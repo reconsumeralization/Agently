@@ -8,6 +8,7 @@
 📧 My Email: [Maplemx@gmail.com](mailto:maplemx@gmail.com)
 
 ##HOW TO INSTALL
+
 Recommend to install Agently by npm
 
 ```shell
@@ -15,6 +16,7 @@ npm install agently
 ```
 
 ##HOW TO USE
+
 It's easy to use Agently because it is designed to be use like a function in code.
 
 Let's create your first Angetly powered application by following the steps below.
@@ -75,7 +77,7 @@ async function translate () {
 translate()
 ```
 
-You can find more examples [here](https://github.com/Maplemx/agently/blob/main/README.md).
+You can find more examples [here](https://github.com/Maplemx/agently/blob/main/demo/demo.js).
 
 ## What's Next?
 
