@@ -73,8 +73,13 @@ Let's start from a quick request to LLM (in this example, it is OpenAI GPT). Age
 ```JavaScript
 const Agently = require('agently')
 
-//Create a new agently instance
-const agently = new Agently({ debug: true })
+//Create a new Agently instance
+const agently = new Agently(
+    {
+        debug: true,//turn on debug will display Prompt and Request Messages in console
+        //proxy: { host: '127.0.0.1', port: 7890 },//You can set global proxy for this Agently instance
+    }
+)
 
 //If you want to use a forwarding API / proxy, you can upate preset here.
 //agently.LLM.Manage
@@ -82,6 +87,9 @@ const agently = new Agently({ debug: true })
     //.url('Your-Forwarding-API-URL')
     //.proxy({ host: '127.0.0.1', port: 7890 })
     //.update()
+
+//Or you can set proxy for target LLM like this
+//agently.LLM.setProxy({ host: '127.0.0.1', port: 7890 })
 
 //Set your authentication
 agently.LLM.setAuth('GPT', 'Your-OpenAI-API-KEY')
@@ -95,7 +103,7 @@ async function requestLLM () {
     //Streaming
     const response = await GPT.streaming([{ role: 'user', content: 'Hello world!' }])
     response.on('data', data => console.log(data))
-    response.on('done', completeResponse => console.log(completeResponse))
+    response.on('finish', completeResponse => console.log(completeResponse))
 }
 
 //Run
@@ -294,7 +302,7 @@ Agently define 3 important parts of prompt:
 
 - **Input:** Sentence, data, information that no matter they are input by user or identified in user interaction behaviors.
 
-- **Prompt:** Your instruction of how LLM should use input information, how the generation work should be carried out, and certain rules in this request that LLM should follow.
+- **Instruct:** Input your instruction of how LLM should use input information, how the generation work should be carried out, and certain rules in this request that LLM should follow.
 
 - **Output:** Your definition of structured output, including all sections that output should have, the content and expected format of each section, etc.
 
@@ -315,7 +323,14 @@ dictionary
 async function demoDictionary (content) {
     const dictionarySession = dictionary.FunctionSession()
     const result = await dictionarySession
+        //[INPUT]
         .input(content)
+        
+        //[INSTRUCT]
+        //In this demo, I don't need to add more instruction
+        //.instruct('<Your instrcut title>', <String | Object of your instruct content>)
+
+        //[OUTPUT]
         //Thought Chain in JSON
         //If the first argument is an Object
         //By Default, Agently will try to output JSON String

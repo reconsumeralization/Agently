@@ -35,7 +35,7 @@ npm安装方法：`npm install agently`
 
 yarn安装方法：`yarn add agently`
 
-> 在npm上当前最新版本是：1.1.0，只要你还在使用Agently v1版本，可以放心update，我会保证本文档中提到的所有使用用例的可用性
+> 在npm上当前最新版本是：1.1.1，只要你还在使用Agently v1版本，可以放心update，我会保证本文档中提到的所有使用用例的可用性
 
 ## 说明好长不想看，能不能直接上代码？
 
@@ -101,14 +101,27 @@ Agently提供了**普通请求**和**流式请求**两种方法来请求大语�
 
 ```JavaScript
 //引入Agently
-const Agently = require('../../index')//('agently')
+const Agently = require('agently')
 
 //创建一个新的Agently实例
 const agently = new Agently(
     {
         debug: true,//如果打开了debug，在控制台里会输出每次请求的Prompt构造结果以及Request Messages消息列
+        //proxy: { host: '127.0.0.1', port: 7890 },//你可以在实例初始化的时候，给实例全局配置代理
     }
 )
+
+//或者你可以在这里给你指定的模型配置代理
+//agently.LLM.setProxy({ host: '127.0.0.1', port: 7890 })
+
+//也把模型请求的API换成转发服务的URL，然后通过.update()更新
+//agently.LLM.Manage
+    //.name('GPT')
+    //.url('Your-Forwarding-API-URL')
+    //.proxy({ host: '127.0.0.1', port: 7890 }),//也可以在这里给模型指定代理
+    //.update()
+
+/*上述指定代理的方式选择其一即可*/
 
 //配置你的授权信息
 agently.LLM.setAuth('GPT', 'sk-Your-OpenAI-API-KEY')
@@ -406,7 +419,16 @@ translator
 async function demoTranslator (content) {
     const translatorSession = translator.FunctionSession()
     const result = await translatorSession
+        //[INPUT]部分
         .input(content)
+        
+        //[INSTRUCT]部分
+        //在这个案例里，我发现不需要使用额外补充的说明指导了，因此注释掉了
+        //你可以使用.instruct()方法在提示词（Prompt）中多次添加额外的指导（Instruction）块
+        //指导块会按顺序排列，出现在[INPUT]块之后[OUTPUT]块之前
+        //.instruct('<Your instrcut title>', <String | Object of your instruct content>)
+
+        //[OUTPUT]部分
         //在.output()中使用JSON表达一个思维链
         //如果.output()的第一个参数是一个Object
         //默认情况下，不需声明Agently也会将输出定义为JSON字符串格式

@@ -15,6 +15,7 @@ const Agently = require('agently')
 const agently = new Agently(
     {
         debug: true,//turn on debug will display Prompt and Request Messages in console
+        //proxy: { host: '127.0.0.1', port: 7890 },//You can set global proxy for this Agently instance
     }
 ) 
 
@@ -25,8 +26,11 @@ const agently = new Agently(
     //.proxy({ host: '127.0.0.1', port: 7890 })
     //.update()
 
+//Or you can set proxy for target LLM like this
+//agently.LLM.setProxy({ host: '127.0.0.1', port: 7890 })
+
 //Set your authentication
-//agently.LLM.setAuth('GPT', 'sk-Your-OpenAI-API-KEY')
+agently.LLM.setAuth('GPT', 'sk-Your-OpenAI-API-KEY')
 
 /**
  * DEMO: Direct Request to LLM
@@ -134,7 +138,14 @@ dictionary
 async function demoDictionary (content) {
     const dictionarySession = dictionary.FunctionSession()
     const result = await dictionarySession
+        //[INPUT]
         .input(content)
+        
+        //[INSTRUCT]
+        //In this demo, I don't need to add more instruction
+        //.instruct('<Your instrcut title>', <String | Object of your instruct content>)
+
+        //[OUTPUT]
         //Thought Chain in JSON
         //If the first argument is an Object
         //By Default, Agently will try to output JSON String
