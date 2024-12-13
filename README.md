@@ -1,12 +1,18 @@
 ## **_<font color = "red">Agent</font><font color = "blue">ly</font>_ 3.0 Guidebook**
 
-**`[new]`** 中文版由浅入深开发文档：[点此访问，一步一步解锁复杂LLMs应用开发技能点](https://github.com/Maplemx/Agently/blob/main/docs/guidebook/Agently_step_by_step_guide.ipynb)
+**`[Important]`** Agently AI开发框架中文首页改版已经完成，模型切换、AgenticRequest、Workflow全新教程文档全面更新，请访问:[Agently.cn](https://agently.cn)查看
+
+**`[Important]`** We'll rewrite repo homepage soon to tell you more about our recently work, please wait for it.
+
+[Showcase Repo]Agently Daily News Collector: [English](https://github.com/AgentEra/Agently-Daily-News-Collector) | [新闻汇总报告生成器开源项目](https://github.com/AgentEra/Agently-Daily-News-Collector/blob/main/README_CN.md)
+
+**`[hot]`** 中文版由浅入深开发文档：[点此访问，一步一步解锁复杂LLMs应用开发技能点](https://github.com/Maplemx/Agently/blob/main/docs/guidebook/Agently_step_by_step_guide.ipynb)
 
 > 📥 How to use: `pip install -U Agently`
 >
 > 💡 Ideas / Bug Report: [Report Issues Here](https://github.com/Maplemx/Agently/issues)
 >
-> 📧 Email Us: [developer@agently.cn](mailto:developer@agently.cn)
+> 📧 Email Us: [developer@agently.cn](mailto:developer@agently.tech)
 >
 > 👾 Discord Group:
 >
@@ -114,7 +120,7 @@ Here down below are two CLI application demos that in two totally different doma
 
 ### DEMO 1: SQL Generator
 
-**DEMO VEDIO**
+**DEMO VIDEO**
 
 https://github.com/Maplemx/Agently/assets/4413155/b7d16592-5fdc-43c0-a14c-f2272c7900da
 
@@ -161,7 +167,7 @@ while not is_finish:
     show_thinking = None
     while str(show_thinking).lower() not in ("y", "n"):
         show_thinking = input("Do you want to observe the thinking process? [Y/N]: ")
-    show_thinking = False if show_thinking.lower == "n" else True
+    show_thinking = False if show_thinking.lower() == "n" else True
     print("[Generating...]")
     result = agent\
         .input({
@@ -263,7 +269,7 @@ print("Bye👋~")
 
 The post about [LLM Powered Autonomous Agents](https://lilianweng.github.io/posts/2023-06-23-agent/) by Lilian Weng from OpenAI has given a really good concept of the basic structure of AI agent. But the post did not give the explanation about how to build an AI agent.
 
-Some awesome projects like [LangChain](https://python.langchain.com/docs/modules/agents/) and [Camel-AI](https://github.com/camel-ai/camel/tree/master/camel/agents) present their ideas about how to build AI agent. In these projects, agents are classified into many different type according the task of the agent or the thinking process of the agent.
+Some awesome projects like [LangChain](https://python.langchain.com/docs/how_to/#agents) and [Camel-AI](https://github.com/camel-ai/camel/tree/master/camel/agents) present their ideas about how to build AI agent. In these projects, agents are classified into many different type according the task of the agent or the thinking process of the agent.
 
 But if we follow these ideas to build agents, that means we must build a whole new agent if we want to have a new agent to work in a different domain. Even though all the projects provide a ChatAgent basic class or something like that, still new agent sub-classes will be built and more and more specific types of agent will be produce. With the number of agent types increasing, one day, boom! There'll be too many types of agent for developer to choose and for agent platform to manage. They'll be hard to seach, hard to choose, hard to manage and hard to update.
 
