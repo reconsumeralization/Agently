@@ -23,6 +23,8 @@ if TYPE_CHECKING:
         MemoResizePolicyResult,
         AttachmentSummaryHandler,
         AttachmentSummaryAsyncHandler,
+        SessionMode,
+        SessionLimit,
     )
 
 
@@ -80,6 +82,30 @@ class Session:
         self.set_settings = self.settings.set_settings
         self.judge_resize = FunctionShifter.syncify(self.async_judge_resize)
         self.resize = FunctionShifter.syncify(self.async_resize)
+
+    def configure(
+        self,
+        *,
+        mode: "SessionMode | None" = None,
+        limit: "SessionLimit | None" = None,
+        every_n_turns: int | None = None,
+    ):
+        if mode is not None:
+            self.settings.set("session.mode", str(mode))
+            if str(mode) == "memo":
+                self.settings.set("session.memo.enabled", True)
+            elif str(mode) == "lite":
+                self.settings.set("session.memo.enabled", False)
+        if limit is not None:
+            self.settings.set("session.limit", limit)
+            if isinstance(limit, dict):
+                if "chars" in limit:
+                    self.settings.set("session.resize.max_messages_text_length", limit["chars"])
+                if "messages" in limit:
+                    self.settings.set("session.resize.max_keep_messages_count", limit["messages"])
+        if every_n_turns is not None:
+            self.settings.set("session.resize.every_n_turns", every_n_turns)
+        return self
 
     def _approx_message_chars(self, message: "ChatMessage") -> int:
         content = message.content

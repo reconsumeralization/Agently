@@ -133,3 +133,18 @@ async def test_async_handler_override():
     await session.async_resize()
     assert session.memo["handler"] == "async"
     assert len(session.current_chat_history) == 1
+
+
+def test_configure_sets_settings():
+    session = Session()
+    session.configure(
+        mode="memo",
+        limit={"chars": 123, "messages": 4},
+        every_n_turns=5,
+    )
+    assert session.settings.get("session.mode") == "memo"
+    assert session.settings.get("session.memo.enabled") is True
+    assert session.settings.get("session.limit") == {"chars": 123, "messages": 4}
+    assert session.settings.get("session.resize.max_messages_text_length") == 123
+    assert session.settings.get("session.resize.max_keep_messages_count") == 4
+    assert session.settings.get("session.resize.every_n_turns") == 5
