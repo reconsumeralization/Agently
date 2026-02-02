@@ -113,6 +113,22 @@ async def test_limit_messages_from_session_limit():
 
 
 @pytest.mark.asyncio
+async def test_custom_memo_update_handler():
+    async def memo_handler(memo, messages, attachments, settings):
+        updated = dict(memo)
+        updated["seen"] = [message.content for message in messages]
+        return updated
+
+    session = Session(memo_update_handler=memo_handler)
+    session.configure(mode="memo")
+    session.append_message({"role": "user", "content": "a"})
+    session.append_message({"role": "assistant", "content": "b"})
+
+    await session.async_resize(force="lite")
+    assert session.memo["seen"] == ["a", "b"]
+
+
+@pytest.mark.asyncio
 async def test_sync_handler_override():
     session = Session()
 

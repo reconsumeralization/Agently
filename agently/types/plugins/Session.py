@@ -49,6 +49,14 @@ MemoResizeAsyncHandler: TypeAlias = (
     "Callable[[list[ChatMessage], list[ChatMessage], SerializableData, Settings], Awaitable[MemoResizeHandlerResult]]"
 )
 
+MemoUpdateResult: TypeAlias = "dict[str, Any]"
+MemoUpdateHandler: TypeAlias = (
+    "Callable[[dict[str, Any], list[ChatMessage], list[AttachmentSummary], Settings], MemoUpdateResult | Awaitable[MemoUpdateResult]]"
+)
+MemoUpdateAsyncHandler: TypeAlias = (
+    "Callable[[dict[str, Any], list[ChatMessage], list[AttachmentSummary], Settings], Awaitable[MemoUpdateResult]]"
+)
+
 AttachmentSummary: TypeAlias = "dict[str, Any]"
 AttachmentSummaryHandler: TypeAlias = (
     "Callable[[ChatMessage], list[AttachmentSummary] | Awaitable[list[AttachmentSummary]]]"
@@ -73,6 +81,7 @@ class SessionProtocol(Protocol):
         policy_handler: MemoResizePolicyHandler | None = None,
         resize_handlers: dict[Literal["lite", "deep"] | str, MemoResizeHandler] | None = None,
         attachment_summary_handler: AttachmentSummaryHandler | None = None,
+        memo_update_handler: MemoUpdateHandler | None = None,
         parent_settings: "Settings | None" = None,
         agent: Any | None = None,
     ): ...
@@ -96,6 +105,8 @@ class SessionProtocol(Protocol):
     ) -> Self: ...
 
     def set_attachment_summary_handler(self, attachment_summary_handler: AttachmentSummaryHandler) -> Self: ...
+
+    def set_memo_update_handler(self, memo_update_handler: MemoUpdateHandler) -> Self: ...
 
     async def async_judge_resize(self, force: Literal["lite", "deep", False, None] | str = False): ...
 

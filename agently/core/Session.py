@@ -25,6 +25,8 @@ if TYPE_CHECKING:
         AttachmentSummaryAsyncHandler,
         SessionMode,
         SessionLimit,
+        MemoUpdateHandler,
+        MemoUpdateAsyncHandler,
     )
 
 
@@ -35,6 +37,7 @@ class Session:
         policy_handler: "MemoResizePolicyHandler | None" = None,
         resize_handlers: "dict[Literal['lite', 'deep'] | str, MemoResizeHandler] | None" = None,
         attachment_summary_handler: "AttachmentSummaryHandler | None" = None,
+        memo_update_handler: "MemoUpdateHandler | None" = None,
         parent_settings: Settings | None = None,
         agent: "Agent | None" = None,
     ):
@@ -62,6 +65,10 @@ class Session:
         self._attachment_summary_handler: AttachmentSummaryAsyncHandler = cast(
             "AttachmentSummaryAsyncHandler",
             FunctionShifter.asyncify(attachment_summary_handler or self._default_attachment_summary_handler),
+        )
+        self._memo_update_handler: MemoUpdateAsyncHandler = cast(
+            "MemoUpdateAsyncHandler",
+            FunctionShifter.asyncify(memo_update_handler or self._default_memo_update_handler),
         )
         self.settings = Settings(parent=parent_settings)
         self._agent = agent
@@ -238,17 +245,14 @@ class Session:
         base = self._ensure_list(self.settings.get("session.memo.instruct", []))
         return [str(item) for item in base if item is not None]
 
-    async def _update_memo_with_model(
+    async def _default_memo_update_handler(
         self,
         memo: dict[str, Any],
         messages: "list[ChatMessage]",
+        attachments: list[dict[str, Any]],
+        settings: Settings,
     ) -> dict[str, Any]:
-        if not self._is_memo_enabled():
-            return memo
-        if not messages:
-            return memo
         requester = self._get_model_requester()
-        attachments = await self._collect_attachment_refs(messages)
         prompt_input = {
             "current_memo": memo,
             "messages": self._serialize_chat_history(messages),
@@ -261,6 +265,23 @@ class Session:
             return data["memo"]
         if isinstance(data, dict):
             return data
+        return memo
+
+    async def _update_memo(
+        self,
+        memo: dict[str, Any],
+        messages: "list[ChatMessage]",
+    ) -> dict[str, Any]:
+        if not self._is_memo_enabled():
+            return memo
+        if not messages:
+            return memo
+        attachments = await self._collect_attachment_refs(messages)
+        result = await self._memo_update_handler(memo, messages, attachments, self.settings)
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, dict):
+            return result
         return memo
 
     def _chunk_by_max_chars(
@@ -414,7 +435,7 @@ class Session:
         memo_dict: dict[str, Any] = memo if isinstance(memo, dict) else {}
         delta_messages = full_chat_history[self._memo_cursor :]
         if delta_messages:
-            memo_dict = await self._update_memo_with_model(memo_dict, delta_messages)
+            memo_dict = await self._update_memo(memo_dict, delta_messages)
         self._memo_cursor = len(full_chat_history)
 
         max_current_chars, keep_last_messages = self._get_limits()
@@ -457,7 +478,7 @@ class Session:
         except Exception:
             max_current_chars_int = 12_000
         for batch in self._chunk_by_max_chars(full_chat_history, max_current_chars_int):
-            memo_dict = await self._update_memo_with_model(memo_dict, batch)
+            memo_dict = await self._update_memo(memo_dict, batch)
         self._memo_cursor = len(full_chat_history)
 
         try:
@@ -494,6 +515,13 @@ class Session:
         self._attachment_summary_handler = cast(
             "AttachmentSummaryAsyncHandler",
             FunctionShifter.asyncify(attachment_summary_handler),
+        )
+        return self
+
+    def set_memo_update_handler(self, memo_update_handler: "MemoUpdateHandler"):
+        self._memo_update_handler = cast(
+            "MemoUpdateAsyncHandler",
+            FunctionShifter.asyncify(memo_update_handler),
         )
         return self
 
