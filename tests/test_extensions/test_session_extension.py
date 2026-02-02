@@ -15,6 +15,20 @@ def test_session_extension_attach_and_proxy():
     assert session.full_chat_history[0].content == "hi"
 
 
+def test_enable_session_shortcuts():
+    agent = Agently.create_agent()
+    agent.enable_session_lite(chars=20, messages=1)
+    assert agent.session is not None
+    assert agent.session.settings.get("session.mode") == "lite"
+    assert agent.session.settings.get("session.resize.max_messages_text_length") == 20
+    assert agent.session.settings.get("session.resize.max_keep_messages_count") == 1
+
+    agent.enable_session_memo(chars=30)
+    assert agent.session.settings.get("session.mode") == "memo"
+    assert agent.session.settings.get("session.memo.enabled") is True
+    assert agent.session.settings.get("session.resize.max_messages_text_length") == 30
+
+
 @pytest.mark.asyncio
 async def test_session_extension_request_prefix_injects_history():
     agent = Agently.create_agent()

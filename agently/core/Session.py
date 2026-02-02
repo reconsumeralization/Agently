@@ -121,6 +121,57 @@ class Session:
             self.settings.set("session.resize.every_n_turns", every_n_turns)
         return self
 
+    def set_limit(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+    ):
+        limit: dict[str, Any] = {}
+        if chars is not None:
+            limit["chars"] = chars
+        if messages is not None:
+            limit["messages"] = messages
+        if limit:
+            return self.configure(limit=limit)
+        return self
+
+    def use_lite(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+        every_n_turns: int | None = None,
+    ):
+        limit: dict[str, Any] = {}
+        if chars is not None:
+            limit["chars"] = chars
+        if messages is not None:
+            limit["messages"] = messages
+        return self.configure(
+            mode="lite",
+            limit=limit if limit else None,
+            every_n_turns=every_n_turns,
+        )
+
+    def use_memo(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+        every_n_turns: int | None = None,
+    ):
+        limit: dict[str, Any] = {}
+        if chars is not None:
+            limit["chars"] = chars
+        if messages is not None:
+            limit["messages"] = messages
+        return self.configure(
+            mode="memo",
+            limit=limit if limit else None,
+            every_n_turns=every_n_turns,
+        )
+
     def _approx_message_chars(self, message: "ChatMessage") -> int:
         content = message.content
         if isinstance(content, str):

@@ -94,6 +94,29 @@ class SessionProtocol(Protocol):
         every_n_turns: int | None = None,
     ) -> Self: ...
 
+    def set_limit(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+    ) -> Self: ...
+
+    def use_lite(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+        every_n_turns: int | None = None,
+    ) -> Self: ...
+
+    def use_memo(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+        every_n_turns: int | None = None,
+    ) -> Self: ...
+
     def append_message(self, message: "ChatMessage | dict[str, Any]") -> Self: ...
 
     def set_policy_handler(self, policy_handler: MemoResizePolicyHandler) -> Self: ...

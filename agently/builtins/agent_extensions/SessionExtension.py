@@ -50,6 +50,34 @@ class SessionExtension(BaseAgent):
         self._session = None
         return self
 
+    def enable_session_lite(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+        every_n_turns: int | None = None,
+        session: Session | None = None,
+    ):
+        if self._session is None:
+            self.attach_session(session=session)
+        assert self._session is not None
+        self._session.use_lite(chars=chars, messages=messages, every_n_turns=every_n_turns)
+        return self
+
+    def enable_session_memo(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+        every_n_turns: int | None = None,
+        session: Session | None = None,
+    ):
+        if self._session is None:
+            self.attach_session(session=session)
+        assert self._session is not None
+        self._session.use_memo(chars=chars, messages=messages, every_n_turns=every_n_turns)
+        return self
+
     def _normalize_chat_history(self, chat_history: list[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
         if not isinstance(chat_history, list):
             return [chat_history]

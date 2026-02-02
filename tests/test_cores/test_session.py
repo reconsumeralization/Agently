@@ -199,3 +199,17 @@ def test_configure_sets_settings():
     assert session.settings.get("session.resize.max_messages_text_length") == 123
     assert session.settings.get("session.resize.max_keep_messages_count") == 4
     assert session.settings.get("session.resize.every_n_turns") == 5
+
+
+def test_use_lite_and_use_memo_shortcuts():
+    session = Session().use_lite(chars=50, messages=2, every_n_turns=3)
+    assert session.settings.get("session.mode") == "lite"
+    assert session.settings.get("session.memo.enabled") is False
+    assert session.settings.get("session.resize.max_messages_text_length") == 50
+    assert session.settings.get("session.resize.max_keep_messages_count") == 2
+    assert session.settings.get("session.resize.every_n_turns") == 3
+
+    session.use_memo(chars=100)
+    assert session.settings.get("session.mode") == "memo"
+    assert session.settings.get("session.memo.enabled") is True
+    assert session.settings.get("session.resize.max_messages_text_length") == 100
