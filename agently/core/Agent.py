@@ -151,9 +151,9 @@ class BaseAgent:
         always: bool = False,
     ):
         if always:
-            self.agent_prompt.set("input", prompt, mappings)
+            self.agent_prompt.set("system", prompt, mappings)
         else:
-            self.request.prompt.set("input", prompt, mappings)
+            self.request.prompt.set("system", prompt, mappings)
         return self
 
     def rule(
