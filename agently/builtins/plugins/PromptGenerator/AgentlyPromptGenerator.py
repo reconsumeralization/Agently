@@ -35,7 +35,7 @@ from pydantic import (
 
 from agently.types.plugins import PromptGenerator
 from agently.types.data import PromptModel, ChatMessageContent, TextMessageContent
-from agently.utils import SettingsNamespace, DataFormatter
+from agently.utils import SettingsNamespace, DataFormatter, TimeInfo
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -47,7 +47,13 @@ if TYPE_CHECKING:
 class AgentlyPromptGenerator(PromptGenerator):
     name = "AgentlyPromptGenerator"
 
-    DEFAULT_SETTINGS = {}
+    DEFAULT_SETTINGS = {
+        "$global": {
+            "prompt": {
+                "add_current_time": True,
+            }
+        }
+    }
 
     def __init__(
         self,
@@ -310,6 +316,9 @@ class AgentlyPromptGenerator(PromptGenerator):
             merged_role_mapping.update(role_mapping)
 
         prompt_text_list.append(f"{ (merged_role_mapping['user'] if 'user' in merged_role_mapping else 'user') }:")
+        if self.settings.get("prompt.add_current_time") is True:
+            prompt_text_list.append(f"[current time]: { TimeInfo.get_current_time() }")
+            prompt_text_list.append("")
 
         # system & developer
         if prompt_object.system:
@@ -393,6 +402,21 @@ class AgentlyPromptGenerator(PromptGenerator):
 
         if isinstance(role_mapping, dict):
             merged_role_mapping.update(role_mapping)
+
+        add_current_time = self.settings.get("prompt.add_current_time") is True
+        current_time_prefix = f"[current time]: { TimeInfo.get_current_time() }\n\n" if add_current_time else ""
+
+        def _prepend_current_time_text(text: str) -> str:
+            return f"{ current_time_prefix }{ text }" if add_current_time else text
+
+        def _prepend_current_time_rich(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if not add_current_time:
+                return content
+            for item in content:
+                if item.get("type") == "text":
+                    item["text"] = _prepend_current_time_text(str(item.get("text", "")))
+                    return content
+            return [{"type": "text", "text": current_time_prefix}] + content
 
         # system & developer
         if prompt_object.system:
@@ -507,7 +531,9 @@ class AgentlyPromptGenerator(PromptGenerator):
             and not prompt_object.attachment
         ):
             role = merged_role_mapping["user"] if "user" in merged_role_mapping else "user"
-            prompt_messages.append({"role": role, "content": DataFormatter.sanitize(prompt_object.input)})
+            prompt_messages.append(
+                {"role": role, "content": _prepend_current_time_text(DataFormatter.sanitize(prompt_object.input))}
+            )
         # special occasion: only attachment
         elif (
             prompt_object.attachment
@@ -521,19 +547,15 @@ class AgentlyPromptGenerator(PromptGenerator):
         ):
             role = merged_role_mapping["user"] if "user" in merged_role_mapping else "user"
             if rich_content:
-                prompt_messages.append(
-                    {
-                        "role": role,
-                        "content": [content.model_dump() for content in prompt_object.attachment],
-                    }
-                )
+                attachment_content = [content.model_dump() for content in prompt_object.attachment]
+                prompt_messages.append({"role": role, "content": _prepend_current_time_rich(attachment_content)})
             else:
                 for one_content in prompt_object.attachment:
                     if one_content.type == "text" and isinstance(one_content, TextMessageContent):
                         prompt_messages.append(
                             {
                                 "role": role,
-                                "content": one_content.text,
+                                "content": _prepend_current_time_text(one_content.text),
                             }
                         )
                     else:
@@ -550,7 +572,7 @@ class AgentlyPromptGenerator(PromptGenerator):
                 user_message_content.append(
                     {
                         "type": "text",
-                        "text": "\n".join(self._generate_main_prompt(prompt_object)),
+                        "text": _prepend_current_time_text("\n".join(self._generate_main_prompt(prompt_object))),
                     }
                 )
                 # extend attachment content
@@ -581,7 +603,9 @@ class AgentlyPromptGenerator(PromptGenerator):
                                 f"Skipped content: unable to put attachment content into prompt messages when `rich_content` == False\n"
                                 f"Content: {str(one_content.model_dump())}"
                             )
-                prompt_messages.append({"role": role, "content": "\n".join(user_message_content)})
+                prompt_messages.append(
+                    {"role": role, "content": _prepend_current_time_text("\n".join(user_message_content))}
+                )
 
         return prompt_messages
 
