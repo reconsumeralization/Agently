@@ -92,6 +92,7 @@ settings.update_mappings(
 # BaseAgent + Extensions = Agent
 from agently.builtins.agent_extensions import (
     ToolExtension,
+    SessionExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -99,6 +100,7 @@ from agently.builtins.agent_extensions import (
 
 
 class Agent(
+    SessionExtension,
     ToolExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
