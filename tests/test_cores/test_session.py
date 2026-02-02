@@ -78,6 +78,41 @@ async def test_default_policy_disabled():
 
 
 @pytest.mark.asyncio
+async def test_limit_chars_from_session_limit():
+    session = Session()
+    session.configure(limit={"chars": 10})
+    session.set_settings("session.resize.max_keep_messages_count", None)
+    session.set_settings("session.resize.every_n_turns", 10_000)
+    session.set_resize_handlers("deep", lambda f, c, m, s: (f, c, m))
+
+    session.append_message({"role": "user", "content": "012345678901"})
+    session.append_message({"role": "assistant", "content": "x"})
+
+    decision = await session.async_judge_resize()
+    assert decision is not None
+    assert decision["reason"] == "max_messages_text_length"
+    assert decision["type"] == "deep"
+
+
+@pytest.mark.asyncio
+async def test_limit_messages_from_session_limit():
+    session = Session()
+    session.configure(limit={"messages": 2})
+    session.set_settings("session.resize.max_messages_text_length", 1_000_000)
+    session.set_settings("session.resize.every_n_turns", 10_000)
+    session.set_resize_handlers("lite", lambda f, c, m, s: (f, c, m))
+
+    session.append_message({"role": "user", "content": "a"})
+    session.append_message({"role": "assistant", "content": "b"})
+    session.append_message({"role": "user", "content": "c"})
+
+    decision = await session.async_judge_resize()
+    assert decision is not None
+    assert decision["reason"] == "max_keep_messages_count"
+    assert decision["type"] == "lite"
+
+
+@pytest.mark.asyncio
 async def test_sync_handler_override():
     session = Session()
 

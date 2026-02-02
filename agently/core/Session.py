@@ -69,6 +69,7 @@ class Session:
         self.settings.setdefault("session.resize.every_n_turns", 8)
         self.settings.setdefault("session.resize.max_messages_text_length", 12_000)
         self.settings.setdefault("session.resize.max_keep_messages_count", None)
+        self.settings.setdefault("session.mode", "lite")
         self.settings.setdefault(
             "session.memo.instruct",
             [
@@ -82,6 +83,12 @@ class Session:
         self.set_settings = self.settings.set_settings
         self.judge_resize = FunctionShifter.syncify(self.async_judge_resize)
         self.resize = FunctionShifter.syncify(self.async_resize)
+
+    def _is_memo_enabled(self) -> bool:
+        enabled = self.settings.get("session.memo.enabled", None)
+        if enabled is not None:
+            return bool(enabled)
+        return str(self.settings.get("session.mode", "lite")) == "memo"
 
     def configure(
         self,
@@ -140,6 +147,25 @@ class Session:
         if legacy_value is not sentinel:
             return legacy_value
         return default
+
+    def _get_limits(self) -> tuple[Any, Any]:
+        max_current_chars = self._get_setting(
+            "session.resize.max_messages_text_length",
+            "session.resize.max_current_chars",
+            12_000,
+        )
+        max_keep_messages_count = self._get_setting(
+            "session.resize.max_keep_messages_count",
+            "session.resize.keep_last_messages",
+            None,
+        )
+        limit = self.settings.get("session.limit", None)
+        if isinstance(limit, dict):
+            if "chars" in limit:
+                max_current_chars = limit["chars"]
+            if "messages" in limit:
+                max_keep_messages_count = limit["messages"]
+        return max_current_chars, max_keep_messages_count
 
     def _get_model_requester(self):
         if self._agent:
@@ -217,6 +243,8 @@ class Session:
         memo: dict[str, Any],
         messages: "list[ChatMessage]",
     ) -> dict[str, Any]:
+        if not self._is_memo_enabled():
+            return memo
         if not messages:
             return memo
         requester = self._get_model_requester()
@@ -348,16 +376,7 @@ class Session:
         current_chat_history: "list[ChatMessage]",
         settings: Settings,
     ):
-        max_current_chars = self._get_setting(
-            "session.resize.max_messages_text_length",
-            "session.resize.max_current_chars",
-            12_000,
-        )
-        max_keep_messages_count = self._get_setting(
-            "session.resize.max_keep_messages_count",
-            "session.resize.keep_last_messages",
-            None,
-        )
+        max_current_chars, max_keep_messages_count = self._get_limits()
         every_n_turns = settings.get("session.resize.every_n_turns", 8)
 
         try:
@@ -398,16 +417,7 @@ class Session:
             memo_dict = await self._update_memo_with_model(memo_dict, delta_messages)
         self._memo_cursor = len(full_chat_history)
 
-        keep_last_messages = self._get_setting(
-            "session.resize.max_keep_messages_count",
-            "session.resize.keep_last_messages",
-            None,
-        )
-        max_current_chars = self._get_setting(
-            "session.resize.max_messages_text_length",
-            "session.resize.max_current_chars",
-            12_000,
-        )
+        max_current_chars, keep_last_messages = self._get_limits()
         try:
             keep_last_messages_int = max(0, int(keep_last_messages))  # type: ignore[arg-type]
         except Exception:
@@ -441,11 +451,7 @@ class Session:
         settings: Settings,
     ):
         memo_dict: dict[str, Any] = memo if isinstance(memo, dict) else {}
-        max_current_chars = self._get_setting(
-            "session.resize.max_messages_text_length",
-            "session.resize.max_current_chars",
-            12_000,
-        )
+        max_current_chars, keep_last_messages = self._get_limits()
         try:
             max_current_chars_int = int(max_current_chars)  # type: ignore[arg-type]
         except Exception:
@@ -454,11 +460,6 @@ class Session:
             memo_dict = await self._update_memo_with_model(memo_dict, batch)
         self._memo_cursor = len(full_chat_history)
 
-        keep_last_messages = self._get_setting(
-            "session.resize.max_keep_messages_count",
-            "session.resize.keep_last_messages",
-            None,
-        )
         try:
             keep_last_messages_int = max(0, int(keep_last_messages))  # type: ignore[arg-type]
         except Exception:
