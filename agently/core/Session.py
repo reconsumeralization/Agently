@@ -22,19 +22,32 @@ if TYPE_CHECKING:
     from agently.core import PluginManager, BaseAgent
     from agently.types.plugins import (
         SessionProtocol,
+        SessionMode,
+        SessionLimit,
+        MemoResizeDecision,
+        MemoResizeType,
         MemoResizePolicyHandler,
         MemoResizeHandler,
         AttachmentSummaryHandler,
         MemoUpdateHandler,
     )
+    from agently.types.data import ChatMessage, ChatMessageDict, SerializableValue, SerializableData
 
 
 class Session:
+    _impl: "SessionProtocol"
+    settings: Settings
+    plugin_manager: "PluginManager"
+    id: str
+    memo: "SerializableData"
+    full_chat_history: "list[ChatMessage]"
+    current_chat_history: "list[ChatMessage]"
+
     def __init__(
         self,
         *,
         policy_handler: "MemoResizePolicyHandler | None" = None,
-        resize_handlers: "dict[Literal['lite', 'deep'] | str, MemoResizeHandler] | None" = None,
+        resize_handlers: "dict[MemoResizeType, MemoResizeHandler] | None" = None,
         attachment_summary_handler: "AttachmentSummaryHandler | None" = None,
         memo_update_handler: "MemoUpdateHandler | None" = None,
         parent_settings: Settings | None = None,
@@ -71,6 +84,126 @@ class Session:
         object.__setattr__(self, "_impl", impl)
         object.__setattr__(self, "settings", impl.settings)
         object.__setattr__(self, "plugin_manager", plugin_manager)
+
+    def configure(
+        self,
+        *,
+        mode: "SessionMode | None" = None,
+        limit: "SessionLimit | None" = None,
+        every_n_turns: int | None = None,
+    ) -> "Session":
+        self._impl.configure(
+            mode=mode,
+            limit=limit,
+            every_n_turns=every_n_turns,
+        )
+        return self
+
+    def set_limit(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+    ) -> "Session":
+        self._impl.set_limit(chars=chars, messages=messages)
+        return self
+
+    def use_lite(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+        every_n_turns: int | None = None,
+    ) -> "Session":
+        self._impl.use_lite(chars=chars, messages=messages, every_n_turns=every_n_turns)
+        return self
+
+    def use_memo(
+        self,
+        *,
+        chars: int | None = None,
+        messages: int | None = None,
+        every_n_turns: int | None = None,
+    ) -> "Session":
+        self._impl.use_memo(chars=chars, messages=messages, every_n_turns=every_n_turns)
+        return self
+
+    def append_message(self, message: "ChatMessage | ChatMessageDict") -> "Session":
+        self._impl.append_message(message)
+        return self
+
+    def set_settings(
+        self,
+        key: str,
+        value: "SerializableValue",
+        *,
+        auto_load_env: bool = False,
+    ) -> Settings:
+        return self._impl.set_settings(key, value, auto_load_env=auto_load_env)
+
+    def set_policy_handler(self, policy_handler: "MemoResizePolicyHandler") -> "Session":
+        self._impl.set_policy_handler(policy_handler)
+        return self
+
+    def set_resize_handlers(
+        self,
+        resize_type: "MemoResizeType",
+        resize_handler: "MemoResizeHandler",
+    ) -> "Session":
+        self._impl.set_resize_handlers(resize_type, resize_handler)
+        return self
+
+    def set_attachment_summary_handler(
+        self,
+        attachment_summary_handler: "AttachmentSummaryHandler",
+    ) -> "Session":
+        self._impl.set_attachment_summary_handler(attachment_summary_handler)
+        return self
+
+    def set_memo_update_handler(
+        self,
+        memo_update_handler: "MemoUpdateHandler",
+    ) -> "Session":
+        self._impl.set_memo_update_handler(memo_update_handler)
+        return self
+
+    def judge_resize(
+        self,
+        force: "Literal['lite', 'deep', False, None] | str" = False,
+    ) -> "MemoResizeDecision | None":
+        return self._impl.judge_resize(force=force)
+
+    def resize(
+        self,
+        force: "Literal['lite', 'deep', False, None] | str" = False,
+    ) -> "list[ChatMessage]":
+        return self._impl.resize(force=force)
+
+    async def async_judge_resize(
+        self,
+        force: "Literal['lite', 'deep', False, None] | str" = False,
+    ) -> "MemoResizeDecision | None":
+        return await self._impl.async_judge_resize(force=force)
+
+    async def async_resize(
+        self,
+        force: "Literal['lite', 'deep', False, None] | str" = False,
+    ) -> "list[ChatMessage]":
+        return await self._impl.async_resize(force=force)
+
+    def to_json(self) -> str:
+        return self._impl.to_json()
+
+    def to_yaml(self) -> str:
+        return self._impl.to_yaml()
+
+    def load_json(self, value: str) -> "Session":
+        self._impl.load_json(value)
+        return self
+
+    def load_yaml(self, value: str) -> "Session":
+        self._impl.load_yaml(value)
+        return self
 
     def __getattr__(self, name: str):
         return getattr(self._impl, name)

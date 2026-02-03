@@ -20,10 +20,11 @@ from typing_extensions import TypedDict, NotRequired, Self
 
 if TYPE_CHECKING:
     from agently.utils import Settings
-    from agently.types.data import SerializableData, ChatMessage
+    from agently.types.data import SerializableData, SerializableValue, ChatMessage, ChatMessageDict
 
 MemoResizeType: TypeAlias = Literal["lite", "deep"] | str
 SessionMode: TypeAlias = Literal["lite", "memo"] | str
+ResizeForce: TypeAlias = Literal["lite", "deep", False, None] | str
 
 
 class SessionLimit(TypedDict, total=False):
@@ -86,15 +87,12 @@ class SessionProtocol(Protocol):
     memo: "SerializableData"
     full_chat_history: "list[ChatMessage]"
     current_chat_history: "list[ChatMessage]"
-    set_settings: Callable[..., Any]
-    judge_resize: Callable[..., Any]
-    resize: Callable[..., Any]
 
     def __init__(
         self,
         *,
         policy_handler: MemoResizePolicyHandler | None = None,
-        resize_handlers: dict[Literal["lite", "deep"] | str, MemoResizeHandler] | None = None,
+        resize_handlers: dict[MemoResizeType, MemoResizeHandler] | None = None,
         attachment_summary_handler: AttachmentSummaryHandler | None = None,
         memo_update_handler: MemoUpdateHandler | None = None,
         parent_settings: "Settings | None" = None,
@@ -132,13 +130,25 @@ class SessionProtocol(Protocol):
         every_n_turns: int | None = None,
     ) -> Self: ...
 
-    def append_message(self, message: "ChatMessage | dict[str, Any]") -> Self: ...
+    def append_message(self, message: "ChatMessage | ChatMessageDict") -> Self: ...
+
+    def set_settings(
+        self,
+        key: str,
+        value: "SerializableValue",
+        *,
+        auto_load_env: bool = False,
+    ) -> "Settings": ...
+
+    def judge_resize(self, force: ResizeForce = False) -> "MemoResizeDecision | None": ...
+
+    def resize(self, force: ResizeForce = False) -> "list[ChatMessage]": ...
 
     def set_policy_handler(self, policy_handler: MemoResizePolicyHandler) -> Self: ...
 
     def set_resize_handlers(
         self,
-        resize_type: Literal["lite", "deep"] | str,
+        resize_type: MemoResizeType,
         resize_handler: MemoResizeHandler,
     ) -> Self: ...
 
@@ -146,9 +156,9 @@ class SessionProtocol(Protocol):
 
     def set_memo_update_handler(self, memo_update_handler: MemoUpdateHandler) -> Self: ...
 
-    async def async_judge_resize(self, force: Literal["lite", "deep", False, None] | str = False): ...
+    async def async_judge_resize(self, force: ResizeForce = False) -> "MemoResizeDecision | None": ...
 
-    async def async_resize(self, force: Literal["lite", "deep", False, None] | str = False): ...
+    async def async_resize(self, force: ResizeForce = False) -> "list[ChatMessage]": ...
 
     def to_json(self) -> str: ...
 

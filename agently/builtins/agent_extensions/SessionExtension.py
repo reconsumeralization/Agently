@@ -123,9 +123,15 @@ class SessionExtension(BaseAgent):
     def _normalize_chat_history(
         self, chat_history: Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage
     ):
-        if not isinstance(chat_history, list):
-            return [chat_history]
-        return chat_history
+        messages: list[ChatMessage] = []
+        if not isinstance(chat_history, Sequence):
+            chat_history = [chat_history]
+        for message in chat_history:
+            if not isinstance(message, ChatMessage):
+                messages.append(ChatMessage(role=message["role"], content=message["content"]))
+            else:
+                messages.append(message)
+        return messages
 
     def _stringify_content(self, content: Any):
         if content is None:
