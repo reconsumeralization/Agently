@@ -14,10 +14,14 @@
 
 from __future__ import annotations
 
+import inspect
+import yaml
+
 from typing import Any, TYPE_CHECKING
 
 from agently.core import BaseAgent
 from agently.core.Session import Session
+from agently.utils import DataPathBuilder
 
 if TYPE_CHECKING:
     from agently.types.data import ChatMessage
@@ -30,6 +34,12 @@ class SessionExtension(BaseAgent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._session: Session | None = None
+        self._record_handler = None
+
+        self.settings.setdefault("session.record.input.paths", [], inherit=True)
+        self.settings.setdefault("session.record.input.mode", "all", inherit=True)
+        self.settings.setdefault("session.record.output.paths", [], inherit=True)
+        self.settings.setdefault("session.record.output.mode", "all", inherit=True)
 
         self.extension_handlers.append("request_prefixes", self._session_request_prefix)
         self.extension_handlers.append("finally", self._session_finally)
@@ -48,6 +58,10 @@ class SessionExtension(BaseAgent):
 
     def detach_session(self):
         self._session = None
+        return self
+
+    def set_record_handler(self, handler):
+        self._record_handler = handler
         return self
 
     def enable_session_lite(
@@ -83,6 +97,117 @@ class SessionExtension(BaseAgent):
             return [chat_history]
         return chat_history
 
+    def _stringify_content(self, content: Any):
+        if content is None:
+            return None
+        if isinstance(content, dict):
+            return yaml.safe_dump(content)
+        if isinstance(content, (str, list)):
+            return content
+        return str(content)
+
+    def _collect_record_input(self, prompt: "Prompt") -> list[dict[str, Any]]:
+        record_input_paths = self.settings.get("session.record.input.paths", [])
+        record_input_mode = self.settings.get("session.record.input.mode", "all")
+
+        if isinstance(record_input_paths, str):
+            record_input_paths = [record_input_paths]
+
+        if not isinstance(record_input_paths, list) or len(record_input_paths) == 0:
+            user_input = prompt.get("input", None)
+            if user_input not in (None, ""):
+                content = self._stringify_content(user_input)
+                if content not in (None, ""):
+                    return [{"role": "user", "content": content}]
+            try:
+                messages = prompt.to_messages()
+            except Exception:
+                return []
+            if messages:
+                content = messages[-1].get("content")
+                if content not in (None, ""):
+                    return [{"role": "user", "content": content}]
+            return []
+
+        content: Any = {}
+        for entry in record_input_paths:
+            if isinstance(entry, str):
+                prompt_key, path = entry, None
+            elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                prompt_key, path = entry[0], entry[1]
+            else:
+                continue
+
+            if path is None:
+                value = prompt.get(prompt_key)
+                if value is None:
+                    continue
+                if record_input_mode == "first":
+                    return [{"role": "user", "content": self._stringify_content(value)}]
+                if not isinstance(content, dict):
+                    content = {}
+                content[prompt_key] = value
+            else:
+                prompt_value = prompt.get(prompt_key)
+                if isinstance(prompt_value, dict):
+                    path_value = DataPathBuilder.get_value_by_path(prompt_value, str(path))
+                    if path_value is None:
+                        continue
+                    if record_input_mode == "first":
+                        return [{"role": "user", "content": self._stringify_content(path_value)}]
+                    if not isinstance(content, dict):
+                        content = {}
+                    if prompt_key not in content or not isinstance(content[prompt_key], dict):
+                        content[prompt_key] = {}
+                    content[prompt_key][str(path)] = path_value
+
+        if content in (None, {}, []):
+            return []
+        return [{"role": "user", "content": self._stringify_content(content)}]
+
+    async def _get_result_text(self, result: "ModelResponseResult"):
+        if hasattr(result, "async_get_text"):
+            return await result.async_get_text()
+        if hasattr(result, "get_text"):
+            return result.get_text()
+        return None
+
+    async def _collect_record_output(self, result: "ModelResponseResult") -> list[dict[str, Any]]:
+        record_output_paths = self.settings.get("session.record.output.paths", [])
+        record_output_mode = self.settings.get("session.record.output.mode", "all")
+
+        if isinstance(record_output_paths, str):
+            record_output_paths = [record_output_paths]
+
+        if not isinstance(record_output_paths, list) or len(record_output_paths) == 0:
+            assistant_text = await self._get_result_text(result)
+            if assistant_text not in (None, ""):
+                return [{"role": "assistant", "content": assistant_text}]
+            return []
+
+        parsed_result = result.full_result_data.get("parsed_result")
+        if isinstance(parsed_result, dict):
+            content: Any = {}
+            for path in record_output_paths:
+                if not isinstance(path, str):
+                    continue
+                path_key = DataPathBuilder.convert_slash_to_dot(path) if "/" in path else path
+                path_value = DataPathBuilder.get_value_by_path(parsed_result, path_key)
+                if path_value is None:
+                    continue
+                if record_output_mode == "first":
+                    return [{"role": "assistant", "content": self._stringify_content(path_value)}]
+                if not isinstance(content, dict):
+                    content = {}
+                content[path_key] = path_value
+            if isinstance(content, dict) and content:
+                return [{"role": "assistant", "content": self._stringify_content(content)}]
+
+        assistant_text = await self._get_result_text(result)
+        if assistant_text not in (None, ""):
+            return [{"role": "assistant", "content": assistant_text}]
+        return []
+
     def _reset_session_history(self):
         assert self._session is not None
         self._session.full_chat_history = []
@@ -102,8 +227,12 @@ class SessionExtension(BaseAgent):
     def add_chat_history(self, chat_history: list[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
         if self._session is None:
             return super().add_chat_history(chat_history)
-        for message in self._normalize_chat_history(chat_history):
+        messages = self._normalize_chat_history(chat_history)
+        if not messages:
+            return self
+        for message in messages:
             self._session.append_message(message)
+        self._session.resize()
         return self
 
     def reset_chat_history(self):
@@ -120,16 +249,17 @@ class SessionExtension(BaseAgent):
     async def _session_finally(self, result: "ModelResponseResult", _settings: "Settings"):
         if self._session is None:
             return
+        if self._record_handler is not None:
+            handler_result = self._record_handler(result)
+            if inspect.isawaitable(handler_result):
+                handler_result = await handler_result
+            if handler_result:
+                self.add_chat_history(handler_result)
+            return
+
         prompt = result.prompt
-        user_input = prompt.get("input", None)
-        if user_input not in (None, ""):
-            self._session.append_message({"role": "user", "content": user_input})
-
-        assistant_text = None
-        if hasattr(result, "async_get_text"):
-            assistant_text = await result.async_get_text()
-        elif hasattr(result, "get_text"):
-            assistant_text = result.get_text()
-
-        if assistant_text not in (None, ""):
-            self._session.append_message({"role": "assistant", "content": assistant_text})
+        messages: list[dict[str, Any]] = []
+        messages.extend(self._collect_record_input(prompt))
+        messages.extend(await self._collect_record_output(result))
+        if messages:
+            self.add_chat_history(messages)

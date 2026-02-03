@@ -15,6 +15,31 @@ def test_session_extension_attach_and_proxy():
     assert session.full_chat_history[0].content == "hi"
 
 
+def test_session_extension_add_chat_history_triggers_resize():
+    agent = Agently.create_agent()
+    agent.attach_session()
+    assert agent.session is not None
+
+    def policy_handler(full, current, settings):
+        return {"type": "lite", "reason": "test"}
+
+    def resize_handler(full, current, memo, settings):
+        return full, current[-1:], {"resized": True}
+
+    agent.session.set_policy_handler(policy_handler)
+    agent.session.set_resize_handlers("lite", resize_handler)  # type: ignore
+
+    agent.add_chat_history(
+        [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ]
+    )
+
+    assert len(agent.session.current_chat_history) == 1
+    assert agent.session.memo.get("resized") is True
+
+
 def test_enable_session_shortcuts():
     agent = Agently.create_agent()
     agent.enable_session_lite(chars=20, messages=1)
@@ -55,6 +80,7 @@ async def test_session_extension_finally_records_messages():
         def __init__(self, prompt, text):
             self.prompt = prompt
             self._text = text
+            self.full_result_data = {"parsed_result": None, "text_result": text}
 
         async def async_get_text(self):
             return self._text
@@ -66,3 +92,64 @@ async def test_session_extension_finally_records_messages():
     assert agent.session.full_chat_history[0].content == "question"
     assert agent.session.full_chat_history[1].role == "assistant"
     assert agent.session.full_chat_history[1].content == "answer"
+
+
+@pytest.mark.asyncio
+async def test_session_extension_finally_records_selected_output_paths():
+    agent = Agently.create_agent()
+    agent.attach_session()
+    assert agent.session is not None
+
+    agent.settings.set("session.record.output.paths", ["answer.text"])
+    agent.settings.set("session.record.output.mode", "first")
+
+    prompt = agent.request_prompt
+    prompt.set("input", "question")
+
+    class DummyResult:
+        def __init__(self, prompt, text, parsed_result):
+            self.prompt = prompt
+            self._text = text
+            self.full_result_data = {"parsed_result": parsed_result, "text_result": text}
+
+        async def async_get_text(self):
+            return self._text
+
+    await agent._session_finally(
+        DummyResult(prompt, "fallback", {"answer": {"text": "picked"}}),
+        agent.settings,
+    )
+
+    assert agent.session.full_chat_history[-1].content == "picked"
+
+
+@pytest.mark.asyncio
+async def test_session_extension_finally_uses_record_handler():
+    agent = Agently.create_agent()
+    agent.attach_session()
+    assert agent.session is not None
+
+    prompt = agent.request_prompt
+    prompt.set("input", "question")
+
+    def record_handler(result):
+        return [
+            {"role": "assistant", "content": "handler-answer"},
+        ]
+
+    agent.set_record_handler(record_handler)
+
+    class DummyResult:
+        def __init__(self, prompt, text):
+            self.prompt = prompt
+            self._text = text
+            self.full_result_data = {"parsed_result": None, "text_result": text}
+
+        async def async_get_text(self):
+            return self._text
+
+    await agent._session_finally(DummyResult(prompt, "answer"), agent.settings)
+
+    assert len(agent.session.full_chat_history) == 1
+    assert agent.session.full_chat_history[0].role == "assistant"
+    assert agent.session.full_chat_history[0].content == "handler-answer"
