@@ -61,6 +61,21 @@ class SessionExtension(BaseAgent):
         self._session = session
         return self
 
+    def enable_session(self, session: Session | None = None):
+        if self._session is None:
+            self.attach_session(session=session)
+        assert self._session is not None
+        # Minimal session: no memo, no truncation, only record full chat history.
+        self._session.configure(
+            mode="lite",
+            limit={"chars": 0, "messages": 0},
+            every_n_turns=0,
+        )
+        return self
+
+    def disable_session(self):
+        return self.detach_session()
+
     def detach_session(self):
         self._session = None
         return self
