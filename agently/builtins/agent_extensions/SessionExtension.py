@@ -62,7 +62,7 @@ class SessionExtension(BaseAgent):
         self._session = session
         return self
 
-    def enable_session(self, session: Session | None = None, *, load: dict[str, Any] | str | None = None):
+    def enable_quick_session(self, session: Session | None = None, *, load: dict[str, Any] | str | None = None):
         if self._session is None:
             self.attach_session(session=session)
         assert self._session is not None
@@ -81,7 +81,7 @@ class SessionExtension(BaseAgent):
         )
         return self
 
-    def disable_session(self):
+    def disable_quick_session(self):
         return self.detach_session()
 
     def detach_session(self):
