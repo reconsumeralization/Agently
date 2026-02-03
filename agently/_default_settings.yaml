@@ -16,7 +16,7 @@
 storage:
   db_url: "sqlite+aiosqlite:///localstorage.db"
 prompt:
-  add_current_time: True
+  add_current_time: False
   role_mapping:
     system: system
     developer: developer

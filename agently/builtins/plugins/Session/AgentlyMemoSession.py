@@ -33,10 +33,12 @@ class AgentlyMemoSession:
     name = "AgentlyMemoSession"
     DEFAULT_SETTINGS: dict[str, Any] = {}
 
-    def _on_register(self):
+    @staticmethod
+    def _on_register():
         pass
 
-    def _on_unregister(self):
+    @staticmethod
+    def _on_unregister():
         pass
 
     def __init__(
@@ -119,6 +121,7 @@ class AgentlyMemoSession:
             elif str(mode) == "lite":
                 self.settings.set("session.memo.enabled", False)
         if limit is not None:
+            self.settings.set("session.limit", limit)
             if isinstance(limit, dict):
                 if "chars" in limit:
                     self.settings.set("session.resize.max_messages_text_length", limit["chars"])

@@ -50,7 +50,7 @@ class AgentlyPromptGenerator(PromptGenerator):
     DEFAULT_SETTINGS = {
         "$global": {
             "prompt": {
-                "add_current_time": True,
+                "add_current_time": False,
             }
         }
     }
