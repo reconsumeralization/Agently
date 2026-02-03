@@ -21,7 +21,7 @@ from typing import Any, Sequence, TYPE_CHECKING
 
 from agently.core import BaseAgent
 from agently.core.Session import Session
-from agently.utils import DataPathBuilder
+from agently.utils import DataPathBuilder, FunctionShifter
 
 if TYPE_CHECKING:
     from agently.types.data import ChatMessage
@@ -227,6 +227,12 @@ class SessionExtension(BaseAgent):
         return self
 
     def add_chat_history(self, chat_history: Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
+        return FunctionShifter.syncify(self.async_add_chat_history)(chat_history)
+
+    async def async_add_chat_history(
+        self,
+        chat_history: Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage,
+    ):
         if self._session is None:
             return super().add_chat_history(chat_history)
         messages = self._normalize_chat_history(chat_history)
@@ -234,7 +240,7 @@ class SessionExtension(BaseAgent):
             return self
         for message in messages:
             self._session.append_message(message)
-        self._session.resize()
+        await self._session.async_resize()
         return self
 
     def reset_chat_history(self):
@@ -256,7 +262,7 @@ class SessionExtension(BaseAgent):
             if inspect.isawaitable(handler_result):
                 handler_result = await handler_result
             if handler_result:
-                self.add_chat_history(handler_result)
+                await self.async_add_chat_history(handler_result)
             return
 
         prompt = result.prompt
@@ -264,4 +270,4 @@ class SessionExtension(BaseAgent):
         messages.extend(self._collect_record_input(prompt))
         messages.extend(await self._collect_record_output(result))
         if messages:
-            self.add_chat_history(messages)
+            await self.async_add_chat_history(messages)
