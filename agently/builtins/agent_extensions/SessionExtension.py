@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import yaml
 
 from typing import Any, Sequence, TYPE_CHECKING
@@ -61,10 +62,17 @@ class SessionExtension(BaseAgent):
         self._session = session
         return self
 
-    def enable_session(self, session: Session | None = None):
+    def enable_session(self, session: Session | None = None, *, load: dict[str, Any] | str | None = None):
         if self._session is None:
             self.attach_session(session=session)
         assert self._session is not None
+        if load is not None:
+            if isinstance(load, dict):
+                self._session.load_json(json.dumps(load, ensure_ascii=True))
+            elif isinstance(load, str):
+                self._session.load_yaml(load)
+            else:
+                raise TypeError(f"Invalid session load data type: {type(load)}")
         # Minimal session: no memo, no truncation, only record full chat history.
         self._session.configure(
             mode="lite",
