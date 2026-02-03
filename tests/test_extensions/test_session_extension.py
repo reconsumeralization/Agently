@@ -85,7 +85,7 @@ async def test_session_extension_finally_records_messages():
         async def async_get_text(self):
             return self._text
 
-    await agent._session_finally(DummyResult(prompt, "answer"), agent.settings)
+    await agent._session_finally(DummyResult(prompt, "answer"), agent.settings)  # type: ignore
 
     assert len(agent.session.full_chat_history) == 2
     assert agent.session.full_chat_history[0].role == "user"
@@ -116,7 +116,7 @@ async def test_session_extension_finally_records_selected_output_paths():
             return self._text
 
     await agent._session_finally(
-        DummyResult(prompt, "fallback", {"answer": {"text": "picked"}}),
+        DummyResult(prompt, "fallback", {"answer": {"text": "picked"}}),  # type: ignore
         agent.settings,
     )
 
@@ -148,7 +148,7 @@ async def test_session_extension_finally_uses_record_handler():
         async def async_get_text(self):
             return self._text
 
-    await agent._session_finally(DummyResult(prompt, "answer"), agent.settings)
+    await agent._session_finally(DummyResult(prompt, "answer"), agent.settings)  # type: ignore
 
     assert len(agent.session.full_chat_history) == 1
     assert agent.session.full_chat_history[0].role == "assistant"

@@ -73,6 +73,7 @@ advanced_session = Session(
 )
 
 memo_agent.attach_session(advanced_session)
+assert memo_agent.session is not None
 
 
 def stream_input(agent, text: str):

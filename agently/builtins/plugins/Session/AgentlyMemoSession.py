@@ -121,7 +121,7 @@ class AgentlyMemoSession:
             elif str(mode) == "lite":
                 self.settings.set("session.memo.enabled", False)
         if limit is not None:
-            self.settings.set("session.limit", limit)
+            self.settings.set("session.limit", DataFormatter.sanitize(limit))
             if isinstance(limit, dict):
                 if "chars" in limit:
                     self.settings.set("session.resize.max_messages_text_length", limit["chars"])
