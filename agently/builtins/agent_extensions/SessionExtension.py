@@ -40,7 +40,7 @@ class SessionExtension(BaseAgent):
 
     def attach_session(self, session: Session | None = None, *, mode: str | None = None):
         if session is None:
-            session = Session(parent_settings=self.settings, agent=self)
+            session = Session(parent_settings=self.settings, agent=self, plugin_manager=self.plugin_manager)
         if mode is not None:
             session.configure(mode=mode)
         self._session = session

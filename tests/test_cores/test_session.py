@@ -213,3 +213,8 @@ def test_use_lite_and_use_memo_shortcuts():
     assert session.settings.get("session.mode") == "memo"
     assert session.settings.get("session.memo.enabled") is True
     assert session.settings.get("session.resize.max_messages_text_length") == 100
+
+
+def test_session_uses_default_plugin():
+    session = Session()
+    assert session._impl.__class__.__name__ == "AgentlyMemoSession"
