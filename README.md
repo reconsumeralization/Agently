@@ -1,183 +1,141 @@
 <img width="640" alt="image" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4
+# Agently 4 🚀
+
+> **Build production‑grade AI apps faster, with stable outputs and maintainable workflows.**
 
 [English Introduction](https://github.com/AgentEra/Agently/blob/main/README.md) | [中文介绍](https://github.com/AgentEra/Agently/blob/main/README_CN.md)
 
-
-> *Speed Up Your GenAI Application Development*
-
-[![license](https://img.shields.io/badge/license-Apache2.0-blue.svg?style=flat-square)](https://github.com/AgentEra/Agently/blob/main/LICENSE)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/agently?style=flat-square)](https://pypistats.org/packages/agently)
-[![GitHub star chart](https://img.shields.io/github/stars/agentera/agently?style=flat-square)](https://star-history.com/#agentera/agently)
-[![Twitter](https://img.shields.io/twitter/url/https/twitter.com/AgentlyTech.svg?style=social&label=Follow%20%40AgentlyTech)](https://x.com/AgentlyTech)
+[![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/AgentEra/Agently/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/agently.svg)](https://pypi.org/project/agently/)
+[![Downloads](https://img.shields.io/pypi/dm/agently.svg)](https://pypistats.org/packages/agently)
+[![GitHub Stars](https://img.shields.io/github/stars/AgentEra/Agently.svg?style=social)](https://github.com/AgentEra/Agently/stargazers)
+[![Twitter Follow](https://img.shields.io/twitter/follow/AgentlyTech?style=social)](https://x.com/AgentlyTech)
 <a href="https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf">
-<img alt="WeChat" src="https://img.shields.io/badge/WeChat%20Group-Apply-brightgreen?logo=wechat&style=flat-square">
+<img alt="WeChat" src="https://img.shields.io/badge/WeChat%20Group-Join-brightgreen?logo=wechat&style=flat-square">
 </a>
 
-<p>
-  <a href="https://github.com/AgentEra/Agently/discussions/categories/general">
-    <img alt="Discussions" src="https://img.shields.io/badge/Agently%20General%20Discussions-JOIN-brightgreen.svg?style=for-the-badge" />
-  </a>
-  <a href="https://github.com/AgentEra/Agently/discussions/categories/contribute-to-agently-4">
-    <img alt="Contribute" src="https://img.shields.io/badge/Contribute%20to%20Agently%204%20-Join-blueviolet.svg?style=for-the-badge">
-  </a>
-  <a href="https://github.com/AgentEra/Agently/issues">
-    <img alt="Issues" src="https://img.shields.io/badge/Report%20Issues-Report-red.svg?style=for-the-badge">
-  </a>
+<p align="center">
+  <a href="https://github.com/AgentEra/Agently/discussions"><img src="https://img.shields.io/badge/💬_Community-Join-blueviolet?style=for-the-badge"></a>
+  <a href="https://agently.tech"><img src="https://img.shields.io/badge/🌐_Website-Docs-brightgreen?style=for-the-badge"></a>
+  <a href="https://github.com/AgentEra/Agently/issues"><img src="https://img.shields.io/badge/🐛_Issues-Report-red?style=for-the-badge"></a>
 </p>
 
-<hr />
+---
 
 <p align="center">
-    <b><a href = "https://Agently.tech">💥 Official WebSite</a> - Everything about Agently and what's coming next</b>
+  <b>🔥 <a href="https://agently.tech/docs">Latest Docs</a> | 🚀 <a href="#quickstart">5‑minute Quickstart</a> | 💡 <a href="#-core-features">Core Features</a></b>
 </p>
 
-<hr />
+---
 
-## Getting Started
+## 📚 Quick Links
 
-Agently is a Python-based framework for building GenAI applications. You can install it via pip and import features using `from agently import Agently`.
+- **Docs (EN)**: https://agently.tech/docs
+- **Docs (中文)**: https://agently.cn/docs
+- **Agent Systems Playbook (EN)**: https://agently.tech/docs/en/agent-systems/overview.html
+- **Agent Systems Playbook (中文)**: https://agently.cn/docs/agent-systems/overview.html
+- **Coding Agent Guide (EN)**: https://agently.tech/docs/en/agent-docs.html
+- **Coding Agent Guide (中文)**: https://agently.cn/docs/agent-docs.html
+- **Agent Docs Pack**: https://agently.cn/docs/agent_docs.zip
 
-Install the latest version via pip:
+## 🤔 Why Agently?
 
-```shell
-pip install -U agently
-```
+Many GenAI POCs fail in production not because models are weak, but because **engineering control is missing**:
 
-> ℹ️ If you're looking for Agently v3's code and documents, please visit branch [`v3-final`](https://github.com/AgentEra/Agently/tree/v3-final)
+| Common challenge | How Agently helps |
+|:--|:--|
+| Output schema drifts, JSON parsing fails | **Contract‑first output control** with `output()` + `ensure_keys` |
+| Workflows get complex and hard to maintain | **TriggerFlow orchestration** with `to` / `if` / `match` / `batch` / `for_each` |
+| Multi‑turn state becomes unstable | **Session & Memo** with memory, summaries, and persistence strategies |
+| Tool calls are hard to audit | **Tool logs** via `extra.tool_logs` |
+| Switching models is expensive | **OpenAICompatible** unified model settings |
 
-Clone the repository and install locally:
+**Agently turns LLM uncertainty into a stable, testable, maintainable engineering system.**
 
-```shell
-git clone git@github.com:AgentEra/Agently.git
-cd Agently
-pip install -e .
-```
+## ✨ Core Features
 
-## Documentation
-
-- Docs Site: https://Agently.tech/docs
-- Step-by-step tutorials: `examples/step_by_step/`
-- Auto Loop FastAPI (SSE/WS/POST, Docker-ready): `examples/step_by_step/13-auto_loop_fastapi/`
-
-## What is Agently?
-
-Agently aims to provide an intuitive, efficient, and developer-friendly framework for GenAI application development. By deeply understanding the runtime control needs of model outputs, Agently bridges the gap between large language models and real-world applications.
-
-Agently abstracts away the complexities of:
-- Varying model parameters
-- Output formatting
-- Communication between engineering modules and GenAI logic
-
-...while giving developers full control over business logic and integration with existing systems.
-
-We believe GenAI is not a generational replacement for current systems but a powerful extension. Engineers and tools are key to turning GenAI's possibilities into reality.
-
-Our mission is to build the best developer experience (DX) for GenAI application engineers.
-
-## From Demo to Production
-
-In real teams, the hardest part is rarely “can the model answer?”—it’s whether the system can survive real traffic, real data, and real dependencies while staying testable, observable, and maintainable. Agently is built to pull LLM uncertainty back inside an engineering boundary.
-
-- **Contract-first structured outputs (framework-native, provider-agnostic)**: define schemas with `output()`, enforce critical paths with `ensure_keys`, and parse/repair in the framework pipeline (no hard dependency on provider-specific `response_format` / JSON-schema switches). This keeps interfaces stable even when you switch models or inference servers.
-- **Tool planning + traceability without vendor lock-in**: deciding whether to use a tool, selecting a tool, and building kwargs is a built-in planning step in the framework, not something that requires function-calling support. Every run leaves evidence in `extra` (`tool_logs` / tool calls) for debugging and audit.
-- **Workflow orchestration you can maintain**: TriggerFlow translates visual “low-code graphs” (n8n/Dify/Coze style) into readable code with events, branching, joins, loops, and concurrency limits. Combined with Instant-mode partial node capture + signal-driven execution, you can do real-time UX like “companion robot speaks while actions trigger”.
-- **Grounded answers with citations**: KB retrieval results are structured (`id/document/metadata`) and can be turned into enforced citations (e.g. `source_id` + `quote`) so answers are traceable and reviewable.
-
-## Core Features Overview
-
-These are the production pain points we keep seeing across teams:
-- **“I asked for JSON, got a paragraph.”** Missing keys, format drift, extra prose → broken parsers.
-- **Tools that work… until they don’t.** Failures become hard to reproduce, debug, and audit.
-- **Low-code graphs that outgrow themselves.** More branches, more state, less confidence to change.
-- **RAG without accountability.** You can’t answer: “Which doc supports this claim?”
-
-Agently turns them into engineering primitives you can ship with confidence: schema-first outputs (`output()` + `ensure_keys`), Instant-mode structured streaming, framework-native tool planning with traces, TriggerFlow orchestration, and KB grounding with citations.
-
-### Structured and Streamed Output Control for LLMs
-
-Schema-first outputs are often the difference between a demo and an API: you define what the system must return, and the framework enforces it at runtime.
-
-Agently allows you to control and consume model outputs using a developer-centric pattern:
+### 1) 📝 Contract‑first Output Control
+Define the structure with `output()`, enforce critical keys with `ensure_keys`.
 
 ```python
-from agently import Agently
-
-agent = Agently.create_agent()
-
-(
+result = (
     agent
-        .input("What time is it now?", always=True)
-        .info({
-            "default_timezone": "",
-            "tool_list": [{
-                "name": "get_current_time",
-                "desc": "Get current time by time zone provided",
-                "kwargs": {
-                    "timezone_str": (str, "time zone string in ZoneInfo()"),
-                },
-            }]
-        })
-        .output({
-            "first_time_response": (str, ),
-            "tool_using_judgement": (bool, ),
-            "tool_using_command": (
-                {
-                    "name": (str, "Decide which tool to use by tool name:{tool_list.[].name}"),
-                    "kwargs": (dict, "According {tool_list.[].args} to output kwargs dictionary"),
-                },
-                "If {tool_using_judgement}==False, just output {}",
-            ),
-        })
+    .input("Analyze user feedback")
+    .output({
+        "sentiment": (str, "positive/neutral/negative"),
+        "key_issues": [(str, "issue summary")],
+        "priority": (int, "1-5, 5 is highest")
+    })
+    .start(ensure_keys=["sentiment", "key_issues[*]"])
 )
 ```
 
-Then, consume the model response:
+### 2) ⚡ Structured Streaming (Instant)
+Consume structured fields as they are generated.
 
 ```python
-response = agent.get_response()
+response = (
+    agent
+    .input("Explain recursion and give 2 tips")
+    .output({"definition": (str, "one sentence"), "tips": [(str, "tip")]})
+    .get_response()
+)
 
-# Get raw text
-response_text = response.get_text()
-
-# Get parsed structured data
-response_data = response.get_data()
-
-# Instant parsing mode (structured streaming)
-instant_response_generator = response.get_generator(type="instant")
-
-use_tool = False
-
-for instant_message in instant_response_generator:
-    if instant_message.path == "first_time_response":
-        if instant_message.delta is not None:
-            print(instant_message.delta, end="", flush=True)
-    elif instant_message.path == "tool_using_judgement":
-        use_tool = instant_message.value
-        print()
-        if use_tool:
-            print("[USE TOOL!]")
-        else:
-            print("[NO NEED TO USE TOOL!]")
-    if use_tool:
-        if instant_message.path == "tool_using_command.name" and instant_message.is_complete:
-            print(f"I want to use: '{ instant_message.value }'")
-        elif instant_message.path == "tool_using_command":
-            print(f"call: { instant_message.value }")
-            print(f"kwargs: { instant_message.value }")
+for msg in response.get_generator(type="instant"):
+    if msg.path == "definition" and msg.delta:
+        ui.update_definition(msg.delta)
+    if msg.wildcard_path == "tips[*]" and msg.delta:
+        ui.add_tip(msg.delta)
 ```
 
-```shell
-I can check the current time for you. Please specify a timezone (e.g., 'America/New_York') so I can provide the accurate time.
-[NO NEED TO USE TOOL!]
+### 3) 🧩 TriggerFlow Orchestration
+Readable, testable workflows with branching and concurrency.
+
+```python
+(
+    flow.to(handle_request)
+    .if_condition(lambda d: d.value["type"] == "query")
+    .to(handle_query)
+    .elif_condition(lambda d: d.value["type"] == "order")
+    .to(check_inventory)
+    .to(create_order)
+    .end_condition()
+)
 ```
 
-### Provider Compatibility (Local / Hosted / Proxy)
+### 4) 🧠 Session & Memo (Multi‑turn Memory)
+Quick / Lite / Memo modes with summaries and persistence strategies.
 
-Agently unifies model configuration via `OpenAICompatible`, so you can switch between providers while keeping the same developer experience. It also supports common “production reality” knobs like `full_url` and custom auth headers.
+```python
+from agently import Agently
+from agently.core import Session
 
-- Minimal example:
+agent = Agently.create_agent()
+session = Session(agent=agent).configure(
+    mode="memo",
+    limit={"chars": 6000, "messages": 12},
+    every_n_turns=2,
+)
+agent.attach_session(session)
+```
+
+### 5) 🔧 Tool Calls + Logs
+Tool selection and usage are logged in `extra.tool_logs`.
+
+```python
+@agent.tool_func
+def add(a: int, b: int) -> int:
+    return a + b
+
+response = agent.input("12+34=?").use_tool(add).get_response()
+full = response.get_data(type="all")
+print(full["extra"]["tool_logs"])
+```
+
+### 6) 🌐 Unified Model Settings (OpenAICompatible)
+One config for multiple providers and local models.
+
 ```python
 from agently import Agently
 
@@ -191,215 +149,175 @@ Agently.set_settings(
 )
 ```
 
-- Example configs: `examples/model_configures/`
-- Step-by-step: `examples/step_by_step/01-settings.py`
+## 🚀 Quickstart
 
-### Output Reliability (ensure_keys + retries)
+### Install
 
-In batch tasks and pipelines, a missing field can crash the whole job. Agently provides `ensure_keys` + retries for structured output so you can enforce required fields (including wildcard paths for list items).
+```bash
+pip install -U agently
+```
 
-- Minimal example:
+*Requirements: Python >= 3.10, recommended Agently >= 4.0.7.2*
+
+### 5‑minute example
+
+**1. Structured output**
+
 ```python
 from agently import Agently
 
 agent = Agently.create_agent()
+
 result = (
-    agent.input("Give me 3 todos")
-    .output({"todos": [("str", "todo item")]})
-    .start(ensure_keys=["todos[*]"], max_retries=2, raise_ensure_failure=False)
+    agent.input("Introduce Python in one sentence and list 2 advantages")
+    .output({
+        "introduction": (str, "one sentence"),
+        "advantages": [(str, "advantage")]
+    })
+    .start(ensure_keys=["introduction", "advantages[*]"])
 )
+
 print(result)
 ```
-```text
-Output (qwen2.5:7b):
-{'todos': ['Schedule morning exercise routine', 'Prepare presentation slides for the meeting', 'Respond to emails from clients']}
-```
 
-- Step-by-step: `examples/step_by_step/03-output_format_control.py`
+**2. Workflow routing**
 
-### Streaming UX (delta / instant / typed_delta)
-
-Agently streaming is designed for real applications: reduce waiting, expose decisions early, and route structured fields to different UI regions. For example in a “companion robot” HCI scenario, you often want to mix user-facing text with machine/behavior commands, and consume them as soon as they are parsed.
-
-- Minimal example:
 ```python
-from agently import Agently
-
-agent = Agently.create_agent()
-response = (
-    agent.input("Act as a companion robot: greet me and propose a small action you can do next.")
-    .output(
-        {
-            "thinking": ("str", "internal planning (not for users)"),
-            "say": ("str", "what the user sees/hears"),
-            "actions": [("str", "robot action command(s) for your app to execute")],
-        }
-    )
-    .get_response()
-)
-
-say_label_printed = False
-
-def execute_action(action: str) -> None:
-    # In real apps, route this to your robot controller / UI event bus.
-    print(f"\n[action] {action}")
-
-for msg in response.get_generator(type="instant"):
-    if msg.path == "say" and msg.delta:
-        if not say_label_printed:
-            print("[say] ", end="")
-            say_label_printed = True
-        print(msg.delta, end="", flush=True)
-    if msg.path.startswith("actions[") and msg.is_complete:
-        execute_action(msg.value)
-print()
-```
-```text
-Output (qwen2.5:7b):
-[say] Hello! Nice to meet you. How about we start with some light conversation? Do you have any favorite hobbies or interests that we could talk about?
-[action] initiate_conversation
-```
-
-- Step-by-step: `examples/step_by_step/06-streaming.py`
-- Reference patterns: `examples/basic/streaming_print.py`
-
-### Tools (built-in + custom + traceable)
-
-When a project grows from 1 tool to 20 tools, “it worked yesterday” isn’t enough—you need predictable planning and a trail you can audit.
-
-Tools let the model call external functions deterministically. Agently supports:
-- built-in `Search` / `Browse`
-- custom tools via decorator
-- tool call tracing from response metadata (`extra`)
-
-Unlike workflows that rely on provider-side function calling, Agently can run a framework-native “tool planning” step even on plain chat endpoints, so tool orchestration stays portable across most modern models.
-
-- Minimal example:
-```python
-from agently import Agently
-
-agent = Agently.create_agent()
-
-@agent.tool_func
-def add(*, a: int, b: int) -> int:
-    return a + b
-
-agent.use_tools(add)
-print(agent.input("Use the add tool to calculate 12 + 34.").start())
-```
-```text
-Output (qwen2.5:7b):
-The sum of 12 and 34 is calculated as follows:
-
-12
-+34
------
-46
-
-Therefore, the result of 12 + 34 is **46**. 
-
-No external sources were used in this calculation.
-```
-
-- Step-by-step: `examples/step_by_step/07-tools.py`
-
-### Workflow Orchestration (TriggerFlow)
-
-TriggerFlow is for the moment your workflow stops being a sketch: you need events, joins, loops, concurrency limits, and long-term maintainability (including migrating from n8n/Dify/Coze-style graphs into code).
-
-TriggerFlow is Agently’s event-driven workflow engine, designed for:
-- branching (`when`, `if_condition`, `match`)
-- concurrency limits (`batch`, `for_each`)
-- loops (`emit` + `when`)
-- runtime stream events (`put_into_stream`)
-
-- Minimal example:
-```python
-from agently import TriggerFlow
+from agently import TriggerFlow, TriggerFlowEventData
 
 flow = TriggerFlow()
-flow.to(lambda d: f"Hello, {d.value}").end()
-print(flow.start("Agently"))
-```
-```text
-Output (qwen2.5:7b):
-Hello, Agently
-```
 
-- TriggerFlow series: `examples/step_by_step/11-triggerflow-01_basics.py`
+@flow.chunk
+def classify_intent(data: TriggerFlowEventData):
+    text = data.value
+    if "price" in text:
+        return "price_query"
+    if "feature" in text:
+        return "feature_query"
+    if "buy" in text:
+        return "purchase"
+    return "other"
 
-### Knowledge Base (embeddings + vector DB)
+@flow.chunk
+def handle_price(_: TriggerFlowEventData):
+    return {"response": "Pricing depends on the plan..."}
 
-In enterprise RAG, the question is rarely “can we retrieve?”—it’s “can we cite and defend the answer?”.
+@flow.chunk
+def handle_feature(_: TriggerFlowEventData):
+    return {"response": "Our product supports..."}
 
-Agently integrates KB pipelines (e.g., Chroma) to ground responses with real documents and metadata.
-
-- Minimal example:
-```python
-from agently import Agently
-from agently.integrations.chromadb import ChromaCollection
-
-embedding = Agently.create_agent()
-embedding.set_settings(
-    "OpenAICompatible",
-    {
-        "model": "qwen3-embedding:0.6b",
-        "base_url": "http://127.0.0.1:11434/v1/",
-        "auth": "nothing",
-        "model_type": "embeddings",
-    },
+(
+    flow.to(classify_intent)
+    .match()
+    .case("price_query")
+    .to(handle_price)
+    .case("feature_query")
+    .to(handle_feature)
+    .case_else()
+    .to(lambda d: {"response": "What would you like to know?"})
+    .end_match()
+    .end()
 )
-kb = ChromaCollection(collection_name="demo", embedding_agent=embedding)
-kb.add([{"document": "Agently is a GenAI framework.", "metadata": {"source": "demo"}}])
-print(kb.query("What is Agently?"))
+
+print(flow.start("How much does it cost?"))
 ```
 
-- Step-by-step: `examples/step_by_step/09-knowledge_base.py`
+## ✅ Is Your App Production‑Ready? — Release Readiness Checklist
 
-### Deployment Templates (FastAPI, Docker)
+Based on teams shipping real projects with Agently, this **production readiness checklist** helps reduce common risks before release.
 
-For engineering delivery, the repo includes a docker-ready FastAPI project that exposes Auto Loop through:
-- SSE streaming
-- WebSocket
-- POST
+| Area | Check | Recommended Practice |
+| :--- | :--- | :--- |
+| **📝 Output Stability** | Are key interfaces stable? | Define schemas with `output()` and lock critical fields with `ensure_keys`. |
+| **⚡ Real‑time UX** | Need updates while generating? | Consume `type="instant"` structured streaming events. |
+| **🔍 Observability** | Tool calls auditable? | Inspect `extra.tool_logs` for full arguments and results. |
+| **🧩 Workflow Robustness** | Complex flows fully tested? | Unit test each TriggerFlow branch and concurrency limit with expected outputs. |
+| **🧠 Memory & Context** | Multi‑turn experience consistent? | Define Session/Memo summary, trimming, and persistence policies. |
+| **📄 Prompt Management** | Can logic evolve safely? | Version and configure prompts to keep changes traceable. |
+| **🌐 Model Strategy** | Can you switch or downgrade models? | Centralize settings with `OpenAICompatible` for fast provider switching. |
+| **🚀 Performance & Scale** | Can it handle concurrency? | Validate async performance in real web‑service scenarios. |
+| **🧪 Quality Assurance** | Regression tests complete? | Create fixed inputs with expected outputs for core scenarios. |
 
-- Minimal example:
-```shell
-cd examples/step_by_step/13-auto_loop_fastapi
-uvicorn app.main:app --reload
-```
 
-- Project: `examples/step_by_step/13-auto_loop_fastapi/`
+## 📈 Who Uses Agently to Solve Real Problems?
 
-### Learn by Examples (Recommended Path)
+> "Agently helped us turn evaluation rules into executable workflows and keep key scoring accuracy at 75%+, significantly improving bid‑evaluation efficiency." — Project lead at a large energy SOE
 
-Start with these step-by-step chapters (runnable code + explanations in docs):
-- Settings → `examples/step_by_step/01-settings.py`
-- Prompt Methods → `examples/step_by_step/02-prompt_methods.py`
-- Output Control → `examples/step_by_step/03-output_format_control.py`
-- Streaming → `examples/step_by_step/06-streaming.py`
-- Tools → `examples/step_by_step/07-tools.py`
-- TriggerFlow → `examples/step_by_step/11-triggerflow-01_basics.py`
-- Auto Loop → `examples/step_by_step/12-auto_loop.py`
+> "Agently enabled a closed loop from clarification to query planning to rendering, reaching 90%+ first‑response accuracy and stable production performance." — Data lead at a large energy group
 
-## Agently Helper (Desktop)
+> "Agently’s orchestration and session capabilities let us ship a teaching assistant for course management and Q&A quickly, with continuous iteration." — Project lead at a university teaching‑assistant initiative
 
-Agently Helper is a desktop tool to help you quickly **understand** and **test** Agently capabilities without setting up a full project first:
-- Multi-model management and switching
-- Switching between different prompt styles
-- Structured output
-- Streaming output
+**Your project can be next.**  
+📢 [Share your case on GitHub Discussions →](https://github.com/AgentEra/Agently/discussions/categories/show-and-tell)
+## ❓ FAQ
 
-- Windows: https://1drv.ms/u/c/13d5207d1b13e4d3/IQC9XITZl83hR5vU9Z_t-0oKAd3jtMh_fYRypp7T2k8JhCY?e=I72GVH
-- macOS (Apple Silicon): https://1drv.ms/u/c/13d5207d1b13e4d3/IQBhdxYw9Ev1R6qTWb-esVK2AY8PwCxnBHLNuf06Ic4w7sw?e=unMjaD
-- macOS (Intel): https://1drv.ms/u/c/13d5207d1b13e4d3/IQDqUPSqRq7LR7gpCjK60FOSASl4PBsRZPGtHvBAA63U_js?e=EmwVMA
-- Linux: https://1drv.ms/u/c/13d5207d1b13e4d3/IQDVenHvItjFTqnlv294MPD9AUQDvkAKwvBcNufEXSl1nAs?e=Ti5aJ7
+**Q: How is Agently different from LangChain or LlamaIndex?**  
+**A:** Agently is **built for production**. It focuses on stable interfaces (contract‑first outputs), readable/testable orchestration (TriggerFlow), and observable tool calls (`tool_logs`). It’s a better fit for teams that need reliability and maintainability after launch.
 
-## 💬 WeChat Group (Join Us)
+**Q: Which models are supported? Is switching expensive?**  
+**A:** With `OpenAICompatible`, you can connect OpenAI, Claude, DeepSeek, Qwen and most OpenAI‑compatible endpoints, plus local models like Llama/Qwen. **The same business code can switch models without rewrites**, reducing vendor lock‑in.
 
-> [Click Here to Apply](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf)
-> or Scan the QR Code Below:
+**Q: What’s the learning curve? Where should I start?**  
+**A:** The core API is straightforward—**you can run your first agent in minutes**. Start with [Quickstart](https://agently.tech/docs/en/quickstart.html), then dive into [Output Control](https://agently.tech/docs/en/output-control/overview.html) and [TriggerFlow](https://agently.tech/docs/en/triggerflow/overview.html).
+
+**Q: How do I deploy an Agently‑based service?**  
+**A:** Agently doesn’t lock you into a specific deployment path. It provides async APIs and FastAPI examples. The [FastAPI integration example](https://github.com/AgentEra/Agently/tree/main/examples/step_by_step/13-auto_loop_fastapi) covers SSE, WebSocket, and standard POST.
+
+**Q: Do you offer enterprise support?**  
+**A:** The core framework is open‑source under **Apache 2.0**. For enterprise support, training, or deep collaboration, contact us via the [community](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf).
+
+
+## 🧭 Docs Guide (Key Paths)
+
+- **Getting Started**
+  - Quickstart: https://agently.tech/docs/en/quickstart.html
+  - Model Settings: https://agently.tech/docs/en/model-settings.html
+  - Coding Agent Guide: https://agently.tech/docs/en/agent-docs.html
+- **Output Control (Structured Output)**
+  - Overview: https://agently.tech/docs/en/output-control/overview.html
+  - Output Format: https://agently.tech/docs/en/output-control/format.html
+  - ensure_keys: https://agently.tech/docs/en/output-control/ensure-keys.html
+  - Instant Streaming: https://agently.tech/docs/en/output-control/instant-streaming.html
+- **Result & Streaming Events**
+  - Result Data: https://agently.tech/docs/en/model-response/result-data.html
+  - Streaming Events: https://agently.tech/docs/en/model-response/streaming.html
+- **Session & Memo**
+  - Overview: https://agently.tech/docs/en/agent-extensions/session-memo/
+  - Quickstart: https://agently.tech/docs/en/agent-extensions/session-memo/quickstart.html
+- **TriggerFlow Orchestration**
+  - Overview: https://agently.tech/docs/en/triggerflow/overview.html
+  - when Branch: https://agently.tech/docs/en/triggerflow/when-branch.html
+  - if / elif / else: https://agently.tech/docs/en/triggerflow/if-branch.html
+  - match / case: https://agently.tech/docs/en/triggerflow/match-branch.html
+  - batch: https://agently.tech/docs/en/triggerflow/batch.html
+  - for_each: https://agently.tech/docs/en/triggerflow/for-each.html
+  - Runtime Stream: https://agently.tech/docs/en/triggerflow/runtime-stream.html
+- **Tools & Extensions**
+  - Tools: https://agently.tech/docs/en/agent-extensions/tools.html
+  - MCP: https://agently.tech/docs/en/agent-extensions/mcp.html
+  - auto_func: https://agently.tech/docs/en/agent-extensions/auto-func.html
+  - KeyWaiter: https://agently.tech/docs/en/agent-extensions/key-waiter.html
+- **Prompt Management**: https://agently.tech/docs/en/prompt-management/overview.html
+- **Async & Settings**: https://agently.tech/docs/en/async-support.html / https://agently.tech/docs/en/settings.html
+- **Playbook**: https://agently.tech/docs/en/agent-systems/overview.html
+
+## 🤝 Community
+
+- Discussions: https://github.com/AgentEra/Agently/discussions
+- Issues: https://github.com/AgentEra/Agently/issues
+- WeChat Group: https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf
+
+## 📄 License
+
+Agently is licensed under [Apache 2.0](LICENSE).
+
+---
 
 <p align="center">
-  <img width="120" alt="WeChat QR" src="https://github.com/AgentEra/Agently/assets/4413155/7f4bc9bf-a125-4a1e-a0a4-0170b718c1a6">
+  <b>Start building your production‑ready AI apps →</b><br>
+  <code>pip install -U agently</code>
+</p>
+
+<p align="center">
+  <sub>Questions? Read the <a href="https://agently.tech/docs">docs</a> or join the <a href="https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf">community</a>.</sub>
 </p>
