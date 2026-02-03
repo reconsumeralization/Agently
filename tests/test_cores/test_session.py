@@ -78,6 +78,22 @@ async def test_default_policy_disabled():
 
 
 @pytest.mark.asyncio
+async def test_legacy_keys_are_ignored():
+    session = Session()
+    session.set_settings("session.resize.max_current_chars", 10)
+    session.set_settings("session.resize.keep_last_messages", 1)
+    session.set_settings("session.resize.every_n_turns", 10_000)
+    session.set_resize_handlers("lite", lambda f, c, m, s: (f, c, m))
+    session.set_resize_handlers("deep", lambda f, c, m, s: (f, c, m))
+
+    session.append_message({"role": "user", "content": "01234567890123456789"})
+    session.append_message({"role": "assistant", "content": "x"})
+
+    decision = await session.async_judge_resize()
+    assert decision is None
+
+
+@pytest.mark.asyncio
 async def test_limit_chars_from_session_limit():
     session = Session()
     session.configure(limit={"chars": 10})

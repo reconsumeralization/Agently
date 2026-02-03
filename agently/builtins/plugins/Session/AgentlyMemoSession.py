@@ -195,29 +195,9 @@ class AgentlyMemoSession:
     def _approx_chat_history_chars(self, chat_history: "list[ChatMessage]") -> int:
         return sum(len(m.role) + 1 + self._approx_message_chars(m) for m in chat_history)
 
-    def _get_setting(self, key: str, legacy_key: str | None, default: Any) -> Any:
-        sentinel = object()
-        value = self.settings.get(key, sentinel)
-        if value is not sentinel:
-            return value
-        if legacy_key is None:
-            return default
-        legacy_value = self.settings.get(legacy_key, sentinel)
-        if legacy_value is not sentinel:
-            return legacy_value
-        return default
-
     def _get_limits(self) -> tuple[Any, Any]:
-        max_current_chars = self._get_setting(
-            "session.resize.max_messages_text_length",
-            "session.resize.max_current_chars",
-            12_000,
-        )
-        max_keep_messages_count = self._get_setting(
-            "session.resize.max_keep_messages_count",
-            "session.resize.keep_last_messages",
-            None,
-        )
+        max_current_chars = self.settings.get("session.resize.max_messages_text_length", 12_000)
+        max_keep_messages_count = self.settings.get("session.resize.max_keep_messages_count", None)
         limit = self.settings.get("session.limit", None)
         if isinstance(limit, dict):
             if "chars" in limit:
