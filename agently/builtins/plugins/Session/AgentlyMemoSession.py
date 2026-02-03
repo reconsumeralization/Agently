@@ -493,7 +493,8 @@ class AgentlyMemoSession:
             pruned, remaining = self._split_by_max_chars(current_chat_history, max_current_chars_int)
         else:
             if keep_last_messages_int == 0 or len(current_chat_history) <= keep_last_messages_int:
-                return full_chat_history, current_chat_history, memo
+                memo_dict["last_resize"] = {"type": "lite", "turn": self._turns, "reason": "lite_resize"}
+                return full_chat_history, current_chat_history, memo_dict
             pruned = current_chat_history[:-keep_last_messages_int]
             remaining = current_chat_history[-keep_last_messages_int:]
             if max_current_chars_int > 0:
