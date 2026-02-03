@@ -17,7 +17,7 @@ from __future__ import annotations
 import inspect
 import yaml
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 from agently.core import BaseAgent
 from agently.core.Session import Session
@@ -92,7 +92,9 @@ class SessionExtension(BaseAgent):
         self._session.use_memo(chars=chars, messages=messages, every_n_turns=every_n_turns)
         return self
 
-    def _normalize_chat_history(self, chat_history: list[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
+    def _normalize_chat_history(
+        self, chat_history: Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage
+    ):
         if not isinstance(chat_history, list):
             return [chat_history]
         return chat_history
@@ -139,7 +141,7 @@ class SessionExtension(BaseAgent):
                 continue
 
             if path is None:
-                value = prompt.get(prompt_key)
+                value = prompt.get(str(prompt_key))
                 if value is None:
                     continue
                 if record_input_mode == "first":
@@ -148,7 +150,7 @@ class SessionExtension(BaseAgent):
                     content = {}
                 content[prompt_key] = value
             else:
-                prompt_value = prompt.get(prompt_key)
+                prompt_value = prompt.get(str(prompt_key))
                 if isinstance(prompt_value, dict):
                     path_value = DataPathBuilder.get_value_by_path(prompt_value, str(path))
                     if path_value is None:
@@ -216,7 +218,7 @@ class SessionExtension(BaseAgent):
         self._session._last_resize_turn = 0
         self._session._memo_cursor = 0
 
-    def set_chat_history(self, chat_history: list[dict[str, Any] | ChatMessage]):
+    def set_chat_history(self, chat_history: Sequence[dict[str, Any] | ChatMessage]):
         if self._session is None:
             return super().set_chat_history(chat_history)
         self._reset_session_history()
@@ -224,7 +226,7 @@ class SessionExtension(BaseAgent):
             self._session.append_message(message)
         return self
 
-    def add_chat_history(self, chat_history: list[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
+    def add_chat_history(self, chat_history: Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
         if self._session is None:
             return super().add_chat_history(chat_history)
         messages = self._normalize_chat_history(chat_history)

@@ -19,8 +19,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from agently.utils import Settings
 
 if TYPE_CHECKING:
-    from agently.core import PluginManager
-    from agently.base import Agent
+    from agently.core import PluginManager, BaseAgent
     from agently.types.plugins import (
         SessionProtocol,
         MemoResizePolicyHandler,
@@ -39,7 +38,7 @@ class Session:
         attachment_summary_handler: "AttachmentSummaryHandler | None" = None,
         memo_update_handler: "MemoUpdateHandler | None" = None,
         parent_settings: Settings | None = None,
-        agent: "Agent | None" = None,
+        agent: "BaseAgent | None" = None,
         plugin_manager: "PluginManager | None" = None,
     ):
         if plugin_manager is None:

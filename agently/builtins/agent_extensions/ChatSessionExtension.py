@@ -16,7 +16,7 @@
 import uuid
 import yaml
 
-from typing import Any, Literal, TYPE_CHECKING, cast
+from typing import Any, Literal, Sequence, TYPE_CHECKING, cast
 
 from agently.core import BaseAgent
 from agently.types.data import ChatMessage
@@ -208,7 +208,7 @@ class ChatSessionExtension(BaseAgent):
         self._record_output_mode = mode
         return self
 
-    def add_chat_history(self, chat_history: list[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
+    def add_chat_history(self, chat_history: Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
         super().add_chat_history(chat_history)
         if self._activated_chat_session is not None:
             self.chat_session_runtime.set(self._activated_chat_session, self.prompt.get("chat_history"))

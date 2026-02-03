@@ -16,7 +16,7 @@ import uuid
 import yaml
 import json
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 from agently.core import Prompt, ExtensionHandlers, ModelRequest
 from agently.utils import Settings
@@ -116,15 +116,15 @@ class BaseAgent:
             self.agent_prompt.set("chat_history", [])
         return self
 
-    def set_chat_history(self, chat_history: "list[dict[str, Any] | ChatMessage]"):
+    def set_chat_history(self, chat_history: "Sequence[dict[str, Any] | ChatMessage]"):
         self.reset_chat_history()
-        if not isinstance(chat_history, list):
+        if not isinstance(chat_history, Sequence):
             chat_history = [chat_history]
         self.agent_prompt.set("chat_history", chat_history)
         return self
 
-    def add_chat_history(self, chat_history: "list[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage"):
-        if not isinstance(chat_history, list):
+    def add_chat_history(self, chat_history: "Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage"):
+        if not isinstance(chat_history, Sequence):
             chat_history = [chat_history]
         self.agent_prompt.set("chat_history", chat_history)
         return self
