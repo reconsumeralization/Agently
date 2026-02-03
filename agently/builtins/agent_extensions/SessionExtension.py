@@ -44,6 +44,11 @@ class SessionExtension(BaseAgent):
         self.extension_handlers.append("request_prefixes", self._session_request_prefix)
         self.extension_handlers.append("finally", self._session_finally)
 
+        # Sync wrappers for async-first methods
+        self.set_chat_history = FunctionShifter.syncify(self.async_set_chat_history)
+        self.add_chat_history = FunctionShifter.syncify(self.async_add_chat_history)
+        self.reset_chat_history = FunctionShifter.syncify(self.async_reset_chat_history)
+
     @property
     def session(self) -> Session | None:
         return self._session
@@ -167,12 +172,8 @@ class SessionExtension(BaseAgent):
             return []
         return [{"role": "user", "content": self._stringify_content(content)}]
 
-    async def _get_result_text(self, result: "ModelResponseResult"):
-        if hasattr(result, "async_get_text"):
-            return await result.async_get_text()
-        if hasattr(result, "get_text"):
-            return result.get_text()
-        return None
+    def _get_result_text(self, result: "ModelResponseResult"):
+        return result.full_result_data.get("text_result")
 
     async def _collect_record_output(self, result: "ModelResponseResult") -> list[dict[str, Any]]:
         record_output_paths = self.settings.get("session.record.output.paths", [])
@@ -182,7 +183,7 @@ class SessionExtension(BaseAgent):
             record_output_paths = [record_output_paths]
 
         if not isinstance(record_output_paths, list) or len(record_output_paths) == 0:
-            assistant_text = await self._get_result_text(result)
+            assistant_text = self._get_result_text(result)
             if assistant_text not in (None, ""):
                 return [{"role": "assistant", "content": assistant_text}]
             return []
@@ -205,7 +206,7 @@ class SessionExtension(BaseAgent):
             if isinstance(content, dict) and content:
                 return [{"role": "assistant", "content": self._stringify_content(content)}]
 
-        assistant_text = await self._get_result_text(result)
+        assistant_text = self._get_result_text(result)
         if assistant_text not in (None, ""):
             return [{"role": "assistant", "content": assistant_text}]
         return []
@@ -218,16 +219,13 @@ class SessionExtension(BaseAgent):
         self._session._last_resize_turn = 0
         self._session._memo_cursor = 0
 
-    def set_chat_history(self, chat_history: Sequence[dict[str, Any] | ChatMessage]):
+    async def async_set_chat_history(self, chat_history: Sequence[dict[str, Any] | ChatMessage]):
         if self._session is None:
             return super().set_chat_history(chat_history)
         self._reset_session_history()
         for message in self._normalize_chat_history(chat_history):
             self._session.append_message(message)
         return self
-
-    def add_chat_history(self, chat_history: Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
-        return FunctionShifter.syncify(self.async_add_chat_history)(chat_history)
 
     async def async_add_chat_history(
         self,
@@ -243,7 +241,7 @@ class SessionExtension(BaseAgent):
         await self._session.async_resize()
         return self
 
-    def reset_chat_history(self):
+    async def async_reset_chat_history(self):
         if self._session is None:
             return super().reset_chat_history()
         self._reset_session_history()
