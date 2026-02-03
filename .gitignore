@@ -158,3 +158,6 @@ demo_*
 
 # node
 node_modules
+
+# spec_docs
+spec_docs
