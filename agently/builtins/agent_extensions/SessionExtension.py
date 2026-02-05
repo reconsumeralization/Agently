@@ -23,9 +23,9 @@ from typing import Any, Sequence, TYPE_CHECKING
 from agently.core import BaseAgent
 from agently.core.Session import Session
 from agently.utils import DataPathBuilder, FunctionShifter
+from agently.types.data import ChatMessage
 
 if TYPE_CHECKING:
-    from agently.types.data import ChatMessage
     from agently.core import Prompt
     from agently.core.ModelRequest import ModelResponseResult
     from agently.utils import Settings

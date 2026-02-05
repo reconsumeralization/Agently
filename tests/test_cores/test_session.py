@@ -234,3 +234,20 @@ def test_use_lite_and_use_memo_shortcuts():
 def test_session_uses_default_plugin():
     session = Session()
     assert session._impl.__class__.__name__ == "AgentlyMemoSession"
+
+
+def test_session_inherits_agent_settings_when_agent_provided():
+    from agently import Agently
+
+    agent = Agently.create_agent()
+    agent.set_settings(
+        "OpenAICompatible",
+        {
+            "base_url": "http://127.0.0.1:11434/v1",
+            "model": "qwen2.5:7b",
+        },
+    )
+
+    session = Session(agent=agent)
+    assert session.settings.get("plugins.ModelRequester.OpenAICompatible.base_url") == "http://127.0.0.1:11434/v1"
+    assert session.settings.get("plugins.ModelRequester.OpenAICompatible.model") == "qwen2.5:7b"

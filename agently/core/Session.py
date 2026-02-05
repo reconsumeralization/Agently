@@ -54,6 +54,11 @@ class Session:
         agent: "BaseAgent | None" = None,
         plugin_manager: "PluginManager | None" = None,
     ):
+        if agent is not None:
+            if plugin_manager is None and hasattr(agent, "plugin_manager"):
+                plugin_manager = agent.plugin_manager
+            if parent_settings is None and hasattr(agent, "settings"):
+                parent_settings = agent.settings
         if plugin_manager is None:
             from agently.base import plugin_manager as global_plugin_manager, settings as global_settings
 
