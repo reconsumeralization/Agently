@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import uuid
 
@@ -55,16 +56,49 @@ class ModelResponseResult:
         self._response_id = response_id
         self._extension_handlers = extension_handlers
         self._response_parser = ResponseParser(agent_name, response_id, prompt, response_generator, self.settings)
+        self._finally_handlers_ran = False
+        self._finally_handlers_lock = asyncio.Lock()
+        self._run_finally_handlers_once_sync = FunctionShifter.syncify(self._run_finally_handlers_once)
         self.prompt = prompt
         self.full_result_data = self._response_parser.full_result_data
-        self.get_meta = self._response_parser.get_meta
-        self.async_get_meta = self._response_parser.async_get_meta
-        self.get_text = self._response_parser.get_text
-        self.async_get_text = self._response_parser.async_get_text
+        self.get_meta = FunctionShifter.syncify(self.async_get_meta)
+        self.get_text = FunctionShifter.syncify(self.async_get_text)
         self.get_data = FunctionShifter.syncify(self.async_get_data)
         self.get_data_object = FunctionShifter.syncify(self.async_get_data_object)
-        self.get_generator = self._response_parser.get_generator
-        self.get_async_generator = self._response_parser.get_async_generator
+
+    async def _run_finally_handlers_once(self):
+        if self._finally_handlers_ran:
+            return
+        async with self._finally_handlers_lock:
+            if self._finally_handlers_ran:
+                return
+            # Mark as executed before invoking handlers so handlers can safely
+            # call result getters without re-entering this hook chain.
+            self._finally_handlers_ran = True
+            finally_handlers = self._extension_handlers.get("finally", [])
+            for handler in finally_handlers:
+                if inspect.iscoroutinefunction(handler):
+                    await handler(
+                        self,
+                        self.settings,
+                    )
+                elif inspect.isgeneratorfunction(handler):
+                    for _ in handler(
+                        self,
+                        self.settings,
+                    ):
+                        pass
+                elif inspect.isasyncgenfunction(handler):
+                    async for _ in handler(
+                        self,
+                        self.settings,
+                    ):
+                        pass
+                elif inspect.isfunction(handler):
+                    handler(
+                        self,
+                        self.settings,
+                    )
 
     @overload
     async def async_get_data(
@@ -107,6 +141,7 @@ class ModelResponseResult:
                     EMPTY = object()
                     if DataLocator.locate_path_in_dict(data, ensure_key, key_style, default=EMPTY) is EMPTY:
                         raise
+                await self._run_finally_handlers_once()
                 return data
             except:
                 from agently.base import async_system_message
@@ -118,7 +153,7 @@ class ModelResponseResult:
                         "response_id": self._response_id,
                         "content": {
                             "stage": "No Target Data in Response, Preparing Retry",
-                            "detail": f"\n[Response]: { await self.async_get_text() }\n"
+                            "detail": f"\n[Response]: { await self._response_parser.async_get_text() }\n"
                             f"[Retried Times]: { _retry_count }",
                         },
                     },
@@ -126,7 +161,7 @@ class ModelResponseResult:
                 )
 
                 if _retry_count < max_retries:
-                    return await ModelResponse(
+                    data = await ModelResponse(
                         self.agent_name,
                         self.plugin_manager,
                         self.settings,
@@ -140,14 +175,20 @@ class ModelResponseResult:
                         raise_ensure_failure=raise_ensure_failure,
                         _retry_count=_retry_count + 1,
                     )
+                    await self._run_finally_handlers_once()
+                    return data
                 else:
                     if raise_ensure_failure:
+                        await self._run_finally_handlers_once()
                         raise ValueError(
                             f"Can not generate ensure keys { ensure_keys } within { max_retries } retires."
                         )
-                    else:
-                        return await self._response_parser.async_get_data(type=type)
-        return await self._response_parser.async_get_data(type=type)
+                    data = await self._response_parser.async_get_data(type=type)
+                    await self._run_finally_handlers_once()
+                    return data
+        data = await self._response_parser.async_get_data(type=type)
+        await self._run_finally_handlers_once()
+        return data
 
     @overload
     async def async_get_data_object(
@@ -190,8 +231,114 @@ class ModelResponseResult:
                 _retry_count=0,
                 raise_ensure_failure=raise_ensure_failure,
             )
-            return await self._response_parser.async_get_data_object()
-        return await self._response_parser.async_get_data_object()
+            result_object = await self._response_parser.async_get_data_object()
+            await self._run_finally_handlers_once()
+            return result_object
+        result_object = await self._response_parser.async_get_data_object()
+        await self._run_finally_handlers_once()
+        return result_object
+
+    async def async_get_meta(self):
+        meta = await self._response_parser.async_get_meta()
+        await self._run_finally_handlers_once()
+        return meta
+
+    async def async_get_text(self):
+        text = await self._response_parser.async_get_text()
+        await self._run_finally_handlers_once()
+        return text
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["instant", "streaming_parse"],
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> Generator["StreamingData", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["all"],
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> Generator[tuple[str, Any], None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta", "specific", "original"],
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = "delta",
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> Generator: ...
+
+    def get_generator(
+        self,
+        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = "delta",
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> Generator:
+        parsed_generator = self._response_parser.get_generator(type=type, specific=specific)
+        completed = False
+        for data in parsed_generator:
+            yield data
+        completed = True
+        if completed:
+            self._run_finally_handlers_once_sync()
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["instant", "streaming_parse"],
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> AsyncGenerator["StreamingData", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["all"],
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> AsyncGenerator[tuple[str, Any], None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["delta", "specific", "original"],
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = "delta",
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> AsyncGenerator: ...
+
+    async def get_async_generator(
+        self,
+        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = "delta",
+        *,
+        specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
+    ) -> AsyncGenerator:
+        parsed_generator = self._response_parser.get_async_generator(type=type, specific=specific)
+        completed = False
+        async for data in parsed_generator:
+            yield data
+        completed = True
+        if completed:
+            await self._run_finally_handlers_once()
 
 
 class ModelResponse:
@@ -362,36 +509,6 @@ class ModelResponse:
                     )
                     if result is not None:
                         yield result
-        finally_handlers = self.extension_handlers.get("finally", [])
-        for handler in finally_handlers:
-            if inspect.iscoroutinefunction(handler):
-                result = await handler(
-                    self.result,
-                    self.settings,
-                )
-                if result is not None:
-                    yield result
-            elif inspect.isgeneratorfunction(handler):
-                for result in handler(
-                    self.result,
-                    self.settings,
-                ):
-                    if result is not None:
-                        yield result
-            elif inspect.isasyncgenfunction(handler):
-                async for result in handler(
-                    self.result,
-                    self.settings,
-                ):
-                    if result is not None:
-                        yield result
-            elif inspect.isfunction(handler):
-                result = handler(
-                    self.result,
-                    self.settings,
-                )
-                if result is not None:
-                    yield result
 
 
 class ModelRequest:
