@@ -264,7 +264,10 @@ Based on teams shipping real projects with Agently, this **production readiness 
 **A:** Agently doesn’t lock you into a specific deployment path. It provides async APIs and FastAPI examples. The [FastAPI integration example](https://github.com/AgentEra/Agently/tree/main/examples/step_by_step/13-auto_loop_fastapi) covers SSE, WebSocket, and standard POST.
 
 **Q: Do you offer enterprise support?**  
-**A:** The core framework is open‑source under **Apache 2.0**. For enterprise support, training, or deep collaboration, contact us via the [community](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf).
+**A:** Yes. The core framework in this repository remains open‑source under **Apache 2.0**. Enterprise support, private extensions, managed services, and SLA-based collaboration are provided under separate commercial agreements. Contact us via the [community](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf).
+
+**Q: What is open-source vs enterprise in Agently?**  
+**A:** The open-source core includes the general framework and public capabilities in this repository. Enterprise offerings (for example private extension packs, advanced governance modules, private deployment support, and SLA services) are delivered separately under commercial terms.
 
 
 ## 🧭 Docs Guide (Key Paths)
@@ -309,7 +312,12 @@ Based on teams shipping real projects with Agently, this **production readiness 
 
 ## 📄 License
 
-Agently is licensed under [Apache 2.0](LICENSE).
+Agently follows an open-core + commercial extension model:
+
+- Open-source core in this repository: [Apache 2.0](LICENSE)
+- Trademark usage policy: [TRADEMARK.md](TRADEMARK.md)
+- Contributor rights agreement: [CLA.md](CLA.md)
+- Enterprise extensions and commercial services: provided under separate commercial agreements
 
 ---
 

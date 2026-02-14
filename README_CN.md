@@ -264,7 +264,10 @@ print(flow.start("这个产品多少钱？"))
 **A：** 框架本身不绑定部署方式。它提供了完整的异步接口，可以轻松集成到 FastAPI、Django 等任何 Web 框架中。我们提供了开箱即用的 [FastAPI 集成示例](https://github.com/AgentEra/Agently/tree/main/examples/step_by_step/13-auto_loop_fastapi)，涵盖 SSE（流式）、WebSocket 和普通 POST 接口。
 
 **Q：是否有企业版或商业支持？**  
-**A：** Agently 核心框架在 **Apache 2.0 开源协议**下完全免费，可放心用于商业项目。如果您所在的企业需要**深度技术合作、定制化支持或培训服务**，欢迎通过 [社区](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf) 与我们联系。
+**A：** 有。当前仓库中的 Agently 核心框架继续采用 **Apache 2.0 开源协议**。企业支持、私有扩展包、托管服务及 SLA 保障等能力通过独立商业协议提供。欢迎通过 [社区](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf) 与我们联系。
+
+**Q：Agently 的开源能力和企业能力边界是什么？**  
+**A：** 开源部分是本仓库中的通用框架能力；企业部分（例如私有扩展、治理模块、私有化部署支持与 SLA 服务）作为独立商业交付提供，不改变开源核心许可证。
 
 
 ## 🧭 文档库重要内容导览
@@ -309,7 +312,12 @@ print(flow.start("这个产品多少钱？"))
 
 ## 📄 开源协议
 
-Agently 采用 [Apache 2.0](LICENSE) 开源协议，可自由用于商业项目。
+Agently 采用“开源核心 + 商业扩展”模式：
+
+- 本仓库开源核心： [Apache 2.0](LICENSE)
+- 商标使用规范： [TRADEMARK.md](TRADEMARK.md)
+- 贡献者授权协议： [CLA.md](CLA.md)
+- 企业扩展与商业服务：通过独立商业协议提供
 
 ---
 
