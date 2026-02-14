@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import uuid
-import yaml
-import json
 
 from typing import Any, Sequence, TYPE_CHECKING
 
@@ -23,7 +21,7 @@ from agently.utils import Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
-    from agently.types.data import PromptStandardSlot, ChatMessage, SerializableValue
+    from agently.types.data import PromptStandardSlot, ChatMessage, ChatMessageDict
 
 
 class BaseAgent:
@@ -116,14 +114,14 @@ class BaseAgent:
             self.agent_prompt.set("chat_history", [])
         return self
 
-    def set_chat_history(self, chat_history: "Sequence[dict[str, Any] | ChatMessage]"):
+    def set_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict]"):
         self.reset_chat_history()
         if not isinstance(chat_history, Sequence):
             chat_history = [chat_history]
         self.agent_prompt.set("chat_history", chat_history)
         return self
 
-    def add_chat_history(self, chat_history: "Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage"):
+    def add_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict] | ChatMessageDict | ChatMessage"):
         if not isinstance(chat_history, Sequence):
             chat_history = [chat_history]
         self.agent_prompt.set("chat_history", chat_history)
@@ -299,26 +297,3 @@ class BaseAgent:
     # Prompt
     def get_prompt_text(self):
         return self.request_prompt.to_text()[6:][:-11]
-
-    def get_json_prompt(self):
-        prompt_data = {
-            ".agent": self.agent_prompt.to_serializable_prompt_data(),
-            ".request": self.request_prompt.to_serializable_prompt_data(),
-        }
-        return json.dumps(
-            prompt_data,
-            indent=2,
-            ensure_ascii=False,
-        )
-
-    def get_yaml_prompt(self):
-        prompt_data = {
-            ".agent": self.agent_prompt.to_serializable_prompt_data(),
-            ".request": self.request_prompt.to_serializable_prompt_data(),
-        }
-        return yaml.safe_dump(
-            prompt_data,
-            indent=2,
-            allow_unicode=True,
-            sort_keys=False,
-        )

@@ -25,6 +25,30 @@ from agently.utils import DataLocator
 
 
 class ConfigurePromptExtension(BaseAgent):
+
+    def get_json_prompt(self):
+        prompt_data = {
+            ".agent": self.agent_prompt.to_serializable_prompt_data(),
+            ".request": self.request_prompt.to_serializable_prompt_data(),
+        }
+        return json5.dumps(
+            prompt_data,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    def get_yaml_prompt(self):
+        prompt_data = {
+            ".agent": self.agent_prompt.to_serializable_prompt_data(),
+            ".request": self.request_prompt.to_serializable_prompt_data(),
+        }
+        return yaml.safe_dump(
+            prompt_data,
+            indent=2,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+
     def _generate_output_value(self, output_prompt_value: Any):
         if isinstance(output_prompt_value, dict):
             output_type = None
