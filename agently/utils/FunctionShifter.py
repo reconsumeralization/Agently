@@ -18,7 +18,7 @@ import threading
 from functools import wraps
 
 import inspect
-from typing import Any, Callable, Coroutine, TypeVar, ParamSpec, Generator, AsyncGenerator
+from typing import Any, Callable, Coroutine, Awaitable, TypeVar, ParamSpec, Generator, AsyncGenerator
 from asyncio import Future
 
 T = TypeVar("T")
@@ -50,7 +50,7 @@ class FunctionShifter:
         return result["data"]
 
     @staticmethod
-    def syncify(func: Callable[P, R | Coroutine[Any, Any, R]]) -> Callable[P, R]:
+    def syncify(func: Callable[P, R | Awaitable[R]]) -> Callable[P, R]:
         if inspect.iscoroutinefunction(func):
 
             @wraps(func)
@@ -70,7 +70,7 @@ class FunctionShifter:
             return func
 
     @staticmethod
-    def asyncify(func: Callable[P, R | Coroutine[Any, Any, R]]) -> Callable[P, Coroutine[Any, Any, R]]:
+    def asyncify(func: Callable[P, R | Awaitable[R]]) -> Callable[P, Coroutine[Any, Any, R]]:
         if inspect.iscoroutinefunction(func):
             return func
 
@@ -83,7 +83,7 @@ class FunctionShifter:
         return wrapper
 
     @staticmethod
-    def future(func: Callable[P, R | Coroutine[Any, Any, R]]) -> Callable[P, Future[R]]:
+    def future(func: Callable[P, R | Awaitable[R]]) -> Callable[P, Future[R]]:
         async_func = FunctionShifter.asyncify(func)
 
         @wraps(func)
