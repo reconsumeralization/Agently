@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+from .StreamingPrintExtension import StreamingPrintExtension
 from .ToolExtension import ToolExtension
-from .SessionExtension import SessionExtension
 from .KeyWaiterExtension import KeyWaiterExtension
 from .AutoFuncExtension import AutoFuncExtension
 from .ConfigurePromptExtension import ConfigurePromptExtension
+from .SessionExtension import SessionExtension
 from .ChatSessionExtension import ChatSessionExtension

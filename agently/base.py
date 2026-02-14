@@ -91,8 +91,9 @@ settings.update_mappings(
 # Extensions Installation
 # BaseAgent + Extensions = Agent
 from agently.builtins.agent_extensions import (
-    ToolExtension,
+    StreamingPrintExtension,
     SessionExtension,
+    ToolExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -100,6 +101,7 @@ from agently.builtins.agent_extensions import (
 
 
 class Agent(
+    StreamingPrintExtension,
     SessionExtension,
     ToolExtension,
     KeyWaiterExtension,
