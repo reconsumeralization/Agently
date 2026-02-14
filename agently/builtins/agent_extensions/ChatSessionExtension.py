@@ -15,11 +15,12 @@
 
 import uuid
 import yaml
+from warnings import warn
 
 from typing import Any, Literal, Sequence, TYPE_CHECKING, cast
 
 from agently.core import BaseAgent
-from agently.types.data import ChatMessage
+from agently.types.data import ChatMessage, ChatMessageDict
 from agently.utils import RuntimeData, DataPathBuilder
 
 if TYPE_CHECKING:
@@ -41,6 +42,10 @@ class ChatSessionExtension(BaseAgent):
         self.chat_session_runtime = RuntimeData()
 
         self.extension_handlers.append("finally", self.__finally)
+
+        warn(
+            "[Agently Extensions] ChatSessionExtension is deprecated and will be removed in future version, use SessionExtension which is mixed in by default instead."
+        )
 
     def activate_chat_session(self, chat_session_id: str | None = None):
         if chat_session_id is None:
@@ -208,7 +213,7 @@ class ChatSessionExtension(BaseAgent):
         self._record_output_mode = mode
         return self
 
-    def add_chat_history(self, chat_history: Sequence[dict[str, Any] | ChatMessage] | dict[str, Any] | ChatMessage):
+    def add_chat_history(self, chat_history: Sequence[ChatMessageDict | ChatMessage] | ChatMessageDict | ChatMessage):
         super().add_chat_history(chat_history)
         if self._activated_chat_session is not None:
             self.chat_session_runtime.set(self._activated_chat_session, self.prompt.get("chat_history"))
