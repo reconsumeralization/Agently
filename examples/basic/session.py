@@ -109,3 +109,84 @@ def session_export_and_restore():
 
 
 # session_export_and_restore()
+
+
+def session_custom_handlers():
+    print("\n=== Example 5: Custom Session Handlers ===")
+    agent.activate_session(session_id="demo_custom_handlers")
+    assert agent.activated_session is not None
+    session = agent.activated_session
+
+    def analysis_handler(full_context, context_window, session_settings):
+        _ = full_context
+        _ = session_settings
+        if len(context_window) > 2:
+            return "keep_last_two"
+        return None
+
+    def keep_last_two_handler(full_context, context_window, session_settings):
+        _ = full_context
+        _ = session_settings
+        return None, list(context_window[-2:]), {"strategy": "keep_last_two"}
+
+    session.register_analysis_handler(analysis_handler)
+    session.register_execution_handlers("keep_last_two", keep_last_two_handler)
+
+    agent.add_chat_history({"role": "user", "content": "turn-1"})
+    agent.add_chat_history({"role": "assistant", "content": "turn-2"})
+    agent.add_chat_history({"role": "user", "content": "turn-3"})
+    agent.add_chat_history({"role": "assistant", "content": "turn-4"})
+
+    print("[Full Context]")
+    for idx, message in enumerate(session.full_context):
+        print(f"{idx + 1}. {message.role}: {message.content}")
+
+    print("[Context Window After Custom Handler]")
+    for idx, message in enumerate(session.context_window):
+        print(f"{idx + 1}. {message.role}: {message.content}")
+
+    print("[Memo]")
+    print(session.memo)
+
+
+# session_custom_handlers()
+
+
+def session_custom_handlers_with_real_request():
+    print("\n=== Example 6: Custom Handlers With Real Request ===")
+    agent.activate_session(session_id="demo_custom_handlers_live")
+    assert agent.activated_session is not None
+    session = agent.activated_session
+
+    def analysis_handler(full_context, context_window, session_settings):
+        _ = full_context
+        _ = session_settings
+        if len(context_window) > 4:
+            return "keep_last_four"
+        return None
+
+    def keep_last_four_handler(full_context, context_window, session_settings):
+        _ = full_context
+        _ = session_settings
+        kept = list(context_window[-4:])
+        return None, kept, {"strategy": "keep_last_four", "kept_count": len(kept)}
+
+    session.register_analysis_handler(analysis_handler)
+    session.register_execution_handlers("keep_last_four", keep_last_four_handler)
+
+    print("[Turn 1]")
+    agent.input("Remember my favorite city is Chengdu.").streaming_print()
+
+    print("[Turn 2]")
+    agent.input("Also remember my favorite food is hotpot.").streaming_print()
+
+    print("[Turn 3]")
+    agent.input("What city and food did I ask you to remember?").streaming_print()
+
+    print("[Session State]")
+    print(f"full_context: {len(session.full_context)}")
+    print(f"context_window: {len(session.context_window)}")
+    print(f"memo: {session.memo}")
+
+
+session_custom_handlers_with_real_request()
