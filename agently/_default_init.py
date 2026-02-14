@@ -46,10 +46,6 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
 
     plugin_manager.register("ToolManager", AgentlyToolManager)
 
-    from agently.builtins.plugins.Session.AgentlyMemoSession import AgentlyMemoSession
-
-    plugin_manager.register("Session", AgentlyMemoSession)
-
 
 def _load_default_settings(settings: "Settings"):
     settings.load("yaml_file", f"{str(Path(__file__).resolve().parent)}/_default_settings.yaml")

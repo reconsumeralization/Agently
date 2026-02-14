@@ -1,253 +1,70 @@
 import pytest
+import asyncio
+from textwrap import indent
+
+from itertools import repeat
 
 from agently.core.Session import Session
-from agently.types.plugins import MemoResizeDecision
-from agently.types.data import ChatMessage
-from agently.utils import Settings
 
 
 @pytest.mark.asyncio
-async def test_default_policy_triggers_on_text_length():
+async def test_one_message_session():
     session = Session()
-    session.set_settings("session.resize.max_messages_text_length", 10)
-    session.set_settings("session.resize.max_keep_messages_count", None)
-    session.set_settings("session.resize.every_n_turns", 10_000)
-    session.set_resize_handlers("deep", lambda f, c, m, s: (f, c, m))
-
-    session.append_message({"role": "user", "content": "01234567890123456789"})
-    session.append_message({"role": "assistant", "content": "x"})
-
-    decision = await session.async_judge_resize()
-    assert decision is not None
-    assert "reason" in decision
-    assert decision["reason"] == "max_messages_text_length"
-    assert decision["type"] == "deep"
+    assert isinstance(session.id, str)
+    assert session._auto_resize is True
+    assert session.session_settings.get("max_length", None) is None
+    session.session_settings.set("max_length", 100)
+    await session.async_add_chat_history({"role": "user", "content": "hi" * 100})
+    assert len(session.context_window[-1].content) == 100
 
 
 @pytest.mark.asyncio
-async def test_default_policy_triggers_on_max_keep_messages_count():
+async def test_multi_messages_session():
     session = Session()
-    session.set_settings("session.resize.max_messages_text_length", 1_000_000)
-    session.set_settings("session.resize.max_keep_messages_count", 2)
-    session.set_settings("session.resize.every_n_turns", 10_000)
-    session.set_resize_handlers("lite", lambda f, c, m, s: (f, c, m))
-
-    session.append_message({"role": "user", "content": "a"})
-    session.append_message({"role": "assistant", "content": "b"})
-    session.append_message({"role": "user", "content": "c"})
-
-    decision = await session.async_judge_resize()
-    assert decision is not None
-    assert "reason" in decision
-    assert decision["reason"] == "max_keep_messages_count"
-    assert decision["type"] == "lite"
+    assert isinstance(session.id, str)
+    assert session._auto_resize is True
+    assert session.session_settings.get("max_length", None) is None
+    session.session_settings.set("max_length", 100)
+    await session.async_add_chat_history([{"role": "user", "content": "hi"} for _ in repeat(None, 100)])
+    total_length = 0
+    for message in session.context_window:
+        total_length += len(str(message.model_dump()))
+    max_length = session.session_settings.get("max_length")
+    assert isinstance(max_length, int)
+    assert total_length <= max_length
+    assert len(session.context_window) > 0
 
 
-@pytest.mark.asyncio
-async def test_default_policy_triggers_on_turns():
-    session = Session()
-    session.set_settings("session.resize.max_messages_text_length", 1_000_000)
-    session.set_settings("session.resize.max_keep_messages_count", None)
-    session.set_settings("session.resize.every_n_turns", 1)
-    session.set_resize_handlers("lite", lambda f, c, m, s: (f, c, m))
-
-    session.append_message({"role": "user", "content": "hi"})
-    session.append_message({"role": "assistant", "content": "a"})
-
-    decision = await session.async_judge_resize()
-    assert decision is not None
-    assert "reason" in decision
-    assert decision["reason"] == "every_n_turns"
-    assert decision["type"] == "lite"
-
-
-@pytest.mark.asyncio
-async def test_default_policy_disabled():
-    session = Session()
-    session.set_settings("session.resize.max_messages_text_length", 0)
-    session.set_settings("session.resize.max_keep_messages_count", None)
-    session.set_settings("session.resize.every_n_turns", 0)
-    session.set_resize_handlers("lite", lambda f, c, m, s: (f, c, m))
-    session.set_resize_handlers("deep", lambda f, c, m, s: (f, c, m))
-
-    session.append_message({"role": "user", "content": "hi"})
-    session.append_message({"role": "assistant", "content": "a"})
-
-    decision = await session.async_judge_resize()
-    assert decision is None
-
-
-@pytest.mark.asyncio
-async def test_legacy_keys_are_ignored():
-    session = Session()
-    session.set_settings("session.resize.max_current_chars", 10)
-    session.set_settings("session.resize.keep_last_messages", 1)
-    session.set_settings("session.resize.every_n_turns", 10_000)
-    session.set_resize_handlers("lite", lambda f, c, m, s: (f, c, m))
-    session.set_resize_handlers("deep", lambda f, c, m, s: (f, c, m))
-
-    session.append_message({"role": "user", "content": "01234567890123456789"})
-    session.append_message({"role": "assistant", "content": "x"})
-
-    decision = await session.async_judge_resize()
-    assert decision is None
-
-
-@pytest.mark.asyncio
-async def test_limit_chars_from_session_limit():
-    session = Session()
-    session.configure(limit={"chars": 10})
-    session.set_settings("session.resize.max_keep_messages_count", None)
-    session.set_settings("session.resize.every_n_turns", 10_000)
-    session.set_resize_handlers("deep", lambda f, c, m, s: (f, c, m))
-
-    session.append_message({"role": "user", "content": "012345678901"})
-    session.append_message({"role": "assistant", "content": "x"})
-
-    decision = await session.async_judge_resize()
-    assert decision is not None
-    assert decision["reason"] == "max_messages_text_length"
-    assert decision["type"] == "deep"
-
-
-@pytest.mark.asyncio
-async def test_limit_messages_from_session_limit():
-    session = Session()
-    session.configure(limit={"messages": 2})
-    session.set_settings("session.resize.max_messages_text_length", 1_000_000)
-    session.set_settings("session.resize.every_n_turns", 10_000)
-    session.set_resize_handlers("lite", lambda f, c, m, s: (f, c, m))
-
-    session.append_message({"role": "user", "content": "a"})
-    session.append_message({"role": "assistant", "content": "b"})
-    session.append_message({"role": "user", "content": "c"})
-
-    decision = await session.async_judge_resize()
-    assert decision is not None
-    assert decision["reason"] == "max_keep_messages_count"
-    assert decision["type"] == "lite"
-
-
-@pytest.mark.asyncio
-async def test_custom_memo_update_handler():
-    async def memo_handler(memo, messages, attachments, settings):
-        updated = dict(memo)
-        updated["seen"] = [message.content for message in messages]
-        return updated
-
-    session = Session(memo_update_handler=memo_handler)
-    session.configure(mode="memo")
-    session.append_message({"role": "user", "content": "a"})
-    session.append_message({"role": "assistant", "content": "b"})
-
-    await session.async_resize(force="lite")
-    assert session.memo["seen"] == ["a", "b"]
-
-
-@pytest.mark.asyncio
-async def test_sync_handler_override():
-    session = Session()
-
-    def policy_handler(
-        full_chat_history: list[ChatMessage],
-        current_chat_history: list[ChatMessage],
-        settings: Settings,
-    ) -> MemoResizeDecision:
-        return {"type": "lite", "reason": "manual"}
-
-    def resize_handler(
-        full_chat_history: list[ChatMessage],
-        current_chat_history: list[ChatMessage],
-        memo: dict,
-        settings: Settings,
-    ):
-        memo = {"handler": "sync"}
-        return full_chat_history, current_chat_history[:1], memo
-
-    session.set_policy_handler(policy_handler)
-    session.set_resize_handlers("lite", resize_handler)  # type: ignore
-    session.append_message({"role": "user", "content": "a"})
-    session.append_message({"role": "assistant", "content": "b"})
-    await session.async_resize()
-    assert session.memo["handler"] == "sync"
-    assert len(session.current_chat_history) == 1
-
-
-@pytest.mark.asyncio
-async def test_async_handler_override():
-    session = Session()
-
-    async def policy_handler(
-        full_chat_history: list[ChatMessage],
-        current_chat_history: list[ChatMessage],
-        settings: Settings,
-    ) -> MemoResizeDecision:
-        return {"type": "deep", "reason": "manual"}
-
-    async def resize_handler(
-        full_chat_history: list[ChatMessage],
-        current_chat_history: list[ChatMessage],
-        memo: dict,
-        settings: Settings,
-    ):
-        memo = {"handler": "async"}
-        return full_chat_history, current_chat_history[:1], memo
-
-    session.set_policy_handler(policy_handler)
-    session.set_resize_handlers("deep", resize_handler)  # type: ignore
-    session.append_message({"role": "user", "content": "a"})
-    session.append_message({"role": "assistant", "content": "b"})
-    await session.async_resize()
-    assert session.memo["handler"] == "async"
-    assert len(session.current_chat_history) == 1
-
-
-def test_configure_sets_settings():
-    session = Session()
-    session.configure(
-        mode="memo",
-        limit={"chars": 123, "messages": 4},
-        every_n_turns=5,
-    )
-    assert session.settings.get("session.mode") == "memo"
-    assert session.settings.get("session.memo.enabled") is True
-    assert session.settings.get("session.limit") == {"chars": 123, "messages": 4}
-    assert session.settings.get("session.resize.max_messages_text_length") == 123
-    assert session.settings.get("session.resize.max_keep_messages_count") == 4
-    assert session.settings.get("session.resize.every_n_turns") == 5
-
-
-def test_use_lite_and_use_memo_shortcuts():
-    session = Session().use_lite(chars=50, messages=2, every_n_turns=3)
-    assert session.settings.get("session.mode") == "lite"
-    assert session.settings.get("session.memo.enabled") is False
-    assert session.settings.get("session.resize.max_messages_text_length") == 50
-    assert session.settings.get("session.resize.max_keep_messages_count") == 2
-    assert session.settings.get("session.resize.every_n_turns") == 3
-
-    session.use_memo(chars=100)
-    assert session.settings.get("session.mode") == "memo"
-    assert session.settings.get("session.memo.enabled") is True
-    assert session.settings.get("session.resize.max_messages_text_length") == 100
-
-
-def test_session_uses_default_plugin():
-    session = Session()
-    assert session._impl.__class__.__name__ == "AgentlyMemoSession"
-
-
-def test_session_inherits_agent_settings_when_agent_provided():
-    from agently import Agently
-
-    agent = Agently.create_agent()
-    agent.set_settings(
-        "OpenAICompatible",
-        {
-            "base_url": "http://127.0.0.1:11434/v1",
-            "model": "qwen2.5:7b",
-        },
+def test_session_json_export_and_load():
+    session = Session(id="session-1", auto_resize=False)
+    session.session_settings.set("max_length", 123)
+    session.add_chat_history(
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+        ]
     )
 
-    session = Session(agent=agent)
-    assert session.settings.get("plugins.ModelRequester.OpenAICompatible.base_url") == "http://127.0.0.1:11434/v1"
-    assert session.settings.get("plugins.ModelRequester.OpenAICompatible.model") == "qwen2.5:7b"
+    json_data = session.get_json_session()
+    loaded = Session(auto_resize=True)
+    loaded.load_json_session(json_data)
+
+    assert loaded.id == "session-1"
+    assert loaded.session_settings.get("max_length") == 123
+    assert len(loaded.full_context) == 2
+    assert len(loaded.context_window) == 2
+
+
+def test_session_yaml_export_and_load_by_path():
+    session = Session(id="session-2", auto_resize=False)
+    session.add_chat_history({"role": "user", "content": "content-from-yaml"})
+
+    yaml_data = session.get_yaml_session()
+    wrapped_yaml_data = f"payload:\n  session:\n{indent(yaml_data, '    ')}"
+
+    loaded = Session(auto_resize=True)
+    loaded.load_yaml_session(wrapped_yaml_data, session_key_path="payload.session")
+
+    assert loaded.id == "session-2"
+    assert len(loaded.context_window) == 1
+    assert loaded.context_window[0].content == "content-from-yaml"

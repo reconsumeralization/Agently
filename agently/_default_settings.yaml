@@ -35,6 +35,8 @@ prompt:
     input: "INPUT"
     output: "OUTPUT"
     output_requirement: "OUTPUT REQUIREMENT"
+session:
+  max_length: null
 response:
   streaming_parse: False
   streaming_parse_path_style: dot
