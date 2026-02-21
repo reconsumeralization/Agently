@@ -22,8 +22,7 @@ if TYPE_CHECKING:
 
 
 _DEPRECATION_MESSAGE = (
-    "ConsoleHooker is deprecated and no longer active. "
-    "Use default logger/system-message hooks instead."
+    "ConsoleHooker is deprecated and no longer active. " "Use default logger/system-message hooks instead."
 )
 
 
@@ -31,7 +30,7 @@ class ConsoleHooker(EventHooker):
     """Deprecated no-op hooker kept for backward compatibility."""
 
     name = "ConsoleHooker"
-    events: list[str] = []
+    events = []
 
     @staticmethod
     def _on_register():
