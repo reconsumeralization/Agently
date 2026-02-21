@@ -6,8 +6,6 @@ load_dotenv(find_dotenv())
 from agently import Agently
 from agently.utils import SettingsNamespace
 
-Agently.set_debug_console("OFF")
-
 request_settings = SettingsNamespace(
     Agently.settings,
     "plugins.ModelRequester.OpenAICompatible",

@@ -124,7 +124,6 @@ class AgentlyMain(Generic[A]):
         self.logger = logger
         self.print = print_
         self.async_print = async_print
-        self.set_debug_console("OFF")
         self.tool = tool
         self.AgentType = AgentType
 
@@ -140,13 +139,12 @@ class AgentlyMain(Generic[A]):
         self.set_settings = set_settings
 
     def set_debug_console(self, debug_console_status: Literal["ON", "OFF"]):
-        match debug_console_status:
-            case "OFF":
-                self.event_center.unregister_hooker_plugin("ConsoleHooker")
-            case "ON":
-                from agently.builtins.hookers.ConsoleHooker import ConsoleHooker
-
-                self.event_center.register_hooker_plugin(ConsoleHooker)
+        # Deprecated: debug console mode is retired and no longer participates in runtime.
+        if debug_console_status == "ON":
+            self.logger.warning(
+                "`set_debug_console(\"ON\")` is deprecated and has no effect."
+            )
+        return self
 
     def set_log_level(self, log_level: "MessageLevel"):
         self.logger.setLevel(log_level)

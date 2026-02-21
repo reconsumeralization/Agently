@@ -189,4 +189,43 @@ def session_custom_handlers_with_real_request():
     print(f"memo: {session.memo}")
 
 
+# session_custom_handlers_with_real_request()
+
+
+def session_custom_handlers_with_memo_in_real_request():
+    print("\n=== Example 7: Custom Handlers With Memo In Real Request ===")
+    agent.activate_session(session_id="demo_custom_handlers_with_memo")
+    assert agent.activated_session is not None
+    session = agent.activated_session
+
+    def analysis_handler(full_context, context_window, session_settings):
+        _ = full_context
+        _ = session_settings
+        if len(context_window):
+            return None
+
+    def keep_last_four_handler(full_context, context_window, session_settings):
+        _ = full_context
+        _ = session_settings
+        kept = list(context_window[-4:])
+        return None, kept, {"strategy": "keep_last_four", "kept_count": len(kept)}
+
+    session.register_analysis_handler(analysis_handler)
+    session.register_execution_handlers("keep_last_four", keep_last_four_handler)
+
+    print("[Turn 1]")
+    agent.input("Remember my favorite city is Chengdu.").streaming_print()
+
+    print("[Turn 2]")
+    agent.input("Also remember my favorite food is hotpot.").streaming_print()
+
+    print("[Turn 3]")
+    agent.input("What city and food did I ask you to remember?").streaming_print()
+
+    print("[Session State]")
+    print(f"full_context: {len(session.full_context)}")
+    print(f"context_window: {len(session.context_window)}")
+    print(f"memo: {session.memo}")
+
+
 session_custom_handlers_with_real_request()
