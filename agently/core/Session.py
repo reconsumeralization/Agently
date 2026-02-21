@@ -28,6 +28,7 @@ from agently.types.data import ChatMessage, ChatMessageDict
 from agently.utils import FunctionShifter, Settings, SettingsNamespace, DataLocator
 
 if TYPE_CHECKING:
+    from agently.types.data import SerializableValue
     from agently.types.plugins import (
         AnalysisHandler,
         ExecutionHandler,
@@ -79,6 +80,7 @@ class Session:
         self,
         full_context: Sequence[ChatMessage],
         context_window: Sequence[ChatMessage],
+        memo: "SerializableValue",
         session_settings: SettingsNamespace,
     ):
         max_length = session_settings.get("max_length", None)
@@ -91,6 +93,7 @@ class Session:
         self,
         full_context: Sequence[ChatMessage],
         context_window: Sequence[ChatMessage],
+        memo: "SerializableValue",
         session_settings: SettingsNamespace,
     ):
         max_length = session_settings.get("max_length", None)
@@ -143,6 +146,7 @@ class Session:
 
                 - full_context <list[ChatMessage]>: Messages contains full context since this session created.
                 - context_window <list[ChatMessage]>: Messages of current context window.
+                - memo <SerializableValue>: Memo content of this session.
                 - session_settings <SettingsNamespace>: Namespace "session" of settings that inherit from global settings or the agent's settings which this session is attached to.
 
             - output:
@@ -164,6 +168,7 @@ class Session:
 
                 - full_context <list[ChatMessage]>: Messages contains full context since this session created.
                 - context_window <list[ChatMessage]>: Messages of current context window.
+                - memo <SerializableValue>: Memo content of this session.
                 - session_settings <SettingsNamespace>: Namespace "session" of settings that inherit from global settings or the agent's settings which this session is attached to.
 
             - output:
@@ -252,6 +257,7 @@ class Session:
         return await self._analysis_handler(
             self._full_context,
             self._context_window,
+            self._memo,
             self.session_settings,
         )
 
@@ -260,6 +266,7 @@ class Session:
             new_full_context, new_context_window, new_memo = await self._execution_handlers[strategy_name](
                 self._full_context,
                 self._context_window,
+                self._memo,
                 self.session_settings,
             )
             if new_full_context is not None:

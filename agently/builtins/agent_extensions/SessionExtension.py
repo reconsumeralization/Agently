@@ -174,6 +174,8 @@ class SessionExtension(BaseAgent):
         if "chat_history" in prompt:
             del prompt["chat_history"]
         prompt.set("chat_history", self.activated_session.context_window)
+        if self.activated_session.memo is not None:
+            prompt.set("CHAT SESSION MEMO", self.activated_session.memo)
 
     async def _session_finally(self, result: "ModelResponseResult", settings: "Settings"):
         if self.activated_session is None:

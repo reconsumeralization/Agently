@@ -27,6 +27,7 @@ AnalysisHandler = Callable[
     [
         "Sequence[ChatMessage]",
         "Sequence[ChatMessage]",
+        "SerializableValue",
         "SettingsNamespace",
     ],
     str | None | Awaitable[str | None],
@@ -36,6 +37,7 @@ StandardAnalysisHandler = Callable[
     [
         "Sequence[ChatMessage]",
         "Sequence[ChatMessage]",
+        "SerializableValue",
         "SettingsNamespace",
     ],
     Awaitable[str | None],
@@ -45,6 +47,7 @@ ExecutionHandler = Callable[
     [
         "Sequence[ChatMessage]",
         "Sequence[ChatMessage]",
+        "SerializableValue",
         "SettingsNamespace",
     ],
     Tuple[
@@ -65,6 +68,7 @@ StandardExecutionHandler = Callable[
     [
         "Sequence[ChatMessage]",
         "Sequence[ChatMessage]",
+        "SerializableValue",
         "SettingsNamespace",
     ],
     Awaitable[

@@ -82,6 +82,39 @@ class BaseAgent:
         self.start = self.get_data
         self.async_start = self.async_get_data
 
+    # Create Request
+    def create_request(
+        self,
+        *,
+        name: str | None = None,
+        inherit_agent_prompt: bool = True,
+        inherit_extension_handlers: bool = True,
+    ):
+        """
+        Create a request instance.
+
+        By default this method returns an isolated request that only inherits
+        agent settings, which avoids pulling in agent prompt/session handlers
+        implicitly.
+
+        Set `inherit_agent_prompt` / `inherit_extension_handlers` to True when
+        you intentionally want a request to reuse current agent context.
+        """
+        return ModelRequest(
+            agent_name=name if name is not None else self.name,
+            plugin_manager=self.plugin_manager,
+            parent_settings=self.settings,
+            parent_prompt=self.agent_prompt if inherit_agent_prompt else None,
+            parent_extension_handlers=self.extension_handlers if inherit_extension_handlers else None,
+        )
+
+    def create_temp_request(self):
+        return self.create_request(
+            name=f"{ self.name }-Temp-{ uuid.uuid4().hex }",
+            inherit_agent_prompt=False,
+            inherit_extension_handlers=False,
+        )
+
     # Basic Methods
     def set_agent_prompt(
         self,

@@ -117,15 +117,17 @@ def session_custom_handlers():
     assert agent.activated_session is not None
     session = agent.activated_session
 
-    def analysis_handler(full_context, context_window, session_settings):
+    def analysis_handler(full_context, context_window, memo, session_settings):
         _ = full_context
+        _ = memo
         _ = session_settings
         if len(context_window) > 2:
             return "keep_last_two"
         return None
 
-    def keep_last_two_handler(full_context, context_window, session_settings):
+    def keep_last_two_handler(full_context, context_window, memo, session_settings):
         _ = full_context
+        _ = memo
         _ = session_settings
         return None, list(context_window[-2:]), {"strategy": "keep_last_two"}
 
@@ -158,15 +160,17 @@ def session_custom_handlers_with_real_request():
     assert agent.activated_session is not None
     session = agent.activated_session
 
-    def analysis_handler(full_context, context_window, session_settings):
+    def analysis_handler(full_context, context_window, memo, session_settings):
         _ = full_context
+        _ = memo
         _ = session_settings
         if len(context_window) > 4:
             return "keep_last_four"
         return None
 
-    def keep_last_four_handler(full_context, context_window, session_settings):
+    def keep_last_four_handler(full_context, context_window, memo, session_settings):
         _ = full_context
+        _ = memo
         _ = session_settings
         kept = list(context_window[-4:])
         return None, kept, {"strategy": "keep_last_four", "kept_count": len(kept)}
@@ -198,17 +202,34 @@ def session_custom_handlers_with_memo_in_real_request():
     assert agent.activated_session is not None
     session = agent.activated_session
 
-    def analysis_handler(full_context, context_window, session_settings):
+    def analysis_handler(full_context, context_window, memo, session_settings):
         _ = full_context
+        _ = memo
         _ = session_settings
-        if len(context_window):
+        if len(context_window) > 4:
+            return "keep_last_four"
+        else:
             return None
 
-    def keep_last_four_handler(full_context, context_window, session_settings):
+    async def keep_last_four_handler(full_context, context_window, memo, session_settings):
         _ = full_context
         _ = session_settings
         kept = list(context_window[-4:])
-        return None, kept, {"strategy": "keep_last_four", "kept_count": len(kept)}
+        memo_request = agent.create_temp_request()
+        (
+            memo_request.input({"messages": context_window[:-4], "history_memo": memo})
+            .instruct("Recreate key points memo dict of {input.messages} and {input.history_memo}")
+            .output(
+                {
+                    "key_points": {
+                        "<point_title>": (str, "point content"),
+                        "...": "...",
+                    }
+                }
+            )
+        )
+        new_memo = await memo_request.async_start(ensure_keys=["key_points"])
+        return None, kept, new_memo["key_points"]
 
     session.register_analysis_handler(analysis_handler)
     session.register_execution_handlers("keep_last_four", keep_last_four_handler)
@@ -228,4 +249,4 @@ def session_custom_handlers_with_memo_in_real_request():
     print(f"memo: {session.memo}")
 
 
-session_custom_handlers_with_real_request()
+session_custom_handlers_with_memo_in_real_request()
