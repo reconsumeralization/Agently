@@ -239,7 +239,7 @@ class AgentlyToolManager(ToolManager):
         *,
         tags: str | list[str] | None = None,
     ):
-        LazyImport.import_package("fastmcp", version_constraint=">=2.10")
+        LazyImport.import_package("fastmcp", version_constraint=">=3")
         from fastmcp import Client
 
         if tags is None:
