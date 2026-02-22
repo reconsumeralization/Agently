@@ -770,7 +770,7 @@ class ModelRequest:
             type=type,
             content=content,
             specific=specific,
-        )
+        )  # type: ignore for `content` compatible
 
     @overload
     def get_async_generator(
@@ -815,4 +815,4 @@ class ModelRequest:
             type=type,
             content=content,
             specific=specific,
-        )
+        )  # type: ignore for `content` compatible
