@@ -141,9 +141,7 @@ class AgentlyMain(Generic[A]):
     def set_debug_console(self, debug_console_status: Literal["ON", "OFF"]):
         # Deprecated: debug console mode is retired and no longer participates in runtime.
         if debug_console_status == "ON":
-            self.logger.warning(
-                "`set_debug_console(\"ON\")` is deprecated and has no effect."
-            )
+            self.logger.warning("`set_debug_console(\"ON\")` is deprecated and has no effect.")
         return self
 
     def set_log_level(self, log_level: "MessageLevel"):
