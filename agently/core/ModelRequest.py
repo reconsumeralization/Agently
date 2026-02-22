@@ -14,6 +14,7 @@
 
 import asyncio
 import json
+import warnings
 import uuid
 
 import inspect
@@ -282,10 +283,20 @@ class ModelResponseResult:
 
     def get_generator(
         self,
-        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = "delta",
+        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = None,
+        content: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = None,
         *,
         specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
     ) -> Generator:
+        if type is None:
+            if content is not None:
+                warnings.warn(
+                    "Parameter `content` in method .get_generator() is  deprecated and will be removed in future "
+                    "version, please use parameter `type` instead."
+                )
+                type = content
+            else:
+                type = "delta"
         parsed_generator = self._response_parser.get_generator(type=type, specific=specific)
         completed = False
         for data in parsed_generator:
@@ -328,10 +339,20 @@ class ModelResponseResult:
 
     async def get_async_generator(
         self,
-        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = "delta",
+        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = None,
+        content: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = None,
         *,
         specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
     ) -> AsyncGenerator:
+        if type is None:
+            if content is not None:
+                warnings.warn(
+                    "Parameter `content` in method .get_async_generator() is  deprecated and will be removed in "
+                    "future version, please use parameter `type` instead."
+                )
+                type = content
+            else:
+                type = "delta"
         parsed_generator = self._response_parser.get_async_generator(type=type, specific=specific)
         completed = False
         async for data in parsed_generator:
@@ -740,12 +761,14 @@ class ModelRequest:
 
     def get_generator(
         self,
-        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = "delta",
+        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = None,
+        content: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = None,
         *,
         specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
     ) -> Generator:
         return self.get_response().get_generator(
             type=type,
+            content=content,
             specific=specific,
         )
 
@@ -783,11 +806,13 @@ class ModelRequest:
 
     def get_async_generator(
         self,
-        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = "delta",
+        type: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = None,
+        content: Literal["all", "original", "delta", "specific", "instant", "streaming_parse"] | None = None,
         *,
         specific: list[str] | str | None = ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
     ) -> AsyncGenerator:
         return self.get_response().get_async_generator(
             type=type,
+            content=content,
             specific=specific,
         )
