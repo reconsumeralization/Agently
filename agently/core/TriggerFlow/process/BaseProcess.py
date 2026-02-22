@@ -1,4 +1,4 @@
-# Copyright 2023-2025 AgentEra(Agently.Tech)
+# Copyright 2023-2026 AgentEra(Agently.Tech)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -302,11 +302,14 @@ class TriggerFlowBaseProcess:
             if semaphore is None:
                 handler = typed_chunk.async_call
             else:
+
                 def make_handler(bound_chunk: TriggerFlowChunk):
                     async def handler(data: "TriggerFlowEventData"):
                         async with semaphore:
                             return await bound_chunk.async_call(data)
+
                     return handler
+
                 handler = make_handler(typed_chunk)
 
             self._blue_print.add_handler(

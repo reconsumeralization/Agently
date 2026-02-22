@@ -1,4 +1,4 @@
-# Copyright 2023-2025 AgentEra(Agently.Tech)
+# Copyright 2023-2026 AgentEra(Agently.Tech)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 #
@@ -39,6 +39,7 @@ class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
             assert for_each_instance_id is not None
 
             send_tasks = []
+
             def prepare_item(item):
                 data.layer_in()
                 item_id = data.layer_mark
@@ -62,6 +63,7 @@ class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
                             item,
                             layer_marks,
                         )
+
             if not isinstance(data.value, str) and isinstance(data.value, Sequence):
                 items = list(data.value)
                 for item in items:
