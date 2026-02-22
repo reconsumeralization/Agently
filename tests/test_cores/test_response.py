@@ -16,6 +16,16 @@ from agently.utils import SerializableRuntimeDataNamespace
 if TYPE_CHECKING:
     from agently.builtins.plugins.ModelRequester.OpenAICompatible import ModelRequesterSettings
 
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+
+
+def configure_ollama(request_settings: "ModelRequesterSettings"):
+    request_settings["base_url"] = OLLAMA_BASE_URL
+    request_settings["model"] = OLLAMA_MODEL
+    request_settings["model_type"] = "chat"
+    request_settings["auth"] = None
+
 
 def test_model_request():
     Agently.set_settings("response.streaming_parse", True)
@@ -28,11 +38,7 @@ def test_model_request():
         "ModelRequesterSettings",
         SerializableRuntimeDataNamespace(Agently.settings, "plugins.ModelRequester.OpenAICompatible"),
     )
-
-    request_settings["base_url"] = os.environ["DEEPSEEK_BASE_URL"]
-    request_settings["model"] = os.environ["DEEPSEEK_DEFAULT_MODEL"]
-    request_settings["model_type"] = "chat"
-    request_settings["auth"] = os.environ["DEEPSEEK_API_KEY"]
+    configure_ollama(request_settings)
     request.set_prompt("input", "hello")
     request.set_prompt(
         "output",

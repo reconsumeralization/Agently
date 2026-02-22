@@ -55,4 +55,6 @@ def test_use_mcp():
     assert result["result"] == 3
 
     result = tool.call_tool("add", kwargs={"a": 1, "b": 2})
-    assert "Input validation error" in result["error"]
+    assert "validation error" in result["error"].lower()
+    assert "first_number" in result["error"]
+    assert "second_number" in result["error"]

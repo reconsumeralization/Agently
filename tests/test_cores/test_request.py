@@ -16,6 +16,16 @@ from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
     ModelRequesterSettings,
 )
 
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+
+
+def configure_ollama(request_settings: ModelRequesterSettings):
+    request_settings["base_url"] = OLLAMA_BASE_URL
+    request_settings["model"] = OLLAMA_MODEL
+    request_settings["model_type"] = "chat"
+    request_settings["auth"] = None
+
 
 @pytest.mark.asyncio
 async def test_single_request():
@@ -30,10 +40,7 @@ async def test_single_request():
             "plugins.ModelRequester.OpenAICompatible",
         ),
     )
-    request_settings["base_url"] = os.environ["DEEPSEEK_BASE_URL"]
-    request_settings["model"] = os.environ["DEEPSEEK_DEFAULT_MODEL"]
-    request_settings["model_type"] = "chat"
-    request_settings["auth"] = os.environ["DEEPSEEK_API_KEY"]
+    configure_ollama(request_settings)
 
     request.prompt["input"] = "你是谁"
 
@@ -55,10 +62,7 @@ async def test_multiple_responses_independent_consumption():
         ),
     )
 
-    request_settings["base_url"] = os.environ["DEEPSEEK_BASE_URL"]
-    request_settings["model"] = os.environ["DEEPSEEK_DEFAULT_MODEL"]
-    request_settings["model_type"] = "chat"
-    request_settings["auth"] = os.environ["DEEPSEEK_API_KEY"]
+    configure_ollama(request_settings)
 
     prompts = ["Hello, how are you?", "Hello again!", "Who are you?"]
     responses = []

@@ -13,6 +13,9 @@ from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
     ModelRequesterSettings,
 )
 
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+
 
 @pytest.mark.asyncio
 async def test_main():
@@ -20,10 +23,10 @@ async def test_main():
         ModelRequesterSettings,
         SerializableRuntimeDataNamespace(Agently.settings, "plugins.ModelRequester.OpenAICompatible"),
     )
-    # request_settings["base_url"] = os.environ["DEEPSEEK_BASE_URL"]
-    # request_settings["model"] = os.environ["DEEPSEEK_DEFAULT_MODEL"]
-    # request_settings["model_type"] = "chat"
-    # request_settings["auth"] = os.environ["DEEPSEEK_API_KEY"]
+    request_settings["base_url"] = OLLAMA_BASE_URL
+    request_settings["model"] = OLLAMA_MODEL
+    request_settings["model_type"] = "chat"
+    request_settings["auth"] = None
     prompt = Agently.create_prompt()
 
     openai_compatible = OpenAICompatible(
@@ -39,6 +42,4 @@ async def test_main():
         async for event, message in response:
             print(event, message)
     except Exception as e:
-        # in case HTTP 401 Unauthorized when provide invalid API key
-        # ERROR logging will be shown in console
         raise e
