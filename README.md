@@ -47,7 +47,7 @@ Many GenAI POCs fail in production not because models are weak, but because **en
 |:--|:--|
 | Output schema drifts, JSON parsing fails | **Contract‑first output control** with `output()` + `ensure_keys` |
 | Workflows get complex and hard to maintain | **TriggerFlow orchestration** with `to` / `if` / `match` / `batch` / `for_each` |
-| Multi‑turn state becomes unstable | **Session & Memo** with memory, summaries, and persistence strategies |
+| Multi‑turn state becomes unstable | **Session (v4.0.8+)** with session activation, context window control, custom memo strategy, and persistence |
 | Tool calls are hard to audit | **Tool logs** via `extra.tool_logs` |
 | Switching models is expensive | **OpenAICompatible** unified model settings |
 
@@ -104,20 +104,34 @@ Readable, testable workflows with branching and concurrency.
 )
 ```
 
-### 4) 🧠 Session & Memo (Multi‑turn Memory)
-Quick / Lite / Memo modes with summaries and persistence strategies.
+### 4) 🧠 Session (Multi‑turn Context, v4.0.8+)
+Built-in `SessionExtension` with `activate_session/deactivate_session`, context window control, custom memo strategies, and JSON/YAML persistence.
 
 ```python
 from agently import Agently
-from agently.core import Session
 
 agent = Agently.create_agent()
-session = Session(agent=agent).configure(
-    mode="memo",
-    limit={"chars": 6000, "messages": 12},
-    every_n_turns=2,
-)
-agent.attach_session(session)
+
+# Activate per-user session (reused by session_id)
+agent.activate_session(session_id="demo_user_1001")
+
+# Optional: default window trimming by max length
+agent.set_settings("session.max_length", 12000)
+
+# Optional: custom strategy (analysis -> execution)
+session = agent.activated_session
+assert session is not None
+
+def analysis_handler(full_context, context_window, memo, session_settings):
+    if len(context_window) > 6:
+        return "keep_last_six"
+    return None
+
+def keep_last_six(full_context, context_window, memo, session_settings):
+    return None, list(context_window[-6:]), memo
+
+session.register_analysis_handler(analysis_handler)
+session.register_execution_handlers("keep_last_six", keep_last_six)
 ```
 
 ### 5) 🔧 Tool Calls + Logs

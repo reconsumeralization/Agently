@@ -47,7 +47,7 @@
 |:--|:--|
 | 输出结构漂移、JSON 解析失败 | **契约式输出控制**：`output()` + `ensure_keys` 保障关键字段稳定出现 |
 | 工作流越来越复杂、难维护 | **TriggerFlow 编排**：`to` / `if` / `match` / `batch` / `for_each` 让逻辑可读可测 |
-| 多轮对话上下文不稳定 | **Session & Memo**：记忆、摘要、持久化与裁剪策略 |
+| 多轮对话上下文不稳定 | **Session（v4.0.8+）**：会话激活、上下文窗口控制、自定义 memo 策略与持久化 |
 | 工具调用不可追踪 | **工具日志**：`extra.tool_logs` 可审计、可复盘 |
 | 切换/升级模型成本高 | **统一模型配置**：`OpenAICompatible` 适配多家云端/本地模型 |
 
@@ -104,20 +104,34 @@ for msg in response.get_generator(type="instant"):
 )
 ```
 
-### 4) 🧠 Session & Memo 多轮对话管理
-支持 Quick / Lite / Memo 模式，提供记忆、摘要、持久化与裁剪策略。
+### 4) 🧠 Session 多轮上下文管理（v4.0.8+）
+默认内置 `SessionExtension`，支持 `activate_session/deactivate_session`、上下文窗口控制、自定义 memo 策略与 JSON/YAML 持久化。
 
 ```python
 from agently import Agently
-from agently.core import Session
 
 agent = Agently.create_agent()
-session = Session(agent=agent).configure(
-    mode="memo",
-    limit={"chars": 6000, "messages": 12},
-    every_n_turns=2,
-)
-agent.attach_session(session)
+
+# 按用户维度激活会话（相同 session_id 会复用历史）
+agent.activate_session(session_id="demo_user_1001")
+
+# 可选：按长度上限自动裁剪上下文窗口
+agent.set_settings("session.max_length", 12000)
+
+# 可选：自定义策略（analysis -> execution）
+session = agent.activated_session
+assert session is not None
+
+def analysis_handler(full_context, context_window, memo, session_settings):
+    if len(context_window) > 6:
+        return "keep_last_six"
+    return None
+
+def keep_last_six(full_context, context_window, memo, session_settings):
+    return None, list(context_window[-6:]), memo
+
+session.register_analysis_handler(analysis_handler)
+session.register_execution_handlers("keep_last_six", keep_last_six)
 ```
 
 ### 5) 🔧 工具调用与日志
