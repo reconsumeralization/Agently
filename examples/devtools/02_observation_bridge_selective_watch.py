@@ -25,7 +25,7 @@ bridge = ObservationBridge(
     auto_watch=False,
 )
 bridge.watch(watched_flow)
-bridge.register(Agently.event_center)
+bridge.register(Agently)
 
 
 try:
@@ -34,4 +34,4 @@ try:
     print("Running ignored flow")
     print(ignored_flow.start("do not upload this run"))
 finally:
-    bridge.unregister(Agently.event_center)
+    bridge.unregister(Agently)

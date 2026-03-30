@@ -6,7 +6,7 @@ bridge = ObservationBridge(
     app_id="agently-main-examples",
     group_id="devtools-local-demo",
 )
-bridge.register(Agently.event_center)
+bridge.register(Agently)
 
 
 flow = TriggerFlow(name="devtools-local-demo-flow")
@@ -31,4 +31,4 @@ try:
     result = flow.start("release readiness")
     print(result)
 finally:
-    bridge.unregister(Agently.event_center)
+    bridge.unregister(Agently)
