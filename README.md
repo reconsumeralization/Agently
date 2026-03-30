@@ -62,6 +62,7 @@ What you get after installing:
 - Dependency direction: `agently-devtools -> agently`
 - Compatibility line: `agently-devtools 0.1.x` targets `agently >=4.0.9,<4.1.0`
 - Integration entrypoints: `ObservationBridge` and `create_local_observation_app`
+- Main-repo examples: `examples/devtools/`
 
 The DevTools package is optional and does not add a reverse dependency from `agently` back to `agently-devtools`.
 
