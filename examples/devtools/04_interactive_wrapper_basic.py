@@ -5,6 +5,11 @@ from collections.abc import Generator
 
 from agently_devtools import InteractiveWrapper
 
+from _observation_helper import register_example_observation, unregister_example_observation
+
+
+bridge = register_example_observation(group_id="interactive-wrapper-basic")
+
 
 def echo_handler(request_data: dict, **options) -> Generator[str, None, None]:
     """
@@ -44,4 +49,10 @@ interactive = InteractiveWrapper(
 if __name__ == "__main__":
     print(f"Interactive UI: {interactive.ui_url}")
     print("This example streams several text chunks instead of returning one full response.")
-    interactive.wait()
+    print(
+        "ObservationBridge is also registered, but this plain callable example does not emit Agently runtime runs unless you replace the handler with an Agently target."
+    )
+    try:
+        interactive.wait()
+    finally:
+        unregister_example_observation(bridge)

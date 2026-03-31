@@ -3,6 +3,11 @@
 from agently import Agent
 from agently_devtools import InteractiveWrapper
 
+from _observation_helper import register_example_observation, unregister_example_observation
+
+
+bridge = register_example_observation(group_id="interactive-wrapper-agent")
+
 
 # Create a simple Agent
 agent = Agent()
@@ -27,4 +32,8 @@ if __name__ == "__main__":
     print(
         "If your configured model backend supports streaming, the answer will appear incrementally in the browser UI."
     )
-    interactive.wait()
+    print("If agently-devtools start is running, Agent runs will also appear in the local DevTools console.")
+    try:
+        interactive.wait()
+    finally:
+        unregister_example_observation(bridge)

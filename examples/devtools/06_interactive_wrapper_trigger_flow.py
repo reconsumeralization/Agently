@@ -5,6 +5,11 @@ import asyncio
 from agently import TriggerFlow, TriggerFlowRuntimeData
 from agently_devtools import InteractiveWrapper
 
+from _observation_helper import register_example_observation, unregister_example_observation
+
+
+bridge = register_example_observation(group_id="interactive-wrapper-triggerflow")
+
 
 # Create a TriggerFlow with multiple stages
 flow = TriggerFlow(name="interactive-demo-flow")
@@ -82,4 +87,8 @@ interactive = InteractiveWrapper(
 if __name__ == "__main__":
     print(f"Interactive UI: {interactive.ui_url}")
     print("The flow streams progress messages for validate -> process -> finalize before showing the final result.")
-    interactive.wait()
+    print("If agently-devtools start is running, TriggerFlow runs will also appear in the local DevTools console.")
+    try:
+        interactive.wait()
+    finally:
+        unregister_example_observation(bridge)
