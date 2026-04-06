@@ -87,9 +87,7 @@ class AgentlyResponseParser(ResponseParser):
         self._OutputModel = prompt.to_output_model() if self._prompt_object.output_format == "json" else None
         self._response_consumer: GeneratorConsumer | None = None
         self._consumer_lock = asyncio.Lock()
-        self._streaming_json_parser = (
-            StreamingJSONParser(self._prompt_object.output) if self._prompt_object.output_format == "json" else None
-        )
+        self._final_json_parse_result: tuple[str | None, Any, BaseModel | None, bool] | None = None
 
         self._streaming_canceled = False
 
@@ -105,6 +103,122 @@ class AgentlyResponseParser(ResponseParser):
     @staticmethod
     def _on_unregister():
         pass
+
+    def _build_result_object(self, parsed: Any) -> BaseModel | None:
+        try:
+            if self._OutputModel:
+                return self._OutputModel.model_validate(parsed)
+        except Exception:
+            return None
+        return None
+
+    def _parse_json_output(self, text: str) -> tuple[str | None, Any, BaseModel | None, bool]:
+        cleaned_json = DataLocator.locate_output_json(text, self._prompt_object.output)
+        if cleaned_json is None:
+            return None, None, None, False
+
+        completer = StreamingJSONCompleter()
+        completer.reset(cleaned_json)
+        completed = completer.complete()
+        try:
+            parsed = json5.loads(completed)
+            return completed, parsed, self._build_result_object(parsed), False
+        except Exception:
+            repaired_json = DataLocator.repair_json_fragment(cleaned_json)
+            if repaired_json == cleaned_json:
+                return completed, None, None, False
+
+            completer.reset(repaired_json)
+            repaired_completed = completer.complete()
+            try:
+                parsed = json5.loads(repaired_completed)
+                return repaired_completed, parsed, self._build_result_object(parsed), True
+            except Exception:
+                return repaired_completed, None, None, False
+
+    async def _handle_done_event(self, data: Any, buffer: str, async_emit_runtime) -> None:
+        self.full_result_data["text_result"] = str(data)
+        if self._prompt_object.output_format == "json":
+            self._final_json_parse_result = self._parse_json_output(str(data))
+            completed, parsed, result_object, repaired = self._final_json_parse_result
+            if parsed is not None:
+                self.full_result_data["cleaned_result"] = completed
+                self.full_result_data["parsed_result"] = parsed
+                self.full_result_data["result_object"] = result_object
+                await async_emit_runtime(
+                    {
+                        "event_type": "model.completed",
+                        "source": "AgentlyResponseParser",
+                        "message": "Model response parsed as JSON output.",
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.response_id,
+                            "result": DataFormatter.sanitize(parsed),
+                            "raw_text": str(data),
+                            "cleaned_text": completed,
+                            "repaired": repaired,
+                            "streamed_text": buffer,
+                        },
+                        "run": self.run_context,
+                    }
+                )
+            else:
+                self.full_result_data["cleaned_result"] = completed
+                self.full_result_data["parsed_result"] = None
+                self.full_result_data["result_object"] = None
+                await async_emit_runtime(
+                    {
+                        "event_type": "model.parse_failed",
+                        "source": "AgentlyResponseParser",
+                        "level": "WARNING",
+                        "message": "Can not parse JSON output from model response.",
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.response_id,
+                            "result": str(data),
+                            "cleaned_text": completed,
+                            "streamed_text": buffer,
+                        },
+                        "run": self.run_context,
+                    }
+                )
+            return
+
+        if (
+            isinstance(data, list)
+            and isinstance(data[0], dict)
+            and "object" in data[0]
+            and data[0]["object"] == "embedding"
+        ):
+            data = [item["embedding"] for item in data]
+        self.full_result_data["parsed_result"] = data
+        if self.settings.get("$log.cancel_logs") is not True:
+            await async_emit_runtime(
+                {
+                    "event_type": "model.completed",
+                    "source": "AgentlyResponseParser",
+                    "message": "Model response parsing completed.",
+                    "payload": {
+                        "agent_name": self.agent_name,
+                        "response_id": self.response_id,
+                        "result": DataFormatter.sanitize(data),
+                        "raw_text": str(data),
+                        "streamed_text": buffer,
+                    },
+                    "run": self.run_context,
+                }
+            )
+
+    async def _flush_streaming_json_events(self, streaming_json_parser: StreamingJSONParser) -> AsyncGenerator[StreamingData, None]:
+        if self._prompt_object.output_format != "json":
+            return
+
+        parsed_result = self.full_result_data["parsed_result"]
+        if parsed_result is None:
+            return
+
+        async for streaming_data in streaming_json_parser.flush_final_data(parsed_result):
+            yield streaming_data
 
     async def _ensure_consumer(self):
         if self._response_consumer is None:
@@ -123,6 +237,10 @@ class AgentlyResponseParser(ResponseParser):
                     event, data = item
                 except:
                     warnings.warn(f"\n⚠️ Incorrect response data from Agently Response Generator: { item }")
+                    continue
+                if event == "done":
+                    await self._handle_done_event(data, buffer, async_emit_runtime)
+                    yield event, data
                     continue
                 yield event, data
                 match event:
@@ -164,90 +282,6 @@ class AgentlyResponseParser(ResponseParser):
                             self._streaming_canceled = True
                     case "original_done":
                         self.full_result_data["original_done"] = data
-                    case "done":
-                        self.full_result_data["text_result"] = str(data)
-                        # if buffer != self.full_result_data["text_result"]:
-                        #     warnings.warn(
-                        #         "Buffered streaming result is not exactly the same as final result.\n"
-                        #         f"Buffered Result: { buffer }\n"
-                        #         f"Final Result: { self.full_result_data['text_result'] }\n"
-                        #     )
-                        if self._prompt_object.output_format == "json":
-                            cleaned_json = DataLocator.locate_output_json(str(data), self._prompt_object.output)
-                            if cleaned_json:
-                                completer = StreamingJSONCompleter()
-                                completer.reset(cleaned_json)
-                                completed = completer.complete()
-                                parsed = json5.loads(completed)
-                                try:
-                                    if self._OutputModel:
-                                        result_object = self._OutputModel.model_validate(parsed)
-                                    else:
-                                        result_object = None
-                                except:
-                                    result_object = None
-                                self.full_result_data["cleaned_result"] = completed
-                                self.full_result_data["parsed_result"] = parsed
-                                self.full_result_data["result_object"] = result_object
-                                await async_emit_runtime(
-                                    {
-                                        "event_type": "model.completed",
-                                        "source": "AgentlyResponseParser",
-                                        "message": "Model response parsed as JSON output.",
-                                        "payload": {
-                                            "agent_name": self.agent_name,
-                                            "response_id": self.response_id,
-                                            "result": DataFormatter.sanitize(parsed),
-                                            "raw_text": str(data),
-                                            "cleaned_text": completed,
-                                            "streamed_text": buffer,
-                                        },
-                                        "run": self.run_context,
-                                    }
-                                )
-                            else:
-                                self.full_result_data["cleaned_result"] = None
-                                self.full_result_data["parsed_result"] = None
-                                await async_emit_runtime(
-                                    {
-                                        "event_type": "model.parse_failed",
-                                        "source": "AgentlyResponseParser",
-                                        "level": "WARNING",
-                                        "message": "Can not parse JSON output from model response.",
-                                        "payload": {
-                                            "agent_name": self.agent_name,
-                                            "response_id": self.response_id,
-                                            "result": str(data),
-                                            "streamed_text": buffer,
-                                        },
-                                        "run": self.run_context,
-                                    }
-                                )
-                        else:
-                            if (
-                                isinstance(data, list)
-                                and isinstance(data[0], dict)
-                                and "object" in data[0]
-                                and data[0]["object"] == "embedding"
-                            ):
-                                data = [item["embedding"] for item in data]
-                            self.full_result_data["parsed_result"] = data
-                            if self.settings.get("$log.cancel_logs") is not True:
-                                await async_emit_runtime(
-                                    {
-                                        "event_type": "model.completed",
-                                        "source": "AgentlyResponseParser",
-                                        "message": "Model response parsing completed.",
-                                        "payload": {
-                                            "agent_name": self.agent_name,
-                                            "response_id": self.response_id,
-                                            "result": DataFormatter.sanitize(data),
-                                            "raw_text": str(data),
-                                            "streamed_text": buffer,
-                                        },
-                                        "run": self.run_context,
-                                    }
-                                )
                     case "meta":
                         if isinstance(data, Mapping):
                             self.full_result_data["meta"].update(dict(data))
@@ -339,6 +373,9 @@ class AgentlyResponseParser(ResponseParser):
         await self._ensure_consumer()
         parsed_generator = cast(GeneratorConsumer, self._response_consumer).get_async_generator()
         _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
+        streaming_json_parser = None
+        if type in ("instant", "streaming_parse") and self._prompt_object.output_format == "json":
+            streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
         if type is None and content is not None:
             warnings.warn(
                 f"Parameter `content` in method .get_async_generator() is  deprecated and will be removed in future version, please use parameter `type` instead."
@@ -359,16 +396,16 @@ class AgentlyResponseParser(ResponseParser):
                     if event in specific:
                         yield event, data
                 case "instant" | "streaming_parse":
-                    if self._streaming_json_parser is not None:
-                        streaming_parsed = None
+                    if streaming_json_parser is not None:
                         if event == "delta":
-                            streaming_parsed = self._streaming_json_parser.parse_chunk(data)
-                        elif event == "tool_calls":
+                            async for streaming_data in streaming_json_parser.parse_chunk(str(data)):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                        if event == "tool_calls":
                             yield StreamingData(path="$tool_calls", value=data)
                         elif event == "done":
-                            streaming_parsed = self._streaming_json_parser.finalize()
-                        if streaming_parsed:
-                            async for streaming_data in streaming_parsed:
+                            async for streaming_data in self._flush_streaming_json_events(streaming_json_parser):
                                 if _streaming_parse_path_style == "slash":
                                     streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
                                 yield streaming_data
@@ -386,6 +423,9 @@ class AgentlyResponseParser(ResponseParser):
         asyncio.run(self._ensure_consumer())
         parsed_generator = cast(GeneratorConsumer, self._response_consumer).get_generator()
         _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
+        streaming_json_parser = None
+        if type in ("instant", "streaming_parse") and self._prompt_object.output_format == "json":
+            streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
         if type is None and content is not None:
             warnings.warn(
                 f"Parameter `content` in method .get_generator() is  deprecated and will be removed in future version, please use parameter `type` instead."
@@ -406,16 +446,20 @@ class AgentlyResponseParser(ResponseParser):
                     if event in specific:
                         yield event, data
                 case "instant" | "streaming_parse":
-                    if self._streaming_json_parser is not None:
-                        streaming_parsed = None
+                    if streaming_json_parser is not None:
                         if event == "delta":
-                            streaming_parsed = self._streaming_json_parser.parse_chunk(data)
-                        elif event == "tool_calls":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_json_parser.parse_chunk(str(data))
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                        if event == "tool_calls":
                             yield StreamingData(path="$tool_calls", value=data)
                         elif event == "done":
-                            streaming_parsed = self._streaming_json_parser.finalize()
-                        if streaming_parsed:
-                            for streaming_data in FunctionShifter.syncify_async_generator(streaming_parsed):
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                self._flush_streaming_json_events(streaming_json_parser)
+                            ):
                                 if _streaming_parse_path_style == "slash":
                                     streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
                                 yield streaming_data

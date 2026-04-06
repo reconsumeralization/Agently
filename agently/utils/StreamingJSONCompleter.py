@@ -31,12 +31,21 @@ class StreamingJSONCompleter:
         """Append data to the internal buffer."""
         self._buffer += data
 
-    def complete(self) -> str:
+    def complete(self, repair: bool = False) -> str:
         """
         Attempt to complete a partial JSON string by closing unclosed brackets, strings, or comments.
         Returns a completed JSON string.
         """
-        buf = self._buffer
+        if repair:
+            # lazy import to avoid potential circular imports
+            try:
+                from agently.utils.DataLocator import DataLocator
+
+                buf = DataLocator.repair_json_fragment(self._buffer)
+            except Exception:
+                buf = self._buffer
+        else:
+            buf = self._buffer
         stack = []
         i = 0
         in_string = False

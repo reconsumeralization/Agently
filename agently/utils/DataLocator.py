@@ -244,3 +244,212 @@ class DataLocator:
                 except Exception:
                     continue
             return all_json[-1]
+
+    @staticmethod
+    def _next_non_whitespace_char(original_text: str, start_index: int) -> str | None:
+        for index in range(start_index, len(original_text)):
+            if not original_text[index].isspace():
+                return original_text[index]
+        return None
+
+    @staticmethod
+    def _is_quote_variant(char: str, delimiter: str) -> bool:
+        if delimiter == '"':
+            return char in {'"', '“', '”', '＂'}
+        return char in {"'", '‘', '’', '＇'}
+
+    @staticmethod
+    def _can_close_repaired_string(original_text: str, index: int, role: Literal["key", "value"]) -> bool:
+        next_char = DataLocator._next_non_whitespace_char(original_text, index + 1)
+        if next_char is None:
+            return role == "value"
+        if role == "key":
+            return next_char in {':', '：'}
+        return next_char in {',', '，', '}', ']', '｝', '］'}
+
+    @staticmethod
+    def repair_json_fragment(original_text: str) -> str:
+        """Repair structural quote and punctuation issues without rewriting string contents."""
+
+        structural_translations = {
+            '：': ':',
+            '，': ',',
+            '｛': '{',
+            '｝': '}',
+            '［': '[',
+            '］': ']',
+        }
+
+        contexts: list[dict[str, str]] = [{"type": "root", "state": "value_or_end"}]
+        repaired_chars: list[str] = []
+        in_string = False
+        string_delimiter = '"'
+        string_role: Literal["key", "value"] = "value"
+        escape = False
+        in_primitive = False
+        primitive_role: Literal["key", "value"] = "value"
+        index = 0
+
+        def current_context() -> dict[str, str]:
+            return contexts[-1]
+
+        def mark_value_completed() -> None:
+            context = current_context()
+            if context["type"] in ("object", "array"):
+                context["state"] = "comma_or_end"
+            else:
+                context["state"] = "done"
+
+        while index < len(original_text):
+            char = original_text[index]
+            normalized_char = structural_translations.get(char, char)
+
+            if in_string:
+                if escape:
+                    repaired_chars.append(char)
+                    escape = False
+                    index += 1
+                    continue
+
+                if char == "\\":
+                    repaired_chars.append(char)
+                    escape = True
+                    index += 1
+                    continue
+
+                if DataLocator._is_quote_variant(char, string_delimiter):
+                    if DataLocator._can_close_repaired_string(original_text, index, string_role):
+                        repaired_chars.append(string_delimiter)
+                        in_string = False
+                        if string_role == "key":
+                            current_context()["state"] = "colon"
+                        else:
+                            mark_value_completed()
+                    else:
+                        repaired_chars.append(char)
+                    index += 1
+                    continue
+
+                repaired_chars.append(char)
+                index += 1
+                continue
+
+            if in_primitive:
+                if primitive_role == "key":
+                    if normalized_char == ':':
+                        repaired_chars.append(':')
+                        current_context()["state"] = "value"
+                        in_primitive = False
+                        index += 1
+                        continue
+
+                    repaired_chars.append(char)
+                    index += 1
+                    continue
+
+                if char.isspace():
+                    repaired_chars.append(char)
+                    mark_value_completed()
+                    in_primitive = False
+                    index += 1
+                    continue
+
+                if normalized_char in {',', '}', ']'}:
+                    mark_value_completed()
+                    in_primitive = False
+                    continue
+
+                repaired_chars.append(char)
+                index += 1
+                continue
+
+            if char.isspace():
+                repaired_chars.append(char)
+                index += 1
+                continue
+
+            context = current_context()
+            state = context["state"]
+
+            if state in ("key_or_end", "value", "value_or_end") and DataLocator._is_quote_variant(char, '"'):
+                in_string = True
+                string_delimiter = '"'
+                string_role = "key" if state == "key_or_end" else "value"
+                repaired_chars.append('"')
+                index += 1
+                continue
+
+            if state in ("key_or_end", "value", "value_or_end") and DataLocator._is_quote_variant(char, "'"):
+                in_string = True
+                string_delimiter = "'"
+                string_role = "key" if state == "key_or_end" else "value"
+                repaired_chars.append("'")
+                index += 1
+                continue
+
+            if normalized_char in {'{', '['} and state in ("value", "value_or_end"):
+                repaired_chars.append(normalized_char)
+                if normalized_char == '{':
+                    contexts.append({"type": "object", "state": "key_or_end"})
+                else:
+                    contexts.append({"type": "array", "state": "value_or_end"})
+                index += 1
+                continue
+
+            if normalized_char == '}' and context["type"] == "object" and state in ("key_or_end", "comma_or_end"):
+                repaired_chars.append('}')
+                contexts.pop()
+                mark_value_completed()
+                index += 1
+                continue
+
+            if normalized_char == ']' and context["type"] == "array" and state in ("value_or_end", "comma_or_end"):
+                repaired_chars.append(']')
+                contexts.pop()
+                mark_value_completed()
+                index += 1
+                continue
+
+            if normalized_char == ':' and context["type"] == "object" and state == "colon":
+                repaired_chars.append(':')
+                context["state"] = "value"
+                index += 1
+                continue
+
+            if normalized_char == ',' and state == "comma_or_end":
+                repaired_chars.append(',')
+                if context["type"] == "object":
+                    context["state"] = "key_or_end"
+                elif context["type"] == "array":
+                    context["state"] = "value_or_end"
+                else:
+                    context["state"] = "done"
+                index += 1
+                continue
+
+            if state == "key_or_end":
+                in_primitive = True
+                primitive_role = "key"
+                repaired_chars.append(char)
+                index += 1
+                continue
+
+            if state in ("value", "value_or_end"):
+                in_primitive = True
+                primitive_role = "value"
+                repaired_chars.append(char)
+                index += 1
+                continue
+
+            repaired_chars.append(char)
+            index += 1
+
+        return "".join(repaired_chars)
+
+    @staticmethod
+    def repair_text(original_text: str) -> str:
+        """Backward-compatible wrapper for structure-aware JSON fragment repair."""
+        try:
+            return DataLocator.repair_json_fragment(original_text)
+        except Exception:
+            return original_text

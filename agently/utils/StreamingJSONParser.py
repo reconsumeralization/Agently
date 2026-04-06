@@ -396,6 +396,29 @@ class StreamingJSONParser:
         match = re.search(r'\[(\d+)\]', path)
         return int(match.group(1)) if match else 0
 
+    async def flush_final_data(self, final_data: Any) -> AsyncGenerator[StreamingData, None]:
+        """
+        Reconcile the parser state with a trusted final parsed result and emit any missing
+        delta/done events needed to bring streaming consumers to the final state.
+
+        Args:
+            final_data (Any): The final parsed JSON-compatible data.
+
+        Yields:
+            StreamingData: Missing incremental or completion events required to catch up.
+        """
+        if final_data is None:
+            return
+
+        if self.current_data != final_data:
+            self.previous_data = copy.deepcopy(self.current_data)
+            self.current_data = final_data
+            async for event in self._compare_and_generate_events():
+                yield event
+
+        async for event in self.finalize():
+            yield event
+
     async def finalize(self) -> AsyncGenerator[StreamingData, None]:
         """
         Mark all remaining fields as complete and yield "done" events for every incomplete path.
