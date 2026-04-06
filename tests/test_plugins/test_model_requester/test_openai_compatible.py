@@ -15,6 +15,7 @@ from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
     ModelRequesterSettings,
 )
 import agently.builtins.plugins.ModelRequester.OpenAICompatible as openai_module
+from collections import Counter
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
@@ -158,3 +159,59 @@ async def test_auth_headers_are_kept_when_api_key_sets_authorization(monkeypatch
 
     assert captured["headers"]["Authorization"] == "Bearer KEY2"
     assert captured["headers"]["X-Test"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_streaming_done_is_not_emitted_twice(monkeypatch: pytest.MonkeyPatch):
+    class FakeSSE:
+        def __init__(self, event: str, data: str):
+            self.event = event
+            self.data = data
+            self.id = None
+            self.retry = None
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aclose(self):
+            return None
+
+    async def fake_aiter_sse_with_retry(self, client, method, url, *, headers, json):
+        async def generator():
+            yield FakeSSE(
+                "message",
+                '{"id":"1","choices":[{"delta":{"content":"hello"},"finish_reason":"stop"}],"usage":{"total_tokens":1}}',
+            )
+            yield FakeSSE("message", "[DONE]")
+
+        return generator()
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(OpenAICompatible, "_aiter_sse_with_retry", fake_aiter_sse_with_retry)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": True,
+        },
+        {"input": "hello"},
+    )
+    request_data = plugin.generate_request_data()
+    response = plugin.broadcast_response(plugin.request_model(request_data))
+
+    events = []
+    async for event, data in response:
+        events.append((event, data))
+
+    counts = Counter(event for event, _ in events)
+    assert counts["done"] == 1
+    assert counts["reasoning_done"] == 1
+    assert counts["meta"] == 1

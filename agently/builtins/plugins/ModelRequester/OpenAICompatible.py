@@ -397,7 +397,7 @@ class OpenAICompatible(ModelRequester):
                     ):
                         yield sse.event, sse.data
                         if sse.data.strip() == "[DONE]":
-                            has_done = False
+                            has_done = True
                     if not has_done:
                         yield "message", "[DONE]"
                 except SSEError as e:
