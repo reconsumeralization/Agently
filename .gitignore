@@ -160,4 +160,4 @@ demo_*
 node_modules
 
 # spec_docs
-spec_docs
+/spec_docs/
