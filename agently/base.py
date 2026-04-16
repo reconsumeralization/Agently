@@ -15,12 +15,31 @@
 import logging
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
+from agently.builtins.hookers._runtime_log_profiles import coerce_runtime_log_profile
 from agently.utils import Settings, create_logger
-from agently.core import PluginManager, EventCenter, Tool, Prompt, ModelRequest, BaseAgent
-from agently._default_init import _load_default_settings, _load_default_plugins, _hook_default_event_handlers
+from agently.core import (
+    PluginManager,
+    EventCenter,
+    Tool,
+    Prompt,
+    ModelRequest,
+    BaseAgent,
+    CapabilityRegistry,
+    CapabilityDispatcher,
+    SkillRegistry,
+    SkillResolver,
+)
+from agently._default_init import (
+    _load_default_settings,
+    _load_default_plugins,
+    _hook_default_event_handlers,
+    _load_default_capabilities,
+    _load_default_skills,
+)
 
 if TYPE_CHECKING:
     from agently.types.data import RuntimeEventLevel, SerializableValue
+    from agently.builtins.hookers._runtime_log_profiles import RuntimeLogProfile
 
 # Basic Initialize
 
@@ -43,6 +62,12 @@ httpx_level = getattr(logging, str(httpx_level_name).upper(), logging.WARNING)
 logging.getLogger("httpx").setLevel(httpx_level)
 logging.getLogger("httpcore").setLevel(httpx_level)
 tool = Tool(plugin_manager, settings)
+capability_registry = CapabilityRegistry(name="global_capability_registry")
+_load_default_capabilities(capability_registry)
+capability = CapabilityDispatcher(capability_registry, settings)
+skill_registry = SkillRegistry(name="global_skill_registry")
+_load_default_skills(skill_registry)
+skill = SkillResolver(skill_registry, capability)
 _agently_emitter = event_center.create_emitter("Agently")
 
 
@@ -64,6 +89,21 @@ async def async_print(content: Any, *args):
     await _agently_emitter.async_info(content_text, event_type="runtime.print")
 
 
+def _apply_debug_profile(
+    target_settings: Settings,
+    value: "SerializableValue",
+    *,
+    auto_load_env: bool = False,
+    raise_empty: bool = False,
+) -> "RuntimeLogProfile":
+    if auto_load_env:
+        value = Settings._substitute_env_placeholder(value, raise_empty=raise_empty)
+    normalized = coerce_runtime_log_profile(value)
+    target_settings.set_settings("debug", normalized)
+    target_settings.set("debug", normalized)
+    return normalized
+
+
 # Settings Mappings
 
 settings.update_mappings(
@@ -73,22 +113,48 @@ settings.update_mappings(
         },
         "key_value_mappings": {
             "debug": {
-                True: {
-                    "runtime.show_model_logs": True,
-                    "runtime.show_tool_logs": True,
-                    "runtime.show_trigger_flow_logs": True,
+                "simple": {
+                    "runtime.show_model_logs": "simple",
+                    "runtime.show_tool_logs": "simple",
+                    "runtime.show_trigger_flow_logs": "simple",
+                    "runtime.show_runtime_logs": "simple",
+                    "runtime.httpx_log_level": "WARNING",
+                },
+                "detail": {
+                    "runtime.show_model_logs": "detail",
+                    "runtime.show_tool_logs": "detail",
+                    "runtime.show_trigger_flow_logs": "detail",
+                    "runtime.show_runtime_logs": "detail",
                     "runtime.httpx_log_level": "INFO",
                 },
+                "off": {
+                    "runtime.show_model_logs": "off",
+                    "runtime.show_tool_logs": "off",
+                    "runtime.show_trigger_flow_logs": "off",
+                    "runtime.show_runtime_logs": "off",
+                    "runtime.httpx_log_level": "WARNING",
+                },
+                True: {
+                    "runtime.show_model_logs": "simple",
+                    "runtime.show_tool_logs": "simple",
+                    "runtime.show_trigger_flow_logs": "simple",
+                    "runtime.show_runtime_logs": "simple",
+                    "runtime.httpx_log_level": "WARNING",
+                },
                 False: {
-                    "runtime.show_model_logs": False,
-                    "runtime.show_tool_logs": False,
-                    "runtime.show_trigger_flow_logs": False,
+                    "runtime.show_model_logs": "off",
+                    "runtime.show_tool_logs": "off",
+                    "runtime.show_trigger_flow_logs": "off",
+                    "runtime.show_runtime_logs": "off",
                     "runtime.httpx_log_level": "WARNING",
                 },
             }
-        }
+        },
     }
 )
+
+if settings.get("debug", None) is not None:
+    _apply_debug_profile(settings, settings.get("debug"))
 
 # Extensions Installation
 # BaseAgent + Extensions = Agent
@@ -96,6 +162,7 @@ from agently.builtins.agent_extensions import (
     StreamingPrintExtension,
     SessionExtension,
     ToolExtension,
+    SkillExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -106,6 +173,7 @@ class Agent(
     StreamingPrintExtension,
     SessionExtension,
     ToolExtension,
+    SkillExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -129,6 +197,10 @@ class AgentlyMain(Generic[A]):
         self.print = print_
         self.async_print = async_print
         self.tool = tool
+        self.capability_registry = capability_registry
+        self.capability = capability
+        self.skill_registry = skill_registry
+        self.skill = skill
         self.AgentType = AgentType
 
         def refresh_httpx_log_level():
@@ -144,7 +216,15 @@ class AgentlyMain(Generic[A]):
             auto_load_env: bool = False,
             raise_empty: bool = False,
         ):
-            self.settings.set_settings(key, value, auto_load_env=auto_load_env, raise_empty=raise_empty)
+            if key == "debug":
+                _apply_debug_profile(
+                    self.settings,
+                    value,
+                    auto_load_env=auto_load_env,
+                    raise_empty=raise_empty,
+                )
+            else:
+                self.settings.set_settings(key, value, auto_load_env=auto_load_env, raise_empty=raise_empty)
             if key in ("runtime.httpx_log_level", "debug"):
                 refresh_httpx_log_level()
             return self
@@ -157,11 +237,24 @@ class AgentlyMain(Generic[A]):
             raise_empty: bool = False,
         ):
             self.settings.load(data_type, value, auto_load_env=auto_load_env, raise_empty=raise_empty)
+            if self.settings.get("debug", None) is not None:
+                _apply_debug_profile(self.settings, self.settings.get("debug"))
             refresh_httpx_log_level()
             return self
 
         self.set_settings = set_settings
         self.load_settings = load_settings
+
+        def discover_skills(path: str):
+            self.skill_registry.discover(path)
+            return self
+
+        def load_skill(path: str):
+            self.skill_registry.load(path)
+            return self
+
+        self.discover_skills = discover_skills
+        self.load_skill = load_skill
 
     def set_api_key(self, api_key: str):
         self.set_settings("agently.api_key", api_key)

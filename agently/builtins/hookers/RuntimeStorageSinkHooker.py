@@ -15,6 +15,7 @@
 import json
 from typing import TYPE_CHECKING, Any
 
+from agently.builtins.hookers._runtime_log_profiles import should_render_storage_event
 from agently.types.plugins import EventHooker
 from agently.utils import DataFormatter
 
@@ -46,7 +47,10 @@ class RuntimeStorageSinkHooker(EventHooker):
 
     @staticmethod
     async def handler(event: "RuntimeEvent"):
-        from agently.base import logger
+        from agently.base import logger, settings
+
+        if not should_render_storage_event(event, settings):
+            return
 
         match event.level:
             case "DEBUG":

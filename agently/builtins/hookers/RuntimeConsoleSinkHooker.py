@@ -15,12 +15,17 @@
 import json
 from typing import TYPE_CHECKING, Any
 
+from agently.builtins.hookers._runtime_log_profiles import (
+    resolve_runtime_log_profile,
+    resolve_runtime_event_family,
+    should_render_console_event,
+)
 from agently.types.plugins import EventHooker
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
     from agently.types.data import RuntimeEvent
-    from agently.utils import Settings
+    from agently.builtins.hookers._runtime_log_profiles import RuntimeLogProfile
 
 
 COLORS = {
@@ -101,18 +106,6 @@ def _resolve_execution_id(event: "RuntimeEvent") -> str | None:
     return None
 
 
-def _should_render(event: "RuntimeEvent", settings: "Settings") -> bool:
-    if event.level in ("WARNING", "ERROR", "CRITICAL"):
-        return True
-    if event.event_type.startswith("model."):
-        return bool(settings.get("runtime.show_model_logs", False))
-    if event.event_type.startswith("tool."):
-        return bool(settings.get("runtime.show_tool_logs", False))
-    if event.event_type.startswith("workflow.") or event.event_type.startswith("trigger_flow."):
-        return bool(settings.get("runtime.show_trigger_flow_logs", False))
-    return False
-
-
 def _render_block(header: str, stage: str, detail: str, *, detail_color: str = "gray", end: str = "\n"):
     header_text = color_text(header, color="blue", bold=True)
     stage_label = color_text("Stage:", color="cyan", bold=True)
@@ -149,14 +142,14 @@ class RuntimeConsoleSinkHooker(EventHooker):
             RuntimeConsoleSinkHooker._streaming_key = None
 
     @staticmethod
-    def _handle_model_event(event: "RuntimeEvent"):
+    def _handle_model_event(event: "RuntimeEvent", profile: "RuntimeLogProfile"):
         agent_name = _resolve_agent_name(event) or event.source
         response_id = _resolve_response_id(event)
         response_label = f"[Agent-{ agent_name }]"
         if response_id:
             response_label = f"{ response_label } - [Response-{ response_id }]"
 
-        if event.event_type == "model.streaming":
+        if event.event_type == "model.streaming" and profile == "detail":
             delta = _payload_value(event, "delta", event.message or "")
             if not isinstance(delta, str):
                 delta = str(delta)
@@ -180,7 +173,16 @@ class RuntimeConsoleSinkHooker(EventHooker):
             "model.requester.error": "Requester Error",
         }
         detail = event.message or ""
-        if event.event_type == "model.requesting":
+        if profile == "simple":
+            if event.event_type == "model.retrying":
+                retry_count = _payload_value(event, "retry_count")
+                retry_label = f" (retry={ retry_count })" if retry_count is not None else ""
+                detail = f"{ event.message or 'Model response retrying.' }{ retry_label }"
+            elif event.error is not None:
+                detail = event.error.message
+            else:
+                detail = event.message or stage_mapping.get(event.event_type, event.event_type)
+        elif event.event_type == "model.requesting":
             request_text = _payload_value(event, "request_text")
             detail = str(request_text) if request_text else _stringify_payload(_payload_value(event, "request"), indent=2)
         elif event.event_type == "model.completed":
@@ -197,7 +199,7 @@ class RuntimeConsoleSinkHooker(EventHooker):
         _render_block(response_label, stage_mapping.get(event.event_type, event.event_type), detail, detail_color=detail_color)
 
     @staticmethod
-    def _handle_tool_event(event: "RuntimeEvent"):
+    def _handle_tool_event(event: "RuntimeEvent", profile: "RuntimeLogProfile"):
         RuntimeConsoleSinkHooker._close_stream_if_needed()
         tool_name = _payload_value(event, "tool_name", "unknown")
         agent_name = _resolve_agent_name(event)
@@ -205,18 +207,21 @@ class RuntimeConsoleSinkHooker(EventHooker):
         if agent_name:
             header = f"[Agent-{ agent_name }] - { header }"
         stage = "Completed" if _payload_value(event, "success", False) else "Failed"
-        detail = _stringify_payload(event.payload, indent=2) or _event_detail(event, pretty_payload=True)
+        if profile == "simple":
+            detail = event.message or stage
+        else:
+            detail = _stringify_payload(event.payload, indent=2) or _event_detail(event, pretty_payload=True)
         detail_color = "gray" if stage == "Completed" else "red"
         _render_block(header, stage, detail, detail_color=detail_color)
 
     @staticmethod
-    def _handle_trigger_flow_event(event: "RuntimeEvent"):
+    def _handle_trigger_flow_event(event: "RuntimeEvent", profile: "RuntimeLogProfile"):
         RuntimeConsoleSinkHooker._close_stream_if_needed()
         execution_id = _resolve_execution_id(event)
         prefix = "[TriggerFlow]"
         if execution_id:
             prefix = f"{ prefix } [Execution-{ execution_id }]"
-        detail = _event_detail(event, pretty_payload=True)
+        detail = event.message or event.event_type if profile == "simple" else _event_detail(event, pretty_payload=True)
         _render_line(prefix, detail, color="yellow" if event.level == "DEBUG" else "gray")
 
     @staticmethod
@@ -235,15 +240,17 @@ class RuntimeConsoleSinkHooker(EventHooker):
     async def handler(event: "RuntimeEvent"):
         from agently.base import settings
 
-        if not _should_render(event, settings):
+        if not should_render_console_event(event, settings):
             return
-        if event.event_type.startswith("model."):
-            RuntimeConsoleSinkHooker._handle_model_event(event)
+        profile = resolve_runtime_log_profile(settings, event.event_type)
+        family = resolve_runtime_event_family(event.event_type)
+        if family == "model":
+            RuntimeConsoleSinkHooker._handle_model_event(event, profile)
             return
-        if event.event_type.startswith("tool."):
-            RuntimeConsoleSinkHooker._handle_tool_event(event)
+        if family == "tool":
+            RuntimeConsoleSinkHooker._handle_tool_event(event, profile)
             return
-        if event.event_type.startswith("workflow.") or event.event_type.startswith("trigger_flow."):
-            RuntimeConsoleSinkHooker._handle_trigger_flow_event(event)
+        if family == "triggerflow":
+            RuntimeConsoleSinkHooker._handle_trigger_flow_event(event, profile)
             return
         RuntimeConsoleSinkHooker._handle_generic_event(event)

@@ -47,9 +47,10 @@ response:
 runtime:
   raise_error: True
   raise_critical: True
-  show_model_logs: False
-  show_tool_logs: False
-  show_trigger_flow_logs: False
+  show_model_logs: "off"
+  show_tool_logs: "off"
+  show_trigger_flow_logs: "off"
+  show_runtime_logs: "off"
   httpx_log_level: "WARNING"
 plugins:
   ToolManager:
