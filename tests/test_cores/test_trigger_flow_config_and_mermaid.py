@@ -3,6 +3,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
+from agently.types.data.event import normalize_triggerflow_event_type
 
 
 def _operator_by_kind(config: dict, kind: str):
@@ -236,7 +237,10 @@ async def test_trigger_flow_stream_and_result_events_include_origin_chunk():
     captured = []
 
     async def capture(event):
-        if event.event_type in {"workflow.stream_item_emitted", "workflow.result_set"}:
+        if normalize_triggerflow_event_type(event.event_type) in {
+            "triggerflow.stream_item_emitted",
+            "triggerflow.result_set",
+        }:
             captured.append(event)
 
     hook_name = "test_trigger_flow_config_and_mermaid.origin_chunk_capture"
@@ -253,8 +257,14 @@ async def test_trigger_flow_stream_and_result_events_include_origin_chunk():
         result = await flow.async_start("done")
         assert result == {"answer": "done"}
 
-        stream_event = next(event for event in captured if event.event_type == "workflow.stream_item_emitted")
-        result_event = next(event for event in captured if event.event_type == "workflow.result_set")
+        stream_event = next(
+            event
+            for event in captured
+            if normalize_triggerflow_event_type(event.event_type) == "triggerflow.stream_item_emitted"
+        )
+        result_event = next(
+            event for event in captured if normalize_triggerflow_event_type(event.event_type) == "triggerflow.result_set"
+        )
 
         assert stream_event.payload["origin_chunk"]["chunk_name"] == "emit_and_complete"
         assert stream_event.payload["origin_chunk"]["operator_kind"] == "chunk"
@@ -572,7 +582,7 @@ async def test_trigger_flow_sub_flow_inherits_parent_run_lineage():
     captured = []
 
     async def capture(event):
-        if event.event_type in {"workflow.execution_started", "chunk.started"} and event.run is not None:
+        if normalize_triggerflow_event_type(event.event_type) in {"triggerflow.execution_started", "chunk.started"} and event.run is not None:
             captured.append(event)
 
     hook_name = "test_trigger_flow_sub_flow_inherits_parent_run_lineage.capture"
@@ -586,7 +596,9 @@ async def test_trigger_flow_sub_flow_inherits_parent_run_lineage():
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
-    workflow_events = [event for event in captured if event.event_type == "workflow.execution_started"]
+    workflow_events = [
+        event for event in captured if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started"
+    ]
     chunk_events = [event for event in captured if event.event_type == "chunk.started"]
 
     assert len(workflow_events) == 2
@@ -622,7 +634,10 @@ async def test_trigger_flow_emits_definition_runtime_event():
     captured = []
 
     async def capture(event):
-        if event.event_type in {"workflow.definition_declared", "workflow.execution_started"}:
+        if normalize_triggerflow_event_type(event.event_type) in {
+            "triggerflow.definition_declared",
+            "triggerflow.execution_started",
+        }:
             captured.append(event)
 
     hook_name = "test_trigger_flow_emits_definition_runtime_event.capture"
@@ -636,8 +651,12 @@ async def test_trigger_flow_emits_definition_runtime_event():
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
-    definition_event = next(event for event in captured if event.event_type == "workflow.definition_declared")
-    start_event = next(event for event in captured if event.event_type == "workflow.execution_started")
+    definition_event = next(
+        event for event in captured if normalize_triggerflow_event_type(event.event_type) == "triggerflow.definition_declared"
+    )
+    start_event = next(
+        event for event in captured if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started"
+    )
 
     assert definition_event.run is not None
     assert start_event.run is not None
@@ -645,6 +664,8 @@ async def test_trigger_flow_emits_definition_runtime_event():
     assert definition_event.run.meta["flow_name"] == "definition-runtime-flow"
     assert definition_event.payload["flow_name"] == "definition-runtime-flow"
     assert definition_event.payload["definition"]["name"] == "definition-runtime-flow"
+    assert "flowchart TD" in definition_event.payload["mermaid"]["simplified"]
+    assert "flowchart TD" in definition_event.payload["mermaid"]["detailed"]
     assert any(operator["kind"] == "result_sink" for operator in definition_event.payload["definition"]["operators"])
 
 
@@ -687,8 +708,12 @@ async def test_trigger_flow_chunk_runtime_events_include_input_output_and_origin
         and event.run is not None
         and event.run.meta.get("chunk_name") == "compute"
     )
-    stream_event = next(event for event in captured if event.event_type == "workflow.stream_item_emitted")
-    result_event = next(event for event in captured if event.event_type == "workflow.result_set")
+    stream_event = next(
+        event for event in captured if normalize_triggerflow_event_type(event.event_type) == "triggerflow.stream_item_emitted"
+    )
+    result_event = next(
+        event for event in captured if normalize_triggerflow_event_type(event.event_type) == "triggerflow.result_set"
+    )
 
     assert chunk_started.payload["input"] == 7
     assert chunk_started.payload["status"] == "running"

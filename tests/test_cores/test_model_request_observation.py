@@ -8,6 +8,7 @@ import pytest
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.core import ModelRequest, PluginManager
 from agently.types.data import AgentlyRequestData, RunContext
+from agently.types.data.event import normalize_triggerflow_event_type
 from agently.utils import Settings
 
 
@@ -385,7 +386,9 @@ async def test_trigger_flow_runtime_context_auto_inherits_parent_run_for_agent_a
         assert "Morning briefing prepared." in result["agent_text"]
         assert "Morning briefing prepared." in result["request_text"]
 
-        workflow_start = next(event for event in captured if event.event_type == "workflow.execution_started")
+        workflow_start = next(
+            event for event in captured if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started"
+        )
         workflow_run = workflow_start.run
         assert workflow_run is not None
 
@@ -454,7 +457,7 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
         workflow_runs = [
             event.run
             for event in captured
-            if event.event_type == "workflow.execution_started" and event.run is not None
+            if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started" and event.run is not None
         ]
 
         root_workflow_run = next(run for run in workflow_runs if run.meta.get("flow_name") == "daily-news-root-flow")

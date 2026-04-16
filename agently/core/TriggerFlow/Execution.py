@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from agently.types.data import RunContext, SerializableValue
 
 from agently.utils import StateData, FunctionShifter, GeneratorConsumer, Settings
-from agently.core.runtime_context import bind_runtime_context, get_current_chunk_run_context
+from agently.core.RuntimeContext import bind_runtime_context, get_current_chunk_run_context
 from agently.types.trigger_flow import (
     TriggerFlowContractMetadata,
     TriggerFlowContractSpec,
@@ -82,10 +82,14 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             f"trigger_flow_execution_concurrency_depth_{ self.id }",
             default=0,
         )
-        self.run_context = run_context if run_context is not None else RunContext.create(
-            run_kind="workflow_execution",
-            execution_id=self.id,
-            meta={"flow_name": self._trigger_flow.name},
+        self.run_context = (
+            run_context
+            if run_context is not None
+            else RunContext.create(
+                run_kind="workflow_execution",
+                execution_id=self.id,
+                meta={"flow_name": self._trigger_flow.name},
+            )
         )
         self._runtime_started_emitted = False
         self._runtime_completed_emitted = False
@@ -182,13 +186,17 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             return
         self._runtime_definition_emitted = True
         await self._emit_runtime_event(
-            "workflow.definition_declared",
-            message=f"Workflow definition declared for execution '{ self.id }'.",
+            "triggerflow.definition_declared",
+            message=f"TriggerFlow definition declared for execution '{ self.id }'.",
             payload={
                 "flow_name": self._trigger_flow.name,
                 "definition": self._to_serializable_value(
                     self._trigger_flow.get_flow_config(validate_serializable=False)
                 ),
+                "mermaid": {
+                    "simplified": self._trigger_flow.to_mermaid(mode="simplified"),
+                    "detailed": self._trigger_flow.to_mermaid(mode="detailed"),
+                },
             },
         )
 
@@ -486,12 +494,16 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                     try:
                         state = yaml.safe_load(content)
                     except yaml.YAMLError as e:
-                        raise ValueError(f"Can not load TriggerFlowExecution state from YAML file '{ state }'.\nError: { e }")
+                        raise ValueError(
+                            f"Can not load TriggerFlowExecution state from YAML file '{ state }'.\nError: { e }"
+                        )
                 else:
                     try:
                         state = json.loads(content)
                     except JSONDecodeError as e:
-                        raise ValueError(f"Can not load TriggerFlowExecution state from JSON file '{ state }'.\nError: { e }")
+                        raise ValueError(
+                            f"Can not load TriggerFlowExecution state from JSON file '{ state }'.\nError: { e }"
+                        )
             elif isinstance(state, str):
                 original = state
                 try:
@@ -504,7 +516,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                             f"Can not load TriggerFlowExecution state from JSON/YAML content.\nError: { e }\nContent: { original }"
                         )
             else:
-                raise TypeError(f"Can not load TriggerFlowExecution state, expect dictionary/string/path but got: { type(state) }")
+                raise TypeError(
+                    f"Can not load TriggerFlowExecution state, expect dictionary/string/path but got: { type(state) }"
+                )
 
         if state is None:
             raise TypeError("Can not load TriggerFlowExecution state, got None.")
@@ -526,7 +540,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
         last_signal_state = state.get("last_signal", None)
         if last_signal_state is not None and not isinstance(last_signal_state, dict):
-            raise TypeError(f"Can not load key 'last_signal', expect dictionary/None but got: { type(last_signal_state) }")
+            raise TypeError(
+                f"Can not load key 'last_signal', expect dictionary/None but got: { type(last_signal_state) }"
+            )
 
         result_state = state.get("result", {})
         if not isinstance(result_state, dict):
@@ -538,7 +554,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
         run_context_state = state.get("run_context", None)
         if run_context_state is not None and not isinstance(run_context_state, dict):
-            raise TypeError(f"Can not load key 'run_context', expect dictionary/None but got: { type(run_context_state) }")
+            raise TypeError(
+                f"Can not load key 'run_context', expect dictionary/None but got: { type(run_context_state) }"
+            )
 
         ready = bool(result_state.get("ready", False))
         result_value = result_state.get("value")
@@ -612,7 +630,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._remember_signal(signal)
         await async_emit_runtime(
             {
-                "event_type": "trigger_flow.signal",
+                "event_type": "triggerflow.signal",
                 "source": "TriggerFlowExecution",
                 "level": "DEBUG",
                 "message": f"Dispatch signal '{ signal.trigger_event }'.",
@@ -632,22 +650,22 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 chunk_run_context = self._create_chunk_run_context(operator, signal) if operator is not None else None
                 await async_emit_runtime(
                     {
-                        "event_type": "trigger_flow.handler_dispatch",
+                        "event_type": "triggerflow.handler_dispatch",
                         "source": "TriggerFlowExecution",
                         "level": "DEBUG",
                         "message": f"Dispatch handler '{ handler_id }' for signal '{ signal.trigger_event }'.",
                         "payload": {
                             "event": signal.trigger_event,
                             "type": signal.trigger_type,
-                        "handler": handler_id,
-                        "signal_id": signal.id,
-                    },
-                    "run": self.run_context,
-                    "meta": {
-                        "execution_id": self.id,
-                    },
-                }
-            )
+                            "handler": handler_id,
+                            "signal_id": signal.id,
+                        },
+                        "run": self.run_context,
+                        "meta": {
+                            "execution_id": self.id,
+                        },
+                    }
+                )
 
                 async def run_handler(handler_func, *, handler_id: str):
                     async def execute_handler():
@@ -667,7 +685,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                             )
                         try:
                             with bind_runtime_context(
-                                parent_run_context=chunk_run_context if chunk_run_context is not None else self.run_context,
+                                parent_run_context=(
+                                    chunk_run_context if chunk_run_context is not None else self.run_context
+                                ),
                                 chunk_run_context=chunk_run_context,
                             ):
                                 return await handler_func
@@ -719,7 +739,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                                 "input": self._serialize_runtime_value(signal.value),
                                 "signal_source": signal.source,
                                 "signal_meta": self._serialize_runtime_value(signal.meta),
-                                "output": None if isinstance(result, TriggerFlowPauseSignal) else self._serialize_runtime_value(result),
+                                "output": (
+                                    None
+                                    if isinstance(result, TriggerFlowPauseSignal)
+                                    else self._serialize_runtime_value(result)
+                                ),
                             },
                         )
                     return result
@@ -745,9 +769,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 if not self._runtime_failed_emitted:
                     self._runtime_failed_emitted = True
                     await self._emit_runtime_event(
-                        "workflow.execution_failed",
+                        "triggerflow.execution_failed",
                         level="ERROR",
-                        message=f"Workflow execution '{ self.id }' failed.",
+                        message=f"TriggerFlow execution '{ self.id }' failed.",
                         payload={"last_signal": signal.to_debug_dict()},
                         error=error,
                     )
@@ -875,14 +899,18 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     ) -> ResultT | None:
         if not self._started:
             self._started = True
-            if self._status not in {TRIGGER_FLOW_STATUS_COMPLETED, TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
+            if self._status not in {
+                TRIGGER_FLOW_STATUS_COMPLETED,
+                TRIGGER_FLOW_STATUS_FAILED,
+                TRIGGER_FLOW_STATUS_CANCELLED,
+            }:
                 self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
             if not self._runtime_started_emitted:
                 await self._emit_runtime_definition_event()
                 self._runtime_started_emitted = True
                 await self._emit_runtime_event(
-                    "workflow.execution_started",
-                    message=f"Workflow execution '{ self.id }' started.",
+                    "triggerflow.execution_started",
+                    message=f"TriggerFlow execution '{ self.id }' started.",
                     payload={"initial_value": initial_value},
                 )
             initial_value = cast(InputT | None, self._trigger_flow._contract.validate_initial_input(initial_value))
@@ -899,9 +927,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 if not self._runtime_failed_emitted:
                     self._runtime_failed_emitted = True
                     await self._emit_runtime_event(
-                        "workflow.execution_failed",
+                        "triggerflow.execution_failed",
                         level="ERROR",
-                        message=f"Workflow execution '{ self.id }' failed during start.",
+                        message=f"TriggerFlow execution '{ self.id }' failed during start.",
                         payload={"initial_value": initial_value},
                         error=error,
                     )
@@ -931,9 +959,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._system_runtime_data.set("interrupts", interrupts)
         self._set_status(TRIGGER_FLOW_STATUS_WAITING)
         await self._emit_runtime_event(
-            "workflow.interrupt_raised",
+            "triggerflow.interrupt_raised",
             level="WARNING",
-            message=f"Workflow execution '{ self.id }' paused for interrupt '{ interrupt_id }'.",
+            message=f"TriggerFlow execution '{ self.id }' paused for interrupt '{ interrupt_id }'.",
             payload={"interrupt": self._to_serializable_value(interrupt)},
         )
         await self.async_put_into_stream(
@@ -958,17 +986,15 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             raise KeyError(f"Can not continue execution { self.id }, interrupt '{ interrupt_id }' not found.")
         interrupt = dict(interrupts[interrupt_id])
         if interrupt.get("status") != "waiting":
-            raise ValueError(
-                f"Can not continue execution { self.id }, interrupt '{ interrupt_id }' is not waiting."
-            )
+            raise ValueError(f"Can not continue execution { self.id }, interrupt '{ interrupt_id }' is not waiting.")
         interrupt["status"] = "resumed"
         interrupt["response"] = value
         interrupts[interrupt_id] = interrupt
         self._system_runtime_data.set("interrupts", interrupts)
         self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
         await self._emit_runtime_event(
-            "workflow.execution_resumed",
-            message=f"Workflow execution '{ self.id }' resumed from interrupt '{ interrupt_id }'.",
+            "triggerflow.execution_resumed",
+            message=f"TriggerFlow execution '{ self.id }' resumed from interrupt '{ interrupt_id }'.",
             payload={
                 "interrupt_id": interrupt_id,
                 "value": self._to_serializable_value(value),
@@ -1009,8 +1035,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             stream_item = cast(StreamT, self._trigger_flow._contract.validate_stream_item(stream_item))
         await self._runtime_stream_queue.put(stream_item)
         await self._emit_runtime_event(
-            "workflow.stream_item_emitted",
-            message=f"Workflow execution '{ self.id }' emitted a stream item.",
+            "triggerflow.stream_item_emitted",
+            message=f"TriggerFlow execution '{ self.id }' emitted a stream item.",
             payload={
                 "item": self._to_serializable_value(stream_item),
                 "item_type": type(stream_item).__name__,
@@ -1107,8 +1133,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 self._runtime_result_set_emitted = True
                 loop.create_task(
                     self._emit_runtime_event(
-                        "workflow.result_set",
-                        message=f"Workflow execution '{ self.id }' set a result.",
+                        "triggerflow.result_set",
+                        message=f"TriggerFlow execution '{ self.id }' set a result.",
                         payload={
                             "result": self._to_serializable_value(result),
                             "origin_chunk": _origin_chunk or self._get_origin_chunk_payload(),
@@ -1124,8 +1150,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 self._runtime_completed_emitted = True
                 loop.create_task(
                     self._emit_runtime_event(
-                        "workflow.execution_completed",
-                        message=f"Workflow execution '{ self.id }' completed.",
+                        "triggerflow.execution_completed",
+                        message=f"TriggerFlow execution '{ self.id }' completed.",
                         payload={
                             "result": self._to_serializable_value(result),
                             "origin_chunk": _origin_chunk or self._get_origin_chunk_payload(),
@@ -1142,8 +1168,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             if self._status == TRIGGER_FLOW_STATUS_COMPLETED and not self._runtime_result_set_emitted:
                 self._runtime_result_set_emitted = True
                 await self._emit_runtime_event(
-                    "workflow.result_set",
-                    message=f"Workflow execution '{ self.id }' set a result.",
+                    "triggerflow.result_set",
+                    message=f"TriggerFlow execution '{ self.id }' set a result.",
                     payload={
                         "result": self._to_serializable_value(self._result),
                         "origin_chunk": self._get_origin_chunk_payload(),
@@ -1152,8 +1178,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             if self._status == TRIGGER_FLOW_STATUS_COMPLETED and not self._runtime_completed_emitted:
                 self._runtime_completed_emitted = True
                 await self._emit_runtime_event(
-                    "workflow.execution_completed",
-                    message=f"Workflow execution '{ self.id }' completed.",
+                    "triggerflow.execution_completed",
+                    message=f"TriggerFlow execution '{ self.id }' completed.",
                     payload={
                         "result": self._to_serializable_value(self._result),
                         "origin_chunk": self._get_origin_chunk_payload(),
@@ -1169,8 +1195,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 if self._status == TRIGGER_FLOW_STATUS_COMPLETED and not self._runtime_result_set_emitted:
                     self._runtime_result_set_emitted = True
                     await self._emit_runtime_event(
-                        "workflow.result_set",
-                        message=f"Workflow execution '{ self.id }' set a result.",
+                        "triggerflow.result_set",
+                        message=f"TriggerFlow execution '{ self.id }' set a result.",
                         payload={
                             "result": self._to_serializable_value(self._result),
                             "origin_chunk": self._get_origin_chunk_payload(),
@@ -1179,8 +1205,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 if self._status == TRIGGER_FLOW_STATUS_COMPLETED and not self._runtime_completed_emitted:
                     self._runtime_completed_emitted = True
                     await self._emit_runtime_event(
-                        "workflow.execution_completed",
-                        message=f"Workflow execution '{ self.id }' completed.",
+                        "triggerflow.execution_completed",
+                        message=f"TriggerFlow execution '{ self.id }' completed.",
                         payload={
                             "result": self._to_serializable_value(self._result),
                             "origin_chunk": self._get_origin_chunk_payload(),

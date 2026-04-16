@@ -99,3 +99,21 @@ async def test_event_center_infers_source_for_emitter_and_direct_emit():
     assert len(captured) == 2
     assert captured[0].source == "InferredOwner"
     assert captured[1].source == "InferredOwner"
+
+
+@pytest.mark.asyncio
+async def test_event_center_matches_triggerflow_aliases_for_legacy_subscriptions():
+    ec = EventCenter()
+    captured: list["RuntimeEvent"] = []
+
+    async def capture(event: "RuntimeEvent"):
+        captured.append(event)
+
+    ec.register_hook(capture, event_types="workflow.execution_started", hook_name="capture")
+    emitter = ec.create_emitter("TriggerFlowTest")
+
+    await emitter.async_emit("triggerflow.execution_started", message="started")
+
+    assert len(captured) == 1
+    assert captured[0].event_type == "triggerflow.execution_started"
+    assert captured[0].message == "started"

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from agently.types.data import ErrorInfo, RuntimeEvent
+from agently.types.data.event import matches_runtime_event_type
 from agently.utils import FunctionShifter
 
 if TYPE_CHECKING:
@@ -119,7 +120,7 @@ class EventCenter:
             event_object = RuntimeEvent.model_validate(event_data)
         tasks = []
         for event_types, callback in self._hooks.values():
-            if event_types is not None and event_object.event_type not in event_types:
+            if not matches_runtime_event_type(event_object.event_type, event_types):
                 continue
             coro = FunctionShifter.asyncify(callback)
             tasks.append(asyncio.create_task(coro(event_object)))

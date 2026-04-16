@@ -698,7 +698,7 @@ class TriggerFlowBaseProcess:
                 if log_info:
                     await async_emit_runtime(
                         {
-                            "event_type": "trigger_flow.annotation",
+                            "event_type": "triggerflow.annotation",
                             "source": "TriggerFlowProcess",
                             "level": "INFO",
                             "message": "TriggerFlow runtime annotation emitted.",

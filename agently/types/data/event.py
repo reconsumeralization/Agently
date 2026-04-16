@@ -22,6 +22,71 @@ from typing_extensions import TypedDict
 
 RuntimeEventLevel: TypeAlias = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
+_TRIGGERFLOW_WORKFLOW_SUFFIXES = frozenset(
+    {
+        "definition_declared",
+        "execution_started",
+        "execution_completed",
+        "execution_failed",
+        "execution_resumed",
+        "interrupt_raised",
+        "stream_item_emitted",
+        "result_set",
+    }
+)
+
+_TRIGGERFLOW_NATIVE_SUFFIXES = frozenset(
+    {
+        "signal",
+        "handler_dispatch",
+        "annotation",
+    }
+)
+
+_TRIGGERFLOW_ALL_SUFFIXES = _TRIGGERFLOW_WORKFLOW_SUFFIXES | _TRIGGERFLOW_NATIVE_SUFFIXES
+
+
+def normalize_triggerflow_event_type(event_type: str | None):
+    if not isinstance(event_type, str) or not event_type:
+        return event_type
+    if event_type.startswith("triggerflow."):
+        suffix = event_type[len("triggerflow.") :]
+        return event_type if suffix in _TRIGGERFLOW_ALL_SUFFIXES else event_type
+    if event_type.startswith("workflow."):
+        suffix = event_type[len("workflow.") :]
+        if suffix in _TRIGGERFLOW_WORKFLOW_SUFFIXES:
+            return f"triggerflow.{ suffix }"
+        return event_type
+    if event_type.startswith("trigger_flow."):
+        suffix = event_type[len("trigger_flow.") :]
+        if suffix in _TRIGGERFLOW_NATIVE_SUFFIXES:
+            return f"triggerflow.{ suffix }"
+        return event_type
+    return event_type
+
+
+def get_triggerflow_event_aliases(event_type: str | None):
+    if not isinstance(event_type, str) or not event_type:
+        return set()
+    normalized = normalize_triggerflow_event_type(event_type)
+    aliases = {event_type}
+    if not isinstance(normalized, str) or not normalized.startswith("triggerflow."):
+        return aliases
+    suffix = normalized[len("triggerflow.") :]
+    aliases.add(normalized)
+    if suffix in _TRIGGERFLOW_WORKFLOW_SUFFIXES:
+        aliases.add(f"workflow.{ suffix }")
+    if suffix in _TRIGGERFLOW_NATIVE_SUFFIXES:
+        aliases.add(f"trigger_flow.{ suffix }")
+    return aliases
+
+
+def matches_runtime_event_type(event_type: str | None, expected_event_types: set[str] | None):
+    if expected_event_types is None:
+        return True
+    aliases = get_triggerflow_event_aliases(event_type)
+    return any(expected in aliases for expected in expected_event_types)
+
 RunKind: TypeAlias = Literal[
     "agent_turn",
     "request",

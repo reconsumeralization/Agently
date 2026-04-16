@@ -5,6 +5,7 @@ import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.types.data import RunContext
+from agently.types.data.event import normalize_triggerflow_event_type
 
 
 def test_trigger_flow_sync_start_returns_result_or_none_by_wait_flag():
@@ -168,7 +169,7 @@ def test_trigger_flow_start_propagates_parent_run_context():
     captured = []
 
     def capture(event):
-        if event.event_type == "workflow.execution_started" and event.run is not None:
+        if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started" and event.run is not None:
             captured.append(event)
 
     hook_name = "test_trigger_flow_start_propagates_parent_run_context.capture"
@@ -207,7 +208,7 @@ async def test_trigger_flow_runtime_stream_propagates_parent_run_context():
     captured = []
 
     async def capture(event):
-        if event.event_type == "workflow.execution_started" and event.run is not None:
+        if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started" and event.run is not None:
             captured.append(event)
 
     hook_name = "test_trigger_flow_runtime_stream_propagates_parent_run_context.capture"
