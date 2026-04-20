@@ -3,10 +3,29 @@ from typing import TYPE_CHECKING
 import pytest
 
 from agently import Agently
+from agently.builtins.hookers.RuntimeConsoleSinkHooker import (
+    should_render_console_event,
+    should_render_storage_event,
+)
 from agently.core import EventCenter
+from agently.types.data import RuntimeEvent
+from agently.utils import Settings
 
 if TYPE_CHECKING:
     from agently.types.data import RuntimeEvent
+
+
+def _build_runtime_log_settings(profile: str = "off") -> Settings:
+    return Settings(
+        {
+            "runtime": {
+                "show_model_logs": profile,
+                "show_tool_logs": profile,
+                "show_trigger_flow_logs": profile,
+                "show_runtime_logs": profile,
+            }
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -117,3 +136,46 @@ async def test_event_center_matches_triggerflow_aliases_for_legacy_subscriptions
     assert len(captured) == 1
     assert captured[0].event_type == "triggerflow.execution_started"
     assert captured[0].message == "started"
+
+
+def test_runtime_log_profiles_keep_default_off_quiet():
+    settings = _build_runtime_log_settings("off")
+
+    assert not should_render_console_event(RuntimeEvent(event_type="model.requesting"), settings)
+    assert not should_render_console_event(RuntimeEvent(event_type="tool.loop_started"), settings)
+    assert not should_render_console_event(RuntimeEvent(event_type="triggerflow.execution_started"), settings)
+
+    assert not should_render_storage_event(RuntimeEvent(event_type="model.requesting", level="INFO"), settings)
+    assert not should_render_storage_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
+    assert should_render_storage_event(RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings)
+    assert should_render_storage_event(RuntimeEvent(event_type="model.requester.error", level="ERROR"), settings)
+    assert should_render_storage_event(RuntimeEvent(event_type="request.failed", level="WARNING"), settings)
+
+
+def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
+    settings = _build_runtime_log_settings("simple")
+
+    assert should_render_console_event(RuntimeEvent(event_type="model.requesting", message="requesting"), settings)
+    assert not should_render_console_event(RuntimeEvent(event_type="model.streaming", message="delta"), settings)
+    assert should_render_console_event(RuntimeEvent(event_type="tool.loop_started", message="started"), settings)
+    assert not should_render_console_event(RuntimeEvent(event_type="tool.plan_ready", message="ready"), settings)
+    assert should_render_console_event(
+        RuntimeEvent(event_type="triggerflow.execution_started", message="execution started"),
+        settings,
+    )
+    assert not should_render_console_event(RuntimeEvent(event_type="triggerflow.signal", message="signal"), settings)
+
+    assert not should_render_storage_event(RuntimeEvent(event_type="model.requesting", level="INFO"), settings)
+    assert not should_render_storage_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
+    assert should_render_storage_event(RuntimeEvent(event_type="request.failed", level="ERROR"), settings)
+
+
+def test_runtime_log_profiles_detail_mode_allows_full_runtime_detail():
+    settings = _build_runtime_log_settings("detail")
+
+    assert should_render_console_event(RuntimeEvent(event_type="model.streaming", message="delta"), settings)
+    assert should_render_console_event(RuntimeEvent(event_type="tool.plan_ready", message="ready"), settings)
+    assert should_render_console_event(RuntimeEvent(event_type="triggerflow.signal", message="signal"), settings)
+
+    assert not should_render_storage_event(RuntimeEvent(event_type="model.completed", level="INFO"), settings)
+    assert should_render_storage_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)

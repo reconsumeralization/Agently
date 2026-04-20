@@ -15,7 +15,7 @@
 import logging
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
-from agently.builtins.hookers._runtime_log_profiles import coerce_runtime_log_profile
+from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
 from agently.utils import Settings, create_logger
 from agently.core import (
     PluginManager,
@@ -33,7 +33,7 @@ from agently._default_init import (
 
 if TYPE_CHECKING:
     from agently.types.data import RuntimeEventLevel, SerializableValue
-    from agently.builtins.hookers._runtime_log_profiles import RuntimeLogProfile
+    from agently.builtins.hookers.RuntimeConsoleSinkHooker import RuntimeLogProfile
 
 # Basic Initialize
 

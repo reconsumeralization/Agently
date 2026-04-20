@@ -15,7 +15,7 @@
 import json
 from typing import TYPE_CHECKING, Any
 
-from agently.builtins.hookers._runtime_log_profiles import should_render_storage_event
+from agently.builtins.hookers.RuntimeConsoleSinkHooker import should_render_storage_event
 from agently.types.plugins import EventHooker
 from agently.utils import DataFormatter
 
