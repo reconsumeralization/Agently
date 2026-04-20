@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import print_, async_print, AgentlyMain
+from .base import print_, async_print, AgentlyMain, Agent
 from .core import TriggerFlow, TriggerFlowBluePrint
 from .types.trigger_flow import (
     TriggerFlowContractSpec,
@@ -26,6 +26,7 @@ Agently = AgentlyMain()
 
 __all__ = [
     "Agently",
+    "Agent",
     "TriggerFlow",
     "TriggerFlowContractSpec",
     "TriggerFlowRuntimeData",
