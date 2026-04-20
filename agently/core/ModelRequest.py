@@ -18,7 +18,7 @@ from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, overload, Genera
 
 from agently.core.Prompt import Prompt
 from agently.core.ExtensionHandlers import ExtensionHandlers
-from agently.core.runtime_context import resolve_parent_run_context
+from agently.core.RuntimeContext import resolve_parent_run_context
 from agently.utils import Settings, FunctionShifter
 
 from agently.core.ModelResponse import ModelResponse

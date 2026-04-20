@@ -20,7 +20,7 @@ import warnings
 
 from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, cast, overload, Generator
 
-from agently.core.runtime_context import bind_runtime_context
+from agently.core.RuntimeContext import bind_runtime_context
 from agently.utils import FunctionShifter, DataLocator
 
 if TYPE_CHECKING:

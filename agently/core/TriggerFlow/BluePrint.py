@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 from agently.types.data import EMPTY, SerializableMapping
 from agently.types.trigger_flow import RUNTIME_STREAM_STOP
 from agently.utils import StateData, StateDataNamespace
-from agently.core.runtime_context import resolve_parent_run_context
+from agently.core.RuntimeContext import resolve_parent_run_context
 from .Chunk import TriggerFlowChunk
 from .Execution import TriggerFlowExecution
 from .Definition import (

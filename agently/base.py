@@ -24,17 +24,11 @@ from agently.core import (
     Prompt,
     ModelRequest,
     BaseAgent,
-    CapabilityRegistry,
-    CapabilityDispatcher,
-    SkillRegistry,
-    SkillResolver,
 )
 from agently._default_init import (
     _load_default_settings,
     _load_default_plugins,
     _hook_default_event_handlers,
-    _load_default_capabilities,
-    _load_default_skills,
 )
 
 if TYPE_CHECKING:
@@ -62,12 +56,6 @@ httpx_level = getattr(logging, str(httpx_level_name).upper(), logging.WARNING)
 logging.getLogger("httpx").setLevel(httpx_level)
 logging.getLogger("httpcore").setLevel(httpx_level)
 tool = Tool(plugin_manager, settings)
-capability_registry = CapabilityRegistry(name="global_capability_registry")
-_load_default_capabilities(capability_registry)
-capability = CapabilityDispatcher(capability_registry, settings)
-skill_registry = SkillRegistry(name="global_skill_registry")
-_load_default_skills(skill_registry)
-skill = SkillResolver(skill_registry, capability)
 _agently_emitter = event_center.create_emitter("Agently")
 
 
@@ -162,7 +150,6 @@ from agently.builtins.agent_extensions import (
     StreamingPrintExtension,
     SessionExtension,
     ToolExtension,
-    SkillExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -173,7 +160,6 @@ class Agent(
     StreamingPrintExtension,
     SessionExtension,
     ToolExtension,
-    SkillExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -197,10 +183,6 @@ class AgentlyMain(Generic[A]):
         self.print = print_
         self.async_print = async_print
         self.tool = tool
-        self.capability_registry = capability_registry
-        self.capability = capability
-        self.skill_registry = skill_registry
-        self.skill = skill
         self.AgentType = AgentType
 
         def refresh_httpx_log_level():
@@ -244,17 +226,6 @@ class AgentlyMain(Generic[A]):
 
         self.set_settings = set_settings
         self.load_settings = load_settings
-
-        def discover_skills(path: str):
-            self.skill_registry.discover(path)
-            return self
-
-        def load_skill(path: str):
-            self.skill_registry.load(path)
-            return self
-
-        self.discover_skills = discover_skills
-        self.load_skill = load_skill
 
     def set_api_key(self, api_key: str):
         self.set_settings("agently.api_key", api_key)

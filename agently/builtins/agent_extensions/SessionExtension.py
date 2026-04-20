@@ -17,7 +17,7 @@ from uuid import uuid4
 from typing import TYPE_CHECKING, Sequence
 
 from agently.core import BaseAgent, Session
-from agently.core.runtime_context import get_current_request_run_context
+from agently.core.RuntimeContext import get_current_request_run_context
 
 if TYPE_CHECKING:
     from agently.core import Prompt

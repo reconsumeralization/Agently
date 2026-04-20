@@ -20,7 +20,7 @@ from typing import Any, AsyncGenerator, TYPE_CHECKING, cast
 
 from agently.core.Prompt import Prompt
 from agently.core.ExtensionHandlers import ExtensionHandlers
-from agently.core.runtime_context import bind_runtime_context
+from agently.core.RuntimeContext import bind_runtime_context
 from agently.utils import Settings, DataFormatter
 
 from agently.core.ModelResponseResult import ModelResponseResult

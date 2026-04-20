@@ -17,7 +17,7 @@ import uuid
 from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
 
 from agently.core import Prompt, ExtensionHandlers, ModelRequest
-from agently.core.runtime_context import resolve_parent_run_context
+from agently.core.RuntimeContext import resolve_parent_run_context
 from agently.utils import Settings
 
 if TYPE_CHECKING:

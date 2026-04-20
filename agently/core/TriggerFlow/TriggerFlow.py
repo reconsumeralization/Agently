@@ -30,7 +30,7 @@ from agently.types.trigger_flow import (
 )
 from agently.types.data import RunContext
 from agently.utils import Settings, StateData, FunctionShifter
-from agently.core.runtime_context import resolve_parent_run_context
+from agently.core.RuntimeContext import resolve_parent_run_context
 from .BluePrint import TriggerFlowBluePrint
 from .Process import TriggerFlowProcess
 from .Chunk import TriggerFlowChunk
