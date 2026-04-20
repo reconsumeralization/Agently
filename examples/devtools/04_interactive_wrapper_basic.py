@@ -3,12 +3,11 @@
 import time
 from collections.abc import Generator
 
-from agently_devtools import InteractiveWrapper
+from agently import Agently
+from agently_devtools import ObservationBridge, InteractiveWrapper  # pyright: ignore[reportMissingImports]
 
-from _observation_helper import register_example_observation, unregister_example_observation
-
-
-bridge = register_example_observation(group_id="interactive-wrapper-basic")
+bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-basic")
+bridge.register(Agently)
 
 
 def echo_handler(request_data: dict, **options) -> Generator[str, None, None]:
@@ -55,4 +54,4 @@ if __name__ == "__main__":
     try:
         interactive.wait()
     finally:
-        unregister_example_observation(bridge)
+        bridge.unregister(Agently)

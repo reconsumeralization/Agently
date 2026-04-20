@@ -1,22 +1,21 @@
 """InteractiveWrapper example using an Agently Agent with streamed UI output."""
 
-from agently import Agent
-from agently_devtools import InteractiveWrapper
+from agently import Agently
+from agently_devtools import ObservationBridge, InteractiveWrapper  # pyright: ignore[reportMissingImports]
 
-from _observation_helper import register_example_observation, unregister_example_observation
-
-
-bridge = register_example_observation(group_id="interactive-wrapper-agent")
+bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-agent")
+bridge.register(Agently)
 
 
 # Create a simple Agent
-agent = Agent()
+agent = Agently.create_agent()
 
-# Configure the agent with a system prompt
-agent.set_general_instruction(
+# Configure the agent with a persistent system prompt
+agent.system(
     "You are a helpful assistant. Answer user questions concisely and clearly. "
     "When the user asks 'hello', respond with a friendly greeting. "
-    "Prefer short paragraphs so streamed output is easy to follow."
+    "Prefer short paragraphs so streamed output is easy to follow.",
+    always=True,
 )
 
 # Create InteractiveWrapper wrapping the agent
@@ -36,4 +35,4 @@ if __name__ == "__main__":
     try:
         interactive.wait()
     finally:
-        unregister_example_observation(bridge)
+        bridge.unregister(Agently)

@@ -2,13 +2,11 @@
 
 import asyncio
 
-from agently import TriggerFlow, TriggerFlowRuntimeData
-from agently_devtools import InteractiveWrapper
+from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
+from agently_devtools import ObservationBridge, InteractiveWrapper  # pyright: ignore[reportMissingImports]
 
-from _observation_helper import register_example_observation, unregister_example_observation
-
-
-bridge = register_example_observation(group_id="interactive-wrapper-triggerflow")
+bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-triggerflow")
+bridge.register(Agently)
 
 
 # Create a TriggerFlow with multiple stages
@@ -91,4 +89,4 @@ if __name__ == "__main__":
     try:
         interactive.wait()
     finally:
-        unregister_example_observation(bridge)
+        bridge.unregister(Agently)
