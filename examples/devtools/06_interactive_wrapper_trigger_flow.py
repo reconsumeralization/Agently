@@ -3,7 +3,7 @@
 import asyncio
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently_devtools import ObservationBridge, InteractiveWrapper  # pyright: ignore[reportMissingImports]
+from agently_devtools import ObservationBridge, InteractiveWrapper
 
 bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-triggerflow")
 bridge.register(Agently)

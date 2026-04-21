@@ -4,7 +4,7 @@ import time
 from collections.abc import Generator
 
 from agently import Agently
-from agently_devtools import ObservationBridge, InteractiveWrapper  # pyright: ignore[reportMissingImports]
+from agently_devtools import ObservationBridge, InteractiveWrapper
 
 bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-basic")
 bridge.register(Agently)

@@ -1,7 +1,7 @@
 """InteractiveWrapper example using an Agently Agent with streamed UI output."""
 
 from agently import Agently
-from agently_devtools import ObservationBridge, InteractiveWrapper  # pyright: ignore[reportMissingImports]
+from agently_devtools import ObservationBridge, InteractiveWrapper
 
 bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-agent")
 bridge.register(Agently)

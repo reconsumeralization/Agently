@@ -1,5 +1,5 @@
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently_devtools import ObservationBridge  # pyright: ignore[reportMissingImports]
+from agently_devtools import ObservationBridge
 
 
 watched_flow = TriggerFlow(name="devtools-watched-flow")
