@@ -60,7 +60,7 @@ Agently 官方可安装 skills 已正式发布：
 
 - 安装：`pip install agently-devtools`
 - 依赖方向：`agently-devtools -> agently`
-- 兼容线：`agently-devtools 0.1.x` 对应 `agently >=4.0.9,<4.1.0`
+- 兼容线：`agently-devtools 0.1.x` 对应 `agently >=4.1.0,<4.2.0`
 - 接入入口：`ObservationBridge` 与 `create_local_observation_app`
 - 主仓库示例：`examples/devtools/`
 
