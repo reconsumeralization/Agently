@@ -18,6 +18,7 @@ agent = Agently.create_agent()
 ## MCP: use a local MCP server (stdio)
 async def mcp_stdio_demo():
     mcp_path = Path(__file__).parents[1] / "mcp" / "cal_mcp_server.py"
+    # MCP tools are exposed through the unified Action runtime.
     result = await agent.use_mcp(str(mcp_path)).input("333+546=?").async_start()
     print(result)
 

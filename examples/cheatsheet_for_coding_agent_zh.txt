@@ -4,18 +4,18 @@
 
 ## Agent-Readable Map（TL;DR）
 ```yaml
-目标: 用可控输出 + 工具 + 记忆 + 编排构建可靠工作流
+目标: 用可控输出 + Action + 记忆 + 编排构建可靠工作流
 核心能力:
   settings: Agently.set_settings + agent.set_settings
   prompt: input + instruct + info + output
   output_control: 结构化输出 + ensure_keys + 自动重试
   response: get_text/get_data + get_generator(type=instant/typed_delta/specific)
-  tools: 内置 Search/Browse + 自定义 tool_func
+  actions: 内置 Search/Browse + 自定义 action_func
   knowledge_base: ChromaCollection + embeddings agent + query -> info
   memory: chat_history + runtime memo
   triggerflow: to/when/emit + runtime_data + runtime_stream
 模式:
-  plan_tool_reply_loop: 规划 -> 工具 -> 规划 -> 回复 -> 记忆 -> 循环
+  plan_action_reply_loop: 规划 -> Action -> 规划 -> 回复 -> 记忆 -> 循环
   search_then_browse: 搜索 -> 选链接 -> 浏览 -> 总结
   rag: 查询KB -> 注入 -> 回答
   form_interview: 角色 -> 提问 -> 意图 -> 校验 -> 入库 -> 循环
@@ -88,9 +88,10 @@ for msg in response.get_generator(type="instant"):
 print()
 ```
 
-### 工具调用（内置 + 自定义）
+### Action 调用（内置 + 自定义）
 - 内置：`Search` / `Browse`（可能需要代理）
-- 自定义：`@agent.tool_func` + `agent.use_tools(...)`
+- 自定义：`@agent.action_func` + `agent.use_actions(...)`
+- `tool` 仍保留为兼容别名，但主运行时统一叫 `Action`
 - 结果追踪：response extra 或 `type="specific"` 流式事件
 
 ### 知识库（RAG）
@@ -124,7 +125,7 @@ collection = ChromaCollection(collection_name="agently_examples", embedding_agen
 - `data.get_runtime_data(...)` / `data.set_runtime_data(...)`（优先使用）
 
 ## Auto Loop 模式（来自 `examples/step_by_step/12-auto_loop.py`）
-**目标：** 规划 -> 工具 -> 规划 -> 回复 -> 记忆 -> 循环
+**目标：** 规划 -> Action -> 规划 -> 回复 -> 记忆 -> 循环
 
 **示例关键点：**
 - knowledge base 在进程级初始化一次，跨回合复用。
@@ -185,7 +186,7 @@ for event in flow.get_runtime_stream("start", timeout=None):
 ## 参考入口
 - Auto Loop：`examples/step_by_step/12-auto_loop.py`
 - Streaming：`examples/step_by_step/06-streaming.py`
-- Tools：`examples/step_by_step/07-tools.py`
+- Actions：`examples/step_by_step/07-tools.py`
 - TriggerFlow 系列：`examples/step_by_step/11-triggerflow-01_basics.py`
 - FastAPI 服务：`examples/step_by_step/13-auto_loop_fastapi/`
 - 访谈示例：`examples/ai_coding_using_Agently/preorder_interview_reset_form.py`

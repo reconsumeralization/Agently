@@ -47,7 +47,7 @@ Agently.set_settings(
 
 agent = Agently.create_agent()
 
-agent.use_tools(
+agent.use_actions(
     [
         search.search,
         search.search_news,
@@ -57,4 +57,5 @@ agent.use_tools(
 
 response = agent.input("Search news about language model applications.").get_response()
 print(response.result.get_data())
-print(response.result.full_result_data["extra"])
+extra = response.result.full_result_data.get("extra") or {}
+print(extra.get("action_logs", extra.get("tool_logs", [])))

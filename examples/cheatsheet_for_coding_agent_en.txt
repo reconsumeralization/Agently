@@ -4,18 +4,18 @@ Use this page as a compact memory aid for building new intelligent workflows wit
 
 ## Agent-Readable Map (TL;DR)
 ```yaml
-goal: build reliable AI workflows with controllable output + tool + memory + orchestration
+goal: build reliable AI workflows with controllable output + action + memory + orchestration
 primitives:
   settings: Agently.set_settings + agent.set_settings
   prompt: input + instruct + info + output
   output_control: typed schema + ensure_keys + retries
   response: get_text/get_data + get_generator(type=instant/typed_delta/specific)
-  tools: built-in Search/Browse + custom tool_func
+  actions: built-in Search/Browse + custom action_func
   knowledge_base: ChromaCollection + embeddings agent + query -> info
   memory: chat_history + runtime memo
   triggerflow: to/when/emit + runtime_data + runtime_stream
 patterns:
-  plan_tool_reply_loop: plan -> tool -> plan -> reply -> memo -> loop
+  plan_action_reply_loop: plan -> action -> plan -> reply -> memo -> loop
   search_then_browse: search -> select urls -> browse -> summarize
   rag: query knowledge base -> inject -> answer
   form_interview: role -> question -> intent -> validate -> store -> loop
@@ -89,10 +89,11 @@ for msg in response.get_generator(type="instant"):
 print()
 ```
 
-### Tools (built-in + custom)
+### Actions (built-in + custom)
 - Built-in: `Search` / `Browse` (proxy may be required)
-- Custom tools: `@agent.tool_func` + `agent.use_tools(...)`
-- Tool calls are traceable via response metadata or `type="specific"` streaming.
+- Custom actions: `@agent.action_func` + `agent.use_actions(...)`
+- Tool aliases remain available for compatibility, but `Action` is the primary runtime.
+- Action calls are traceable via response metadata or `type="specific"` streaming.
 
 ### Knowledge Base (RAG)
 Use Chroma integration and an embeddings agent; build once and reuse:
@@ -125,7 +126,7 @@ Event-driven orchestration with runtime-scoped data:
 - `data.get_runtime_data(...)` / `data.set_runtime_data(...)` (prefer over `flow_data`)
 
 ## Auto Loop pattern (from `examples/step_by_step/12-auto_loop.py`)
-**Goal:** plan -> tool -> plan -> reply -> memo -> loop
+**Goal:** plan -> action -> plan -> reply -> memo -> loop
 
 **Key ideas from the example:**
 - Build a knowledge base once per process, reuse across turns.
@@ -186,7 +187,7 @@ Use two output fields: one for user-facing content, one for app actions.
 ## Pointers
 - Auto Loop: `examples/step_by_step/12-auto_loop.py`
 - Streaming: `examples/step_by_step/06-streaming.py`
-- Tools: `examples/step_by_step/07-tools.py`
+- Actions: `examples/step_by_step/07-tools.py`
 - TriggerFlow series: `examples/step_by_step/11-triggerflow-01_basics.py`
 - FastAPI Service: `examples/step_by_step/13-auto_loop_fastapi/`
 - Interview example: `examples/ai_coding_using_Agently/preorder_interview_reset_form.py`

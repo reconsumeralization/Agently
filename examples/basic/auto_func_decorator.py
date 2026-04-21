@@ -13,7 +13,7 @@ Agently.set_settings(
 agent = Agently.create_agent()
 
 
-@agent.tool_func
+@agent.action_func
 async def add(a: int, b: int) -> int:
     """
     Return result of `a(int)` add `b(int)`
@@ -25,7 +25,7 @@ async def add(a: int, b: int) -> int:
     return a + b
 
 
-@agent.tool_func
+@agent.action_func
 async def python_code_executor(
     python_code: str,
 ):
@@ -64,10 +64,10 @@ async def python_code_executor(
     return {"code": python_code[:1000], "stdout": result_io.getvalue(), "result": final_result, "error": None}
 
 
-# Try provide two tools for agent
-agent.use_tools([add, python_code_executor])
+# Try provide two actions for agent
+agent.use_actions([add, python_code_executor])
 # Try just use code executor
-# agent.use_tools(python_code_executor)
+# agent.use_actions(python_code_executor)
 # Try use nothing
 # pass
 
@@ -76,7 +76,7 @@ agent.use_tools([add, python_code_executor])
 def calculate(formula: str) -> int:
     """
     Return result of {formula}.
-    MUST USE TOOLS TO ENSURE THE ANSWER IS ACTUAL NO MATTER WHAT.
+    MUST USE ACTIONS TO ENSURE THE ANSWER IS ACTUAL NO MATTER WHAT.
     """
     ...
 

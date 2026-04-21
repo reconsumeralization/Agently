@@ -18,7 +18,7 @@ from agently import Agently
 agent = Agently.create_agent()
 
 
-@agent.tool_func
+@agent.action_func
 async def add(a: int, b: int) -> int:
     """
     Get result of `a(int)` add `b(int)`
@@ -28,9 +28,9 @@ async def add(a: int, b: int) -> int:
     return a + b
 
 
-response = agent.input("34643523+52131231=? Use tool to calculate!").use_tool(add).get_response()
+response = agent.input("34643523+52131231=? Use action to calculate!").use_actions(add).get_response()
 result = response.get_data()
 print("[Response]:", result)
 
-tool_command = agent.input("34643523+52131231=? Use tool to calculate!").use_tool(add).generate_tool_command()
-print("[Only Tool Command]:", tool_command)
+action_call = agent.input("34643523+52131231=? Use action to calculate!").use_actions(add).generate_action_call()
+print("[Only Action Call]:", action_call)

@@ -20,6 +20,7 @@ agent = Agently.create_agent()
 
 async def main():
     result = (
+        # MCP tools join the agent's Action runtime after registration.
         await agent.use_mcp(f"https://mcp.amap.com/mcp?key={ os.environ.get('AMAP_API_KEY') }")
         .input("What's the weather like in Shanghai today?")
         .async_start()

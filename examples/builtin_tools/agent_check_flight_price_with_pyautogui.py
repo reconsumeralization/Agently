@@ -152,11 +152,11 @@ def url_is_query_ready(url: str) -> bool:
     return has_date and ((has_from and has_to) or has_iata_pair or has_flight_query_hint)
 
 
-def extract_last_opened_url(tool_logs: list[dict]) -> str:
-    for tool_log in reversed(tool_logs):
-        if not isinstance(tool_log, dict):
+def extract_last_opened_url(action_logs: list[dict]) -> str:
+    for action_log in reversed(action_logs):
+        if not isinstance(action_log, dict):
             continue
-        kwargs = tool_log.get("kwargs")
+        kwargs = action_log.get("kwargs")
         if not isinstance(kwargs, dict):
             continue
         url = kwargs.get("url")
@@ -165,21 +165,21 @@ def extract_last_opened_url(tool_logs: list[dict]) -> str:
     return ""
 
 
-def extract_last_open_result(tool_logs: list[dict]) -> dict:
-    for tool_log in reversed(tool_logs):
-        if not isinstance(tool_log, dict):
+def extract_last_open_result(action_logs: list[dict]) -> dict:
+    for action_log in reversed(action_logs):
+        if not isinstance(action_log, dict):
             continue
-        result = tool_log.get("result")
+        result = action_log.get("result")
         if isinstance(result, dict) and "ok" in result:
             return result
     return {}
 
 
-def extract_last_read_page(tool_logs: list[dict]) -> tuple[str, str, int | None, str]:
-    for tool_log in reversed(tool_logs):
-        if not isinstance(tool_log, dict):
+def extract_last_read_page(action_logs: list[dict]) -> tuple[str, str, int | None, str]:
+    for action_log in reversed(action_logs):
+        if not isinstance(action_log, dict):
             continue
-        result = tool_log.get("result")
+        result = action_log.get("result")
         if not isinstance(result, dict):
             continue
         content = str(result.get("content", "") or "")
@@ -380,7 +380,7 @@ def run_one_open_step(
     )
     result = response.result.get_data()
     extra = response.result.full_result_data.get("extra", {})
-    return result, extra.get("tool_logs", [])
+    return result, extra.get("action_logs", extra.get("tool_logs", []))
 
 
 def run_one_read_step(read_agent, target_url: str):
@@ -428,7 +428,7 @@ def run_one_read_step(read_agent, target_url: str):
     )
     result = response.result.get_data()
     extra = response.result.full_result_data.get("extra", {})
-    return result, extra.get("tool_logs", [])
+    return result, extra.get("action_logs", extra.get("tool_logs", []))
 
 
 def post_process_read_result(read_result: dict, read_logs: list[dict], target_url: str) -> dict:
@@ -672,8 +672,8 @@ def main():
             "expected_url": normalized_url,
         }
 
-    scan_agent.use_tools(open_flight_site)
-    read_agent.use_tools(read_flight_page)
+    scan_agent.use_actions(open_flight_site)
+    read_agent.use_actions(read_flight_page)
 
     opened_urls: list[str] = []
     valid_urls: list[str] = []
@@ -683,10 +683,10 @@ def main():
     analyzed_urls: set[str] = set()
     open_step_results: list[dict] = []
     read_step_results: list[dict] = []
-    all_tool_logs: list[dict] = []
+    all_action_logs: list[dict] = []
 
     for step in range(1, max_steps + 1):
-        result, tool_logs = run_one_open_step(
+        result, action_logs = run_one_open_step(
             scan_agent=scan_agent,
             opened_urls=opened_urls,
             rejected_urls=rejected_urls,
@@ -696,9 +696,9 @@ def main():
             max_steps=max_steps,
         )
         open_step_results.append(result if isinstance(result, dict) else {"step": step, "opened": False})
-        all_tool_logs.extend(tool_logs)
+        all_action_logs.extend(action_logs)
 
-        opened_url = extract_last_opened_url(tool_logs)
+        opened_url = extract_last_opened_url(action_logs)
         if not opened_url and isinstance(result, dict):
             selected_url = result.get("selected_url")
             if isinstance(selected_url, str) and selected_url.strip():
@@ -707,7 +707,7 @@ def main():
             opened_urls.append(opened_url)
 
         quality_ok = url_is_query_ready(opened_url)
-        open_exec_result = extract_last_open_result(tool_logs)
+        open_exec_result = extract_last_open_result(action_logs)
         opened = bool(open_exec_result.get("ok")) if isinstance(open_exec_result, dict) else False
         if not open_exec_result and isinstance(result, dict):
             opened = bool(result.get("opened"))
@@ -737,7 +737,7 @@ def main():
             read_result, read_logs = run_one_read_step(read_agent, opened_url)
             processed = post_process_read_result(read_result, read_logs, opened_url)
             read_step_results.append(processed)
-            all_tool_logs.extend(read_logs)
+            all_action_logs.extend(read_logs)
             read_status = str(processed.get("page_status", "unknown"))
             if read_status == "valid":
                 if opened_url not in valid_urls:
@@ -796,8 +796,8 @@ def main():
 
     print("[FLIGHT_CHECK_RESULT]")
     print(final_report)
-    print("[TOOL_LOGS]")
-    print(all_tool_logs)
+    print("[ACTION_LOGS]")
+    print(all_action_logs)
 
 
 if __name__ == "__main__":

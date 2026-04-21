@@ -18,6 +18,7 @@ mcp_path_str = str(mcp_path.resolve())
 
 
 async def main():
+    # Agent-scoped MCP registration exposes MCP tools as actions under the hood.
     # result = await agent.use_mcp(mcp_path_str).input("333+546=？").async_start()
     result = await agent.use_mcp("http://localhost:8080/mcp").input("333+546=？").async_start()
     print(result)

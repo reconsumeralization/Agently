@@ -32,8 +32,8 @@ def _configure_model() -> None:
     )
 
 
-def _validate_search_browse_chain(tool_logs: list[dict]) -> dict:
-    names = [str(log.get("tool_name", "")).strip() for log in tool_logs]
+def _validate_search_browse_chain(action_logs: list[dict]) -> dict:
+    names = [str(log.get("tool_name", log.get("action_id", ""))).strip() for log in action_logs]
     first_search = next((idx for idx, name in enumerate(names) if name.startswith("search")), -1)
     first_browse = next((idx for idx, name in enumerate(names) if name == "browse"), -1)
     return {
@@ -60,7 +60,7 @@ def main():
     )
     browse = Browse(proxy=os.getenv("BROWSE_PROXY"))
 
-    agent.use_tools([search.search, search.search_news, browse.browse])
+    agent.use_actions([search.search, search.search_news, browse.browse])
 
     response = (
         agent.input("How to use Agently TriggerFlow")
@@ -73,14 +73,14 @@ def main():
     )
     result = response.result.get_data()
     extra = response.result.full_result_data.get("extra", {})
-    tool_logs = extra.get("tool_logs", []) if isinstance(extra, dict) else []
+    action_logs = extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else []
 
     print("[RESULT]")
     print(result)
-    print("\n[TOOL_LOG_COUNT]")
-    print(len(tool_logs))
-    print("\n[TOOL_CHAIN_VALIDATION]")
-    print(_validate_search_browse_chain(tool_logs if isinstance(tool_logs, list) else []))
+    print("\n[ACTION_LOG_COUNT]")
+    print(len(action_logs))
+    print("\n[ACTION_CHAIN_VALIDATION]")
+    print(_validate_search_browse_chain(action_logs if isinstance(action_logs, list) else []))
 
 
 if __name__ == "__main__":

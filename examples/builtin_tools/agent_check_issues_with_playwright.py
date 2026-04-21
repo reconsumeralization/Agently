@@ -51,13 +51,13 @@ def with_page(url: str, page: int) -> str:
     )
 
 
-def extract_issue_links_from_tool_logs(tool_logs: list[dict]) -> list[str]:
+def extract_issue_links_from_action_logs(action_logs: list[dict]) -> list[str]:
     issue_links: list[str] = []
     seen: set[str] = set()
-    for tool_log in tool_logs:
-        if not isinstance(tool_log, dict):
+    for action_log in action_logs:
+        if not isinstance(action_log, dict):
             continue
-        result = tool_log.get("result")
+        result = action_log.get("result")
         if not isinstance(result, dict):
             continue
 
@@ -90,12 +90,12 @@ def extract_issue_links_from_tool_logs(tool_logs: list[dict]) -> list[str]:
     return issue_links
 
 
-def has_next_page_from_tool_logs(tool_logs: list[dict], current_page: int) -> bool:
+def has_next_page_from_action_logs(action_logs: list[dict], current_page: int) -> bool:
     target_page = str(current_page + 1)
-    for tool_log in tool_logs:
-        if not isinstance(tool_log, dict):
+    for action_log in action_logs:
+        if not isinstance(action_log, dict):
             continue
-        result = tool_log.get("result")
+        result = action_log.get("result")
         if not isinstance(result, dict):
             continue
         urls: list[str] = []
@@ -159,7 +159,7 @@ def analyze_one_page(scan_agent, page_url: str, page: int):
     )
     result = response.result.get_data()
     extra = response.result.full_result_data.get("extra", {})
-    return result, extra.get("tool_logs", [])
+    return result, extra.get("action_logs", extra.get("tool_logs", []))
 
 
 def analyze_issue_detail(scan_agent, issue_url: str):
@@ -190,7 +190,7 @@ def analyze_issue_detail(scan_agent, issue_url: str):
     )
     result = response.result.get_data()
     extra = response.result.full_result_data.get("extra", {})
-    return result, extra.get("tool_logs", [])
+    return result, extra.get("action_logs", extra.get("tool_logs", []))
 
 
 def summarize_all(summary_agent, page_results: list[dict], issues: list[dict], issue_details: list[dict]):
@@ -264,10 +264,10 @@ def main():
             "content": content if isinstance(content, str) else str(content),
         }
 
-    scan_agent.use_tools(open_issues_page)
+    scan_agent.use_actions(open_issues_page)
 
     page_results: list[dict] = []
-    all_tool_logs: list[dict] = []
+    all_action_logs: list[dict] = []
     all_issues: list[dict] = []
     issue_details: list[dict] = []
     seen_issue_urls: set[str] = set()
@@ -275,7 +275,7 @@ def main():
 
     for page in range(1, max_pages + 1):
         page_url = with_page(ISSUES_URL, page)
-        page_result, tool_logs = analyze_one_page(scan_agent, page_url, page)
+        page_result, action_logs = analyze_one_page(scan_agent, page_url, page)
         page_results.append(
             {
                 "page": page,
@@ -283,9 +283,9 @@ def main():
                 "result": page_result,
             }
         )
-        all_tool_logs.extend(tool_logs)
+        all_action_logs.extend(action_logs)
 
-        extracted_issue_links = extract_issue_links_from_tool_logs(tool_logs)
+        extracted_issue_links = extract_issue_links_from_action_logs(action_logs)
         for issue_url in extracted_issue_links:
             if issue_url in seen_issue_urls:
                 continue
@@ -331,7 +331,7 @@ def main():
             f"issues={len(issues)} extracted_issue_links={len(extracted_issue_links)} new={new_count}"
         )
 
-        has_next_from_links = has_next_page_from_tool_logs(tool_logs, page)
+        has_next_from_links = has_next_page_from_action_logs(action_logs, page)
         has_next_from_model = page_result.get("has_next_page_guess", False) if isinstance(page_result, dict) else False
         has_next = has_next_from_links or has_next_from_model
         if not has_next:
@@ -344,17 +344,17 @@ def main():
     issue_urls_for_detail = [issue["url"] for issue in all_issues if isinstance(issue.get("url"), str) and issue["url"]]
     issue_urls_for_detail = issue_urls_for_detail[:issue_detail_limit]
     for index, issue_url in enumerate(issue_urls_for_detail, start=1):
-        detail_result, detail_tool_logs = analyze_issue_detail(scan_agent, issue_url)
+        detail_result, detail_action_logs = analyze_issue_detail(scan_agent, issue_url)
         issue_details.append(detail_result if isinstance(detail_result, dict) else {"url": issue_url})
-        all_tool_logs.extend(detail_tool_logs)
+        all_action_logs.extend(detail_action_logs)
         print(f"[DETAIL {index}] url={issue_url}")
 
     final_report = summarize_all(summary_agent, page_results, all_issues, issue_details)
 
     print("[ISSUE_CHECK_RESULT]")
     print(final_report)
-    print("[TOOL_LOGS]")
-    print(all_tool_logs)
+    print("[ACTION_LOGS]")
+    print(all_action_logs)
 
 
 if __name__ == "__main__":
