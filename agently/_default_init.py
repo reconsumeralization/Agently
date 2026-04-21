@@ -22,6 +22,22 @@ if TYPE_CHECKING:
 
 
 def _load_default_plugins(plugin_manager: "PluginManager"):
+    from agently.builtins.plugins.ActionFlow import TriggerFlowActionFlow
+    from agently.builtins.plugins.ActionRuntime import AgentlyActionRuntime
+    from agently.builtins.plugins.ActionExecutor import (
+        BashSandboxActionExecutor,
+        LocalFunctionActionExecutor,
+        MCPActionExecutor,
+        PythonSandboxActionExecutor,
+    )
+
+    plugin_manager.register("ActionRuntime", AgentlyActionRuntime)
+    plugin_manager.register("ActionFlow", TriggerFlowActionFlow)
+    plugin_manager.register("ActionExecutor", LocalFunctionActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", MCPActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", PythonSandboxActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", BashSandboxActionExecutor, activate=False)
+
     from agently.builtins.plugins.PromptGenerator.AgentlyPromptGenerator import (
         AgentlyPromptGenerator,
     )
@@ -42,10 +58,6 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
 
     plugin_manager.register("ResponseParser", AgentlyResponseParser)
 
-    from agently.builtins.plugins.ToolManager.AgentlyToolManager import AgentlyToolManager
-
-    plugin_manager.register("ToolManager", AgentlyToolManager)
-
 
 def _load_default_settings(settings: "Settings"):
     settings.load("yaml_file", f"{str(Path(__file__).resolve().parent)}/_default_settings.yaml")
@@ -59,3 +71,7 @@ def _hook_default_event_handlers(event_center: "EventCenter"):
     from agently.builtins.hookers.RuntimeStorageSinkHooker import RuntimeStorageSinkHooker
 
     event_center.register_hooker_plugin(RuntimeStorageSinkHooker)
+
+
+def _load_default_actions(_):
+    return None

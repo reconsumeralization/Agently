@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from typing import Optional, Any, Type, cast, overload
 from agently.utils import (
     StateData,
@@ -44,6 +45,13 @@ class PluginManager:
         *,
         activate: bool = True,
     ) -> "PluginManager":
+        if plugin_type == "ToolManager":
+            warnings.warn(
+                "ToolManager plugins are deprecated as an internal runtime layer. "
+                "Use Action, ActionRuntime, ActionFlow, and ActionExecutor plugins instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         if hasattr(plugin_class, "_on_register"):
             plugin_class._on_register()
         self.plugins.update(

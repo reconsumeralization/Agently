@@ -52,6 +52,3 @@ runtime:
   show_trigger_flow_logs: "off"
   show_runtime_logs: "off"
   httpx_log_level: "WARNING"
-plugins:
-  ToolManager:
-    activate: AgentlyToolManager

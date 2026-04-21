@@ -13,10 +13,11 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import threading
 import queue as sync_queue
 from types import AsyncGeneratorType, GeneratorType
-from typing import AsyncGenerator, Generator, cast, Any
+from typing import AsyncGenerator, Awaitable, Callable, Generator, cast, Any
 
 
 class GeneratorConsumer:
@@ -53,6 +54,20 @@ class GeneratorConsumer:
         self._closed = False
         self._closing_lock = asyncio.Lock()
         self._generator_closed = False
+        self._source_closed = False
+
+    async def _close_source_generator(self):
+        if self._source_closed:
+            return
+        self._source_closed = True
+        if self._generator_type != "AsyncGenerator":
+            return
+        close = getattr(self.original_generator, "aclose", None)
+        if not callable(close):
+            return
+        close_async = cast(Callable[[], Awaitable[Any]], close)
+        with contextlib.suppress(RuntimeError, StopAsyncIteration, asyncio.CancelledError):
+            await close_async()
 
     async def _consume(self):
         """
@@ -69,6 +84,7 @@ class GeneratorConsumer:
             self._exception = e
             await self._broadcast(e)
         finally:
+            await self._close_source_generator()
             self._done.set()
             if not self._generator_closed:
                 await self._broadcast(self._sentinel)
@@ -215,6 +231,7 @@ class GeneratorConsumer:
                     pass
                 except Exception as e:
                     self._exception = e
+            await self._close_source_generator()
             self._done.set()
             if not self._generator_closed:
                 await self._broadcast(self._sentinel)

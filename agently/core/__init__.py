@@ -18,6 +18,7 @@ from .Prompt import Prompt
 from .ExtensionHandlers import ExtensionHandlers
 from .ModelRequest import ModelRequest
 from .Agent import BaseAgent
+from .Action import Action, ActionDispatcher, ActionRegistry
 from .Tool import Tool
 from .TriggerFlow import (
     TriggerFlow,

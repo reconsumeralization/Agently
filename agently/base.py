@@ -18,6 +18,7 @@ from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
 from agently.utils import Settings, create_logger
 from agently.core import (
+    Action,
     PluginManager,
     EventCenter,
     Tool,
@@ -26,6 +27,7 @@ from agently.core import (
     BaseAgent,
 )
 from agently._default_init import (
+    _load_default_actions,
     _load_default_settings,
     _load_default_plugins,
     _hook_default_event_handlers,
@@ -55,7 +57,13 @@ httpx_level_name = settings.get("runtime.httpx_log_level", "WARNING")
 httpx_level = getattr(logging, str(httpx_level_name).upper(), logging.WARNING)
 logging.getLogger("httpx").setLevel(httpx_level)
 logging.getLogger("httpcore").setLevel(httpx_level)
-tool = Tool(plugin_manager, settings)
+action = Action(plugin_manager, settings)
+tool = action
+action_registry = action.action_registry
+_load_default_actions(action_registry)
+action_dispatcher = action.action_dispatcher
+action_runtime = action.action_runtime
+action_flow = action.action_flow
 _agently_emitter = event_center.create_emitter("Agently")
 
 
@@ -149,7 +157,7 @@ if settings.get("debug", None) is not None:
 from agently.builtins.agent_extensions import (
     StreamingPrintExtension,
     SessionExtension,
-    ToolExtension,
+    ActionExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -159,7 +167,7 @@ from agently.builtins.agent_extensions import (
 class Agent(
     StreamingPrintExtension,
     SessionExtension,
-    ToolExtension,
+    ActionExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -182,7 +190,12 @@ class AgentlyMain(Generic[A]):
         self.logger = logger
         self.print = print_
         self.async_print = async_print
+        self.action = action
         self.tool = tool
+        self.action_registry = action_registry
+        self.action_dispatcher = action_dispatcher
+        self.action_runtime = action_runtime
+        self.action_flow = action_flow
         self.AgentType = AgentType
 
         def refresh_httpx_log_level():

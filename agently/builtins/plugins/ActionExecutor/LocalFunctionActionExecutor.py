@@ -12,39 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Callable
 
-AgentlyPluginType = Literal[
-    "PromptGenerator",
-    "ModelRequester",
-    "ResponseParser",
-    "ToolManager",
-    "Session",
-    "ActionRuntime",
-    "ActionFlow",
-    "ActionExecutor",
-]
+from agently.utils import FunctionShifter
 
 
-@runtime_checkable
-class AgentlyPlugin(Protocol):
-    """
-    Agently Plugin Base Protocol
-    """
+class LocalFunctionActionExecutor:
+    name = "LocalFunctionActionExecutor"
+    DEFAULT_SETTINGS = {}
 
-    name: str
-    DEFAULT_SETTINGS: dict[str, Any] = {}
+    kind = "function"
+    sandboxed = False
+
+    def __init__(self, func: Callable[..., Any]):
+        self.func = func
 
     @staticmethod
     def _on_register():
-        """
-        Tasks to be done before register plugin
-        """
-        ...
+        pass
 
     @staticmethod
     def _on_unregister():
-        """
-        Tasks to be done after unregister plugin
-        """
-        ...
+        pass
+
+    async def execute(self, *, spec, action_call, policy, settings) -> Any:
+        _ = (spec, policy, settings)
+        action_input = action_call.get("action_input", {})
+        if not isinstance(action_input, dict):
+            action_input = {}
+        func = FunctionShifter.asyncify(self.func)
+        return await func(**action_input)

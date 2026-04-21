@@ -12,34 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
+from __future__ import annotations
+
 import inspect
+import warnings
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Coroutine, Literal, ParamSpec, TypeVar, cast, get_args, get_origin, get_type_hints
 
-from typing import (
-    Any,
-    Literal,
-    Callable,
-    TYPE_CHECKING,
-    Coroutine,
-    Annotated,
-    TypeVar,
-    ParamSpec,
-    get_origin,
-    get_args,
-    get_type_hints,
-)
+from agently.core.Action import ActionDispatcher, ActionRegistry
 from agently.types.plugins import ToolManager
-
-from agently.utils import (
-    SettingsNamespace,
-    DataFormatter,
-    FunctionShifter,
-    LazyImport,
-)
+from agently.utils import DataFormatter, FunctionShifter, LazyImport, SettingsNamespace
+from agently.types.data import ActionSpec
 
 if TYPE_CHECKING:
+    from agently.types.data import ActionPolicy, MCPConfigs, KwargsType, ReturnType
     from agently.utils import Settings
-    from agently.types.data import KwargsType, ReturnType, MCPConfigs
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -51,17 +37,26 @@ class AgentlyToolManager(ToolManager):
     DEFAULT_SETTINGS = {}
 
     def __init__(self, settings: "Settings"):
-        from agently.base import event_center
+        warnings.warn(
+            "AgentlyToolManager is deprecated as an internal runtime layer. Use Action directly; "
+            "`tool` APIs remain public surface aliases.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        from agently.base import event_center, plugin_manager
 
         self.settings = settings
+        self.plugin_manager = plugin_manager
         self.plugin_settings = SettingsNamespace(self.settings, f"plugins.ToolManager.{ self.name }")
         self._emitter = event_center.create_emitter(self.name)
 
-        self.tool_funcs: dict[str, Callable] = {}
-        self.tool_info: dict[str, dict[str, Any]] = {}
-        self.tag_mappings: dict[str, set[str]] = {}
-        self.tool_tags: dict[str, set[str]] = {}
+        self.action_registry = ActionRegistry(name=f"{ self.name }-ActionRegistry")
+        self.action_dispatcher = ActionDispatcher(self.action_registry, self.settings)
 
+        self.action_funcs: dict[str, Callable[..., Any]] = {}
+        self.tool_funcs = self.action_funcs
+
+        self.use_action_mcp = FunctionShifter.syncify(self.async_use_action_mcp)
         self.use_mcp = FunctionShifter.syncify(self.async_use_mcp)
 
     @staticmethod
@@ -72,58 +67,131 @@ class AgentlyToolManager(ToolManager):
     def _on_unregister():
         pass
 
+    @staticmethod
+    def _normalize_tags(tags: str | list[str] | None):
+        if tags is None:
+            return []
+        if isinstance(tags, str):
+            return [tags]
+        return [str(tag) for tag in tags]
+
+    def create_action_executor(self, plugin_name: str, **kwargs) -> Any:
+        plugin_class = cast(type[Any], self.plugin_manager.get_plugin("ActionExecutor", plugin_name))
+        return plugin_class(**kwargs)
+
+    def _create_executor(self, plugin_name: str, **kwargs) -> Any:
+        return self.create_action_executor(plugin_name, **kwargs)
+
+    @staticmethod
+    def _sanitize_action_spec(
+        *,
+        action_id: str,
+        desc: str | None,
+        kwargs: "KwargsType | None",
+        returns: "ReturnType | None",
+        tags: list[str],
+        default_policy: "ActionPolicy | None",
+        side_effect_level: str,
+        approval_required: bool,
+        sandbox_required: bool,
+        replay_safe: bool,
+        expose_to_model: bool,
+        executor_type: str,
+        meta: dict[str, Any] | None,
+    ) -> "ActionSpec":
+        spec = cast(ActionSpec, {
+            "action_id": action_id,
+            "name": action_id,
+            "desc": desc if desc is not None else "",
+            "kwargs": kwargs if kwargs is not None else {},
+            "tags": tags,
+            "default_policy": default_policy if default_policy is not None else {},
+            "side_effect_level": side_effect_level,
+            "approval_required": approval_required,
+            "sandbox_required": sandbox_required,
+            "replay_safe": replay_safe,
+            "expose_to_model": expose_to_model,
+            "executor_type": executor_type,
+            "meta": meta if meta is not None else {},
+        })
+        if returns is not None:
+            spec["returns"] = returns
+        return spec
+
+    def register_action(
+        self,
+        *,
+        action_id: str,
+        desc: str | None,
+        kwargs: "KwargsType | None",
+        func: Callable[..., Any] | None = None,
+        executor=None,
+        returns: "ReturnType | None" = None,
+        tags: str | list[str] | None = None,
+        default_policy: "ActionPolicy | None" = None,
+        side_effect_level: Literal["read", "write", "exec"] = "read",
+        approval_required: bool = False,
+        sandbox_required: bool = False,
+        replay_safe: bool = True,
+        expose_to_model: bool = True,
+        meta: dict[str, Any] | None = None,
+    ):
+        if executor is None:
+            if func is None:
+                raise ValueError("register_action() requires either func or executor.")
+            executor = self._create_executor("LocalFunctionActionExecutor", func=func)
+        normalized_tags = self._normalize_tags(tags)
+        executor_type = str(getattr(executor, "kind", "function"))
+        spec = self._sanitize_action_spec(
+            action_id=action_id,
+            desc=desc,
+            kwargs=kwargs,
+            returns=returns,
+            tags=normalized_tags,
+            default_policy=default_policy,
+            side_effect_level=side_effect_level,
+            approval_required=approval_required,
+            sandbox_required=sandbox_required,
+            replay_safe=replay_safe,
+            expose_to_model=expose_to_model,
+            executor_type=executor_type,
+            meta=meta,
+        )
+        self.action_registry.register(spec, executor, func=func)
+        if func is not None:
+            self.action_funcs[action_id] = func
+        return self
+
     def register(
         self,
         *,
-        name: str,
+        name: str | None = None,
+        action_id: str | None = None,
         desc: str | None,
         kwargs: "KwargsType | None",
         func: Callable[..., Any],
         returns: "ReturnType | None" = None,
         tags: str | list[str] | None = None,
     ):
-        self.tool_funcs.update({name: func})
-        self.tool_info.update(
-            {
-                name: {
-                    "name": name,
-                    "desc": desc if desc is not None else "",
-                    "kwargs": kwargs if kwargs is not None else {},
-                }
-            }
+        resolved_name = action_id if isinstance(action_id, str) and action_id.strip() != "" else name
+        if not isinstance(resolved_name, str) or resolved_name.strip() == "":
+            raise ValueError("register() requires either name or action_id.")
+        self.register_action(
+            action_id=resolved_name,
+            desc=desc,
+            kwargs=kwargs,
+            func=func,
+            returns=returns,
+            tags=tags,
         )
-        if returns is not None:
-            self.tool_info[name].update({"returns": returns})
-        if tags is None:
-            tags = []
-        if isinstance(tags, str):
-            tags = [tags]
-        self.tool_tags[name] = set(tags)
-        for tag in tags:
-            if tag not in self.tag_mappings:
-                self.tag_mappings.update({tag: set()})
-            self.tag_mappings[tag].add(name)
+        return self
 
     def tag(self, tool_names: str | list[str], tags: str | list[str]):
-        if isinstance(tool_names, str):
-            tool_names = [tool_names]
-        if isinstance(tags, str):
-            tags = [tags]
+        self.action_registry.tag(tool_names, tags)
+        return self
 
-        for tool_name in tool_names:
-            if tool_name in self.tool_info:
-                for tag in tags:
-                    if tag not in self.tag_mappings:
-                        self.tag_mappings.update({tag: set()})
-                    self.tag_mappings[tag].add(tool_name)
-                    if tool_name not in self.tool_tags:
-                        self.tool_tags[tool_name] = set()
-                    self.tool_tags[tool_name].add(tag)
-            else:
-                raise ValueError(f"Cannot find tool named '{ tool_name }'")
-
-    def tool_func(self, func: Callable[P, R]) -> Callable[P, R]:
-        tool_name = func.__name__
+    def action_func(self, func: Callable[P, R]) -> Callable[P, R]:
+        action_id = func.__name__
         desc = inspect.getdoc(func) or func.__name__
         signature = inspect.signature(func)
         type_hints = get_type_hints(func)
@@ -140,9 +208,9 @@ class AgentlyToolManager(ToolManager):
                 annotations = []
             if param.default != inspect.Parameter.empty:
                 annotations.append(f"Default: { param.default }")
-            kwargs_signature.update({param_name: (base_type, ";".join(annotations))})
-        self.register(
-            name=tool_name,
+            kwargs_signature[param_name] = (base_type, ";".join(annotations))
+        self.register_action(
+            action_id=action_id,
             desc=desc,
             kwargs=kwargs_signature,
             func=func,
@@ -150,26 +218,85 @@ class AgentlyToolManager(ToolManager):
         )
         return func
 
-    def get_tool_info(self, tags: str | list[str] | None = None) -> dict[str, dict[str, Any]]:
+    def tool_func(self, func: Callable[P, R]) -> Callable[P, R]:
+        return self.action_func(func)
+
+    def _iter_action_ids(self, tags: str | list[str] | None = None, *, expose_only: bool = True):
         if tags is None:
-            return {
-                name: info
-                for name, info in self.tool_info.items()
-                if not any(tag.startswith("agent-") for tag in self.tool_tags.get(name, set()))
-            }
-        if isinstance(tags, str):
-            tags = [tags]
+            action_ids = self.action_registry.list_action_ids()
+            collected = []
+            for action_id in action_ids:
+                spec = self.action_registry.get_spec(action_id)
+                if spec is None:
+                    continue
+                if expose_only and spec.get("expose_to_model", True) is not True:
+                    continue
+                if any(tag.startswith("agent-") for tag in self.action_registry.get_tags(action_id)):
+                    continue
+                collected.append(action_id)
+            return collected
+
+        action_ids = self.action_registry.list_action_ids(tags)
+        collected = []
+        for action_id in action_ids:
+            spec = self.action_registry.get_spec(action_id)
+            if spec is None:
+                continue
+            if expose_only and spec.get("expose_to_model", True) is not True:
+                continue
+            collected.append(action_id)
+        return collected
+
+    def get_action_info(self, tags: str | list[str] | None = None):
+        action_info: dict[str, dict[str, Any]] = {}
+        for action_id in self._iter_action_ids(tags, expose_only=True):
+            spec = self.action_registry.get_spec(action_id)
+            if spec is None:
+                continue
+            action_info[action_id] = dict(spec)
+        return action_info
+
+    def get_tool_info(self, tags: str | list[str] | None = None):
         tool_info: dict[str, dict[str, Any]] = {}
-        for tag in tags:
-            if tag in self.tag_mappings:
-                for name in self.tag_mappings[tag]:
-                    if name not in tool_info:
-                        tool_info.update({name: self.tool_info[name]})
+        for action_id, spec in self.get_action_info(tags).items():
+            tool_spec = {
+                "name": spec.get("name", action_id),
+                "desc": spec.get("desc", ""),
+                "kwargs": spec.get("kwargs", {}),
+            }
+            if "returns" in spec:
+                tool_spec["returns"] = spec["returns"]
+            tool_info[action_id] = tool_spec
         return tool_info
 
-    def get_tool_list(self, tags: str | list[str] | None = None) -> list[dict[str, Any]]:
-        tool_info = self.get_tool_info(tags)
-        return list(tool_info.values())
+    def get_action_list(self, tags: str | list[str] | None = None):
+        return list(self.get_action_info(tags).values())
+
+    def get_tool_list(self, tags: str | list[str] | None = None):
+        return list(self.get_tool_info(tags).values())
+
+    def get_action_func(
+        self,
+        name: str,
+        *,
+        shift: Literal["sync", "async"] | None = None,
+    ) -> Callable[..., Coroutine] | Callable[..., Any] | None:
+        action_func = self.action_funcs[name] if name in self.action_funcs else None
+        if action_func is None and self.action_registry.has(name):
+
+            async def _call_action(**kwargs):
+                return await self.async_call_action(name, kwargs)
+
+            action_func = _call_action
+        if action_func is None:
+            return None
+        match shift:
+            case "sync":
+                return FunctionShifter.syncify(action_func)
+            case "async":
+                return FunctionShifter.asyncify(action_func)
+            case None:
+                return action_func
 
     def get_tool_func(
         self,
@@ -177,97 +304,185 @@ class AgentlyToolManager(ToolManager):
         *,
         shift: Literal["sync", "async"] | None = None,
     ) -> Callable[..., Coroutine] | Callable[..., Any] | None:
-        tool_func = self.tool_funcs[name] if name in self.tool_funcs else None
-        if tool_func is None:
-            return None
-        match shift:
-            case "sync":
-                return FunctionShifter.syncify(tool_func)
-            case "async":
-                return FunctionShifter.asyncify(tool_func)
-            case None:
-                return tool_func
+        return self.get_action_func(name, shift=shift)
 
-    def call_tool(self, name: str, kwargs: dict[str, Any]) -> Any:
-        func = self.get_tool_func(name)
-        if func is None:
-            return f"Can not find tool named '{ name }'"
-        func = FunctionShifter.syncify(func)
-        try:
-            return func(**kwargs)
-        except Exception as e:
-            return f"Error: { e }"
+    def _legacy_error(self, name: str, *, as_tool: bool):
+        subject = "tool" if as_tool else "action"
+        return f"Can not find { subject } named '{ name }'"
+
+    def _legacy_result(self, result: Any, *, as_tool: bool):
+        if not isinstance(result, dict):
+            return None
+        status = str(result.get("status", "success"))
+        data = result.get("data", result.get("result"))
+        error = str(result.get("error", ""))
+        if status == "success":
+            return data
+        if isinstance(data, dict) and "error" in data:
+            return data
+        if status in {"approval_required", "blocked"}:
+            return {
+                "status": status,
+                "error": error or f"{'Tool' if as_tool else 'Action'} execution is blocked.",
+                "approval": result.get("approval", {}),
+            }
+        label = "Tool" if as_tool else "Action"
+        return f"Error: { error if error else f'{ label } execution failed.' }"
+
+    async def async_execute_action(
+        self,
+        name: str,
+        kwargs: dict[str, Any],
+        *,
+        settings: "Settings | None" = None,
+        purpose: str | None = None,
+        policy_override: "ActionPolicy | None" = None,
+        source_protocol: str = "direct",
+        todo_suggestion: str = "",
+        next_value: str = "",
+    ):
+        return await self.action_dispatcher.async_execute(
+            name,
+            kwargs,
+            settings=settings,
+            purpose=purpose,
+            policy_override=policy_override,
+            source_protocol=source_protocol,
+            todo_suggestion=todo_suggestion,
+            next_value=next_value,
+        )
+
+    def execute_action(self, name: str, kwargs: dict[str, Any], **kwargs_options):
+        return self.action_dispatcher.execute(name, kwargs, **kwargs_options)
+
+    async def async_call_action(self, name: str, kwargs: dict[str, Any]) -> Any:
+        if not self.action_registry.has(name):
+            return self._legacy_error(name, as_tool=False)
+        result = await self.async_execute_action(name, kwargs)
+        return self._legacy_result(result, as_tool=False)
+
+    def call_action(self, name: str, kwargs: dict[str, Any]) -> Any:
+        return FunctionShifter.syncify(self.async_call_action)(name, kwargs)
 
     async def async_call_tool(self, name: str, kwargs: dict[str, Any]) -> Any:
-        func = self.get_tool_func(name)
-        if func is None:
-            return f"Can not find tool named '{ name }'"
-        func = FunctionShifter.asyncify(func)
-        try:
-            return await func(**kwargs)
-        except Exception as e:
-            return f"Error: { e }"
+        if not self.action_registry.has(name):
+            return self._legacy_error(name, as_tool=True)
+        result = await self.async_execute_action(name, kwargs)
+        return self._legacy_result(result, as_tool=True)
 
-    def _mcp_tool_func(
-        self,
-        mcp_tool_name: str,
-        transport: "MCPConfigs | str | Any",
-    ):
-        async def _call_mcp_tool(**kwargs):
-            from fastmcp import Client
-            from mcp.types import TextContent, ImageContent, AudioContent, ResourceLink, EmbeddedResource
+    def call_tool(self, name: str, kwargs: dict[str, Any]) -> Any:
+        return FunctionShifter.syncify(self.async_call_tool)(name, kwargs)
 
-            async with Client(transport) as client:  # type: ignore
-                mcp_result = await client.call_tool(
-                    name=mcp_tool_name,
-                    arguments=kwargs,
-                    raise_on_error=False,
-                )
-                if mcp_result.is_error:
-                    return {"error": mcp_result.content[0].text}  # type: ignore
-                else:
-                    if mcp_result.structured_content:
-                        return mcp_result.structured_content
-                    try:
-                        result = mcp_result.content[0]
-                        if isinstance(result, TextContent):
-                            try:
-                                return json.loads(result.text)
-                            except json.decoder.JSONDecodeError:
-                                return result.text
-                        elif isinstance(result, (ImageContent, AudioContent, ResourceLink, EmbeddedResource)):
-                            return result.model_dump()
-                    except:
-                        return None
-
-        return _call_mcp_tool
-
-    async def async_use_mcp(
+    async def async_use_action_mcp(
         self,
         transport: "MCPConfigs | str | Any",
         *,
         tags: str | list[str] | None = None,
+        default_policy: "ActionPolicy | None" = None,
+        side_effect_level: Literal["read", "write", "exec"] = "read",
+        approval_required: bool = False,
+        sandbox_required: bool = False,
+        replay_safe: bool = True,
+        expose_to_model: bool = True,
     ):
         LazyImport.import_package("fastmcp", version_constraint=">=3")
         from fastmcp import Client
 
-        if tags is None:
-            tags = []
-        if isinstance(tags, str):
-            tags = [tags]
+        normalized_tags = self._normalize_tags(tags)
 
-        async with Client(transport) as client:  # type: ignore
+        async with Client(transport) as client:  # type: ignore[arg-type]
             tool_list = await client.list_tools()
             for tool in tool_list:
                 tool_tags = []
-                if hasattr(tool, "_meta") and tool._meta:  # type: ignore
-                    tool_tags = tool._meta.get("_fastmcp", {}).get("tags", [])  # type: ignore
-                tool_tags.extend(tags)
-                self.register(
-                    name=tool.name,
+                if hasattr(tool, "_meta") and tool._meta:  # type: ignore[attr-defined]
+                    tool_tags = tool._meta.get("_fastmcp", {}).get("tags", [])  # type: ignore[index]
+                tool_tags.extend(normalized_tags)
+                self.register_action(
+                    action_id=tool.name,
                     desc=tool.description,
                     kwargs=DataFormatter.from_schema_to_kwargs_format(tool.inputSchema),
                     returns=DataFormatter.from_schema_to_kwargs_format(tool.outputSchema),
-                    func=self._mcp_tool_func(tool.name, transport),
+                    executor=self._create_executor(
+                        "MCPActionExecutor",
+                        action_id=tool.name,
+                        transport=transport,
+                    ),
                     tags=tool_tags,
+                    default_policy=default_policy,
+                    side_effect_level=side_effect_level,
+                    approval_required=approval_required,
+                    sandbox_required=sandbox_required,
+                    replay_safe=replay_safe,
+                    expose_to_model=expose_to_model,
                 )
+        return self
+
+    async def async_use_mcp(self, transport: "MCPConfigs | str | Any", *, tags: str | list[str] | None = None):
+        await self.async_use_action_mcp(transport, tags=tags)
+        return self
+
+    def register_python_sandbox_action(
+        self,
+        *,
+        action_id: str = "python_sandbox",
+        desc: str = "Execute Python code inside a restricted sandbox.",
+        tags: str | list[str] | None = None,
+        default_policy: "ActionPolicy | None" = None,
+        expose_to_model: bool = False,
+        preset_objects: dict[str, object] | None = None,
+        base_vars: dict[str, Any] | None = None,
+        allowed_return_types: list[type] | None = None,
+    ):
+        self.register_action(
+            action_id=action_id,
+            desc=desc,
+            kwargs={"python_code": (str, "Python code to execute in the sandbox.")},
+            executor=self._create_executor(
+                "PythonSandboxActionExecutor",
+                preset_objects=preset_objects,
+                base_vars=base_vars,
+                allowed_return_types=allowed_return_types,
+            ),
+            tags=tags,
+            default_policy=default_policy,
+            side_effect_level="exec",
+            sandbox_required=True,
+            expose_to_model=expose_to_model,
+        )
+        return self
+
+    def register_bash_sandbox_action(
+        self,
+        *,
+        action_id: str = "bash_sandbox",
+        desc: str = "Execute a shell command inside a constrained sandbox.",
+        tags: str | list[str] | None = None,
+        default_policy: "ActionPolicy | None" = None,
+        expose_to_model: bool = False,
+        allowed_cmd_prefixes: list[str] | None = None,
+        allowed_workdir_roots: list[str] | None = None,
+        timeout: int = 20,
+        env: dict[str, str] | None = None,
+    ):
+        self.register_action(
+            action_id=action_id,
+            desc=desc,
+            kwargs={
+                "cmd": ("str | list[str]", "Command to run inside the sandbox."),
+                "workdir": ("str | None", "Working directory inside allowed roots."),
+                "allow_unsafe": ("bool", "Bypass the command allowlist."),
+            },
+            executor=self._create_executor(
+                "BashSandboxActionExecutor",
+                allowed_cmd_prefixes=allowed_cmd_prefixes,
+                allowed_workdir_roots=allowed_workdir_roots,
+                timeout=timeout,
+                env=env,
+            ),
+            tags=tags,
+            default_policy=default_policy,
+            side_effect_level="exec",
+            sandbox_required=True,
+            expose_to_model=expose_to_model,
+        )
+        return self

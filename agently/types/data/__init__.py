@@ -82,3 +82,19 @@ from .tool import (
     MCPConfigs,
     ToolInfo,
 )
+
+from .action import (
+    ActionApproval,
+    ActionArtifact,
+    ActionCall,
+    ActionDecision,
+    ActionDiagnostic,
+    ActionPolicy,
+    ActionPlanningRequest,
+    ActionExecutionRequest,
+    ActionResult,
+    ActionRunContext,
+    ActionSideEffectLevel,
+    ActionSpec,
+    ActionStatus,
+)

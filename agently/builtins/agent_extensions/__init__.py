@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from .StreamingPrintExtension import StreamingPrintExtension
-from .ToolExtension import ToolExtension
+from .ActionExtension import ActionExtension
 from .KeyWaiterExtension import KeyWaiterExtension
 from .AutoFuncExtension import AutoFuncExtension
 from .ConfigurePromptExtension import ConfigurePromptExtension
