@@ -45,6 +45,65 @@ def test_agently_set_api_key_and_alias_mapping():
         Agently.set_settings("agently.api_key", original_api_key)
 
 
+def test_action_executor_plugins_registered():
+    plugin_list = Agently.plugin_manager.get_plugin_list("ActionExecutor")
+    assert "LocalFunctionActionExecutor" in plugin_list
+    assert "MCPActionExecutor" in plugin_list
+    assert "PythonSandboxActionExecutor" in plugin_list
+    assert "BashSandboxActionExecutor" in plugin_list
+
+
+def test_action_runtime_and_flow_plugins_registered():
+    runtime_plugins = Agently.plugin_manager.get_plugin_list("ActionRuntime")
+    flow_plugins = Agently.plugin_manager.get_plugin_list("ActionFlow")
+    plugin_map = Agently.plugin_manager.get_plugin_list()
+
+    assert "AgentlyActionRuntime" in runtime_plugins
+    assert "TriggerFlowActionFlow" in flow_plugins
+    assert getattr(Agently.action_runtime, "name", "") == "AgentlyActionRuntime"
+    assert getattr(Agently.action_flow, "name", "") == "TriggerFlowActionFlow"
+    assert "ToolManager" not in plugin_map
+
+
+def test_deprecated_action_manager_aliases_warn():
+    with pytest.warns(DeprecationWarning):
+        assert Agently.action.tool_manager is not None
+    with pytest.warns(DeprecationWarning):
+        assert Agently.action.action_manager is not None
+
+
+def test_tool_manager_plugin_registration_warns():
+    from agently.builtins.plugins.ToolManager.AgentlyToolManager import AgentlyToolManager
+    from agently.core import PluginManager
+    from agently.utils import Settings
+
+    settings = Settings(name="DeprecatedToolManagerSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="DeprecatedToolManagerPluginManager")
+
+    with pytest.warns(DeprecationWarning):
+        plugin_manager.register("ToolManager", AgentlyToolManager)
+
+
+def test_action_plugin_protocols_exported_for_third_party_plugins():
+    from agently.types.plugins import (
+        ActionExecutionHandler,
+        ActionExecutor,
+        ActionFlow,
+        ActionPlanningHandler,
+        ActionRuntime,
+        StandardActionExecutionHandler,
+        StandardActionPlanningHandler,
+    )
+
+    assert ActionExecutor is not None
+    assert ActionRuntime is not None
+    assert ActionFlow is not None
+    assert ActionPlanningHandler is not None
+    assert ActionExecutionHandler is not None
+    assert StandardActionPlanningHandler is not None
+    assert StandardActionExecutionHandler is not None
+
+
 def test_agently_load_settings_file(tmp_path, monkeypatch):
     config_path = tmp_path / "settings.yaml"
     env_path = tmp_path / ".env"

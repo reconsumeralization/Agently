@@ -1,7 +1,0 @@
-{
-  "typeCheckingMode": "basic",
-  "extraPaths": [
-    "../Agently-Devtools/packages/python"
-  ],
-  "reportMissingImports": false
-}

@@ -281,15 +281,11 @@ async def test_tool_runtime_uses_action_runs_under_request_scope():
         )
 
         async def fake_plan_handler(
-            _prompt,
-            _settings,
-            _tool_list,
-            _done_plans,
-            _last_round_records,
-            round_index,
-            _max_rounds,
-            _agent_name,
+            context,
+            request,
         ):
+            _ = request
+            round_index = context.get("round_index", 0)
             if round_index == 0:
                 return {
                     "next_action": "execute",
@@ -308,14 +304,11 @@ async def test_tool_runtime_uses_action_runs_under_request_scope():
             }
 
         async def fake_execution_handler(
-            tool_commands,
-            _settings,
-            _async_call_tool,
-            _done_plans,
-            _round_index,
-            _concurrency,
-            _agent_name,
+            context,
+            request,
         ):
+            _ = context
+            tool_commands = request.get("action_calls", [])
             return [
                 {
                     "purpose": str(tool_commands[0].get("purpose", "unknown")),
