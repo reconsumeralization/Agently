@@ -186,8 +186,9 @@ for event in flow.get_runtime_stream("start", timeout=None):
 ## 参考入口
 - Auto Loop：`examples/step_by_step/12-auto_loop.py`
 - Streaming：`examples/step_by_step/06-streaming.py`
-- Actions：`examples/step_by_step/07-tools.py`
+- Actions：`examples/action_runtime/README.md`
+- 已归档旧示例：`examples/archived/README.md`
 - TriggerFlow 系列：`examples/step_by_step/11-triggerflow-01_basics.py`
-- FastAPI 服务：`examples/step_by_step/13-auto_loop_fastapi/`
+- FastAPI 服务：`examples/step_by_step/auto_loop_fastapi/`
 - 访谈示例：`examples/ai_coding_using_Agently/preorder_interview_reset_form.py`
 - AI 编码指南：`examples/ai_coding_using_Agently/ai_coding_guide_with_agently.md`

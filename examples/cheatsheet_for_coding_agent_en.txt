@@ -187,8 +187,9 @@ Use two output fields: one for user-facing content, one for app actions.
 ## Pointers
 - Auto Loop: `examples/step_by_step/12-auto_loop.py`
 - Streaming: `examples/step_by_step/06-streaming.py`
-- Actions: `examples/step_by_step/07-tools.py`
+- Actions: `examples/action_runtime/README.md`
+- Archived legacy examples: `examples/archived/README.md`
 - TriggerFlow series: `examples/step_by_step/11-triggerflow-01_basics.py`
-- FastAPI Service: `examples/step_by_step/13-auto_loop_fastapi/`
+- FastAPI Service: `examples/step_by_step/auto_loop_fastapi/`
 - Interview example: `examples/ai_coding_using_Agently/preorder_interview_reset_form.py`
 - AI coding guide: `examples/ai_coding_using_Agently/ai_coding_guide_with_agently.md`
