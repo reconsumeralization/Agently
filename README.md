@@ -1,10 +1,10 @@
 <img width="640" alt="image" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4 🚀
+# Agently 4.1 — AI Application Development Framework
 
-> **Build production‑grade AI apps faster, with stable outputs and maintainable workflows.**
+> **Build production-grade AI applications with stable outputs, composable agents, observable actions, and testable workflows.**
 
-[English Introduction](https://github.com/AgentEra/Agently/blob/main/README.md) | [中文介绍](https://github.com/AgentEra/Agently/blob/main/README_CN.md)
+[English](https://github.com/AgentEra/Agently/blob/main/README.md) | [中文介绍](https://github.com/AgentEra/Agently/blob/main/README_CN.md)
 
 [![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/AgentEra/Agently/blob/main/LICENSE)
 [![PyPI version](https://img.shields.io/pypi/v/agently.svg)](https://pypi.org/project/agently/)
@@ -24,349 +24,625 @@
 ---
 
 <p align="center">
-  <b>🔥 <a href="https://agently.tech/docs">Latest Docs</a> | 🚀 <a href="#quickstart">5‑minute Quickstart</a> | 💡 <a href="#-core-features">Core Features</a></b>
+  <b>🔥 <a href="https://agently.tech/docs">Docs</a> · 🚀 <a href="#quickstart">Quickstart</a> · 🏗️ <a href="#architecture">Architecture</a> · 💡 <a href="#core-capabilities">Capabilities</a> · 🧩 <a href="#ecosystem">Ecosystem</a></b>
 </p>
 
 ---
 
-## Official Skills
+## Why Agently?
 
-Official installable Agently skills are now published at:
+LangChain, CrewAI, and AutoGen each solve a real problem — but they optimize for exploration, not delivery. Teams that ship AI-powered products into production consistently run into the same walls:
 
-- GitHub: https://github.com/AgentEra/Agently-Skills
-- Install: `npx skills add AgentEra/Agently-Skills`
+| Framework | What it's great at | Where production teams hit walls |
+|:--|:--|:--|
+| LangChain | Ecosystem breadth, quick prototypes | Untyped outputs, chains hard to unit-test, state management complexity |
+| CrewAI | Role-based agent teams, natural language coordination | Black-box routing, limited observability, hard to debug failures |
+| AutoGen | Conversational multi-agent, research exploration | Unpredictable loops, no built-in state persistence, hard to deploy deterministically |
+| **Agently** | **Engineering-grade AI applications** | Contract-first outputs · testable/pausable/serializable TriggerFlow · full action logs · project-scale config management |
 
-What you get after installing:
+Agently is designed from the start for the gap between "works in a notebook" and "runs reliably in production":
 
-- Better implementation routing for real Agently work, from single-request design to TriggerFlow, multi-agent, MCP, tools, session, and FastAPI integration
-- Ready-to-use skill guidance for common production tasks instead of re-explaining framework concepts in every coding session
-- Migration playbooks for LangChain and LangGraph, so existing agent systems can be translated into Agently faster
-- A higher-quality coding-agent experience, because the skills package gives the agent concrete Agently patterns, boundaries, and recommended implementation paths
+- **Stable outputs** — contract-first schema with mandatory field enforcement and automatic retries
+- **Testable orchestration** — every TriggerFlow branch is a plain Python function, independently unit-testable
+- **Observable actions** — every tool/MCP/sandbox call is logged with input, output, and timing
+- **Pause, resume, persist** — TriggerFlow executions can be saved to disk and restored after process restart
+- **Project-scale config** — hierarchical YAML/TOML/JSON settings files, env-variable substitution, and scaffolding via `agently-devtools init`
+
+**Agently 4.1 adds a fully rewritten Action Runtime**: a three-layer extensible plugin stack (planning → loop → execution) with native support for local functions, MCP servers, Python/Bash sandboxes, and custom backends.
 
 ---
 
-## 📚 Quick Links
+## Architecture
 
-- **Docs (EN)**: https://agently.tech/docs
-- **Docs (中文)**: https://agently.cn/docs
-- **Agent Systems Playbook (EN)**: https://agently.tech/docs/en/agent-systems/overview.html
-- **Agent Systems Playbook (中文)**: https://agently.cn/docs/agent-systems/overview.html
-- **Official Agently Skills**: https://github.com/AgentEra/Agently-Skills
-- **Install Agently Skills**: `npx skills add AgentEra/Agently-Skills`
+### Layer Model
 
-## Optional Companion Package: Agently Devtools
+Agently organizes every AI application into four clear layers. Each layer has a stable interface — replaceable, extendable, and independently testable.
 
-`agently-devtools` is a separate companion package for runtime observation and developer tooling.
+```mermaid
+graph TB
+    subgraph APP["Your Application"]
+        UserCode["Application / Business Logic"]
+    end
 
-- Install: `pip install agently-devtools`
-- Dependency direction: `agently-devtools -> agently`
-- Compatibility line: `agently-devtools 0.1.x` targets `agently >=4.1.0,<4.2.0`
-- Integration entrypoints: `ObservationBridge` and `create_local_observation_app`
-- Main-repo examples: `examples/devtools/`
+    subgraph GLOBAL["Agently Global"]
+        Global["Global Settings  ·  Plugin Manager  ·  Default Model Config"]
+    end
 
-The DevTools package is optional and does not add a reverse dependency from `agently` back to `agently-devtools`.
+    subgraph AGENT["Agent Layer"]
+        direction TB
+        AgentInst["Agent Instance"]
+        subgraph AGENT_INNER["Per-Agent Components"]
+            Prompt["Prompt\ninput · instruct · info · output"]
+            Session["Session\nmulti-turn memory · memo · persistence"]
+            Action["Action\nplanning · dispatch · logs"]
+            Settings2["Hierarchical Settings\n(inherits from global)"]
+        end
+    end
 
-## 🤔 Why Agently?
+    subgraph MODEL["Model Layer"]
+        ModelReq["Model Request\nbuilt from prompt slots + settings"]
+        ModelResp["Model Response\nstructured · streaming · instant events"]
+    end
 
-Many GenAI POCs fail in production not because models are weak, but because **engineering control is missing**:
+    subgraph WORKFLOW["Workflow Orchestration"]
+        TF["TriggerFlow\nto · if/elif/else · match/case · batch · for_each · when · emit · pause/resume · persist"]
+    end
 
-| Common challenge | How Agently helps |
-|:--|:--|
-| Output schema drifts, JSON parsing fails | **Contract‑first output control** with `output()` + `ensure_keys` |
-| Workflows get complex and hard to maintain | **TriggerFlow orchestration** with `to` / `if` / `match` / `batch` / `for_each` |
-| Multi‑turn state becomes unstable | **Session (v4.0.8.1+)** with session activation, context window control, custom memo strategy, and persistence |
-| Tool calls are hard to audit | **Tool logs** via `extra.tool_logs` |
-| Switching models is expensive | **OpenAICompatible** unified model settings |
+    subgraph LLMS["LLM APIs"]
+        LLMAPIs["OpenAI · DeepSeek · Claude · Qwen · Ollama · any OpenAI-compatible endpoint"]
+    end
 
-**Agently turns LLM uncertainty into a stable, testable, maintainable engineering system.**
+    UserCode -->|"configure & create"| Global
+    Global -->|"inherited settings"| AgentInst
+    AgentInst --- AGENT_INNER
+    AgentInst -->|"build & send"| ModelReq
+    ModelReq -->|"HTTP"| LLMAPIs
+    LLMAPIs -->|"response stream"| ModelResp
+    UserCode -->|"orchestrate"| TF
+    TF -->|"trigger agent steps"| AgentInst
+```
 
-## ✨ Core Features
+### Action Runtime (v4.1)
 
-### 1) 📝 Contract‑first Output Control
-Define the structure with `output()`, enforce critical keys with `ensure_keys`.
+Three independently replaceable layers — swap only what you need.
+
+```mermaid
+graph LR
+    subgraph AGENT2["Agent"]
+        AExt["ActionExtension\nprepares visible actions & logs"]
+    end
+
+    subgraph RUNTIME["Action Runtime (replaceable)"]
+        AR["ActionRuntime Plugin\nAgentlyActionRuntime\n\nplanning protocol · call normalization · round control"]
+        AF["ActionFlow Plugin\nTriggerFlowActionFlow\n\naction loop · pause/resume · concurrency"]
+    end
+
+    subgraph EXECUTORS["ActionExecutor (replaceable)"]
+        E1["LocalFunctionExecutor\n@action_func / @tool_func"]
+        E2["MCPExecutor\nstdio · http"]
+        E3["PythonSandboxExecutor"]
+        E4["BashSandboxExecutor"]
+        E5["Custom Plugin"]
+    end
+
+    AExt -->|"delegate planning"| AR
+    AR -->|"run action loop"| AF
+    AF -->|"dispatch call"| E1
+    AF -->|"dispatch call"| E2
+    AF -->|"dispatch call"| E3
+    AF -->|"dispatch call"| E4
+    AF -->|"dispatch call"| E5
+```
+
+---
+
+## Core Capabilities
+
+### 1. Contract-First Output Control
+
+Define the schema once. Agently enforces it on every call, with automatic retries when critical fields are missing.
 
 ```python
 result = (
     agent
-    .input("Analyze user feedback")
+    .input("Analyze this review: 'Great product, but slow shipping.'")
     .output({
-        "sentiment": (str, "positive/neutral/negative"),
+        "sentiment": (str, "positive / neutral / negative"),
         "key_issues": [(str, "issue summary")],
-        "priority": (int, "1-5, 5 is highest")
+        "priority": (int, "1–5, 5 is most urgent"),
     })
     .start(ensure_keys=["sentiment", "key_issues[*]"])
 )
+# Always a dict — "sentiment" and every "key_issues" item guaranteed present
 ```
 
-### 2) ⚡ Structured Streaming (Instant)
-Consume structured fields as they are generated.
+### 2. Structured Streaming — Instant Events
+
+Each output field streams independently. Drive UI updates or downstream logic as fields complete, not after the whole response.
 
 ```python
 response = (
     agent
-    .input("Explain recursion and give 2 tips")
-    .output({"definition": (str, "one sentence"), "tips": [(str, "tip")]})
+    .input("Explain recursion with 3 examples")
+    .output({
+        "definition": (str, "one-sentence definition"),
+        "examples": [(str, "code example with explanation")],
+    })
     .get_response()
 )
 
-for msg in response.get_generator(type="instant"):
-    if msg.path == "definition" and msg.delta:
-        ui.update_definition(msg.delta)
-    if msg.wildcard_path == "tips[*]" and msg.delta:
-        ui.add_tip(msg.delta)
+for event in response.get_generator(type="instant"):
+    if event.path == "definition" and event.delta:
+        ui.update_header(event.delta)             # stream definition character by character
+    if event.wildcard_path == "examples[*]" and event.is_complete:
+        ui.append_example(event.value)            # append each complete example
 ```
 
-### 3) 🧩 TriggerFlow Orchestration
-Readable, testable workflows with branching and concurrency.
+### 3. Action Runtime — Functions, MCP, Sandboxes (v4.1)
+
+Mount any combination. The runtime handles planning, execution, retries, and full structured logs.
 
 ```python
+@agent.action_func
+def search_docs(query: str) -> str:
+    """Search internal documentation."""
+    return docs_db.search(query)
+
+agent.use_mcp("docs-server", transport="stdio", command=["python", "mcp_server.py"])
+agent.use_sandbox("python")                          # isolated Python execution
+
+agent.use_actions([search_docs, "docs-server", "python"])
+
+response = agent.input("Find auth docs and show a login code example.").get_response()
+
+# Every call: what was invoked, with what args, what it returned
+print(response.result.full_result_data["extra"]["action_logs"])
+```
+
+Legacy `tool` APIs (`@agent.tool_func`, `agent.use_tool()`) continue to work and map to the same runtime.
+
+### 4. TriggerFlow — Serious Workflow Orchestration
+
+TriggerFlow goes well beyond chaining functions. It's a full workflow engine with concurrency, event-driven branching, human-in-the-loop interrupts, and execution persistence.
+
+**Concurrency — `batch` and `for_each`**
+
+Run steps in parallel with a configurable concurrency limit:
+
+```python
+# Process a list of URLs, max 5 in parallel
 (
-    flow.to(handle_request)
-    .if_condition(lambda d: d.value["type"] == "query")
-    .to(handle_query)
-    .elif_condition(lambda d: d.value["type"] == "order")
-    .to(check_inventory)
-    .to(create_order)
-    .end_condition()
+    flow.for_each(url_list, concurrency=5)
+    .to(fetch_page)
+    .to(summarize)
+    .end()
+)
+
+# Fan out to N fixed branches simultaneously
+flow.batch(3).to(strategy_a).collect("results", "a")
+flow.batch(3).to(strategy_b).collect("results", "b")
+flow.batch(3).to(strategy_c).collect("results", "c")
+```
+
+**Event-driven — `when` and `emit`**
+
+Branch on signals, chunk completions, or data changes — not just linear sequence:
+
+```python
+flow.when("UserInput").to(process_input).to(plan_next_step)
+flow.when("ToolResult").to(evaluate_result)
+flow.when({"runtime_data": "user_decision"}).to(apply_decision)
+
+# Emit from inside a chunk to trigger other branches
+async def plan_next_step(data: TriggerFlowEventData):
+    if needs_tool:
+        await data.async_emit("ToolCall", tool_args)
+    else:
+        await data.async_emit("UserInput", final_reply)
+```
+
+**Pause, Resume, and Persistence**
+
+Save execution state to disk, restore it after a process restart — critical for long-running or human-in-the-loop workflows:
+
+```python
+# Start execution, save checkpoint immediately
+execution = flow.start_execution(initial_input, wait_for_result=False)
+execution.save("checkpoint.json")
+
+# Later — new process, restored state, continue from where it paused
+restored = flow.create_execution()
+restored.load("checkpoint.json")
+restored.emit("UserFeedback", {"approved": True, "note": "Looks good."})
+result = restored.get_result(timeout=30)
+```
+
+This makes Agently workflows genuinely restart-safe — suitable for approval gates, multi-day pipelines, and human review loops.
+
+**Blueprint Serialization**
+
+The flow topology itself can be exported to JSON/YAML and reloaded, enabling dynamic workflow definitions and versioned flow configurations:
+
+```python
+flow.get_yaml_flow(save_to="flows/main_flow.yaml")
+# later
+flow.load_flow_config("flows/main_flow.yaml")
+```
+
+### 5. Session — Multi-Turn Memory
+
+Activate a session by ID. Agently maintains chat history, applies window trimming, supports custom memo strategies, and persists state to JSON/YAML.
+
+```python
+agent.activate_session(session_id="user-42")
+agent.set_settings("session.max_length", 10000)
+
+session = agent.activated_session
+session.register_analysis_handler(decide_when_to_summarize)
+session.register_resize_handler("summarize_oldest", summarize_handler)
+
+reply1 = agent.input("My name is Alice.").start()
+reply2 = agent.input("What's my name?").start()   # correctly returns "Alice"
+```
+
+### 6. Project-Scale Configuration Management
+
+Real AI projects involve multiple agents, multiple prompt templates, and multiple environments. Agently's hierarchical settings system supports YAML/JSON/TOML config files at every layer, with `${ENV.VAR}` substitution and layered inheritance.
+
+**Recommended project structure:**
+
+```
+my_ai_project/
+├── .env                          # API keys and secrets
+├── config/
+│   ├── global.yaml               # global model + runtime settings
+│   └── agents/
+│       ├── researcher.yaml       # per-agent model overrides
+│       └── writer.yaml
+├── prompts/
+│   ├── researcher_role.yaml      # reusable prompt templates
+│   └── writer_role.yaml
+├── flows/
+│   ├── main_flow.py              # TriggerFlow definitions
+│   └── main_flow.yaml            # serialized flow blueprint (optional)
+├── agents/
+│   ├── researcher.py
+│   └── writer.py
+└── main.py
+```
+
+**Config hierarchy — each layer inherits and overrides:**
+
+```mermaid
+graph LR
+    A["global.yaml\n(model, runtime defaults)"]
+    B["agents/researcher.yaml\n(per-agent model overrides)"]
+    C["agent.set_settings(...)\n(per-request overrides)"]
+
+    A -->|"inherited by"| B
+    B -->|"inherited by"| C
+```
+
+```python
+# global.yaml loaded once at startup
+Agently.load_settings("yaml", "config/global.yaml", auto_load_env=True)
+
+# each agent loads its own overrides
+researcher = Agently.create_agent()
+researcher.load_settings("yaml", "config/agents/researcher.yaml")
+
+# request-level override if needed
+researcher.set_settings("OpenAICompatible.request_options", {"temperature": 0.2})
+```
+
+**Scaffold a new project instantly:**
+
+```bash
+pip install agently-devtools
+agently-devtools init my_project
+```
+
+See real-world project examples:
+- [Agently-Daily-News-Collector](https://github.com/AgentEra/Agently-Daily-News-Collector) — scheduled multi-source news pipeline
+- [Agently-Talk-to-Control](https://github.com/AgentEra/Agently-Talk-to-Control) — conversational control flow with TriggerFlow
+
+### 7. Layered Prompt Management
+
+Prompts are structured slots, not raw strings. Each slot has a role: `input` (the task), `instruct` (constraints), `info` (context data), `output` (schema). Agent-level slots persist across requests; request-level slots apply once.
+
+```python
+agent.role("You are a senior Python code reviewer.")   # always present
+
+result = (
+    agent
+    .input(user_code)
+    .instruct("Focus on security and performance.")
+    .info({"context": "Public-facing API handler", "framework": "FastAPI"})
+    .output({"issues": [(str, "issue description")], "score": (int, "0–100")})
+    .start()
 )
 ```
 
-### 4) 🧠 Session (Multi‑turn Context, v4.0.8.1+)
-Built-in `SessionExtension` with `activate_session/deactivate_session`, context window control, custom memo strategies, and JSON/YAML persistence.
+Prompt templates can be loaded from YAML/JSON files via the `configure_prompt` extension for team-level prompt governance.
+
+### 8. Unified Model Settings
+
+One config object, any provider, no vendor lock-in.
 
 ```python
-from agently import Agently
-
-agent = Agently.create_agent()
-
-# Activate per-user session (reused by session_id)
-agent.activate_session(session_id="demo_user_1001")
-
-# Optional: default window trimming by max length
-agent.set_settings("session.max_length", 12000)
-
-# Optional: custom strategy (analysis -> resize)
-session = agent.activated_session
-assert session is not None
-
-def analysis_handler(full_context, context_window, memo, session_settings):
-    if len(context_window) > 6:
-        return "keep_last_six"
-    return None
-
-def keep_last_six(full_context, context_window, memo, session_settings):
-    return None, list(context_window[-6:]), memo
-
-session.register_analysis_handler(analysis_handler)
-session.register_resize_handler("keep_last_six", keep_last_six)
-```
-
-### 5) 🔧 Tool Calls + Logs
-Tool selection and usage are logged in `extra.tool_logs`.
-
-```python
-@agent.tool_func
-def add(a: int, b: int) -> int:
-    return a + b
-
-response = agent.input("12+34=?").use_tool(add).get_response()
-full = response.get_data(type="all")
-print(full["extra"]["tool_logs"])
-```
-
-### 6) 🌐 Unified Model Settings (OpenAICompatible)
-One config for multiple providers and local models.
-
-```python
-from agently import Agently
-
 Agently.set_settings(
     "OpenAICompatible",
     {
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat",
-        "auth": "DEEPSEEK_API_KEY",
+        "auth": "DEEPSEEK_API_KEY",   # reads from env automatically
     },
 )
+# Change base_url + model to switch providers — business code unchanged
 ```
 
-## 🚀 Quickstart
+Supported: OpenAI · DeepSeek · Anthropic Claude (via proxy) · Qwen · Mistral · Llama · local Ollama · any OpenAI-compatible endpoint.
 
-### Install
+---
+
+## Quickstart
 
 ```bash
 pip install -U agently
 ```
 
-*Requirements: Python >= 3.10, recommended Agently >= 4.0.7.2*
-
-### 5‑minute example
-
-**1. Structured output**
+*Python ≥ 3.10 required.*
 
 ```python
 from agently import Agently
 
+Agently.set_settings("OpenAICompatible", {
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "auth": "DEEPSEEK_API_KEY",
+})
+
 agent = Agently.create_agent()
 
 result = (
-    agent.input("Introduce Python in one sentence and list 2 advantages")
+    agent.input("Introduce Python in one sentence and list 3 strengths")
     .output({
-        "introduction": (str, "one sentence"),
-        "advantages": [(str, "advantage")]
+        "intro": (str, "one sentence"),
+        "strengths": [(str, "strength")],
     })
-    .start(ensure_keys=["introduction", "advantages[*]"])
+    .start(ensure_keys=["intro", "strengths[*]"])
 )
 
 print(result)
+# {"intro": "Python is ...", "strengths": ["...", "...", "..."]}
 ```
 
-**2. Workflow routing**
+---
+
+## Ecosystem
+
+### Agently Skills — Coding Agent Extensions
+
+Official Agently Skills give AI coding assistants (Claude Code, Cursor, etc.) the knowledge to implement Agently patterns correctly, without re-explaining the framework each session.
+
+- **Repo:** https://github.com/AgentEra/Agently-Skills
+- **Install:** `npx skills add AgentEra/Agently-Skills`
+
+Covers: single-request design · TriggerFlow orchestration · multi-agent · MCP · Session · FastAPI integration · LangChain/LangGraph migration playbooks.
+
+### Agently DevTools — Runtime Observation & Scaffolding
+
+`agently-devtools` is an optional companion package for runtime inspection and project scaffolding.
+
+```bash
+pip install agently-devtools
+agently-devtools init my_project    # scaffold a new Agently project
+```
+
+- Runtime observation: `ObservationBridge`, `create_local_observation_app`
+- Examples: `examples/devtools/`
+- Compatibility: `agently-devtools 0.1.x` targets `agently >=4.1.0,<4.2.0`
+
+### Integrations
+
+| Integration | What it enables |
+|:--|:--|
+| `agently.integrations.chromadb` | `ChromaCollection` — RAG knowledge base with embedding agent |
+| `agently.integrations.fastapi` | SSE streaming, WebSocket, and standard POST endpoint patterns |
+
+---
+
+## Extensibility — Customize at Every Layer
+
+Agently is designed to be extended at multiple independent levels. You don't have to fork the framework to change how it behaves — every major component is a replaceable plugin, hook, or registered handler.
+
+```mermaid
+graph TB
+    subgraph USER["Your Application"]
+        App["Business Logic  ·  TriggerFlow Orchestration"]
+    end
+
+    subgraph AGENT_EXT["Agent Extension Layer"]
+        AE["Built-in Extensions\nSession · Action · AutoFunc · ConfigurePrompt · KeyWaiter · StreamingPrint"]
+        AEC["Custom Agent Extension\nregister your own lifecycle hooks\nand agent-level capabilities"]
+    end
+
+    subgraph HOOKS["Request Lifecycle Hooks"]
+        H1["request_prefixes\nmodify Prompt + Settings before request"]
+        H2["broadcast_prefixes\nreact when response starts"]
+        H3["broadcast_suffixes\nreact per streaming event"]
+        H4["finally\nrun after response completes"]
+    end
+
+    subgraph CORE_PIPELINE["Core Pipeline Plugins (replaceable)"]
+        PG["PromptGenerator\ncontrols how slots are assembled into the final prompt"]
+        MR["ModelRequester\nOpenAICompatible (default) · custom provider"]
+        RP["ResponseParser\ncontrols how raw model output is parsed"]
+    end
+
+    subgraph ACTION_STACK["Action Runtime Plugins (replaceable)"]
+        AR["ActionRuntime\nplanning protocol · round control"]
+        AF["ActionFlow\nloop shape · pause/resume · concurrency"]
+        AX["ActionExecutor\nLocalFunction · MCP · PythonSandbox · BashSandbox · Custom"]
+    end
+
+    subgraph TF_EXT["TriggerFlow Extensions"]
+        TC["Custom Chunk Handlers\n@flow.chunk or register_chunk_handler"]
+        TCC["Custom Condition Handlers\nregister_condition_handler"]
+    end
+
+    subgraph HOOKERS["Runtime Event Hookers"]
+        RH["ConsoleSink · StorageSink · ChannelSink · Custom\nattach to any runtime event stream"]
+    end
+
+    App --> AGENT_EXT
+    AGENT_EXT --> HOOKS
+    HOOKS --> CORE_PIPELINE
+    CORE_PIPELINE --> ACTION_STACK
+    App --> TF_EXT
+    CORE_PIPELINE -.->|"emit runtime events"| HOOKERS
+    ACTION_STACK -.->|"emit runtime events"| HOOKERS
+```
+
+### Extension Points at a Glance
+
+| Layer | Extension type | What you can customize |
+|:--|:--|:--|
+| **Agent Extensions** | Register a custom extension class | Add new capabilities to every agent: new prompt slots, new response hooks, new lifecycle behavior |
+| **Request lifecycle hooks** | `request_prefixes` / `broadcast_prefixes` / `broadcast_suffixes` / `finally` | Intercept and modify requests, responses, or streaming events at each stage |
+| **PromptGenerator** (plugin) | Replace the built-in plugin | Control exactly how prompt slots are assembled into the final message list sent to the model |
+| **ModelRequester** (plugin) | Register a new provider class | Add any non-OpenAI-compatible model API — the interface contract stays the same |
+| **ResponseParser** (plugin) | Replace the built-in plugin | Change how raw model output is parsed into structured data and streaming events |
+| **ActionRuntime** (plugin) | Replace `AgentlyActionRuntime` | Change planning protocol, call normalization, or round-limit logic |
+| **ActionFlow** (plugin) | Replace `TriggerFlowActionFlow` | Change how the action loop is orchestrated — different concurrency, pause/resume, or branching |
+| **ActionExecutor** (plugin) | Register alongside or replace builtins | Add a new execution backend: cloud functions, RPC, custom sandboxes |
+| **TriggerFlow chunks** | `@flow.chunk` / `register_chunk_handler` | Any Python function or coroutine becomes a composable flow step |
+| **TriggerFlow conditions** | `register_condition_handler` | Custom routing logic between branches |
+| **Runtime hookers** | Implement and register a hooker | Attach to the runtime event stream for observability, storage, or channel forwarding |
+
+### Example: Registering a Custom ActionExecutor
 
 ```python
-from agently import TriggerFlow, TriggerFlowEventData
+from agently.types.plugins import ActionExecutor, ActionRunContext, ActionExecutionRequest, ActionResult
 
-flow = TriggerFlow()
+class MyCloudExecutor:
+    name = "my-cloud-executor"
+    DEFAULT_SETTINGS = {}
 
-@flow.chunk
-def classify_intent(data: TriggerFlowEventData):
-    text = data.value
-    if "price" in text:
-        return "price_query"
-    if "feature" in text:
-        return "feature_query"
-    if "buy" in text:
-        return "purchase"
-    return "other"
+    async def execute(
+        self,
+        context: ActionRunContext,
+        request: ActionExecutionRequest,
+    ) -> list[ActionResult]:
+        # call your cloud function / RPC / custom backend
+        ...
 
-@flow.chunk
-def handle_price(_: TriggerFlowEventData):
-    return {"response": "Pricing depends on the plan..."}
-
-@flow.chunk
-def handle_feature(_: TriggerFlowEventData):
-    return {"response": "Our product supports..."}
-
-(
-    flow.to(classify_intent)
-    .match()
-    .case("price_query")
-    .to(handle_price)
-    .case("feature_query")
-    .to(handle_feature)
-    .case_else()
-    .to(lambda d: {"response": "What would you like to know?"})
-    .end_match()
-    .end()
-)
-
-print(flow.start("How much does it cost?"))
+Agently.plugin_manager.register("ActionExecutor", MyCloudExecutor)
 ```
 
-## ✅ Is Your App Production‑Ready? — Release Readiness Checklist
+### Example: Adding a Request Lifecycle Hook
 
-Based on teams shipping real projects with Agently, this **production readiness checklist** helps reduce common risks before release.
+```python
+agent = Agently.create_agent()
 
-| Area | Check | Recommended Practice |
-| :--- | :--- | :--- |
-| **📝 Output Stability** | Are key interfaces stable? | Define schemas with `output()` and lock critical fields with `ensure_keys`. |
-| **⚡ Real‑time UX** | Need updates while generating? | Consume `type="instant"` structured streaming events. |
-| **🔍 Observability** | Tool calls auditable? | Inspect `extra.tool_logs` for full arguments and results. |
-| **🧩 Workflow Robustness** | Complex flows fully tested? | Unit test each TriggerFlow branch and concurrency limit with expected outputs. |
-| **🧠 Memory & Context** | Multi‑turn experience consistent? | Define Session/Memo summary, trimming, and persistence policies. |
-| **📄 Prompt Management** | Can logic evolve safely? | Version and configure prompts to keep changes traceable. |
-| **🌐 Model Strategy** | Can you switch or downgrade models? | Centralize settings with `OpenAICompatible` for fast provider switching. |
-| **🚀 Performance & Scale** | Can it handle concurrency? | Validate async performance in real web‑service scenarios. |
-| **🧪 Quality Assurance** | Regression tests complete? | Create fixed inputs with expected outputs for core scenarios. |
+# Inject context into every request this agent makes
+def inject_tenant_context(prompt, settings):
+    prompt.info({"tenant_id": get_current_tenant()})
 
+agent.extension_handlers.append("request_prefixes", inject_tenant_context)
+```
 
-## 📈 Who Uses Agently to Solve Real Problems?
+---
 
-> "Agently helped us turn evaluation rules into executable workflows and keep key scoring accuracy at 75%+, significantly improving bid‑evaluation efficiency." — Project lead at a large energy SOE
+## Agently and the "Harness" Concept
 
-> "Agently enabled a closed loop from clarification to query planning to rendering, reaching 90%+ first‑response accuracy and stable production performance." — Data lead at a large energy group
+The term **AI application harness** describes a layer that wraps LLM calls with engineering controls — stable interfaces, observable internals, pluggable components. It's an architectural quality, not a product category.
 
-> "Agently’s orchestration and session capabilities let us ship a teaching assistant for course management and Q&A quickly, with continuous iteration." — Project lead at a university teaching‑assistant initiative
+Agently is a **development framework**, but it's designed to satisfy exactly those properties:
 
-**Your project can be next.**  
+| Harness property | How Agently delivers it |
+|:--|:--|
+| **Stable output interfaces** | `output()` + `ensure_keys` guarantee field presence regardless of model variation |
+| **Observable internals** | `action_logs`, `tool_logs`, DevTools `ObservationBridge`, per-layer structured logs |
+| **Pluggable runtime layers** | ActionRuntime, ActionFlow, and ActionExecutor are independent plugin slots |
+| **Separation of concerns** | Prompt slots, settings hierarchy, Session, and TriggerFlow are distinct composable layers |
+| **Testability** | Each TriggerFlow chunk is a plain function; structured outputs have fixed schemas to assert against |
+
+These properties are a consequence of Agently's design philosophy — what you get when you structure an AI application the Agently way.
+
+---
+
+## Who Uses Agently?
+
+> "Agently helped us turn evaluation rules into executable workflows and keep key scoring accuracy at 75%+, significantly improving bid-evaluation efficiency." — Project lead at a large energy SOE
+
+> "Agently enabled a closed loop from clarification to query planning to rendering, reaching 90%+ first-response accuracy and stable production performance." — Data lead at a large energy group
+
+> "Agently's orchestration and session capabilities let us ship a teaching assistant for course management and Q&A quickly, with continuous iteration." — Project lead at a university teaching-assistant initiative
+
 📢 [Share your case on GitHub Discussions →](https://github.com/AgentEra/Agently/discussions/categories/show-and-tell)
-## ❓ FAQ
 
-**Q: How is Agently different from LangChain or LlamaIndex?**  
-**A:** Agently is **built for production**. It focuses on stable interfaces (contract‑first outputs), readable/testable orchestration (TriggerFlow), and observable tool calls (`tool_logs`). It’s a better fit for teams that need reliability and maintainability after launch.
+---
 
-**Q: Which models are supported? Is switching expensive?**  
-**A:** With `OpenAICompatible`, you can connect OpenAI, Claude, DeepSeek, Qwen and most OpenAI‑compatible endpoints, plus local models like Llama/Qwen. **The same business code can switch models without rewrites**, reducing vendor lock‑in.
+## FAQ
 
-**Q: What’s the learning curve? Where should I start?**  
-**A:** The core API is straightforward—**you can run your first agent in minutes**. Start with [Quickstart](https://agently.tech/docs/en/quickstart.html), then dive into [Output Control](https://agently.tech/docs/en/output-control/overview.html) and [TriggerFlow](https://agently.tech/docs/en/triggerflow/overview.html).
+**Q: What makes Agently different from LangChain?**
+LangChain is excellent for prototyping and has a broad ecosystem. Agently is optimized for the post-prototype phase: contract-first outputs prevent interface drift, TriggerFlow branches are individually unit-testable, and the project-scale config system supports real engineering workflows. If you've shipped with LangChain and hit maintainability walls, Agently is built for exactly that.
 
-**Q: How do I deploy an Agently‑based service?**  
-**A:** Agently doesn’t lock you into a specific deployment path. It provides async APIs and FastAPI examples. The [FastAPI integration example](https://github.com/AgentEra/Agently/tree/main/examples/step_by_step/13-auto_loop_fastapi) covers SSE, WebSocket, and standard POST.
+**Q: How is Agently different from CrewAI or AutoGen?**
+CrewAI and AutoGen are designed around agent teams with natural-language coordination — great for exploration, hard to make deterministic. Agently uses explicit code-based orchestration (TriggerFlow) where every branch is a Python function with clear inputs and outputs, every action call is logged, and executions can be paused, serialized, and resumed — properties that matter when you're shipping to users.
 
-**Q: Do you offer enterprise support?**  
-**A:** Yes. The core framework in this repository remains open‑source under **Apache 2.0**. Enterprise support, private extensions, managed services, and SLA-based collaboration are provided under separate commercial agreements. Contact us via the [community](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf).
+**Q: What is the Action Runtime, and why was it rewritten in v4.1?**
+The old tool system was a single flat layer — enough for simple use cases, but not extensible. The new Action Runtime separates planning ("what to call"), loop orchestration ("how many rounds, with what concurrency"), and execution ("actually run the function/MCP/sandbox"). Each layer is a plugin. You can swap just the sandbox backend without touching the planning logic, or replace just the planning algorithm without changing how loops run.
 
-**Q: What is open-source vs enterprise in Agently?**  
-**A:** The open-source core includes the general framework and public capabilities in this repository. Enterprise offerings (for example private extension packs, advanced governance modules, private deployment support, and SLA services) are delivered separately under commercial terms.
+**Q: How do I deploy an Agently service?**
+Agently doesn't prescribe a deployment model. It provides full async APIs. The `examples/fastapi/` directory covers SSE streaming, WebSocket, and standard POST. See [Agently-Talk-to-Control](https://github.com/AgentEra/Agently-Talk-to-Control) for a complete deployed example.
 
+**Q: Is there enterprise support?**
+Yes. The core framework is open-source under Apache 2.0. Enterprise extensions, private deployment support, governance modules, and SLA-backed collaboration are available under separate commercial agreements. Contact us via the [community](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf).
 
-## 🧭 Docs Guide (Key Paths)
+---
 
-- **Getting Started**
-  - Quickstart: https://agently.tech/docs/en/quickstart.html
-  - Model Settings: https://agently.tech/docs/en/model-settings.html
-  - Official Agently Skills: https://github.com/AgentEra/Agently-Skills
-- **Output Control (Structured Output)**
-  - Overview: https://agently.tech/docs/en/output-control/overview.html
-  - Output Format: https://agently.tech/docs/en/output-control/format.html
-  - ensure_keys: https://agently.tech/docs/en/output-control/ensure-keys.html
-  - Instant Streaming: https://agently.tech/docs/en/output-control/instant-streaming.html
-- **Result & Streaming Events**
-  - Result Data: https://agently.tech/docs/en/model-response/result-data.html
-  - Streaming Events: https://agently.tech/docs/en/model-response/streaming.html
-- **Session & Memo**
-  - Overview: https://agently.tech/docs/en/agent-extensions/session-memo/
-  - Quickstart: https://agently.tech/docs/en/agent-extensions/session-memo/quickstart.html
-- **TriggerFlow Orchestration**
-  - Overview: https://agently.tech/docs/en/triggerflow/overview.html
-  - when Branch: https://agently.tech/docs/en/triggerflow/when-branch.html
-  - if / elif / else: https://agently.tech/docs/en/triggerflow/if-branch.html
-  - match / case: https://agently.tech/docs/en/triggerflow/match-branch.html
-  - batch: https://agently.tech/docs/en/triggerflow/batch.html
-  - for_each: https://agently.tech/docs/en/triggerflow/for-each.html
-  - Runtime Stream: https://agently.tech/docs/en/triggerflow/runtime-stream.html
-- **Tools & Extensions**
-  - Tools: https://agently.tech/docs/en/agent-extensions/tools.html
-  - MCP: https://agently.tech/docs/en/agent-extensions/mcp.html
-  - auto_func: https://agently.tech/docs/en/agent-extensions/auto-func.html
-  - KeyWaiter: https://agently.tech/docs/en/agent-extensions/key-waiter.html
-- **Prompt Management**: https://agently.tech/docs/en/prompt-management/overview.html
-- **Async & Settings**: https://agently.tech/docs/en/async-support.html / https://agently.tech/docs/en/settings.html
-- **Playbook**: https://agently.tech/docs/en/agent-systems/overview.html
+## Docs
 
-## 🤝 Community
+| Resource | Link |
+|:--|:--|
+| Documentation (EN) | https://agently.tech/docs |
+| Documentation (中文) | https://agently.cn/docs |
+| Quickstart | https://agently.tech/docs/en/quickstart.html |
+| Output Control | https://agently.tech/docs/en/output-control/overview.html |
+| Instant Streaming | https://agently.tech/docs/en/output-control/instant-streaming.html |
+| Session & Memo | https://agently.tech/docs/en/agent-extensions/session-memo/ |
+| TriggerFlow | https://agently.tech/docs/en/triggerflow/overview.html |
+| Actions & MCP | https://agently.tech/docs/en/agent-extensions/tools.html |
+| Prompt Management | https://agently.tech/docs/en/prompt-management/overview.html |
+| Agent Systems Playbook | https://agently.tech/docs/en/agent-systems/overview.html |
+| Agently Skills | https://github.com/AgentEra/Agently-Skills |
+
+---
+
+## Community
 
 - Discussions: https://github.com/AgentEra/Agently/discussions
 - Issues: https://github.com/AgentEra/Agently/issues
 - WeChat Group: https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf
 
-## 📄 License
+## License
 
-Agently follows an open-core + commercial extension model:
+Agently follows an open-core model:
 
-- Open-source core in this repository: [Apache 2.0](LICENSE)
+- Open-source core (this repository): [Apache 2.0](LICENSE)
 - Trademark usage policy: [TRADEMARK.md](TRADEMARK.md)
 - Contributor rights agreement: [CLA.md](CLA.md)
-- Enterprise extensions and commercial services: provided under separate commercial agreements
+- Enterprise extensions and services: separate commercial agreements
 
 ---
 
 <p align="center">
-  <b>Start building your production‑ready AI apps →</b><br>
+  <b>Build AI applications that actually ship →</b><br>
   <code>pip install -U agently</code>
 </p>
 
 <p align="center">
-  <sub>Questions? Read the <a href="https://agently.tech/docs">docs</a> or join the <a href="https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf">community</a>.</sub>
+  <sub>Questions? <a href="https://agently.tech/docs">Read the docs</a> or <a href="https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf">join the community</a>.</sub>
 </p>
