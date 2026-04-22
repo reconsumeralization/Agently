@@ -1,10 +1,10 @@
-from agently import TriggerFlow, TriggerFlowBluePrint
+from agently import TriggerFlow, TriggerFlowBlueprint
 
-# You can create an independent blue print
-blue_print = TriggerFlowBluePrint(name="MyBluePrint")
+# You can create an independent blueprint
+blueprint = TriggerFlowBlueprint(name="MyBlueprint")
 
-blue_print.add_event_handler("test", lambda data: print("event:test", data.value))
-blue_print.add_flow_data_handler(
+blueprint.add_event_handler("test", lambda data: print("event:test", data.value))
+blueprint.add_flow_data_handler(
     "test",
     lambda data: print(
         f"execution:{ data.execution_id }",
@@ -13,7 +13,7 @@ blue_print.add_flow_data_handler(
         flush=True,
     ),
 )
-blue_print.add_runtime_data_handler(
+blueprint.add_runtime_data_handler(
     "test",
     lambda data: print(
         f"execution:{ data.execution_id }",
@@ -23,8 +23,8 @@ blue_print.add_runtime_data_handler(
     ),
 )
 
-# load blue print to flow
-flow = TriggerFlow(blue_print=blue_print)
+# load blueprint to flow
+flow = TriggerFlow(blueprint=blueprint)
 
 # create multiple executions
 execution_1 = flow.create_execution()

@@ -17,7 +17,7 @@ async def say_bye(data: TriggerFlowRuntimeData):
 
 flow_1.to(say_hello).to(say_bye).end()
 
-flow_2 = TriggerFlow(blue_print=flow_1.save_blue_print())
+flow_2 = TriggerFlow(blueprint=flow_1.save_blueprint())
 
 flow_2.when(flow_2.chunks["say_bye"]).to(lambda _: print("One more thing only in flow 2!"))
 
