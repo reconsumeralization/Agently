@@ -140,21 +140,24 @@ graph LR
 
 ### 1. Contract-First Output Control
 
-Define the schema once. Agently enforces it on every call, with automatic retries when critical fields are missing.
+Define the schema once. Mark required leaves with `True`. Use `ensure_keys` as a supplement for runtime-dependent paths, and use `ensure_all_keys=True` when you want the whole structure strictly enforced.
 
 ```python
 result = (
     agent
     .input("Analyze this review: 'Great product, but slow shipping.'")
     .output({
-        "sentiment": (str, "positive / neutral / negative"),
+        "sentiment": (str, "positive / neutral / negative", True),
         "key_issues": [(str, "issue summary")],
-        "priority": (int, "1–5, 5 is most urgent"),
+        "priority": (int, "1–5, 5 is most urgent", True),
     })
-    .start(ensure_keys=["sentiment", "key_issues[*]"])
+    .start(ensure_keys=["key_issues[*]"])
 )
-# Always a dict — "sentiment" and every "key_issues" item guaranteed present
+# Always a dict — "sentiment" and "priority" are schema-required; "key_issues" is additionally checked at runtime.
+# For strict whole-structure enforcement, pass `ensure_all_keys=True`.
 ```
+
+Prompt templates can set `ensure_all_keys` at the outer layer as well (`$ensure_all_keys` in YAML/JSON) to make strict whole-structure enforcement the default.
 
 ### 2. Structured Streaming — Instant Events
 
@@ -358,7 +361,7 @@ result = (
     .input(user_code)
     .instruct("Focus on security and performance.")
     .info({"context": "Public-facing API handler", "framework": "FastAPI"})
-    .output({"issues": [(str, "issue description")], "score": (int, "0–100")})
+    .output({"issues": [(str, "issue description")], "score": (int, "0–100", True)})
     .start()
 )
 ```
@@ -407,10 +410,10 @@ agent = Agently.create_agent()
 result = (
     agent.input("Introduce Python in one sentence and list 3 strengths")
     .output({
-        "intro": (str, "one sentence"),
+        "intro": (str, "one sentence", True),
         "strengths": [(str, "strength")],
     })
-    .start(ensure_keys=["intro", "strengths[*]"])
+    .start(ensure_all_keys=True)
 )
 
 print(result)
@@ -562,7 +565,7 @@ Agently is a **development framework**, but it's designed to satisfy exactly tho
 
 | Harness property | How Agently delivers it |
 |:--|:--|
-| **Stable output interfaces** | `output()` + `ensure_keys` guarantee field presence regardless of model variation |
+| **Stable output interfaces** | `output()` schema `True` markers + `ensure_keys` supplements + `ensure_all_keys` strict mode |
 | **Observable internals** | `action_logs`, `tool_logs`, DevTools `ObservationBridge`, per-layer structured logs |
 | **Pluggable runtime layers** | ActionRuntime, ActionFlow, and ActionExecutor are independent plugin slots |
 | **Separation of concerns** | Prompt slots, settings hierarchy, Session, and TriggerFlow are distinct composable layers |
