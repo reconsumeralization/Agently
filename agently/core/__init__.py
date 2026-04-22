@@ -22,7 +22,7 @@ from .Action import Action, ActionDispatcher, ActionRegistry
 from .Tool import Tool
 from .TriggerFlow import (
     TriggerFlow,
-    TriggerFlowBluePrint,
+    TriggerFlowBlueprint,
     TriggerFlowExecution,
     TriggerFlowChunk,
 )

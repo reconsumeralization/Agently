@@ -22,7 +22,7 @@ from typing_extensions import Self
 
 
 if TYPE_CHECKING:
-    from ..BluePrint import TriggerFlowBluePrint
+    from ..BluePrint import TriggerFlowBlueprint
     from agently.types.trigger_flow import (
         TriggerFlowHandler,
         TriggerFlowRuntimeData,
@@ -52,7 +52,7 @@ class TriggerFlowBaseProcess:
         *,
         flow_chunk,
         trigger_event: str,
-        blue_print: "TriggerFlowBluePrint",
+        blueprint: "TriggerFlowBlueprint",
         block_data: "TriggerFlowBlockData",
         trigger_type: Literal["event", "runtime_data", "flow_data"] = "event",
         definition_signals: list[dict[str, Any]] | None = None,
@@ -63,7 +63,7 @@ class TriggerFlowBaseProcess:
         self._flow_chunk = flow_chunk
         self.trigger_event = trigger_event
         self.trigger_type: Literal["event", "runtime_data", "flow_data"] = trigger_type
-        self._blue_print = blue_print
+        self._blue_print = blueprint
         self._block_data = block_data
         self._options = options
         self._definition_signals = copy.deepcopy(definition_signals) if definition_signals is not None else []
@@ -77,7 +77,7 @@ class TriggerFlowBaseProcess:
     def _new(
         self,
         trigger_event: str,
-        blue_print: "TriggerFlowBluePrint",
+        blueprint: "TriggerFlowBlueprint",
         block_data: "TriggerFlowBlockData",
         trigger_type: Literal["event", "runtime_data", "flow_data"] = "event",
         definition_signals: list[dict[str, Any]] | None = None,
@@ -89,7 +89,7 @@ class TriggerFlowBaseProcess:
             flow_chunk=self._flow_chunk,
             trigger_event=trigger_event,
             trigger_type=trigger_type,
-            blue_print=blue_print,
+            blueprint=blueprint,
             block_data=block_data,
             definition_signals=definition_signals if definition_signals is not None else self._definition_signals,
             definition_group_id=(
@@ -191,7 +191,7 @@ class TriggerFlowBaseProcess:
             return self._new(
                 trigger_event=trigger,
                 trigger_type="event",
-                blue_print=self._blue_print,
+                blueprint=self._blue_print,
                 block_data=TriggerFlowBlockData(
                     outer_block=None,
                 ),
@@ -238,7 +238,7 @@ class TriggerFlowBaseProcess:
             return self._new(
                 trigger_event=current_trigger_event,
                 trigger_type=current_trigger_type,
-                blue_print=self._blue_print,
+                blueprint=self._blue_print,
                 block_data=TriggerFlowBlockData(
                     outer_block=None,
                 ),
@@ -305,7 +305,7 @@ class TriggerFlowBaseProcess:
         return self._new(
             trigger_event=when_trigger,
             trigger_type="event",
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=TriggerFlowBlockData(
                 outer_block=None,
             ),
@@ -359,7 +359,7 @@ class TriggerFlowBaseProcess:
         return self._new(
             trigger_event=chunk.trigger if not side_branch else self.trigger_event,
             trigger_type=self.trigger_type,
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=self._block_data,
             definition_signals=[self._event_signal(chunk.trigger)] if not side_branch else self._definition_signals,
             definition_group_id=self._definition_group_id,
@@ -394,7 +394,7 @@ class TriggerFlowBaseProcess:
         return self._new(
             trigger_event=emit_signal["trigger_event"] if not side_branch else self.trigger_event,
             trigger_type="event" if not side_branch else self.trigger_type,
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=self._block_data,
             definition_signals=[emit_signal] if not side_branch else self._definition_signals,
             definition_group_id=self._definition_group_id,
@@ -539,7 +539,7 @@ class TriggerFlowBaseProcess:
 
         return self._new(
             trigger_event=batch_trigger if not side_branch else self.trigger_event,
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=self._block_data,
             definition_signals=[self._event_signal(batch_trigger)] if not side_branch else self._definition_signals,
             definition_group_id=self._definition_group_id,
@@ -629,7 +629,7 @@ class TriggerFlowBaseProcess:
 
         return self._new(
             trigger_event=collect_trigger,
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=self._block_data,
             definition_signals=[self._event_signal(collect_trigger)],
             definition_group_id=self._definition_group_id,
@@ -663,7 +663,7 @@ class TriggerFlowBaseProcess:
         return self._new(
             trigger_event=self.trigger_event,
             trigger_type=self.trigger_type,
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=self._block_data,
             definition_signals=self._definition_signals,
             definition_group_id=self._definition_group_id,

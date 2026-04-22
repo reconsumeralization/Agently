@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agently.types.trigger_flow import TriggerFlowHandler, TriggerFlowRuntimeData
-    from .BluePrint import TriggerFlowBluePrint
+    from .BluePrint import TriggerFlowBlueprint
 
 from agently.utils import FunctionShifter
 from .Control import TriggerFlowPauseSignal
@@ -33,7 +33,7 @@ class TriggerFlowChunk:
         name: str | None = None,
         trigger: str | None = None,
         callable_ref: dict | None = None,
-        blue_print: "TriggerFlowBluePrint | None" = None,
+        blueprint: "TriggerFlowBlueprint | None" = None,
         emit_signals: list[str] | None = None,
     ):
         self.id = chunk_id if chunk_id is not None else uuid.uuid4().hex
@@ -41,7 +41,7 @@ class TriggerFlowChunk:
         self._handler = handler
         self.trigger = trigger if trigger is not None else f"Chunk[{ handler.__name__ }]-{ self.id }"
         self.callable_ref = callable_ref.copy() if isinstance(callable_ref, dict) else None
-        self._blue_print = blue_print
+        self._blue_print = blueprint
         self._emit_signals = list(dict.fromkeys(str(signal) for signal in (emit_signals or [])))
 
     async def async_call(self, data: "TriggerFlowRuntimeData"):

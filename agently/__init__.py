@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from .base import print_, async_print, AgentlyMain, Agent
-from .core import TriggerFlow, TriggerFlowBluePrint
+from .core import TriggerFlow, TriggerFlowBlueprint
 from .types.trigger_flow import (
     TriggerFlowContractSpec,
     TriggerFlowEventData,
@@ -33,7 +33,7 @@ __all__ = [
     "TriggerFlowEventData",
     "TriggerFlowInterruptEvent",
     "TriggerFlowSystemStreamEvent",
-    "TriggerFlowBluePrint",
+    "TriggerFlowBlueprint",
     "print_",
     "async_print",
 ]

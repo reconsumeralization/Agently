@@ -124,7 +124,7 @@ class TriggerFlowMatchCaseProcess(TriggerFlowBaseProcess):
         return self._new(
             trigger_event=self.trigger_event,
             trigger_type=self.trigger_type,
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=match_block_data,
             definition_signals=self._definition_signals,
             definition_group_id=match_id,
@@ -187,7 +187,7 @@ class TriggerFlowMatchCaseProcess(TriggerFlowBaseProcess):
         return self._new(
             trigger_event=case_trigger,
             trigger_type="event",
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=self._block_data,
             definition_signals=[self._event_signal(branch_trigger)],
             definition_group_id=match_id,
@@ -231,7 +231,7 @@ class TriggerFlowMatchCaseProcess(TriggerFlowBaseProcess):
         return self._new(
             trigger_event=else_trigger,
             trigger_type="event",
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=self._block_data,
             definition_signals=[self._event_signal(branch_trigger)],
             definition_group_id=match_id,
@@ -301,7 +301,7 @@ class TriggerFlowMatchCaseProcess(TriggerFlowBaseProcess):
         return self._new(
             trigger_event=f"Match-{ match_id }-Result",
             trigger_type="event",
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=block_data,
             definition_signals=[self._block_data.data["definition_result_signal"]],
             definition_group_id=self._block_data.data.get("definition_outer_group_id"),

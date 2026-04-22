@@ -103,7 +103,7 @@ class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
         return self._new(
             trigger_event=send_item_trigger,
             trigger_type="event",
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=for_each_block_data,
             definition_signals=[self._event_signal(send_item_trigger)],
             definition_group_id=for_each_id,
@@ -166,7 +166,7 @@ class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
         return self._new(
             trigger_event=end_for_each_trigger,
             trigger_type="event",
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=block_data,
             definition_signals=[self._event_signal(end_for_each_trigger)],
             definition_group_id=self._block_data.data.get("definition_outer_group_id"),

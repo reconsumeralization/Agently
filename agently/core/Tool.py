@@ -27,8 +27,8 @@ from .Action import (
 )
 
 
-class Tool(Action):
-    pass
+# Legacy alias. Action is the canonical name.
+Tool = Action
 
 
 StandardToolExecutionHandler = StandardActionExecutionHandler

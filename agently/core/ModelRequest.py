@@ -126,7 +126,7 @@ class ModelRequest:
         prompt: Any,
         mappings: dict[str, Any] | None = None,
     ):
-        self.prompt.set("input", prompt, mappings)
+        self.prompt.set("system", prompt, mappings)
         return self
 
     def rule(

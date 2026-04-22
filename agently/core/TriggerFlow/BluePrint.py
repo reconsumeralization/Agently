@@ -191,9 +191,9 @@ class _SubFlowWriteBackTarget:
             data.execution._trigger_flow._flow_data.set(key, _clone_sub_flow_value(value))
 
 
-class TriggerFlowBluePrint:
+class TriggerFlowBlueprint:
     def __init__(self, *, name: str | None = None):
-        self.name = name if name is not None else f"BluePrint-{ uuid.uuid4().hex }"
+        self.name = name if name is not None else f"Blueprint-{ uuid.uuid4().hex }"
         self._handlers: "TriggerFlowAllHandlers" = {
             "event": {},
             "flow_data": {},
@@ -318,7 +318,7 @@ class TriggerFlowBluePrint:
             handler,
             name=name,
             callable_ref=callable_ref,
-            blue_print=self,
+            blueprint=self,
         )
         self.chunks[chunk.name] = chunk
         self.sync_chunk_definition(chunk)
@@ -339,9 +339,9 @@ class TriggerFlowBluePrint:
             target_registry[name] = handler
         return self
 
-    def _merge_registries_from_blue_print(self, blue_print: "TriggerFlowBluePrint"):
-        self._merge_callable_registry("chunk", blue_print._chunk_registry)
-        self._merge_callable_registry("condition", blue_print._condition_registry)
+    def _merge_registries_from_blueprint(self, blueprint: "TriggerFlowBlueprint"):
+        self._merge_callable_registry("chunk", blueprint._chunk_registry)
+        self._merge_callable_registry("condition", blueprint._condition_registry)
         return self
 
     def sync_chunk_definition(
@@ -645,7 +645,7 @@ class TriggerFlowBluePrint:
         from .TriggerFlow import TriggerFlow
 
         isolated_sub_flow = TriggerFlow(
-            blue_print=trigger_flow.save_blue_print(),
+            blueprint=trigger_flow.save_blueprint(),
             name=trigger_flow.name,
             skip_exceptions=trigger_flow._skip_exceptions,
         )
@@ -684,7 +684,7 @@ class TriggerFlowBluePrint:
                 f"TriggerFlow sub flow operator '{ operator['id'] }' missing valid 'sub_flow_config'."
             )
 
-        sub_blue_print = type(self)(
+        sub_blueprint = type(self)(
             name=str(
                 sub_flow_config.get("name")
                 or options.get("sub_flow_name")
@@ -692,12 +692,12 @@ class TriggerFlowBluePrint:
                 or f"SubFlow-{ operator['id'] }"
             )
         )
-        sub_blue_print._chunk_registry = self._chunk_registry.copy()
-        sub_blue_print._condition_registry = self._condition_registry.copy()
-        sub_blue_print.load_flow_config(copy.deepcopy(sub_flow_config))
+        sub_blueprint._chunk_registry = self._chunk_registry.copy()
+        sub_blueprint._condition_registry = self._condition_registry.copy()
+        sub_blueprint.load_flow_config(copy.deepcopy(sub_flow_config))
         return TriggerFlow(
-            blue_print=sub_blue_print,
-            name=sub_blue_print.name,
+            blueprint=sub_blueprint,
+            name=sub_blueprint.name,
         )
 
     def _compile_sub_flow_operator(
@@ -803,7 +803,7 @@ class TriggerFlowBluePrint:
         parent_group_id: str | None = None,
         parent_group_kind: str | None = None,
     ):
-        self._merge_registries_from_blue_print(trigger_flow._blue_print)
+        self._merge_registries_from_blueprint(trigger_flow._blue_print)
         normalized_capture, _ = self._compile_sub_flow_bindings(capture, mode="capture")
         normalized_write_back, _ = self._compile_sub_flow_bindings(write_back, mode="write_back")
         sub_flow_instance_id = uuid.uuid4().hex
@@ -956,7 +956,7 @@ class TriggerFlowBluePrint:
             name=operator.get("name"),
             trigger=continuation_signal["trigger_event"],
             callable_ref=operator.get("handler_ref"),
-            blue_print=self,
+            blueprint=self,
             emit_signals=[
                 signal["trigger_event"]
                 for signal in operator["emit_signals"]
@@ -1509,23 +1509,24 @@ class TriggerFlowBluePrint:
         )
 
     def copy(self, *, name: str | None = None):
-        new_blue_print = type(self)(name=name if name is not None else self.name)
-        new_blue_print._handlers = {
+        new_blueprint = type(self)(name=name if name is not None else self.name)
+        new_blueprint._handlers = {
             "event": {key: value.copy() for key, value in self._handlers["event"].items()},
             "flow_data": {key: value.copy() for key, value in self._handlers["flow_data"].items()},
             "runtime_data": {key: value.copy() for key, value in self._handlers["runtime_data"].items()},
         }
-        new_blue_print.definition = self.definition.copy()
-        new_blue_print._chunk_registry = self._chunk_registry.copy()
-        new_blue_print._condition_registry = self._condition_registry.copy()
+        new_blueprint.definition = self.definition.copy()
+        new_blueprint._chunk_registry = self._chunk_registry.copy()
+        new_blueprint._condition_registry = self._condition_registry.copy()
         for chunk in self.chunks.values():
-            new_blue_print.chunks[chunk.name] = TriggerFlowChunk(
+            new_blueprint.chunks[chunk.name] = TriggerFlowChunk(
                 chunk._handler,
                 chunk_id=chunk.id,
                 name=chunk.name,
                 trigger=chunk.trigger,
                 callable_ref=chunk.callable_ref,
-                blue_print=new_blue_print,
+                blueprint=new_blueprint,
                 emit_signals=chunk.emit_signals,
             )
-        return new_blue_print
+        return new_blueprint
+

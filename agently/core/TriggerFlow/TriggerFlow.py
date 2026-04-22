@@ -31,7 +31,7 @@ from agently.types.trigger_flow import (
 from agently.types.data import RunContext
 from agently.utils import Settings, StateData, FunctionShifter
 from agently.core.RuntimeContext import resolve_parent_run_context
-from .BluePrint import TriggerFlowBluePrint
+from .BluePrint import TriggerFlowBlueprint
 from .Process import TriggerFlowProcess
 from .Chunk import TriggerFlowChunk
 from .Contract import CONTRACT_UNSET, TriggerFlowContract, TriggerFlowContractSpec
@@ -46,8 +46,7 @@ ContractResultT = TypeVar("ContractResultT")
 class TriggerFlow(Generic[InputT, StreamT, ResultT]):
     def __init__(
         self,
-        blue_print: TriggerFlowBluePrint | None = None,
-        *,
+        blueprint: TriggerFlowBlueprint | None = None,
         name: str | None = None,
         skip_exceptions: bool = False,
     ):
@@ -63,7 +62,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         self._runtime_resources = StateData(
             name=f"TriggerFlow-{ self.name }-RuntimeResources",
         )
-        self._blue_print = blue_print if blue_print is not None else TriggerFlowBluePrint()
+        self._blue_print = blueprint if blueprint is not None else TriggerFlowBlueprint()
         self._skip_exceptions = skip_exceptions
         self._executions: dict[str, "TriggerFlowExecution[InputT, StreamT, ResultT]"] = {}
         self._contract = TriggerFlowContract[InputT, StreamT, ResultT]()
@@ -89,7 +88,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         self._start_process = TriggerFlowProcess(
             flow_chunk=self.chunk,
             trigger_event="START",
-            blue_print=self._blue_print,
+            blueprint=self._blue_print,
             block_data=TriggerFlowBlockData(
                 outer_block=None,
             ),
@@ -516,11 +515,11 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             timeout=timeout,
         )
 
-    def save_blue_print(self):
+    def save_blueprint(self):
         return self._blue_print.copy()
 
-    def load_blue_print(self, new_blue_print: TriggerFlowBluePrint):
-        self._blue_print = new_blue_print
+    def load_blueprint(self, new_blueprint: TriggerFlowBlueprint):
+        self._blue_print = new_blueprint
         self._contract = TriggerFlowContract[InputT, StreamT, ResultT]()
         self.register_chunk_handler = self._blue_print.register_chunk_handler
         self.register_condition_handler = self._blue_print.register_condition_handler
