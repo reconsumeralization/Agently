@@ -31,7 +31,7 @@ async def main():
                 "role": role,
             },
         )
-        .output({"reply": (str, "role reply only")})
+        .output({"reply": (str, "role reply only", True)})
         .start()
     )
     print(result["reply"])

@@ -18,6 +18,10 @@ from collections import OrderedDict
 
 class DataPathBuilder:
     @staticmethod
+    def is_ensure_marker(value: Any) -> bool:
+        return value is True or value == 1
+
+    @staticmethod
     def build_dot_path(keys: list[str | int]) -> str:
         if not keys:
             return ""
@@ -204,6 +208,53 @@ class DataPathBuilder:
                 else DataPathBuilder.build_slash_path(path_keys)
             )
             ordered_paths[current_path] = None
+
+        traverse(agently_output_dict, [])
+        return list(ordered_paths.keys())
+
+    @staticmethod
+    def extract_ensure_paths(
+        agently_output_dict: Mapping[str, Any] | Sequence[Any], *, style: Literal["dot", "slash"] = "dot"
+    ) -> list[str]:
+        """
+        Traverse the schema and return paths marked as required via the third leaf tuple slot.
+        """
+        if not isinstance(agently_output_dict, (Mapping, Sequence)) or isinstance(agently_output_dict, str):
+            raise TypeError("extract_ensure_paths expects a mapping or sequence as input")
+
+        ordered_paths: OrderedDict[str, None] = OrderedDict()
+
+        def traverse(value: Any, path_keys: list[str | int]):
+            if isinstance(value, tuple):
+                ensure_marker = value[2] if len(value) > 2 else None
+                if DataPathBuilder.is_ensure_marker(ensure_marker):
+                    current_path = (
+                        DataPathBuilder.build_dot_path(path_keys)
+                        if style == "dot"
+                        else DataPathBuilder.build_slash_path(path_keys)
+                    )
+                    if current_path:
+                        ordered_paths[current_path] = None
+                if value:
+                    traverse(value[0], path_keys)
+                return
+
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    traverse(v, path_keys + [k])
+                return
+
+            origin = get_origin(value)
+            if origin is list:
+                args = get_args(value)
+                if args:
+                    traverse(args[0], path_keys + ["[*]"])
+                return
+
+            if isinstance(value, list):
+                for item in value:
+                    traverse(item, path_keys + ["[*]"])
+                return
 
         traverse(agently_output_dict, [])
         return list(ordered_paths.keys())

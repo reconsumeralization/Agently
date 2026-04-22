@@ -18,10 +18,10 @@ import asyncio
 import inspect
 import warnings
 
-from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, cast, overload, Generator
+from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, cast, overload, Generator, Mapping, Sequence
 
 from agently.core.RuntimeContext import bind_runtime_context
-from agently.utils import FunctionShifter, DataLocator
+from agently.utils import FunctionShifter, DataLocator, DataPathBuilder
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -92,11 +92,51 @@ class ModelResponseResult:
         self._finally_handlers_lock = asyncio.Lock()
         self._run_finally_handlers_once_sync = FunctionShifter.syncify(self._run_finally_handlers_once)
         self.prompt = prompt
+        self._auto_ensure_keys_cache: dict[str, list[str]] = {}
         self.full_result_data = self._response_parser.full_result_data
         self.get_meta = FunctionShifter.syncify(self.async_get_meta)
         self.get_text = FunctionShifter.syncify(self.async_get_text)
         self.get_data = FunctionShifter.syncify(self.async_get_data)
         self.get_data_object = FunctionShifter.syncify(self.async_get_data_object)
+
+    def _get_auto_ensure_keys(self, *, key_style: Literal["dot", "slash"] = "dot") -> list[str]:
+        cache_key = key_style
+        if cache_key in self._auto_ensure_keys_cache:
+            return self._auto_ensure_keys_cache[cache_key]
+
+        try:
+            prompt_output = self.prompt.to_prompt_object().output
+        except Exception:
+            prompt_output = None
+
+        if not isinstance(prompt_output, (Mapping, Sequence)) or isinstance(prompt_output, str):
+            self._auto_ensure_keys_cache[cache_key] = []
+            return []
+
+        try:
+            ensure_keys = DataPathBuilder.extract_ensure_paths(prompt_output, style=key_style)
+        except Exception:
+            ensure_keys = []
+
+        self._auto_ensure_keys_cache[cache_key] = ensure_keys
+        return ensure_keys
+
+    @staticmethod
+    def _merge_ensure_keys(auto_keys: list[str], explicit_keys: list[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for key in [*auto_keys, *explicit_keys]:
+            if key not in seen:
+                seen.add(key)
+                merged.append(key)
+        return merged
+
+    def _is_strict_output_enabled(self) -> bool:
+        try:
+            prompt_object = self.prompt.to_prompt_object()
+            return bool(getattr(prompt_object, "ensure_all_keys", False)) and prompt_object.output_format == "json"
+        except Exception:
+            return False
 
     async def _run_finally_handlers_once(self):
         if self._finally_handlers_ran:
@@ -171,13 +211,29 @@ class ModelResponseResult:
         raise_ensure_failure: bool = True,
         _retry_count: int = 0,
     ) -> Any:
-        if type == "parsed" and ensure_keys:
+        auto_ensure_keys = self._get_auto_ensure_keys(key_style=key_style)
+        strict_output = self._is_strict_output_enabled()
+        if ensure_keys is None:
+            active_ensure_keys = auto_ensure_keys
+        elif len(ensure_keys) == 0:
+            active_ensure_keys = []
+        else:
+            active_ensure_keys = self._merge_ensure_keys(auto_ensure_keys, ensure_keys)
+        if type in ("parsed", "all") and (active_ensure_keys or strict_output):
             try:
                 data = await self._response_parser.async_get_data(type=type)
-                for ensure_key in ensure_keys:
-                    EMPTY = object()
-                    if DataLocator.locate_path_in_dict(data, ensure_key, key_style, default=EMPTY) is EMPTY:
-                        raise
+                if strict_output:
+                    parsed_result = self._response_parser.full_result_data.get("parsed_result")
+                    result_object = self._response_parser.full_result_data.get("result_object")
+                    if parsed_result is None or result_object is None:
+                        raise ValueError(
+                            "Strict output validation failed: parsed result or strict result object is missing."
+                        )
+                if active_ensure_keys:
+                    for ensure_key in active_ensure_keys:
+                        EMPTY = object()
+                        if DataLocator.locate_path_in_dict(data, ensure_key, key_style, default=EMPTY) is EMPTY:
+                            raise
                 await self._run_finally_handlers_once()
                 return data
             except:
@@ -198,7 +254,8 @@ class ModelResponseResult:
                             "next_attempt_index": self.attempt_index + 1,
                             "model_run_id": self.model_run_context.run_id if self.model_run_context is not None else None,
                             "response_text": await self._response_parser.async_get_text(),
-                            "ensure_keys": ensure_keys,
+                            "ensure_keys": active_ensure_keys,
+                            "strict_output": strict_output,
                             "key_style": key_style,
                         },
                         "run": self.request_run_context,
@@ -216,7 +273,7 @@ class ModelResponseResult:
                         attempt_index=self.attempt_index + 1,
                     ).result.async_get_data(
                         type=type,
-                        ensure_keys=ensure_keys,
+                        ensure_keys=active_ensure_keys,
                         key_style=key_style,
                         max_retries=max_retries,
                         raise_ensure_failure=raise_ensure_failure,
@@ -270,9 +327,17 @@ class ModelResponseResult:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
     ):
-        if ensure_keys:
+        auto_ensure_keys = self._get_auto_ensure_keys(key_style=key_style)
+        strict_output = self._is_strict_output_enabled()
+        if ensure_keys is None:
+            active_ensure_keys = auto_ensure_keys
+        elif len(ensure_keys) == 0:
+            active_ensure_keys = []
+        else:
+            active_ensure_keys = self._merge_ensure_keys(auto_ensure_keys, ensure_keys)
+        if active_ensure_keys or strict_output:
             await self.async_get_data(
-                ensure_keys=ensure_keys,
+                ensure_keys=active_ensure_keys,
                 key_style=key_style,
                 max_retries=max_retries,
                 _retry_count=0,

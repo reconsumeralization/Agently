@@ -244,11 +244,14 @@ class ModelRequest:
         *,
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ):
+        if ensure_all_keys is not None:
+            self.prompt.set("ensure_all_keys", ensure_all_keys)
         response = self.get_response(parent_run_context=parent_run_context)
         return await response.async_get_data(
             type=type,
@@ -262,11 +265,14 @@ class ModelRequest:
         self,
         *,
         ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ):
+        if ensure_all_keys is not None:
+            self.prompt.set("ensure_all_keys", ensure_all_keys)
         response = self.get_response(parent_run_context=parent_run_context)
         return await response.async_get_data_object(
             ensure_keys=ensure_keys,

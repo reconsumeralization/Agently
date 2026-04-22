@@ -31,8 +31,9 @@ ensured_data_object = (
         }
     )
     .get_data_object(
-        # You can use dot style path to define a deeper-level path
-        # Use wildcard to ensure each item in a list has required fields.
+        # Use ensure_keys for runtime-dependent paths or conditional checks.
+        # Fixed required leaves should be marked with True in .output(...) instead.
+        # Use ensure_all_keys=True when you want the whole structure strictly enforced.
         ensure_keys=["final.steps", "resources[*].title", "resources[*].link"],
         # You can switch key path style in 'dot' and 'slash'("final/steps")
         key_style="dot",  # default: "dot"

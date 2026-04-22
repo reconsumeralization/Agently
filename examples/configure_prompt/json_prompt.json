@@ -1,4 +1,5 @@
 {
+    "$ensure_all_keys": true,
     ".agent": {
         "system": "You are an Agently enhanced agent.",
         "info": {
@@ -13,10 +14,12 @@
                     "$type": "str",
                     "$desc": "one step of plan"
                 }],
-                "$desc": "plans to response"
+                "$desc": "plans to response",
+                "$ensure": true
             },
             "reply": {
-                "$type": "str"
+                "$type": "str",
+                "$ensure": true
             },
             "extra": {
                 "$type": {

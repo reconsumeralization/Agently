@@ -21,6 +21,7 @@ def load_yaml_prompt():
     # See demo_docs/CONFIGURE_PROMPT_RELATION.md for details.
     #
     # YAML example (examples/configure_prompt/yaml_prompt.yaml):
+    # $ensure_all_keys: true
     # .agent:
     #   system: You are an Agently enhanced agent.
     #   info:
@@ -33,8 +34,10 @@ def load_yaml_prompt():
     #         - $type: str
     #           $desc: one step of plan
     #       $desc: plans to response
+    #       $ensure: true
     #     reply:
     #       $type: str
+    #       $ensure: true
     #     extra:
     #       $type:
     #         worth_to_remember:
@@ -72,6 +75,7 @@ def load_json_prompt():
     #
     # JSON example (examples/configure_prompt/json_prompt.json):
     # {
+    #   "$ensure_all_keys": true,
     #   ".agent": {
     #     "system": "You are an Agently enhanced agent.",
     #     "info": {
@@ -83,9 +87,10 @@ def load_json_prompt():
     #     "output": {
     #       "thinking": {
     #         "$type": [{"$type": "str", "$desc": "one step of plan"}],
-    #         "$desc": "plans to response"
+    #         "$desc": "plans to response",
+    #         "$ensure": true
     #       },
-    #       "reply": {"$type": "str"},
+    #       "reply": {"$type": "str", "$ensure": true},
     #       "extra": {
     #         "$type": {
     #           "worth_to_remember": {
@@ -142,6 +147,7 @@ def load_from_string():
     # - If you keep placeholders like ${...}, they are resolved at load time
     #   only when mappings are provided.
     yaml_prompt_text = """
+$ensure_all_keys: true
 .agent:
   system: You are an Agently enhanced agent.
 .request:
@@ -149,13 +155,15 @@ def load_from_string():
   output:
     reply:
       $type: str
+      $ensure: true
 """
     json_prompt_text = """
 {
+  "$ensure_all_keys": true,
   ".agent": { "system": "You are an Agently enhanced agent." },
   ".request": {
     "input": "Say hello.",
-    "output": { "reply": { "$type": "str" } }
+    "output": { "reply": { "$type": "str", "$ensure": true } }
   }
 }
 """
@@ -174,9 +182,10 @@ def roundtrip_configure_prompt():
         .info({"Agently": "Speed up your AI application development."}, always=True)
         .input("Say hello.")
         .instruct(["Reply {input} politely."])
+        .set_agent_prompt("ensure_all_keys", True)  # outermost strict guarantee
         .output(
             {
-                "reply": (str,),
+                "reply": (str, "reply", True),
             }
         )
     )

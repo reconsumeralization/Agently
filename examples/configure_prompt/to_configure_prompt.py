@@ -14,6 +14,7 @@ agent = Agently.create_agent()
         always=True,
     )
     .input("Say hello.")
+    .set_agent_prompt("ensure_all_keys", True)  # outermost strict guarantee
     .instruct(
         [
             "Reply {input} politely.",
@@ -25,7 +26,7 @@ agent = Agently.create_agent()
                 [(str, "one step of plan")],
                 "plans to response",
             ),
-            "reply": (str,),
+            "reply": (str, "reply", True),
             "extra": (
                 {
                     "worth_to_remember": (

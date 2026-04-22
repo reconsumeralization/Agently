@@ -21,7 +21,7 @@ request.set_prompt(
     "output",
     {
         "thinking": ([(str,)], "Step by step"),
-        "reply": (str, None, "Markdown Style"),
+        "reply": (str, "Markdown Style", True),
     },
 )
 

@@ -21,28 +21,23 @@ def agently_output_format_control():
         .output(
             # You can use a structured data to specific the output structure you want
             {
-                # use Tuple[<type>, <output specific description of this part>] to specific output content you want at the leaf points
-                "thinking": (str, "Think about how you would answer this question?"),
-                "explanation": (str, "Concept explanation"),
+                # Use Tuple[<type>, <output specific description of this part>, True] to mark a required leaf.
+                "thinking": (str, "Think about how you would answer this question?", True),
+                "explanation": (str, "Concept explanation", True),
                 # Nested type definition supported
                 "example_codes": ([(str, "Example code")], "Provide at least 2 example codes"),
                 "practices": (
                     # Specific as many layers as you pleased
                     [
                         {
-                            "question": (str, "Practice question"),
-                            "answer": (str, "Reference answer"),
+                            "question": (str, "Practice question", True),
+                            "answer": (str, "Reference answer", True),
                         }
                     ],
                     "Provide at least 2 practice questions, ensure they are different from the example codes",
                 ),
             }
         ).start(
-            ## You can use parameter `ensure_keys` to enhance output control
-            # You can use dot style path to define a deeper-level path
-            ensure_keys=["practices[*].question", "practices[*].answer"],
-            # You can switch key path style in 'dot' and 'slash'("final/steps")
-            key_style="dot",  # default: "dot"
             # You can customize max retries
             max_retries=1,  # default: 3
             # You can control whether to raise exception if can not ensure all keys in model generation or just ignore it and return the value of the last try.
@@ -65,9 +60,9 @@ def output_order_cot_control():
             {
                 "info_list": [
                     {
-                        "topic": (str, "Which game/subject this info is about"),
-                        "key_fact": (str, "Key fact needed to answer the question"),
-                        "is_known": (bool, "Whether you are confident about this key fact"),
+                        "topic": (str, "Which game/subject this info is about", True),
+                        "key_fact": (str, "Key fact needed to answer the question", True),
+                        "is_known": (bool, "Whether you are confident about this key fact", True),
                     }
                 ],
                 "sure_info": (str, "Only explain the key facts you are confident about"),
@@ -79,14 +74,8 @@ def output_order_cot_control():
         # 2) Then derive "sure_info" and "uncertain" based on that list.
         # This encourages the model to separate confident vs. uncertain facts.
         # If you swap the order, the model may answer directly and skip the control step.
-        .start(
-            ensure_keys=["info_list[*].topic", "info_list[*].key_fact", "info_list[*].is_known"],
-            key_style="dot",
-            max_retries=1,
-            raise_ensure_failure=False,
-        )
+        .start(max_retries=1, raise_ensure_failure=False)
     )
-    # Use ensure_keys to protect "info_list" completeness when later fields depend on it.
     print(result)
 
 
@@ -103,24 +92,20 @@ def role_thinking_self_critique():
             }
         ).output(
             {
-                "action": (str, "Propose the boldest way to complete {target} using {items}"),
-                "can_do": (bool, "Use common sense to judge if {action} is feasible"),
+                "action": (str, "Propose the boldest way to complete {target} using {items}", True),
+                "can_do": (bool, "Use common sense to judge if {action} is feasible", True),
                 "can_do_explain": (str, "If {can_do} is false, explain why"),
                 "fixed_action": (
                     str,
                     "If {can_do} is false, revise the plan using {items} and {can_do_explain}",
+                    True,
                 ),
             }
         )
         # Order matters:
         # action -> can_do -> can_do_explain -> fixed_action
         # This keeps the critique and revision grounded on the proposed action.
-        .start(
-            ensure_keys=["action", "can_do", "fixed_action"],
-            key_style="dot",
-            max_retries=1,
-            raise_ensure_failure=False,
-        )
+        .start(max_retries=1, raise_ensure_failure=False)
     )
     print(result)
 

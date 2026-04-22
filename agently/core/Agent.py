@@ -190,6 +190,7 @@ class BaseAgent:
         *,
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -200,6 +201,7 @@ class BaseAgent:
         return self.request.get_data(
             type=type,
             ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -211,6 +213,7 @@ class BaseAgent:
         *,
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -221,6 +224,7 @@ class BaseAgent:
         return await self.request.async_get_data(
             type=type,
             ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -231,6 +235,7 @@ class BaseAgent:
         self,
         *,
         ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -240,6 +245,7 @@ class BaseAgent:
         self._emit_agent_turn_started(turn_run_context)
         return self.request.get_data_object(
             ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -250,6 +256,7 @@ class BaseAgent:
         self,
         *,
         ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -259,6 +266,7 @@ class BaseAgent:
         await self._async_emit_agent_turn_started(turn_run_context)
         return await self.request.async_get_data_object(
             ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -280,6 +288,7 @@ class BaseAgent:
         *,
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -288,6 +297,7 @@ class BaseAgent:
         return self.get_data(
             type=type,
             ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -299,6 +309,7 @@ class BaseAgent:
         *,
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -307,6 +318,7 @@ class BaseAgent:
         return await self.async_get_data(
             type=type,
             ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,

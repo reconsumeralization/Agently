@@ -122,6 +122,7 @@ class ModelResponse:
             "prompt_messages": DataFormatter.sanitize(prompt_messages),
             "prompt_text": prompt_text,
             "output_format": prompt_object.output_format,
+            "ensure_all_keys": getattr(prompt_object, "ensure_all_keys", False),
             "has_tools": bool(prompt_object.tools),
             "chat_history_length": len(prompt_object.chat_history),
             "attachment_count": len(prompt_object.attachment),

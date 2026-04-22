@@ -42,7 +42,7 @@ from pydantic import (
 
 from agently.types.plugins import PromptGenerator
 from agently.types.data import PromptModel, ChatMessageContent, TextMessageContent
-from agently.utils import SettingsNamespace, DataFormatter, TimeInfo
+from agently.utils import SettingsNamespace, DataFormatter, DataPathBuilder, TimeInfo
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -117,6 +117,10 @@ class AgentlyPromptGenerator(PromptGenerator):
             if isinstance(arg, type) and issubclass(arg, Enum):
                 return arg
         return None
+
+    @staticmethod
+    def _is_ensure_marker(value: Any) -> bool:
+        return DataPathBuilder.is_ensure_marker(value)
 
     def _check_prompt_all_empty(self, prompt_object: PromptModel):
         # If prompt is customized, skip the check
@@ -295,6 +299,14 @@ class AgentlyPromptGenerator(PromptGenerator):
                         [
                             f"[{ prompt_title_mapping.get('output_requirement', 'OUTPUT REQUIREMENT') }]:",
                             "Data Format: JSON",
+                            *(
+                            [
+                                "Output Guarantee: STRICT structure",
+                                "All defined fields are required and extra fields are not allowed.",
+                            ]
+                                if getattr(prompt_object, "ensure_all_keys", False)
+                                else []
+                            ),
                             "Data Structure:",
                             self._generate_json_output_prompt(final_output),
                             "",
@@ -653,7 +665,13 @@ class AgentlyPromptGenerator(PromptGenerator):
 
         return prompt_messages
 
-    def _generate_output_model(self, name: str, schema: Mapping[str, Any] | Sequence[Any]) -> Any:
+    def _generate_output_model(
+        self,
+        name: str,
+        schema: Mapping[str, Any] | Sequence[Any],
+        *,
+        strict_output: bool = False,
+    ) -> Any:
         fields = {}
         validators = {}
 
@@ -705,14 +723,30 @@ class AgentlyPromptGenerator(PromptGenerator):
                 field_type = Any
                 field_desc = None
                 default_value = None
+                field_required = False
                 if isinstance(field_type_schema, str):
                     field_desc = field_type_schema
+                    field_required = strict_output
                 elif isinstance(field_type_schema, Mapping):
-                    field_type = self._generate_output_model(f"{ name }_{ field_name.capitalize() }", field_type_schema)
+                    field_type = self._generate_output_model(
+                        f"{ name }_{ field_name.capitalize() }",
+                        field_type_schema,
+                        strict_output=strict_output,
+                    )
+                    field_required = strict_output
                 elif isinstance(field_type_schema, tuple):
                     value_type = field_type_schema[0] if len(field_type_schema) > 0 else Any
                     desc = field_type_schema[1] if len(field_type_schema) > 1 else ""
-                    default_value = field_type_schema[2] if len(field_type_schema) > 2 else None
+                    third_value = field_type_schema[2] if len(field_type_schema) > 2 else None
+                    ensure_marker = self._is_ensure_marker(third_value)
+                    if len(field_type_schema) > 2 and not ensure_marker:
+                        raise TypeError(
+                            f"Agently output leaf tuple third slot only supports ensure markers (True/1), "
+                            f"got {third_value!r} for field '{field_name}'."
+                        )
+                    field_required = strict_output or ensure_marker
+                    if field_required:
+                        default_value = ...
                     if isinstance(value_type, type) or get_origin(value_type) is not None:
                         field_type = value_type
                         field_desc = desc
@@ -722,11 +756,19 @@ class AgentlyPromptGenerator(PromptGenerator):
                     field_type = self._generate_output_model(
                         f"{ name }_{ field_name.capitalize() }",
                         list(field_type_schema),
+                        strict_output=strict_output,
                     )
+                    field_required = strict_output
                 elif isinstance(field_type_schema, type) or get_origin(field_type_schema) is not None:
                     field_type = field_type_schema | None
+                    field_required = strict_output
                 else:
                     field_desc = str(field_type_schema)
+                    field_required = strict_output
+                if field_required and field_type is not Any:
+                    field_annotation = field_type | None
+                else:
+                    field_annotation = field_type
                 if get_origin(field_type) in (list, List):
                     elem_type = cast(
                         type,
@@ -737,7 +779,7 @@ class AgentlyPromptGenerator(PromptGenerator):
                         {
                             field_name: (
                                 Annotated[
-                                    field_type,
+                                    field_annotation,
                                     PlainValidator(lambda value: ensure_list_and_cast(value, elem_type)),
                                 ],
                                 Field(default_value, description=field_desc),
@@ -750,7 +792,7 @@ class AgentlyPromptGenerator(PromptGenerator):
                         {
                             field_name: (
                                 Annotated[
-                                    field_type,
+                                    field_annotation,
                                     PlainValidator(make_enum_validator(enum_type)),
                                 ],
                                 Field(default_value, description=field_desc),
@@ -761,7 +803,7 @@ class AgentlyPromptGenerator(PromptGenerator):
                     fields.update(
                         {
                             field_name: (
-                                field_type,
+                                field_annotation,
                                 Field(default_value, description=field_desc),
                             )
                         }
@@ -769,7 +811,7 @@ class AgentlyPromptGenerator(PromptGenerator):
 
             return create_model(
                 name,
-                __config__={'extra': 'allow'},
+                __config__={'extra': 'forbid' if strict_output else 'allow'},
                 **fields,
                 **validators,
             )
@@ -780,7 +822,11 @@ class AgentlyPromptGenerator(PromptGenerator):
                 if isinstance(origin_item, str):
                     item_type = Any
                 elif isinstance(origin_item, Mapping):
-                    item_type = self._generate_output_model(f"{ name }_List", origin_item)
+                    item_type = self._generate_output_model(
+                        f"{ name }_List",
+                        origin_item,
+                        strict_output=strict_output,
+                    )
                 elif isinstance(origin_item, tuple):
                     value_type = origin_item[0] if len(origin_item) > 0 else Any
                     desc = origin_item[1] if len(origin_item) > 1 else ""
@@ -789,7 +835,11 @@ class AgentlyPromptGenerator(PromptGenerator):
                     else:
                         item_type = Any
                 elif isinstance(origin_item, Sequence):
-                    item_type = self._generate_output_model(f"{ name }_List", list(origin_item))
+                    item_type = self._generate_output_model(
+                        f"{ name }_List",
+                        list(origin_item),
+                        strict_output=strict_output,
+                    )
                 elif isinstance(origin_item, type) or get_origin(origin_item) is not None:
                     item_type = origin_item
                 else:
@@ -802,17 +852,21 @@ class AgentlyPromptGenerator(PromptGenerator):
                 PlainValidator(lambda v: ensure_list_and_cast(v, cast(type, item_type))),
             ]
 
-    def to_output_model(self) -> type["BaseModel"]:
+    def to_output_model(self, *args, strict_output: bool | None = None, **kwargs) -> type["BaseModel"]:
         prompt_object = self.to_prompt_object()
         output_prompt = prompt_object.output
 
         if not isinstance(output_prompt, (Mapping, Sequence)) or isinstance(output_prompt, str):
             raise TypeError("Unable to generator output model because the output is not a structure data.")
 
+        if strict_output is None:
+            strict_output = bool(getattr(prompt_object, "ensure_all_keys", False))
+
         if isinstance(output_prompt, Mapping):
             return self._generate_output_model(
                 "AgentlyOutput",
                 DataFormatter.sanitize(output_prompt, remain_type=True),
+                strict_output=strict_output,
             )
         else:
             return create_model(
@@ -822,9 +876,11 @@ class AgentlyPromptGenerator(PromptGenerator):
                     self._generate_output_model(
                         "AgentlyOutput_List",
                         DataFormatter.sanitize(output_prompt, remain_type=True),
+                        strict_output=strict_output,
                     ),
-                    None,
+                    ... if strict_output else None,
                 ),
+                __config__={'extra': 'forbid' if strict_output else 'allow'},
             )
 
     def _to_serializable_output_prompt(self, output_prompt_part: Any):
@@ -845,17 +901,27 @@ class AgentlyPromptGenerator(PromptGenerator):
                         return {
                             "$type": output_prompt_part[0],
                         }
+                    case 2:
+                        result = {
+                            "$type": output_prompt_part[0],
+                        }
+                        if output_prompt_part[1]:
+                            result["$desc"] = output_prompt_part[1]
+                        return result
                     case _:
-                        desc_text = ";".join([item for item in output_prompt_part[1:] if item])
-                        if desc_text:
-                            return {
-                                "$type": output_prompt_part[0],
-                                "$desc": desc_text,
-                            }
+                        result = {
+                            "$type": output_prompt_part[0],
+                        }
+                        if output_prompt_part[1]:
+                            result["$desc"] = output_prompt_part[1]
+                        third_value = output_prompt_part[2]
+                        if self._is_ensure_marker(third_value):
+                            result["$ensure"] = True
                         else:
-                            return {
-                                "$type": output_prompt_part[0],
-                            }
+                            raise TypeError(
+                                "Agently output leaf tuple third slot only supports ensure markers (True/1)."
+                            )
+                        return result
             else:
                 return list(output_prompt_part)
 
