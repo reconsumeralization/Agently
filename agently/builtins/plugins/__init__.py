@@ -22,4 +22,5 @@ from .ActionExecutor import (
 from .ActionRuntime import AgentlyActionRuntime
 from .PromptGenerator.AgentlyPromptGenerator import AgentlyPromptGenerator
 from .ModelRequester.OpenAICompatible import OpenAICompatible
+from .ModelRequester.OpenAIResponsesCompatible import OpenAIResponsesCompatible
 from .ResponseParser.AgentlyResponseParser import AgentlyResponseParser

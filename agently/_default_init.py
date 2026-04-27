@@ -47,11 +47,19 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
         OpenAICompatible,
     )
+    from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import (
+        OpenAIResponsesCompatible,
+    )
 
     plugin_manager.register(
         "ModelRequester",
         OpenAICompatible,
         activate=True,
+    )
+    plugin_manager.register(
+        "ModelRequester",
+        OpenAIResponsesCompatible,
+        activate=False,
     )
 
     from agently.builtins.plugins.ResponseParser.AgentlyResponseParser import AgentlyResponseParser
