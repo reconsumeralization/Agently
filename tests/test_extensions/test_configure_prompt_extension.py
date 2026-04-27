@@ -3,6 +3,7 @@ from pathlib import Path
 
 import yaml
 import json5
+import pytest
 
 from agently import Agently
 
@@ -70,3 +71,20 @@ def test_load_yaml_prompt_accepts_file_path(tmp_path: Path):
     agent.load_yaml_prompt(yaml_path)
 
     assert agent.request_prompt.get("input", inherit=False) == "from-file"
+
+
+def test_load_yaml_prompt_accepts_explicit_mappings_keyword():
+    agent = Agently.create_agent()
+    yaml_prompt = 'input: "Hello ${name}"\n'
+
+    agent.load_yaml_prompt(yaml_prompt, mappings={"name": "Alice"})
+
+    assert agent.request_prompt.get("input", inherit=False) == "Hello Alice"
+
+
+def test_load_yaml_prompt_rejects_positional_mappings():
+    agent = Agently.create_agent()
+    yaml_prompt = 'input: "Hello ${name}"\n'
+
+    with pytest.raises(TypeError):
+        getattr(agent, "load_yaml_prompt")(yaml_prompt, {"name": "Alice"})

@@ -127,19 +127,19 @@ class ConfigurePromptExtension(BaseAgent):
                                 self.set_agent_prompt(
                                     agent_prompt_key,
                                     agent_prompt_value,
-                                    variable_mappings,
+                                    mappings=variable_mappings,
                                 )
                             else:
                                 self.set_agent_prompt(
                                     agent_prompt_key,
                                     self._generate_output_value(agent_prompt_value),
-                                    variable_mappings,
+                                    mappings=variable_mappings,
                                 )
                     else:
                         self.set_agent_prompt(
                             "system",
                             prompt_value,
-                            variable_mappings,
+                            mappings=variable_mappings,
                         )
                 case ".request":
                     if isinstance(prompt_value, dict):
@@ -148,19 +148,19 @@ class ConfigurePromptExtension(BaseAgent):
                                 self.set_request_prompt(
                                     request_prompt_key,
                                     request_prompt_value,
-                                    variable_mappings,
+                                    mappings=variable_mappings,
                                 )
                             else:
                                 self.set_request_prompt(
                                     request_prompt_key,
                                     self._generate_output_value(request_prompt_value),
-                                    variable_mappings,
+                                    mappings=variable_mappings,
                                 )
                     else:
                         self.set_request_prompt(
                             "input",
                             prompt_value,
-                            variable_mappings,
+                            mappings=variable_mappings,
                         )
                 case ".alias":
                     if isinstance(prompt_value, dict):
@@ -215,33 +215,33 @@ class ConfigurePromptExtension(BaseAgent):
                             self.set_agent_prompt(
                                 prompt_key,
                                 prompt_value,
-                                variable_mappings,
+                                mappings=variable_mappings,
                             )
                         else:
                             self.set_agent_prompt(
                                 prompt_key,
                                 self._generate_output_value(prompt_value),
-                                variable_mappings,
+                                mappings=variable_mappings,
                             )
                     else:
                         if prompt_key != "output":
                             self.set_request_prompt(
                                 prompt_key,
                                 prompt_value,
-                                variable_mappings,
+                                mappings=variable_mappings,
                             )
                         else:
                             self.set_request_prompt(
                                 prompt_key,
                                 self._generate_output_value(prompt_value),
-                                variable_mappings,
+                                mappings=variable_mappings,
                             )
 
     def load_yaml_prompt(
         self,
         path_or_content: str | Path,
-        mappings: dict[str, Any] | None = None,
         *,
+        mappings: dict[str, Any] | None = None,
         prompt_key_path: str | None = None,
         encoding: str | None = "utf-8",
     ):
@@ -276,8 +276,8 @@ class ConfigurePromptExtension(BaseAgent):
     def load_json_prompt(
         self,
         path_or_content: str | Path,
-        mappings: dict[str, Any] | None = None,
         *,
+        mappings: dict[str, Any] | None = None,
         prompt_key_path: str | None = None,
         encoding: str | None = "utf-8",
     ):

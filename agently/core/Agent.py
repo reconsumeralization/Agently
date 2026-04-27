@@ -16,7 +16,9 @@ import uuid
 
 from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
 
-from agently.core import Prompt, ExtensionHandlers, ModelRequest
+from agently.core.Prompt import Prompt
+from agently.core.ExtensionHandlers import ExtensionHandlers
+from agently.core.ModelRequest import ModelRequest, _resolve_quick_prompt_input, _UNSET
 from agently.core.RuntimeContext import resolve_parent_run_context
 from agently.utils import Settings
 
@@ -330,18 +332,20 @@ class BaseAgent:
         self,
         key: "PromptStandardSlot | str",
         value: Any,
+        *,
         mappings: dict[str, Any] | None = None,
     ):
-        self.agent_prompt.set(key, value, mappings)
+        self.agent_prompt.set(key, value, mappings=mappings)
         return self
 
     def set_request_prompt(
         self,
         key: "PromptStandardSlot | str",
         value: Any,
+        *,
         mappings: dict[str, Any] | None = None,
     ):
-        self.request.prompt.set(key, value, mappings)
+        self.request.prompt.set(key, value, mappings=mappings)
         return self
 
     def remove_agent_prompt(self, key: "PromptStandardSlot | str"):
@@ -390,111 +394,129 @@ class BaseAgent:
     def system(
         self,
         prompt: Any,
-        mappings: dict[str, Any] | None = None,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
     ):
         if always:
-            self.agent_prompt.set("system", prompt, mappings)
+            self.agent_prompt.set("system", prompt, mappings=mappings)
         else:
-            self.request.prompt.set("system", prompt, mappings)
+            self.request.prompt.set("system", prompt, mappings=mappings)
         return self
 
     def rule(
         self,
         prompt: Any,
-        mappings: dict[str, Any] | None = None,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
     ):
         if always:
             self.agent_prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
-            self.agent_prompt.set("system.rule", prompt, mappings)
+            self.agent_prompt.set("system.rule", prompt, mappings=mappings)
         else:
             self.request.prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
-            self.request.prompt.set("system.rule", prompt, mappings)
+            self.request.prompt.set("system.rule", prompt, mappings=mappings)
         return self
 
     def role(
         self,
-        prompt: Any,
-        mappings: dict[str, Any] | None = None,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
-            self.agent_prompt.set("system.your_role", prompt, mappings)
+            self.agent_prompt.set("system.your_role", prompt, mappings=mappings)
         else:
             self.request.prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
-            self.request.prompt.set("system.your_role", prompt, mappings)
+            self.request.prompt.set("system.your_role", prompt, mappings=mappings)
         return self
 
     def user_info(
         self,
-        prompt: Any,
-        mappings: dict[str, Any] | None = None,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
-            self.agent_prompt.set("system.user_info", prompt, mappings)
+            self.agent_prompt.set("system.user_info", prompt, mappings=mappings)
         else:
             self.request.prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
-            self.request.prompt.set("system.user_info", prompt, mappings)
+            self.request.prompt.set("system.user_info", prompt, mappings=mappings)
         return self
 
     def input(
         self,
-        prompt: Any,
-        mappings: dict[str, Any] | None = None,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
-            self.agent_prompt.set("input", prompt, mappings)
+            self.agent_prompt.set("input", prompt, mappings=mappings)
         else:
-            self.request.prompt.set("input", prompt, mappings)
+            self.request.prompt.set("input", prompt, mappings=mappings)
         return self
 
     def info(
         self,
-        prompt: Any,
-        mappings: dict[str, Any] | None = None,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
-            self.agent_prompt.set("info", prompt, mappings)
+            self.agent_prompt.set("info", prompt, mappings=mappings)
         else:
-            self.request.prompt.set("info", prompt, mappings)
+            self.request.prompt.set("info", prompt, mappings=mappings)
         return self
 
     def instruct(
         self,
-        prompt: Any,
-        mappings: dict[str, Any] | None = None,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
-            self.agent_prompt.set("instruct", prompt, mappings)
+            self.agent_prompt.set("instruct", prompt, mappings=mappings)
         else:
-            self.request.prompt.set("instruct", prompt, mappings)
+            self.request.prompt.set("instruct", prompt, mappings=mappings)
         return self
 
     def examples(
         self,
-        prompt: Any,
-        mappings: dict[str, Any] | None = None,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
-            self.agent_prompt.set("examples", prompt, mappings)
+            self.agent_prompt.set("examples", prompt, mappings=mappings)
         else:
-            self.request.prompt.set("examples", prompt, mappings)
+            self.request.prompt.set("examples", prompt, mappings=mappings)
         return self
 
     def output(
@@ -505,27 +527,27 @@ class BaseAgent:
             | tuple[type, str | None, str, None]
             | Any
         ),
-        mappings: dict[str, Any] | None = None,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
     ):
         if always:
-            self.agent_prompt.set("output", prompt, mappings)
+            self.agent_prompt.set("output", prompt, mappings=mappings)
         else:
-            self.request.prompt.set("output", prompt, mappings)
+            self.request.prompt.set("output", prompt, mappings=mappings)
         return self
 
     def attachment(
         self,
         prompt: list[dict[str, Any]],
-        mappings: dict[str, Any] | None = None,
         *,
+        mappings: dict[str, Any] | None = None,
         always: bool = False,
     ):
         if always:
-            self.agent_prompt.set("attachment", prompt, mappings)
+            self.agent_prompt.set("attachment", prompt, mappings=mappings)
         else:
-            self.request_prompt.set("attachment", prompt, mappings)
+            self.request_prompt.set("attachment", prompt, mappings=mappings)
         return self
 
     def options(

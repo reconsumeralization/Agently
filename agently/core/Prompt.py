@@ -106,6 +106,7 @@ class Prompt(StateData):
         self,
         key: Literal["chat_history"],
         value: "dict[str, str | dict[str, Any]] | list[ChatMessage] | ChatMessage",
+        *,
         mappings: dict[str, Any] | None = None,
     ): ...
 
@@ -114,6 +115,7 @@ class Prompt(StateData):
         self,
         key: "PromptStandardSlot | str",
         value: Any,
+        *,
         mappings: dict[str, Any] | None = None,
     ): ...
 
@@ -121,6 +123,7 @@ class Prompt(StateData):
         self,
         key: "PromptStandardSlot | str",
         value: Any,
+        *,
         mappings: dict[str, Any] | None = None,
     ):
         if isinstance(value, str):
@@ -136,6 +139,7 @@ class Prompt(StateData):
     def update(
         self,
         new: "dict[PromptStandardSlot | str, Any]",
+        *,
         mappings: dict[str, Any] | None = None,
     ):
         if mappings is not None:
@@ -149,6 +153,7 @@ class Prompt(StateData):
         self,
         key: "PromptStandardSlot | str",
         value: Any,
+        *,
         mappings: dict[str, Any] | None = None,
     ):
         if isinstance(value, str):

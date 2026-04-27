@@ -191,3 +191,33 @@ def test_agently_load_settings_applies_debug_mapping(tmp_path):
         assert logging.getLogger("httpx").level == logging.INFO
     finally:
         _restore_runtime_log_settings(snapshot)
+
+
+def test_request_quick_prompt_supports_key_value_and_kwargs():
+    request = Agently.create_request()
+
+    request.info("context", "Public-facing API handler", framework="FastAPI")
+
+    assert request.prompt.to_prompt_object().info == {
+        "context": "Public-facing API handler",
+        "framework": "FastAPI",
+    }
+
+
+def test_request_quick_prompt_preserves_explicit_mappings():
+    request = Agently.create_request()
+
+    request.instruct("Hello ${name}", mappings={"name": "Alice"})
+
+    assert request.prompt.to_prompt_object().instruct == "Hello Alice"
+
+
+def test_agent_quick_prompt_supports_key_value_and_kwargs():
+    agent = Agently.create_agent()
+
+    agent.info("context", "Public-facing API handler", framework="FastAPI", always=True)
+
+    assert agent.agent_prompt.to_prompt_object().info == {
+        "context": "Public-facing API handler",
+        "framework": "FastAPI",
+    }

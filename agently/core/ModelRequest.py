@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, overload, Generator
+from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, overload, Generator, Mapping
 
 from agently.core.Prompt import Prompt
 from agently.core.ExtensionHandlers import ExtensionHandlers
@@ -43,6 +43,38 @@ DEFAULT_SPECIFIC_EVENTS: "SpecificEvents" = [
     "done",
     "tool_calls",
 ]
+
+_UNSET = object()
+
+
+def _resolve_quick_prompt_input(
+    prompt: Any = _UNSET,
+    value: Any = _UNSET,
+    mappings: dict[str, Any] | None = None,
+    kwargs: Mapping[str, Any] | None = None,
+) -> tuple[Any, dict[str, Any] | None]:
+    extra_items = dict(kwargs or {})
+
+    if value is _UNSET:
+        if extra_items:
+            if prompt is _UNSET or prompt is None:
+                return extra_items, mappings
+            if isinstance(prompt, Mapping):
+                merged_prompt = dict(prompt)
+                merged_prompt.update(extra_items)
+                return merged_prompt, mappings
+            raise TypeError("Keyword prompt pairs require no positional prompt, a mapping prompt, or a key/value pair.")
+        if prompt is _UNSET:
+            raise TypeError("Missing prompt value.")
+        return prompt, mappings
+
+    if not isinstance(prompt, str):
+        raise TypeError("Key/value quick prompt input expects a string key.")
+
+    prompt_data: dict[str, Any] = {prompt: value}
+    if extra_items:
+        prompt_data.update(extra_items)
+    return prompt_data, mappings
 
 
 class ModelRequest:
@@ -115,77 +147,110 @@ class ModelRequest:
         self,
         key: "PromptStandardSlot | str",
         value: tuple[type, str | None, str | None] | Any,
+        *,
         mappings: dict[str, Any] | None = None,
     ):
-        self.prompt.set(key, value, mappings)
+        self.prompt.set(key, value, mappings=mappings)
         return self
 
     # Quick Prompt
     def system(
         self,
-        prompt: Any,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
         mappings: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
-        self.prompt.set("system", prompt, mappings)
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
+        self.prompt.set("system", prompt, mappings=mappings)
         return self
 
     def rule(
         self,
-        prompt: Any,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
         mappings: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         self.prompt.set("system", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
-        self.prompt.set("system.rule", prompt, mappings)
+        self.prompt.set("system.rule", prompt, mappings=mappings)
         return self
 
     def role(
         self,
-        prompt: Any,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
         mappings: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         self.prompt.set("system", ["YOU MUST REACT AND RESPOND AS {system.your_role}!"])
-        self.prompt.set("system.your_role", prompt, mappings)
+        self.prompt.set("system.your_role", prompt, mappings=mappings)
         return self
 
     def user_info(
         self,
-        prompt: Any,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
         mappings: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         self.prompt.set("system", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
-        self.prompt.set("system.user_info", prompt, mappings)
+        self.prompt.set("system.user_info", prompt, mappings=mappings)
         return self
 
     def input(
         self,
-        prompt: Any,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
         mappings: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
-        self.prompt.set("input", prompt, mappings)
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
+        self.prompt.set("input", prompt, mappings=mappings)
         return self
 
     def info(
         self,
-        prompt: Any,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
         mappings: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
-        self.prompt.set("info", prompt, mappings)
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
+        self.prompt.set("info", prompt, mappings=mappings)
         return self
 
     def instruct(
         self,
-        prompt: Any,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
         mappings: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
-        self.prompt.set("instruct", prompt, mappings)
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
+        self.prompt.set("instruct", prompt, mappings=mappings)
         return self
 
     def examples(
         self,
-        prompt: Any,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
         mappings: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
-        self.prompt.set("examples", prompt, mappings)
+        prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
+        self.prompt.set("examples", prompt, mappings=mappings)
         return self
 
     def output(
@@ -196,17 +261,19 @@ class ModelRequest:
             | tuple[type, str | None, str, None]
             | Any
         ),
+        *,
         mappings: dict[str, Any] | None = None,
     ):
-        self.prompt.set("output", prompt, mappings)
+        self.prompt.set("output", prompt, mappings=mappings)
         return self
 
     def attachment(
         self,
         prompt: list[dict[str, Any]],
+        *,
         mappings: dict[str, Any] | None = None,
     ):
-        self.prompt.set("attachment", prompt, mappings)
+        self.prompt.set("attachment", prompt, mappings=mappings)
         return self
 
     # Response & Result
