@@ -26,6 +26,7 @@ async def main():
     result = (
         agent.input(
             "Acting as ${role} to response: ${user_input}",
+            # Placeholder substitutions always use explicit mappings=...
             mappings={
                 "user_input": user_input,
                 "role": role,

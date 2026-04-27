@@ -366,6 +366,8 @@ result = (
 )
 ```
 
+When you use `${...}` placeholders, pass substitutions explicitly with `mappings=...`, for example `agent.instruct("Hello ${name}", mappings={"name": "Alice"})`.
+
 Prompt templates can be loaded from YAML/JSON files via the `configure_prompt` extension for team-level prompt governance.
 
 ### 8. Unified Model Settings

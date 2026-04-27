@@ -58,6 +58,7 @@ def load_yaml_prompt():
     # $${key_name_placeholder}: This agent key name should be replaced.
     # ${key_name_placeholder}: This request key name should be replaced too.
     # only_value_placeholder_test": ${ only_value_placeholder }
+    # If you want placeholder substitution while loading, pass mappings=... explicitly.
     # You can load YAML prompt from file path or raw string content.
     result = (
         agent.load_yaml_prompt("examples/configure_prompt/yaml_prompt.yaml")
@@ -114,6 +115,7 @@ def load_json_prompt():
     #   "${key_name_placeholder}": "This request key name should be replaced too.",
     #   "only_value_placeholder_test": "${ only_value_placeholder }"
     # }
+    # If you want placeholder substitution while loading, pass mappings=... explicitly.
     # You can load JSON prompt from file path or raw string content.
     result = (
         agent.load_json_prompt("examples/configure_prompt/json_prompt.json")
@@ -145,7 +147,7 @@ def load_from_string():
     # Notice:
     # - String loading is treated as raw prompt content, not a file path.
     # - If you keep placeholders like ${...}, they are resolved at load time
-    #   only when mappings are provided.
+    #   only when explicit mappings=... are provided.
     yaml_prompt_text = """
 $ensure_all_keys: true
 .agent:

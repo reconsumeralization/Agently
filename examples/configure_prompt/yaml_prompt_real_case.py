@@ -24,5 +24,5 @@ output:
 cat_words = "This is delicious!"
 
 agent = Agently.create_agent()
-result = agent.load_yaml_prompt(yaml_prompt, {"cat_words": cat_words}).start()
+result = agent.load_yaml_prompt(yaml_prompt, mappings={"cat_words": cat_words}).start()
 print(result)

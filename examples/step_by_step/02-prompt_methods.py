@@ -152,7 +152,8 @@ def prompt_slots():
 
 ## Placeholder Mappings
 def placeholder_mappings():
-    # You can use ${<variable name>} in almost every position in prompt data as long as that position support string value
+    # You can use ${<variable name>} in almost every position in prompt data as long as that position support string value.
+    # Placeholder mappings should always be passed explicitly via mappings=...
     result = (
         agent.set_request_prompt(
             "input",
@@ -187,7 +188,7 @@ def quick_prompt_methods():
             "You're a useful assistant named ${assistant_name}.",
             # set `always=True` if you want to set this prompt as an agent prompt
             always=True,
-            # you can use placeholder mapping in quick prompt methods too
+            # you can use placeholder mapping in quick prompt methods too, via mappings=...
             mappings={
                 "assistant_name": "Alice Agently",
             },

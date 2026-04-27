@@ -366,6 +366,8 @@ result = (
 )
 ```
 
+当你使用 `${...}` 占位符时，替换值必须显式通过 `mappings=...` 传入，例如 `agent.instruct("Hello ${name}", mappings={"name": "Alice"})`。
+
 Prompt 模板可通过 `configure_prompt` 扩展从 YAML/JSON 文件加载，支持团队级 Prompt 治理。
 
 ### 8. 统一模型配置
