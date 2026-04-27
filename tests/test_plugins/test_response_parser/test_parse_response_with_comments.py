@@ -1,6 +1,6 @@
 import pytest
 import json5
-from typing import cast
+from typing import Any, cast
 from agently.utils import DataFormatter, DataLocator, StreamingJSONCompleter
 
 
@@ -129,3 +129,39 @@ def test_locate_output_json_with_root_list_schema():
     assert isinstance(parsed, list)
     parsed = cast(list[dict[str, str]], parsed)
     assert parsed[0]["title"] == "A"
+
+
+def test_locate_output_json_prefers_best_schema_match_over_think_draft():
+    model_output = '''
+    <think>
+    先草拟一个结构：
+    {"summary": "draft", "action_items": [{"owner": "张经理"}]}
+    </think>
+
+    最终结果：
+    {
+      "summary": "启动用户反馈系统开发，暂缓数据导出功能；微服务改造需评估；4月底完成原型，6月底上线；下周提交项目计划。",
+      "action_items": [
+        {"task": "提交详细项目计划", "owner": "张经理", "deadline": "2024-03-22"},
+        {"task": "评估微服务改造可行性", "owner": "张经理", "deadline": "2024-03-29"}
+      ]
+    }
+    '''
+
+    chosen_json = DataLocator.locate_output_json(
+        model_output,
+        {
+            "summary": (str, "会议核心结论，100字以内"),
+            "action_items": [
+                {
+                    "task": (str, "待办事项描述"),
+                    "owner": (str, "负责人"),
+                    "deadline": (str, "截止日期"),
+                }
+            ],
+        },
+    )
+
+    assert chosen_json is not None
+    parsed = cast(dict[str, Any], json5.loads(chosen_json))
+    assert parsed["action_items"][0]["task"] == "提交详细项目计划"

@@ -76,6 +76,82 @@ class MockObservationRequester:
         yield "meta", {"provider": "mock-observation", "model": "mock-1"}
 
 
+class MockThinkStructuredRequester:
+    name = "MockThinkStructuredRequester"
+    DEFAULT_SETTINGS: dict[str, Any] = {}
+
+    def __init__(self, prompt, settings):
+        self.prompt = prompt
+        self.settings = settings
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    def generate_request_data(self):
+        prompt_object = self.prompt.to_prompt_object()
+        return AgentlyRequestData(
+            client_options={},
+            headers={},
+            data={
+                "messages": self.prompt.to_messages(),
+                "prompt_text": self.prompt.to_text(),
+                "output_format": prompt_object.output_format,
+            },
+            request_options={"stream": True},
+            request_url="mock://think-structured-requester",
+        )
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        del request_data
+        yield "message", json.dumps(
+            {
+                "summary": "draft",
+                "action_items": [{"owner": "张经理"}],
+            },
+            ensure_ascii=False,
+        )
+        yield "message", "\n"
+        yield "message", json.dumps(
+            {
+                "summary": "启动用户反馈系统开发，暂缓数据导出功能；微服务改造需评估；4月底完成原型，6月底上线；下周提交项目计划。",
+                "action_items": [
+                    {
+                        "task": "提交详细项目计划",
+                        "owner": "张经理",
+                        "deadline": "2024-03-22",
+                    },
+                    {
+                        "task": "评估微服务改造可行性",
+                        "owner": "张经理",
+                        "deadline": "2024-03-29",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, Any], None],
+    ):
+        response_text = "<think>先草拟一个结构。"
+        async for event, data in response_generator:
+            if event == "message":
+                response_text += str(data)
+        response_text += "</think>"
+        for line in response_text.splitlines(keepends=True):
+            if line:
+                yield "delta", line
+                await asyncio.sleep(0)
+        yield "done", response_text
+        yield "meta", {"provider": "mock-observation", "model": "mock-think"}
+
+
 def _create_request():
     settings = Settings(name="ObservationTestSettings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="ObservationTestPluginManager")
@@ -96,6 +172,18 @@ def _create_agent():
         plugin_manager,
         parent_settings=settings,
         name="observation-agent",
+    )
+
+
+def _create_think_structured_request():
+    settings = Settings(name="ThinkStructuredTestSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="ThinkStructuredPluginManager")
+    plugin_manager.register("ModelRequester", MockThinkStructuredRequester, activate=True)
+    return ModelRequest(
+        plugin_manager,
+        agent_name="think-structured-agent",
+        agent_id="agent-think-structured",
+        parent_settings=settings,
     )
 
 
@@ -129,7 +217,9 @@ async def test_model_request_events_include_prompt_and_child_run_lineage():
         assert response.model_run_context.run_kind == "model_request"
 
         request_events = [event for event in captured if event.run and event.run.run_id == response.run_context.run_id]
-        model_events = [event for event in captured if event.run and event.run.run_id == response.model_run_context.run_id]
+        model_events = [
+            event for event in captured if event.run and event.run.run_id == response.model_run_context.run_id
+        ]
 
         assert [event.event_type for event in request_events if event.event_type.startswith("request.")] == [
             "request.started",
@@ -189,7 +279,9 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
         assert len(attempt_start_events) == 2
         assert [event.payload["attempt_index"] for event in attempt_start_events] == [1, 2]
         assert len({event.run.run_id for event in attempt_start_events if event.run is not None}) == 2
-        assert all(event.run and event.run.parent_run_id == response.run_context.run_id for event in attempt_start_events)
+        assert all(
+            event.run and event.run.parent_run_id == response.run_context.run_id for event in attempt_start_events
+        )
 
         retry_event = next(event for event in captured if event.event_type == "model.retrying")
         assert retry_event.payload["next_attempt_index"] == 2
@@ -207,6 +299,33 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
         assert final_completed_event.payload["cleaned_text"] == '{"summary": "all good", "reply": "done"}'
     finally:
         Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_model_request_ensure_keys_prefers_complete_json_after_think_block():
+    request = _create_think_structured_request()
+    request.output(
+        {
+            "summary": (str, "会议核心结论，100字以内"),
+            "action_items": [
+                {
+                    "task": (str, "待办事项描述"),
+                    "owner": (str, "负责人"),
+                    "deadline": (str, "截止日期"),
+                }
+            ],
+        }
+    )
+
+    response = request.get_response()
+    data = await response.async_get_data(
+        ensure_keys=["summary", "action_items[*].task", "action_items[*].owner"],
+        max_retries=0,
+    )
+
+    assert data["summary"].startswith("启动用户反馈系统开发")
+    assert data["action_items"][0]["task"] == "提交详细项目计划"
+    assert data["action_items"][0]["owner"] == "张经理"
 
 
 @pytest.mark.asyncio
@@ -245,7 +364,9 @@ async def test_agent_turn_wraps_request_and_model_request_runs():
         assert turn_run.parent_run_id == workflow_run.run_id
 
         request_events = [
-            event for event in captured if event.run and event.run.run_kind == "request" and event.run.parent_run_id == turn_run.run_id
+            event
+            for event in captured
+            if event.run and event.run.run_kind == "request" and event.run.parent_run_id == turn_run.run_id
         ]
         assert [event.event_type for event in request_events if event.event_type.startswith("request.")] == [
             "request.started",
@@ -380,7 +501,9 @@ async def test_trigger_flow_runtime_context_auto_inherits_parent_run_for_agent_a
         assert "Morning briefing prepared." in result["request_text"]
 
         workflow_start = next(
-            event for event in captured if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started"
+            event
+            for event in captured
+            if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started"
         )
         workflow_run = workflow_start.run
         assert workflow_run is not None
@@ -450,7 +573,8 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
         workflow_runs = [
             event.run
             for event in captured
-            if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started" and event.run is not None
+            if normalize_triggerflow_event_type(event.event_type) == "triggerflow.execution_started"
+            and event.run is not None
         ]
 
         root_workflow_run = next(run for run in workflow_runs if run.meta.get("flow_name") == "daily-news-root-flow")
@@ -479,22 +603,20 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
         assert summarize_chunk.parent_run_id == subflow_workflow_run.run_id
 
         agent_turn_run = next(
-            event.run
-            for event in captured
-            if event.event_type == "agent_turn.started" and event.run is not None
+            event.run for event in captured if event.event_type == "agent_turn.started" and event.run is not None
         )
         assert agent_turn_run is not None
         assert agent_turn_run.parent_run_id == summarize_chunk.run_id
 
-        request_starts = [event.run for event in captured if event.event_type == "request.started" and event.run is not None]
+        request_starts = [
+            event.run for event in captured if event.event_type == "request.started" and event.run is not None
+        ]
         parent_ids = {run.parent_run_id for run in request_starts}
         assert summarize_chunk.run_id in parent_ids
         assert agent_turn_run.run_id in parent_ids
 
         model_request_runs = [
-            event.run
-            for event in captured
-            if event.event_type == "model.request_started" and event.run is not None
+            event.run for event in captured if event.event_type == "model.request_started" and event.run is not None
         ]
         assert len(model_request_runs) >= 2
         assert all(run.parent_run_id in {request.run_id for request in request_starts} for run in model_request_runs)

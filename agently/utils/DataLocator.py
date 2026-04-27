@@ -36,6 +36,27 @@ class DataLocator:
         return False
 
     @staticmethod
+    def _score_output_schema_match(parsed_json: Any, output_prompt: "PromptOutputStructure") -> int:
+        if not DataLocator._matches_output_schema_shape(parsed_json, output_prompt):
+            return -1
+
+        from agently.utils.DataPathBuilder import DataPathBuilder
+
+        try:
+            schema_paths = DataPathBuilder.extract_possible_paths(output_prompt, style="dot")
+        except Exception:
+            return 0
+
+        empty = object()
+        score = 0
+        for path in schema_paths:
+            if not path:
+                continue
+            if DataLocator.locate_path_in_dict(parsed_json, path, style="dot", default=empty) is not empty:
+                score += 1
+        return score
+
+    @staticmethod
     def _locate_path_parts(
         result: Any,
         path_parts: list[str],
@@ -236,13 +257,19 @@ class DataLocator:
         if len(all_json) == 1:
             return all_json[0]
         else:
-            for json_string in all_json[:-1]:
+            best_json = None
+            best_score = -1
+            for json_string in all_json:
                 try:
                     parsed_json = json5.loads(json_string)
-                    if DataLocator._matches_output_schema_shape(parsed_json, output_prompt_dict):
-                        return json_string
+                    score = DataLocator._score_output_schema_match(parsed_json, output_prompt_dict)
+                    if score >= best_score:
+                        best_score = score
+                        best_json = json_string
                 except Exception:
                     continue
+            if best_json is not None and best_score >= 0:
+                return best_json
             return all_json[-1]
 
     @staticmethod
