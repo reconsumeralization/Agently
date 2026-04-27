@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 
 import os
 from dotenv import find_dotenv, load_dotenv
@@ -16,6 +17,7 @@ from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
 )
 import agently.builtins.plugins.ModelRequester.OpenAICompatible as openai_module
 from collections import Counter
+from types import SimpleNamespace
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
@@ -215,3 +217,159 @@ async def test_streaming_done_is_not_emitted_twice(monkeypatch: pytest.MonkeyPat
     assert counts["done"] == 1
     assert counts["reasoning_done"] == 1
     assert counts["meta"] == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_uses_first_token_timeout_mode_by_default(monkeypatch: pytest.MonkeyPatch):
+    captured: dict = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aclose(self):
+            return None
+
+    async def fake_aiter_sse_with_retry(self, client, method, url, *, headers, json):
+        del self, client, method, url, headers, json
+
+        async def generator():
+            yield SimpleNamespace(event="message", data='{"choices":[{"delta":{"content":"hello"}}]}')
+            yield SimpleNamespace(event="message", data="[DONE]")
+
+        return generator()
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(OpenAICompatible, "_aiter_sse_with_retry", fake_aiter_sse_with_retry)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": True,
+            "timeout": {"connect": 1.0, "read": 9.0, "write": 2.0, "pool": 3.0},
+        },
+        {"input": "hello"},
+    )
+    request_data = plugin.generate_request_data()
+
+    async for _event, _payload in plugin.request_model(request_data):
+        pass
+
+    timeout = captured["client_kwargs"]["timeout"]
+    assert timeout.connect == 1.0
+    assert timeout.read is None
+    assert timeout.write == 2.0
+    assert timeout.pool == 3.0
+
+
+@pytest.mark.asyncio
+async def test_streaming_http_timeout_mode_preserves_http_read_timeout(monkeypatch: pytest.MonkeyPatch):
+    captured: dict = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aclose(self):
+            return None
+
+    async def fake_aiter_sse_with_retry(self, client, method, url, *, headers, json):
+        del self, client, method, url, headers, json
+
+        async def generator():
+            yield SimpleNamespace(event="message", data='{"choices":[{"delta":{"content":"hello"}}]}')
+            yield SimpleNamespace(event="message", data="[DONE]")
+
+        return generator()
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(OpenAICompatible, "_aiter_sse_with_retry", fake_aiter_sse_with_retry)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": True,
+            "timeout_mode": "http",
+            "timeout": {"connect": 1.0, "read": 9.0, "write": 2.0, "pool": 3.0},
+        },
+        {"input": "hello"},
+    )
+    request_data = plugin.generate_request_data()
+
+    async for _event, _payload in plugin.request_model(request_data):
+        pass
+
+    timeout = captured["client_kwargs"]["timeout"]
+    assert timeout.connect == 1.0
+    assert timeout.read == 9.0
+    assert timeout.write == 2.0
+    assert timeout.pool == 3.0
+
+
+@pytest.mark.asyncio
+async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pytest.MonkeyPatch):
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aclose(self):
+            return None
+
+    async def fake_aiter_sse_with_retry(self, client, method, url, *, headers, json):
+        del self, client, method, url, headers, json
+
+        async def generator():
+            await asyncio.sleep(0.05)
+            yield SimpleNamespace(event="message", data='{"choices":[{"delta":{"content":"hello"}}]}')
+
+        return generator()
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(OpenAICompatible, "_aiter_sse_with_retry", fake_aiter_sse_with_retry)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": True,
+            "timeout": {"connect": 1.0, "read": 0.01, "write": 2.0, "pool": 3.0},
+        },
+        {"input": "hello"},
+    )
+    async def fake_async_error(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    plugin._emitter.async_error = fake_async_error  # type: ignore[method-assign]
+    request_data = plugin.generate_request_data()
+
+    events = []
+    async for event, payload in plugin.request_model(request_data):
+        events.append((event, payload))
+
+    assert len(events) == 1
+    assert events[0][0] == "error"
+    assert isinstance(events[0][1], TimeoutError)
+    assert "First token timeout after 0.01 seconds." in str(events[0][1])

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import time
 import yaml
 import json
@@ -64,6 +65,7 @@ class ModelSettingsMapping(TypedDict):
 class ModelRequesterSettings(TypedDict, total=False):
     model: str
     model_type: Literal["chat", "completions", "embeddings"]
+    timeout_mode: Literal["http", "first_token"]
     client_options: dict[str, "SerializableValue"]
     headers: dict[str, "SerializableValue"]
     proxy: str
@@ -97,6 +99,7 @@ class OpenAICompatible(ModelRequester):
             "completions": "gpt-3.5-turbo-instruct",
             "embeddings": "text-embedding-ada-002",
         },
+        "timeout_mode": "first_token",
         "client_options": {},
         "headers": {},
         "proxy": None,
@@ -160,6 +163,66 @@ class OpenAICompatible(ModelRequester):
     @staticmethod
     def _on_unregister():
         pass
+
+    def _get_timeout_mode(self) -> Literal["http", "first_token"]:
+        timeout_mode = self.plugin_settings.get("timeout_mode", "first_token")
+        if timeout_mode == "http":
+            return "http"
+        return "first_token"
+
+    def _get_timeout_configs(self) -> dict[str, Any]:
+        return DataFormatter.to_str_key_dict(
+            self.plugin_settings.get(
+                "timeout",
+                {
+                    "connect": 30.0,
+                    "read": 120.0,
+                    "write": 30.0,
+                    "pool": 30.0,
+                },
+            ),
+            default_value={},
+        )
+
+    def _get_http_timeout(self, *, disable_read: bool = False) -> Timeout:
+        timeout_configs = self._get_timeout_configs().copy()
+        if disable_read:
+            timeout_configs["read"] = None
+        return Timeout(**timeout_configs)
+
+    def _get_first_token_timeout_seconds(self) -> float | None:
+        read_timeout = self._get_timeout_configs().get("read")
+        if isinstance(read_timeout, (int, float)) and read_timeout > 0:
+            return float(read_timeout)
+        return None
+
+    def _should_use_first_token_timeout(self, request_data: "AgentlyRequestData") -> bool:
+        return (
+            self._get_timeout_mode() == "first_token"
+            and self.model_type in ("chat", "completions")
+            and bool(request_data.stream)
+        )
+
+    async def _aiter_with_first_token_timeout(
+        self,
+        generator: AsyncGenerator[Any, None],
+        *,
+        timeout_seconds: float | None,
+    ) -> AsyncGenerator[Any, None]:
+        if timeout_seconds is None:
+            async for item in generator:
+                yield item
+            return
+
+        try:
+            first_item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
+        except asyncio.TimeoutError as e:
+            await generator.aclose()
+            raise TimeoutError(f"First token timeout after { timeout_seconds } seconds.") from e
+
+        yield first_item
+        async for item in generator:
+            yield item
 
     def generate_request_data(self) -> "AgentlyRequestData":
         agently_request_dict: AgentlyRequestDataDict = {
@@ -236,19 +299,7 @@ class OpenAICompatible(ModelRequester):
         if proxy:
             client_options.update({"proxy": proxy})
         ## timeout
-        timeout_configs = DataFormatter.to_str_key_dict(
-            self.plugin_settings.get(
-                "timeout",
-                {
-                    "connect": 30.0,
-                    "read": 120.0,
-                    "write": 30.0,
-                    "pool": 30.0,
-                },
-            ),
-            default_value={},
-        )
-        timeout = Timeout(**timeout_configs)
+        timeout = self._get_http_timeout()
         client_options.update({"timeout": timeout})
         ## set
         agently_request_dict["client_options"] = client_options
@@ -382,7 +433,11 @@ class OpenAICompatible(ModelRequester):
         # request
         # stream request
         if self.model_type in ("chat", "completions") and request_data.stream:
-            async with AsyncClient(**request_data.client_options) as client:
+            client_options = request_data.client_options.copy()
+            if self._should_use_first_token_timeout(request_data):
+                client_options.update({"timeout": self._get_http_timeout(disable_read=True)})
+
+            async with AsyncClient(**client_options) as client:
                 client.headers.update(headers_with_auth)
                 full_request_data = DataFormatter.to_str_key_dict(
                     request_data.data,
@@ -392,9 +447,15 @@ class OpenAICompatible(ModelRequester):
                 full_request_data.update(request_data.request_options)
                 try:
                     has_done = False
-                    async for sse in await self._aiter_sse_with_retry(
+                    sse_generator = await self._aiter_sse_with_retry(
                         client, "POST", request_data.request_url, json=full_request_data, headers=headers_with_auth
-                    ):
+                    )
+                    if self._should_use_first_token_timeout(request_data):
+                        sse_generator = self._aiter_with_first_token_timeout(
+                            sse_generator,
+                            timeout_seconds=self._get_first_token_timeout_seconds(),
+                        )
+                    async for sse in sse_generator:
                         yield sse.event, sse.data
                         if sse.data.strip() == "[DONE]":
                             has_done = True
@@ -450,6 +511,13 @@ class OpenAICompatible(ModelRequester):
                         "Error: HTTP Status Error\n"
                         f"Detail: { e.response.status_code } - { e.response.text }\n"
                         f"Request Data: { full_request_data }",
+                        event_type="model.requester.error",
+                        payload={"request_data": full_request_data},
+                    )
+                    yield "error", e
+                except TimeoutError as e:
+                    await self._emitter.async_error(
+                        "Error: Timeout Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
                         event_type="model.requester.error",
                         payload={"request_data": full_request_data},
                     )
