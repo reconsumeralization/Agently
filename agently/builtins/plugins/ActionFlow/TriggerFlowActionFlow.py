@@ -294,7 +294,9 @@ class TriggerFlowActionFlow:
                     wait_for_result=True,
                     timeout=timeout,
                 )
-        except Exception as error:
+        except BaseException as error:
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
             await async_emit_runtime(
                 {
                     "event_type": "tool.loop_failed",

@@ -129,7 +129,7 @@ class RuntimeEventDict(TypedDict, total=False):
     level: RuntimeEventLevel
     message: str | None
     payload: Any
-    error: ErrorInfoDict | Exception | None
+    error: ErrorInfoDict | BaseException | None
     run: RunContextDict | None
     meta: dict[str, Any]
     timestamp: int
@@ -146,7 +146,7 @@ class ErrorInfo(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def from_exception(cls, error: Exception) -> "ErrorInfo":
+    def from_exception(cls, error: BaseException) -> "ErrorInfo":
         return cls(
             type=error.__class__.__name__,
             message=str(error),
@@ -252,7 +252,7 @@ class RuntimeEvent(BaseModel):
         if not isinstance(value, dict):
             return value
         error = value.get("error")
-        if isinstance(error, Exception):
+        if isinstance(error, BaseException):
             normalized = dict(value)
             normalized["error"] = ErrorInfo.from_exception(error)
             return normalized

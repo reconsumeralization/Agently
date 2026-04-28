@@ -164,7 +164,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         level: str = "INFO",
         message: str | None = None,
         payload: Any = None,
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ):
         from agently.base import async_emit_runtime
 
@@ -283,7 +283,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         level: str = "INFO",
         message: str | None = None,
         payload: Any = None,
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ):
         from agently.base import async_emit_runtime
 
@@ -691,7 +691,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                                 chunk_run_context=chunk_run_context,
                             ):
                                 return await handler_func
-                        except Exception as error:
+                        except BaseException as error:
+                            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                                raise
                             if operator is not None and chunk_run_context is not None:
                                 await self._emit_chunk_runtime_event(
                                     "chunk.failed",
@@ -765,6 +767,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             try:
                 await asyncio.gather(*tasks, return_exceptions=self._skip_exceptions)
             except Exception as error:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
                 self._set_status(TRIGGER_FLOW_STATUS_FAILED)
                 if not self._runtime_failed_emitted:
                     self._runtime_failed_emitted = True

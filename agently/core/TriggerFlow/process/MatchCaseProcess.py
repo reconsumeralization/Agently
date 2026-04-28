@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 from agently.types.data import EMPTY
 from agently.types.trigger_flow import TriggerFlowBlockData
 from .BaseProcess import TriggerFlowBaseProcess
+from .._async_utils import gather_cancel_on_error
 
 TriggerFlowConditionHandler = Callable[["TriggerFlowRuntimeData"], bool]
 
@@ -84,7 +85,7 @@ class TriggerFlowMatchCaseProcess(TriggerFlowBaseProcess):
                             )
                         )
                         data.layer_out()
-            await asyncio.gather(*tasks)
+            await gather_cancel_on_error(*tasks)
             if matched_count == 0:
                 if match_block_data.data["has_else"] is True:
                     await data.async_emit(

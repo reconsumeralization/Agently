@@ -173,7 +173,7 @@ class RuntimeEventEmitter:
         level: "RuntimeEventLevel" = "INFO",
         message: str | None = None,
         payload: Any = None,
-        error: ErrorInfo | Exception | None = None,
+        error: ErrorInfo | BaseException | None = None,
         run: "RunContext | None" = None,
         meta: dict[str, Any] | None = None,
     ):
@@ -181,7 +181,7 @@ class RuntimeEventEmitter:
         if meta is not None:
             final_meta.update(meta)
         final_error: ErrorInfo | None = None
-        if isinstance(error, Exception):
+        if isinstance(error, BaseException):
             final_error = ErrorInfo.from_exception(error)
         else:
             final_error = error
@@ -254,7 +254,7 @@ class RuntimeEventEmitter:
 
     async def async_error(
         self,
-        error: str | Exception,
+        error: str | BaseException,
         *,
         event_type: str = "runtime.error",
         message: str | None = None,
@@ -262,7 +262,7 @@ class RuntimeEventEmitter:
         run: "RunContext | None" = None,
         meta: dict[str, Any] | None = None,
     ):
-        final_error = error if isinstance(error, Exception) else RuntimeError(error)
+        final_error = error if isinstance(error, BaseException) else RuntimeError(error)
         await self.async_emit(
             event_type,
             level="ERROR",
@@ -279,7 +279,7 @@ class RuntimeEventEmitter:
 
     async def async_critical(
         self,
-        critical: str | Exception,
+        critical: str | BaseException,
         *,
         event_type: str = "runtime.critical",
         message: str | None = None,
@@ -287,7 +287,7 @@ class RuntimeEventEmitter:
         run: "RunContext | None" = None,
         meta: dict[str, Any] | None = None,
     ):
-        final_critical = critical if isinstance(critical, Exception) else RuntimeError(critical)
+        final_critical = critical if isinstance(critical, BaseException) else RuntimeError(critical)
         await self.async_emit(
             event_type,
             level="CRITICAL",

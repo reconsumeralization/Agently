@@ -327,7 +327,9 @@ class ModelResponse:
                             "run": self.agent_turn_run_context,
                         }
                     )
-            except Exception as error:
+            except BaseException as error:
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    raise
                 await async_emit_runtime(
                     {
                         "event_type": "model.request_failed",

@@ -226,6 +226,15 @@ class AgentlyResponseParser(ResponseParser):
                 if self._response_consumer is None:
                     self._response_consumer = GeneratorConsumer(self._extract())
 
+    async def _wait_for_consumer_result(self):
+        await self._ensure_consumer()
+        consumer = cast(GeneratorConsumer, self._response_consumer)
+        try:
+            await consumer.get_result()
+        except asyncio.CancelledError:
+            await consumer.close()
+            raise
+
     async def _extract(self):
         from agently.base import async_emit_runtime
 
@@ -321,8 +330,7 @@ class AgentlyResponseParser(ResponseParser):
                     await self.response_generator.aclose()
 
     async def async_get_meta(self) -> "SerializableMapping":
-        await self._ensure_consumer()
-        await cast(GeneratorConsumer, self._response_consumer).get_result()
+        await self._wait_for_consumer_result()
         return self.full_result_data["meta"]
 
     async def async_get_data(
@@ -331,8 +339,7 @@ class AgentlyResponseParser(ResponseParser):
         type: Literal['original', 'parsed', "all"] | None = "parsed",
         content: Literal['original', 'parsed', "all"] | None = "parsed",
     ) -> Any:
-        await self._ensure_consumer()
-        await cast(GeneratorConsumer, self._response_consumer).get_result()
+        await self._wait_for_consumer_result()
         if type is None and content is not None:
             warnings.warn(
                 f"Parameter `content` in method .async_get_data() is  deprecated and will be removed in future version, please use parameter `type` instead."
@@ -354,13 +361,11 @@ class AgentlyResponseParser(ResponseParser):
                 f"Output Format: { self._prompt_object.output_format }\n"
                 f"Output Prompt: { self._prompt_object.output }"
             )
-        await self._ensure_consumer()
-        await cast(GeneratorConsumer, self._response_consumer).get_result()
+        await self._wait_for_consumer_result()
         return self.full_result_data["result_object"]
 
     async def async_get_text(self) -> str:
-        await self._ensure_consumer()
-        await cast(GeneratorConsumer, self._response_consumer).get_result()
+        await self._wait_for_consumer_result()
         return self.full_result_data["text_result"]
 
     async def get_async_generator(
@@ -371,7 +376,8 @@ class AgentlyResponseParser(ResponseParser):
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator:
         await self._ensure_consumer()
-        parsed_generator = cast(GeneratorConsumer, self._response_consumer).get_async_generator()
+        consumer = cast(GeneratorConsumer, self._response_consumer)
+        parsed_generator = consumer.get_async_generator()
         _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
         streaming_json_parser = None
         if type in ("instant", "streaming_parse") and self._prompt_object.output_format == "json":
@@ -381,37 +387,41 @@ class AgentlyResponseParser(ResponseParser):
                 f"Parameter `content` in method .get_async_generator() is  deprecated and will be removed in future version, please use parameter `type` instead."
             )
             type = content
-        async for event, data in parsed_generator:
-            match type:
-                case "all":
-                    yield event, data
-                case "delta":
-                    if event == "delta":
-                        yield data
-                case "specific":
-                    if specific is None:
-                        specific = ["delta"]
-                    elif isinstance(specific, str):
-                        specific = [specific]
-                    if event in specific:
+        try:
+            async for event, data in parsed_generator:
+                match type:
+                    case "all":
                         yield event, data
-                case "instant" | "streaming_parse":
-                    if streaming_json_parser is not None:
+                    case "delta":
                         if event == "delta":
-                            async for streaming_data in streaming_json_parser.parse_chunk(str(data)):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
-                        if event == "tool_calls":
-                            yield StreamingData(path="$tool_calls", value=data)
-                        elif event == "done":
-                            async for streaming_data in self._flush_streaming_json_events(streaming_json_parser):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
-                case "original":
-                    if event.startswith("original"):
-                        yield data
+                            yield data
+                    case "specific":
+                        if specific is None:
+                            specific = ["delta"]
+                        elif isinstance(specific, str):
+                            specific = [specific]
+                        if event in specific:
+                            yield event, data
+                    case "instant" | "streaming_parse":
+                        if streaming_json_parser is not None:
+                            if event == "delta":
+                                async for streaming_data in streaming_json_parser.parse_chunk(str(data)):
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
+                            if event == "tool_calls":
+                                yield StreamingData(path="$tool_calls", value=data)
+                            elif event == "done":
+                                async for streaming_data in self._flush_streaming_json_events(streaming_json_parser):
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
+                    case "original":
+                        if event.startswith("original"):
+                            yield data
+        except asyncio.CancelledError:
+            await consumer.close()
+            raise
 
     def get_generator(
         self,

@@ -19,6 +19,7 @@ from .BaseProcess import TriggerFlowBaseProcess
 from agently.types.data import EMPTY
 from agently.types.trigger_flow import TriggerFlowBlockData
 from agently.utils import StateDataNamespace
+from .._async_utils import gather_cancel_on_error
 
 
 class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
@@ -76,7 +77,7 @@ class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
                 for item in items:
                     _, layer_marks, item_value = prepare_item(item)
                     send_tasks.append(emit_item(item_value, layer_marks))
-                await asyncio.gather(*send_tasks)
+                await gather_cancel_on_error(*send_tasks)
             else:
                 _, layer_marks, item_value = prepare_item(data.value)
                 await emit_item(item_value, layer_marks)

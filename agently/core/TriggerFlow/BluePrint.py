@@ -26,6 +26,7 @@ from json import JSONDecodeError
 from asyncio import Event, Semaphore
 from collections.abc import Mapping
 from typing import Any, Literal, TYPE_CHECKING, Sequence, cast
+from ._async_utils import gather_cancel_on_error
 
 if TYPE_CHECKING:
     from agently.types.trigger_flow import (
@@ -1043,7 +1044,7 @@ class TriggerFlowBlueprint:
                         _layer_marks=data._layer_marks.copy(),
                     )
 
-            await asyncio.gather(*[emit_branch(signal) for signal in operator["emit_signals"]])
+            await gather_cancel_on_error(*[emit_branch(signal) for signal in operator["emit_signals"]])
 
         for signal in operator["listen_signals"]:
             self.add_handler(signal["trigger_type"], signal["trigger_event"], send_to_branches, id=operator["id"])
@@ -1127,7 +1128,7 @@ class TriggerFlowBlueprint:
                 for item in items:
                     layer_marks, item_value = prepare_item(item)
                     send_tasks.append(emit_item(item_value, layer_marks))
-                await asyncio.gather(*send_tasks)
+                await gather_cancel_on_error(*send_tasks)
             else:
                 layer_marks, item_value = prepare_item(data.value)
                 await emit_item(item_value, layer_marks)
@@ -1214,7 +1215,7 @@ class TriggerFlowBlueprint:
                             )
                         )
                         data.layer_out()
-            await asyncio.gather(*tasks)
+            await gather_cancel_on_error(*tasks)
             if matched_count == 0:
                 if isinstance(else_signal, dict):
                     await data.async_emit(
@@ -1529,4 +1530,3 @@ class TriggerFlowBlueprint:
                 emit_signals=chunk.emit_signals,
             )
         return new_blueprint
-

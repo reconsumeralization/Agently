@@ -152,6 +152,58 @@ class MockThinkStructuredRequester:
         yield "meta", {"provider": "mock-observation", "model": "mock-think"}
 
 
+class MockSlowCancelableRequester:
+    name = "MockSlowCancelableRequester"
+    DEFAULT_SETTINGS: dict[str, Any] = {}
+    canceled_attempts = 0
+
+    def __init__(self, prompt, settings):
+        self.prompt = prompt
+        self.settings = settings
+
+    @classmethod
+    def reset(cls):
+        cls.canceled_attempts = 0
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    def generate_request_data(self):
+        prompt_object = self.prompt.to_prompt_object()
+        return AgentlyRequestData(
+            client_options={},
+            headers={},
+            data={
+                "messages": self.prompt.to_messages(),
+                "prompt_text": self.prompt.to_text(),
+                "output_format": prompt_object.output_format,
+            },
+            request_options={"stream": True},
+            request_url="mock://slow-cancelable-requester",
+        )
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        del request_data
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            type(self).canceled_attempts += 1
+            raise
+        yield "message", "unexpected"
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, Any], None],
+    ):
+        async for event, data in response_generator:
+            yield event, data
+
+
 def _create_request():
     settings = Settings(name="ObservationTestSettings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="ObservationTestPluginManager")
@@ -172,6 +224,17 @@ def _create_agent():
         plugin_manager,
         parent_settings=settings,
         name="observation-agent",
+    )
+
+
+def _create_slow_agent():
+    settings = Settings(name="SlowObservationTestAgentSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="SlowObservationTestAgentPluginManager")
+    plugin_manager.register("ModelRequester", MockSlowCancelableRequester, activate=True)
+    return Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="slow-observation-agent",
     )
 
 
@@ -620,5 +683,97 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
         ]
         assert len(model_request_runs) >= 2
         assert all(run.parent_run_id in {request.run_id for request in request_starts} for run in model_request_runs)
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_failed_events():
+    MockSlowCancelableRequester.reset()
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.sibling_cancel_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        flow = TriggerFlow(name="sibling-cancel-flow")
+
+        async def slow_branch(data: TriggerFlowRuntimeData):
+            del data
+            agent = _create_slow_agent()
+            agent.input("Wait for sibling cancellation.")
+            return await agent.async_get_text()
+
+        async def fail_branch(data: TriggerFlowRuntimeData):
+            del data
+            await asyncio.sleep(0.05)
+            raise RuntimeError("branch boom")
+
+        flow.batch(slow_branch, fail_branch).end()
+
+        with pytest.raises(RuntimeError, match="branch boom"):
+            await flow.async_start("start")
+
+        for _ in range(20):
+            if MockSlowCancelableRequester.canceled_attempts >= 1 and any(
+                event.event_type == "model.request_failed" for event in captured
+            ):
+                break
+            await asyncio.sleep(0.01)
+
+        event_types = [event.event_type for event in captured]
+        assert "model.request_failed" in event_types
+        assert "request.failed" in event_types
+        assert "agent_turn.failed" in event_types
+        assert "chunk.failed" in event_types
+        assert normalize_triggerflow_event_type("triggerflow.execution_failed") in {
+            normalize_triggerflow_event_type(event_type) for event_type in event_types
+        }
+        assert MockSlowCancelableRequester.canceled_attempts >= 1
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_for_each_failure_waits_for_sibling_cleanup():
+    MockSlowCancelableRequester.reset()
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.for_each_cancel_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        flow = TriggerFlow(name="for-each-cancel-flow")
+
+        async def prepare_items(data: TriggerFlowRuntimeData):
+            del data
+            return ["slow", "fail"]
+
+        async def analyze_item(data: TriggerFlowRuntimeData):
+            if data.value == "slow":
+                agent = _create_slow_agent()
+                agent.input("Wait for for_each sibling cancellation.")
+                return await agent.async_get_text()
+            await asyncio.sleep(0.05)
+            raise RuntimeError("for_each branch boom")
+
+        flow.to(prepare_items).for_each(concurrency=2).to(analyze_item).end_for_each().end()
+
+        with pytest.raises(RuntimeError, match="for_each branch boom"):
+            await flow.async_start("start")
+
+        event_types = [event.event_type for event in captured]
+        assert "model.request_failed" in event_types
+        assert "request.failed" in event_types
+        assert "agent_turn.failed" in event_types
+        assert "chunk.failed" in event_types
+        assert normalize_triggerflow_event_type("triggerflow.execution_failed") in {
+            normalize_triggerflow_event_type(event_type) for event_type in event_types
+        }
+        assert MockSlowCancelableRequester.canceled_attempts >= 1
     finally:
         Agently.event_center.unregister_hook(hook_name)

@@ -1,3 +1,4 @@
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -136,6 +137,29 @@ async def test_event_center_matches_triggerflow_aliases_for_legacy_subscriptions
     assert len(captured) == 1
     assert captured[0].event_type == "triggerflow.execution_started"
     assert captured[0].message == "started"
+
+
+@pytest.mark.asyncio
+async def test_event_center_normalizes_cancelled_error():
+    ec = EventCenter()
+    captured: list["RuntimeEvent"] = []
+
+    async def capture(event: "RuntimeEvent"):
+        captured.append(event)
+
+    ec.register_hook(capture, event_types="runtime.error", hook_name="capture_cancelled_error")
+
+    await ec.async_emit(
+        {
+            "event_type": "runtime.error",
+            "error": asyncio.CancelledError(),
+        }
+    )
+
+    assert len(captured) == 1
+    assert captured[0].error is not None
+    assert captured[0].error.type == "CancelledError"
+    assert captured[0].error.module == "asyncio.exceptions"
 
 
 def test_runtime_log_profiles_keep_default_off_quiet():
