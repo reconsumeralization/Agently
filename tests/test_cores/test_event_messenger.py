@@ -1,3 +1,4 @@
+import logging
 import asyncio
 from typing import TYPE_CHECKING
 
@@ -5,15 +6,40 @@ import pytest
 
 from agently import Agently
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import (
+    RuntimeConsoleSinkHooker,
     should_render_console_event,
     should_render_storage_event,
 )
 from agently.core import EventCenter
+from agently.core.RuntimeContext import bind_runtime_context
 from agently.types.data import RuntimeEvent
 from agently.utils import Settings
 
 if TYPE_CHECKING:
     from agently.types.data import RuntimeEvent
+
+
+_RUNTIME_LOG_KEYS = (
+    "debug",
+    "runtime.show_model_logs",
+    "runtime.show_tool_logs",
+    "runtime.show_trigger_flow_logs",
+    "runtime.show_runtime_logs",
+    "runtime.httpx_log_level",
+)
+
+
+def _snapshot_runtime_log_settings():
+    return {key: Agently.settings.get(key, None) for key in _RUNTIME_LOG_KEYS}
+
+
+def _restore_runtime_log_settings(snapshot):
+    for key, value in snapshot.items():
+        Agently.settings.set(key, value)
+    level_name = Agently.settings.get("runtime.httpx_log_level", "WARNING")
+    level = getattr(logging, str(level_name).upper(), logging.WARNING)
+    logging.getLogger("httpx").setLevel(level)
+    logging.getLogger("httpcore").setLevel(level)
 
 
 def _build_runtime_log_settings(profile: str = "off") -> Settings:
@@ -203,3 +229,39 @@ def test_runtime_log_profiles_detail_mode_allows_full_runtime_detail():
 
     assert not should_render_storage_event(RuntimeEvent(event_type="model.completed", level="INFO"), settings)
     assert should_render_storage_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
+
+
+@pytest.mark.asyncio
+async def test_runtime_console_sink_uses_run_context_log_settings(monkeypatch):
+    snapshot = _snapshot_runtime_log_settings()
+    printed: list[str] = []
+    ec = EventCenter()
+    hook_name = "runtime_console_sink.test"
+
+    def capture_print(*args, **kwargs):
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    ec.register_hook(RuntimeConsoleSinkHooker.handler, hook_name=hook_name)
+
+    try:
+        Agently.set_settings("debug", False)
+        request = Agently.create_request("debug-check")
+        request.set_settings("debug", True)
+
+        with bind_runtime_context(settings=request.settings):
+            await ec.async_emit(
+                {
+                    "event_type": "model.requesting",
+                    "source": "probe",
+                    "level": "INFO",
+                    "message": "requesting",
+                    "run": request._create_request_run_context(),
+                }
+            )
+
+        assert printed
+        assert any("requesting" in line for line in printed)
+    finally:
+        ec.unregister_hook(hook_name)
+        _restore_runtime_log_settings(snapshot)

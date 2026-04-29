@@ -365,10 +365,13 @@ class RuntimeConsoleSinkHooker(EventHooker):
     @staticmethod
     async def handler(event: "RuntimeEvent"):
         from agently.base import settings
+        from agently.core.RuntimeContext import get_current_settings
 
-        if not should_render_console_event(event, settings):
+        current_settings = get_current_settings()
+        active_settings = current_settings if current_settings is not None else settings
+        if not should_render_console_event(event, active_settings):
             return
-        profile = resolve_runtime_log_profile(settings, event.event_type)
+        profile = resolve_runtime_log_profile(active_settings, event.event_type)
         family = resolve_runtime_event_family(event.event_type)
         if family == "model":
             RuntimeConsoleSinkHooker._handle_model_event(event, profile)

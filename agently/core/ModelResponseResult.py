@@ -152,6 +152,7 @@ class ModelResponseResult:
                 parent_run_context=self.request_run_context,
                 request_run_context=self.request_run_context,
                 model_run_context=self.model_run_context,
+                settings=self.settings,
             ):
                 for handler in finally_handlers:
                     if inspect.iscoroutinefunction(handler):
@@ -240,27 +241,33 @@ class ModelResponseResult:
                 from agently.base import async_emit_runtime
                 from agently.core.ModelResponse import ModelResponse
 
-                await async_emit_runtime(
-                    {
-                        "event_type": "model.retrying",
-                        "source": "ModelResponseResult",
-                        "level": "WARNING",
-                        "message": "No target data in response. Preparing retry.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self._response_id,
-                            "retry_count": _retry_count,
-                            "attempt_index": self.attempt_index,
-                            "next_attempt_index": self.attempt_index + 1,
-                            "model_run_id": self.model_run_context.run_id if self.model_run_context is not None else None,
-                            "response_text": await self._response_parser.async_get_text(),
-                            "ensure_keys": active_ensure_keys,
-                            "strict_output": strict_output,
-                            "key_style": key_style,
-                        },
-                        "run": self.request_run_context,
-                    }
-                )
+                with bind_runtime_context(
+                    parent_run_context=self.request_run_context,
+                    request_run_context=self.request_run_context,
+                    model_run_context=self.model_run_context,
+                    settings=self.settings,
+                ):
+                    await async_emit_runtime(
+                        {
+                            "event_type": "model.retrying",
+                            "source": "ModelResponseResult",
+                            "level": "WARNING",
+                            "message": "No target data in response. Preparing retry.",
+                            "payload": {
+                                "agent_name": self.agent_name,
+                                "response_id": self._response_id,
+                                "retry_count": _retry_count,
+                                "attempt_index": self.attempt_index,
+                                "next_attempt_index": self.attempt_index + 1,
+                                "model_run_id": self.model_run_context.run_id if self.model_run_context is not None else None,
+                                "response_text": await self._response_parser.async_get_text(),
+                                "ensure_keys": active_ensure_keys,
+                                "strict_output": strict_output,
+                                "key_style": key_style,
+                            },
+                            "run": self.request_run_context,
+                        }
+                    )
 
                 if _retry_count < max_retries:
                     data = await ModelResponse(

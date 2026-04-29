@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Iterator, cast
 
 if TYPE_CHECKING:
 	from agently.types.data import RunContext
+	from agently.utils import Settings
 
 
 _MISSING = object()
@@ -48,6 +49,10 @@ _current_tool_phase_run_context: ContextVar["RunContext | None"] = ContextVar(
 	"agently_current_tool_phase_run_context",
 	default=None,
 )
+_current_settings: ContextVar["Settings | None"] = ContextVar(
+	"agently_current_settings",
+	default=None,
+)
 
 
 @contextmanager
@@ -59,6 +64,7 @@ def bind_runtime_context(
 	agent_turn_run_context: "RunContext | None | object" = _MISSING,
 	chunk_run_context: "RunContext | None | object" = _MISSING,
 	tool_phase_run_context: "RunContext | None | object" = _MISSING,
+	settings: "Settings | None | object" = _MISSING,
 ) -> Iterator[None]:
 	tokens = []
 	try:
@@ -104,6 +110,13 @@ def bind_runtime_context(
 					_current_tool_phase_run_context.set(cast("RunContext | None", tool_phase_run_context)),
 				)
 			)
+		if settings is not _MISSING:
+			tokens.append(
+				(
+					_current_settings,
+					_current_settings.set(cast("Settings | None", settings)),
+				)
+			)
 		yield
 	finally:
 		for context_var, token in reversed(tokens):
@@ -132,6 +145,10 @@ def get_current_chunk_run_context():
 
 def get_current_tool_phase_run_context():
 	return _current_tool_phase_run_context.get()
+
+
+def get_current_settings():
+	return _current_settings.get()
 
 
 def resolve_parent_run_context(parent_run_context: "RunContext | None" = None):

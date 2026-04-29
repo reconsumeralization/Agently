@@ -151,6 +151,7 @@ class ModelResponse:
             request_run_context=self.request_run_context,
             model_run_context=self.model_run_context,
             agent_turn_run_context=self.agent_turn_run_context,
+            settings=self.settings,
         ):
             await async_emit_runtime(
                 {

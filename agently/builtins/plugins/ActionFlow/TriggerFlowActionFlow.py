@@ -96,19 +96,24 @@ class TriggerFlowActionFlow:
             session_id=str(settings.get("runtime.session_id")) if settings.get("runtime.session_id", None) else None,
             meta={"tool_count": len(action_list), "action_type": "tool_loop"},
         )
-        await async_emit_runtime(
-            {
-                "event_type": "tool.loop_started",
-                "source": "ActionFlow",
-                "message": f"Tool loop started for agent '{ agent_name }'.",
-                "payload": {
-                    "agent_name": agent_name,
-                    "tool_count": len(action_list),
-                    "planning_protocol": action.action_runtime.resolve_planning_protocol(settings, planning_protocol),
-                },
-                "run": tool_loop_run,
-            }
-        )
+        with bind_runtime_context(
+            parent_run_context=tool_loop_run,
+            tool_phase_run_context=tool_loop_run,
+            settings=settings,
+        ):
+            await async_emit_runtime(
+                {
+                    "event_type": "tool.loop_started",
+                    "source": "ActionFlow",
+                    "message": f"Tool loop started for agent '{ agent_name }'.",
+                    "payload": {
+                        "agent_name": agent_name,
+                        "tool_count": len(action_list),
+                        "planning_protocol": action.action_runtime.resolve_planning_protocol(settings, planning_protocol),
+                    },
+                    "run": tool_loop_run,
+                }
+            )
 
         flow = TriggerFlow(name=f"action-loop-{ agent_name }")
 
@@ -289,6 +294,7 @@ class TriggerFlowActionFlow:
             with bind_runtime_context(
                 parent_run_context=tool_loop_run,
                 tool_phase_run_context=tool_loop_run,
+                settings=settings,
             ):
                 result = await execution.async_start(
                     wait_for_result=True,
@@ -297,31 +303,41 @@ class TriggerFlowActionFlow:
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
-            await async_emit_runtime(
-                {
-                    "event_type": "tool.loop_failed",
-                    "source": "ActionFlow",
-                    "level": "ERROR",
-                    "message": f"Tool loop failed for agent '{ agent_name }'.",
-                    "payload": {"agent_name": agent_name},
-                    "error": error,
-                    "run": tool_loop_run,
-                }
-            )
+            with bind_runtime_context(
+                parent_run_context=tool_loop_run,
+                tool_phase_run_context=tool_loop_run,
+                settings=settings,
+            ):
+                await async_emit_runtime(
+                    {
+                        "event_type": "tool.loop_failed",
+                        "source": "ActionFlow",
+                        "level": "ERROR",
+                        "message": f"Tool loop failed for agent '{ agent_name }'.",
+                        "payload": {"agent_name": agent_name},
+                        "error": error,
+                        "run": tool_loop_run,
+                    }
+                )
             raise
         if not isinstance(result, list):
             return []
         normalized = [action._normalize_execution_record(record, None, index) for index, record in enumerate(result)]
-        await async_emit_runtime(
-            {
-                "event_type": "tool.loop_completed",
-                "source": "ActionFlow",
-                "message": f"Tool loop completed for agent '{ agent_name }'.",
-                "payload": {
-                    "agent_name": agent_name,
-                    "record_count": len(normalized),
-                },
-                "run": tool_loop_run,
-            }
-        )
+        with bind_runtime_context(
+            parent_run_context=tool_loop_run,
+            tool_phase_run_context=tool_loop_run,
+            settings=settings,
+        ):
+            await async_emit_runtime(
+                {
+                    "event_type": "tool.loop_completed",
+                    "source": "ActionFlow",
+                    "message": f"Tool loop completed for agent '{ agent_name }'.",
+                    "payload": {
+                        "agent_name": agent_name,
+                        "record_count": len(normalized),
+                    },
+                    "run": tool_loop_run,
+                }
+            )
         return normalized
