@@ -1,25 +1,28 @@
 import asyncio
-from random import randint
 
-from agently import TriggerFlow, TriggerFlowRuntimeData
+from agently import TriggerFlow
 
-flow = TriggerFlow()
-
-
-async def task(data: TriggerFlowRuntimeData):
-    print(f"No.{ data.value } START")
-    await asyncio.sleep(randint(1, 5))
-    print(f"No.{ data.value } DONE")
+flow = TriggerFlow(name="async-multiple-executions")
 
 
-(flow.to(task).end())
+async def task(data):
+    await asyncio.sleep(0.01 * int(data.input))
+    await data.async_set_state("output", {"input": data.input, "status": "done"})
+
+
+flow.to(task)
+
+
+async def run_one(value):
+    execution = flow.create_execution()
+    await execution.async_start(value)
+    return await execution.async_close()
 
 
 async def main():
-    tasks = []
-    for i in range(10):
-        tasks.append(asyncio.create_task(flow.async_start(i)))
-    await asyncio.gather(*tasks)
+    states = await asyncio.gather(*(run_one(i) for i in range(5)))
+    assert [state["output"]["input"] for state in states] == [0, 1, 2, 3, 4]
+    print(states)
 
 
 asyncio.run(main())

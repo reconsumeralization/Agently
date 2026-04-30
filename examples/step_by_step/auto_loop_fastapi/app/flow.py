@@ -6,14 +6,14 @@ from typing import Any
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.builtins.tools import Browse, Search
 
-from .config import DEEPSEEK_API_KEY, SEARCH_PROXY
+from .config import OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, SEARCH_PROXY
 
 
 kb_collection = None
 
 
-def _emit(data: TriggerFlowRuntimeData, event_type: str, payload: Any):
-    data.put_into_stream(json.dumps({"type": event_type, "data": payload}))
+async def _emit(data: TriggerFlowRuntimeData, event_type: str, payload: Any):
+    await data.async_put_into_stream(json.dumps({"type": event_type, "data": payload}))
 
 
 async def _build_kb_collection():
@@ -55,10 +55,11 @@ def build_flow() -> TriggerFlow:
     agent.set_settings(
         "OpenAICompatible",
         {
-            "base_url": "https://api.deepseek.com/v1",
-            "model": "deepseek-chat",
-            "auth": DEEPSEEK_API_KEY,
-            "request_options": {"temperature": 0.7},
+            "base_url": OLLAMA_BASE_URL,
+            "api_key": OLLAMA_API_KEY,
+            "model": OLLAMA_MODEL,
+            "model_type": "chat",
+            "request_options": {"temperature": 0.3},
         },
     )
 
@@ -92,25 +93,25 @@ def build_flow() -> TriggerFlow:
     async def start_request(data: TriggerFlowRuntimeData):
         global kb_collection
         if kb_collection is None:
-            _emit(data, "status", "kb preparing")
+            await _emit(data, "status", "kb preparing")
             kb_collection = await _build_kb_collection()
             if kb_collection is None:
-                _emit(data, "status", "kb disabled")
+                await _emit(data, "status", "kb disabled")
             else:
-                _emit(data, "status", "kb ready")
-        return data.value
+                await _emit(data, "status", "kb ready")
+        return data.input
 
     async def prepare_context(data: TriggerFlowRuntimeData):
-        payload = data.value
+        payload = data.input
         question = payload.get("question", "")
         chat_history = payload.get("chat_history", [])
         memo = payload.get("memo", [])
         agent.set_chat_history(chat_history)
-        data.set_runtime_data("question", question)
-        data.set_runtime_data("done_plans", [])
-        data.set_runtime_data("step", 0)
-        data.set_runtime_data("memo", memo)
-        _emit(data, "status", "planning started")
+        await data.async_set_state("question", question)
+        await data.async_set_state("done_plans", [])
+        await data.async_set_state("step", 0)
+        await data.async_set_state("memo", memo)
+        await _emit(data, "status", "planning started")
         return question
 
     async def ensure_kb(data: TriggerFlowRuntimeData):
@@ -118,18 +119,18 @@ def build_flow() -> TriggerFlow:
         if kb_collection is None:
             kb_collection = await _build_kb_collection()
         if kb_collection is None:
-            data.set_runtime_data("kb_results", [])
+            await data.async_set_state("kb_results", [])
             return []
-        results = kb_collection.query(data.get_runtime_data("question", ""))
-        data.set_runtime_data("kb_results", results)
+        results = kb_collection.query(data.get_state("question", ""))
+        await data.async_set_state("kb_results", results)
         return results
 
     async def make_next_plan(data: TriggerFlowRuntimeData):
-        question = data.get_runtime_data("question")
-        done_plans = data.get_runtime_data("done_plans", [])
-        step = data.get_runtime_data("step") or 0
-        kb_results = data.get_runtime_data("kb_results") or []
-        memo = data.get_runtime_data("memo") or []
+        question = data.get_state("question")
+        done_plans = data.get_state("done_plans", [])
+        step = data.get_state("step") or 0
+        kb_results = data.get_state("kb_results") or []
+        memo = data.get_state("memo") or []
         if step >= 5:
             final_action = {
                 "type": "final",
@@ -182,36 +183,36 @@ def build_flow() -> TriggerFlow:
         async for stream in response.get_async_generator(type="instant"):
             if stream.wildcard_path == "next_step_thinking" and stream.delta:
                 if not thinking_started:
-                    _emit(data, "thinking_delta", "")
+                    await _emit(data, "thinking_delta", "")
                     thinking_started = True
-                data.put_into_stream(json.dumps({"type": "thinking_delta", "data": stream.delta}))
+                await data.async_put_into_stream(json.dumps({"type": "thinking_delta", "data": stream.delta}))
             if stream.wildcard_path == "next_step_action.type" and stream.is_complete:
-                _emit(data, "plan", {"next_action": stream.value})
+                await _emit(data, "plan", {"next_action": stream.value})
             if stream.wildcard_path == "next_step_action.tool_using.tool_name" and stream.is_complete:
-                _emit(data, "plan", {"tool": stream.value})
-        result = response.result.get_data()
+                await _emit(data, "plan", {"tool": stream.value})
+        result = await response.result.async_get_data()
         next_action = result["next_step_action"]
-        _emit(data, "status", "planning done")
-        data.set_runtime_data("step", step + 1)
+        await _emit(data, "status", "planning done")
+        await data.async_set_state("step", step + 1)
         await data.async_emit("Plan", next_action)
         return next_action
 
     async def use_tool(data: TriggerFlowRuntimeData):
-        tool_using_info = data.value["tool_using"]
+        tool_using_info = data.input["tool_using"]
         tool_name = tool_using_info["tool_name"].lower()
         tool = tools_info.get(tool_name)
         if tool is None:
             return {"type": "final", "reply": f"Unknown tool: {tool_name}"}
 
-        _emit(data, "status", f"tool running: {tool_name}")
+        await _emit(data, "status", f"tool running: {tool_name}")
         tool_func = tool["func"]
         if asyncio.iscoroutinefunction(tool_func):
             tool_result = await tool_func(**tool_using_info["kwargs"])
         else:
             tool_result = tool_func(**tool_using_info["kwargs"])
-        _emit(data, "status", f"tool done: {tool_name}")
+        await _emit(data, "status", f"tool done: {tool_name}")
 
-        done_plans = data.get_runtime_data("done_plans", [])
+        done_plans = data.get_state("done_plans", [])
         done_plans.append(
             {
                 "purpose": tool_using_info["purpose"],
@@ -219,18 +220,19 @@ def build_flow() -> TriggerFlow:
                 "result": tool_result,
             }
         )
-        data.set_runtime_data("done_plans", done_plans)
+        await data.async_set_state("done_plans", done_plans)
         return {"type": "tool"}
 
     async def reply(data: TriggerFlowRuntimeData):
-        reply_text = data.value["reply"]
-        _emit(data, "reply", reply_text)
-        return reply_text
+        reply_text = data.input["reply"]
+        await _emit(data, "reply", reply_text)
+        await data.async_set_state("reply", reply_text)
+        return data.input
 
     async def update_memo(data: TriggerFlowRuntimeData):
-        memo = data.get_runtime_data("memo") or []
-        question = data.get_runtime_data("question")
-        reply_text = data.value.get("reply", "")
+        memo = data.get_state("memo") or []
+        question = data.get_state("question")
+        reply_text = data.get_state("reply") or data.input.get("reply", "")
         result = (
             agent.input({"question": question, "reply": reply_text, "memo": memo})
             .instruct(
@@ -241,17 +243,27 @@ def build_flow() -> TriggerFlow:
                 ]
             )
             .output({"memo": [("str", "Short memo item")]})
-            .start()
+            .async_start()
         )
+        result = await result
         new_memo = result.get("memo", []) if isinstance(result, dict) else []
         if new_memo:
-            _emit(data, "memo", new_memo)
+            await data.async_set_state("memo", new_memo)
+            await _emit(data, "memo", new_memo)
+        await data.async_set_state(
+            "final",
+            {
+                "reply": reply_text,
+                "memo": new_memo,
+                "done_plans": data.get_state("done_plans", []),
+            },
+        )
         return {"type": "final", "reply": reply_text, "memo": new_memo}
 
     flow.to(start_request).to(prepare_context).to(ensure_kb).to(make_next_plan)
     (
         flow.when("Plan")
-        .if_condition(lambda d: d.value.get("type") == "final")
+        .if_condition(lambda d: d.input.get("type") == "final")
         .to(reply)
         .to(update_memo)
         .else_condition()

@@ -1,3 +1,5 @@
+import asyncio
+
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently_devtools import ObservationBridge
 
@@ -8,27 +10,31 @@ bridge = ObservationBridge(
 )
 bridge.register(Agently)
 
-
 flow = TriggerFlow(name="devtools-local-demo-flow")
 
 
 @flow.chunk
-def prepare(data: TriggerFlowRuntimeData):
-    return {"topic": str(data.value), "status": "prepared"}
+async def prepare(data: TriggerFlowRuntimeData):
+    return {"topic": str(data.input), "status": "prepared"}
 
 
 @flow.chunk
-def finalize(data: TriggerFlowRuntimeData):
-    payload = dict(data.value) if isinstance(data.value, dict) else {"value": data.value}
+async def finalize(data: TriggerFlowRuntimeData):
+    payload = dict(data.input) if isinstance(data.input, dict) else {"value": data.input}
     payload["status"] = "completed"
-    return payload
+    await data.async_set_state("result", payload)
 
 
-flow.to(prepare).to(finalize).end()
+flow.to(prepare).to(finalize)
+
+
+async def main():
+    execution = flow.create_execution()
+    await execution.async_start("release readiness")
+    print(await execution.async_close())
 
 
 try:
-    result = flow.start("release readiness")
-    print(result)
+    asyncio.run(main())
 finally:
     bridge.unregister(Agently)

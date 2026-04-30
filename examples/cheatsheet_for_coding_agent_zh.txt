@@ -13,7 +13,7 @@
   actions: 内置 Search/Browse + 自定义 action_func
   knowledge_base: ChromaCollection + embeddings agent + query -> info
   memory: chat_history + runtime memo
-  triggerflow: to/when/emit + runtime_data + runtime_stream
+  triggerflow: to/when/emit + execution state + runtime stream + close
 模式:
   plan_action_reply_loop: 规划 -> Action -> 规划 -> 回复 -> 记忆 -> 循环
   search_then_browse: 搜索 -> 选链接 -> 浏览 -> 总结
@@ -114,7 +114,7 @@ collection = ChromaCollection(collection_name="agently_examples", embedding_agen
 
 ### 记忆体系
 - `agent.set_chat_history([...])`：多轮对话上下文
-- 运行态 memo（TriggerFlow runtime_data）：保存偏好/约束
+- 运行态 memo：优先放在 TriggerFlow execution state（`data.get_state` / `data.async_set_state`）
 
 ### TriggerFlow 要点
 事件驱动编排 + 运行态数据：
@@ -122,14 +122,15 @@ collection = ChromaCollection(collection_name="agently_examples", embedding_agen
 - `flow.when("Event")`：事件分支
 - `data.async_emit("Event", value)`：发送信号
 - `data.put_into_stream(...)`：运行态流式输出
-- `data.get_runtime_data(...)` / `data.set_runtime_data(...)`（优先使用）
+- `data.get_state(...)` / `data.async_set_state(...)`：execution 本地状态
+- `execution.async_close()`：收尾 pending tasks，关闭 runtime stream，并返回 state 快照
 
 ## Auto Loop 模式（来自 `examples/step_by_step/12-auto_loop.py`）
 **目标：** 规划 -> Action -> 规划 -> 回复 -> 记忆 -> 循环
 
 **示例关键点：**
 - knowledge base 在进程级初始化一次，跨回合复用。
-- `done_plans` / `kb_results` / `memo` 存在 runtime data。
+- `done_plans` / `kb_results` / `memo` 存在 execution state。
 - 用 `instant` 事件实时输出规划过程。
 - 设定 step 上限避免死循环。
 
@@ -141,7 +142,7 @@ flow.when("Loop").to(get_input)
 flow.when("UserInput").to(prepare_context).to(ensure_kb).to(make_next_plan)
 (
     flow.when("Plan")
-    .if_condition(lambda d: d.value.get("type") == "final")
+    .if_condition(lambda d: d.input.get("type") == "final")
     .to(reply)
     .to(update_memo)
     .else_condition()
@@ -149,8 +150,12 @@ flow.when("UserInput").to(prepare_context).to(ensure_kb).to(make_next_plan)
     .to(make_next_plan)
     .end_condition()
 )
-for event in flow.get_runtime_stream("start", timeout=None):
+execution = flow.create_execution(auto_close=False)
+await execution.async_start("start")
+close_task = asyncio.create_task(execution.async_close())
+async for event in execution.get_async_runtime_stream(timeout=None):
     print(event, end="", flush=True)
+state = await close_task
 ```
 
 ## 实用配方
@@ -179,7 +184,7 @@ for event in flow.get_runtime_stream("start", timeout=None):
 - 明确输出结构，并用 `ensure_keys` 锁关键字段
 - knowledge base 初始化放到循环外部
 - 流式输出只在首个 token 打标签
-- 多轮记忆优先放在 runtime_data
+- 多轮记忆优先放在 execution state
 - 设定最大步数 + 工具失败兜底
 - 表单字段加校验，超过次数后可跳过
 

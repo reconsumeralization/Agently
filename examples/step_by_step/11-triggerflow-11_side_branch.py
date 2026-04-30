@@ -1,29 +1,29 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Side Branch + ____ separator
-def triggerflow_side_branch_demo():
-    # Idea: run a side branch without blocking the main path.
-    # Flow: main -> ____ separator -> side_branch -> end
-    # Expect: prints side branch output and main result.
-    flow = TriggerFlow()
+async def triggerflow_side_branch_demo():
+    flow = TriggerFlow(name="step-11-side-branch")
 
     async def main_task(data: TriggerFlowRuntimeData):
-        return f"main: {data.value}"
+        return f"main: {data.input}"
 
     async def side_task(data: TriggerFlowRuntimeData):
-        print(f"[side] {data.value}")
-        return "side done"
+        await data.async_set_state("side", f"side saw {data.input}")
 
-    (
-        flow.to(main_task)
-        .____(print_info=True, show_value=True)
-        .side_branch(side_task)
-        .to(lambda d: print("[main]", d.value))
-        .end()
-    )
+    async def store_main(data: TriggerFlowRuntimeData):
+        await data.async_set_state("main", data.input)
 
-    flow.start("hello")
+    flow.to(main_task).side_branch(side_task).to(store_main)
+
+    execution = flow.create_execution()
+    await execution.async_start("hello")
+    state = await execution.async_close()
+    assert state["main"] == "main: hello"
+    assert state["side"] == "side saw main: hello"
+    print(state)
 
 
-# triggerflow_side_branch_demo()
+if __name__ == "__main__":
+    asyncio.run(triggerflow_side_branch_demo())

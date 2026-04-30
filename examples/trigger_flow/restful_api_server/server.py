@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from flow import dump_flow
+from flow import run_flow
 
 app = FastAPI()
 
@@ -11,7 +11,7 @@ class TestData(BaseModel):
 
 @app.post("/test")
 async def test(data: TestData):
-    return await dump_flow().async_start(data.int_number)
+    return await run_flow(data.int_number)
 
 
 if __name__ == "__main__":

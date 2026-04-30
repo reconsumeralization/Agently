@@ -1,26 +1,43 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Blueprint: save / load
-def triggerflow_blueprint():
-    # Idea: export a flow blueprint and reuse it elsewhere.
-    # Flow: build -> save_blueprint -> load_blueprint -> start
-    # Expect: prints "AGENTLY".
-    flow = TriggerFlow()
-
-    async def upper(data: TriggerFlowRuntimeData):
-        return str(data.value).upper()
-
-    flow.to(upper).end()
-
-    blueprint = flow.save_blueprint()
-
-    # load the blueprint into a new flow
-    flow_2 = TriggerFlow()
-    flow_2.load_blueprint(blueprint)
-
-    result = flow_2.start("agently")
-    print(result)
+async def upper(data: TriggerFlowRuntimeData):
+    return str(data.input).upper()
 
 
-# triggerflow_blueprint()
+async def store(data: TriggerFlowRuntimeData):
+    await data.async_set_state("output", data.input)
+
+
+def build_flow():
+    flow = TriggerFlow(name="step-05-blueprint-source")
+    flow.register_chunk_handler(upper)
+    flow.register_chunk_handler(store)
+    flow.to(upper).to(store)
+    return flow
+
+
+async def run_flow(flow: TriggerFlow, value: str):
+    execution = flow.create_execution()
+    await execution.async_start(value)
+    return await execution.async_close()
+
+
+async def triggerflow_blueprint():
+    source_flow = build_flow()
+    blueprint = source_flow.save_blueprint()
+
+    restored_flow = TriggerFlow(name="step-05-blueprint-restored")
+    restored_flow.register_chunk_handler(upper)
+    restored_flow.register_chunk_handler(store)
+    restored_flow.load_blueprint(blueprint)
+
+    state = await run_flow(restored_flow, "agently")
+    assert state["output"] == "AGENTLY"
+    print(state)
+
+
+if __name__ == "__main__":
+    asyncio.run(triggerflow_blueprint())

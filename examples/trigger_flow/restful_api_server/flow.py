@@ -2,28 +2,44 @@ from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
 async def init(data: TriggerFlowRuntimeData):
-    data.set_runtime_data("init", data.value)
-    return data.value
+    await data.async_set_state("initial_number", data.input)
+    return data.input
+
+
+def make_multiplier(multiplier: int):
+    async def multiply(data: TriggerFlowRuntimeData):
+        return data.input * multiplier
+
+    return multiply
+
+
+async def summarize(data: TriggerFlowRuntimeData):
+    await data.async_set_state(
+        "response",
+        {
+            "group_1": data.input["first"],
+            "group_2": data.input["second"] + data.input["third"],
+            "initial_number": data.get_state("initial_number"),
+        },
+    )
 
 
 def dump_flow():
-    flow = TriggerFlow()
-
+    flow = TriggerFlow(name="rest-api-triggerflow-demo")
     (
         flow.to(init)
         .batch(
-            ("first", lambda data: data.value),
-            ("second", lambda data: data.value * 2),
-            ("third", lambda data: data.value * 3),
+            ("first", make_multiplier(1)),
+            ("second", make_multiplier(2)),
+            ("third", make_multiplier(3)),
         )
-        .side_branch(lambda data: print(data.value))
-        .to(
-            lambda data: {
-                "group_1": data.value["first"],
-                "group_2": data.value["second"] + data.value["third"],
-                "init": data.get_runtime_data("init", None),
-            }
-        )
-        .end()
+        .to(summarize)
     )
     return flow
+
+
+async def run_flow(value: int):
+    execution = dump_flow().create_execution()
+    await execution.async_start(value)
+    state = await execution.async_close()
+    return state["response"]

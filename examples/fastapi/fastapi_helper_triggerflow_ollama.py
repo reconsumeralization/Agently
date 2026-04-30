@@ -26,7 +26,7 @@ def build_flow() -> TriggerFlow:
     flow = TriggerFlow()
 
     async def run_chat(data: TriggerFlowRuntimeData):
-        payload = data.value if isinstance(data.value, dict) else {}
+        payload = data.input if isinstance(data.input, dict) else {}
         if payload.get("raise_error"):
             raise RuntimeError("Demo runtime error from TriggerFlow provider.")
         user_input = str(payload.get("input", "")).strip()
@@ -34,8 +34,8 @@ def build_flow() -> TriggerFlow:
         if not user_input:
             empty_reply = "Please provide input in payload.data.input."
             await data.async_put_into_stream({"event": "final", "content": empty_reply})
-            await data.async_stop_stream()
-            return {"input": user_input, "reply": empty_reply}
+            await data.async_set_state("response", {"input": user_input, "reply": empty_reply})
+            return
 
         response = agent.input(user_input).get_response()
 
@@ -45,14 +45,9 @@ def build_flow() -> TriggerFlow:
 
         final_reply = await response.async_get_text()
         await data.async_put_into_stream({"event": "final", "content": final_reply})
-        await data.async_stop_stream()
+        await data.async_set_state("response", {"input": user_input, "reply": final_reply})
 
-        return {
-            "input": user_input,
-            "reply": final_reply,
-        }
-
-    flow.to(run_chat).end()
+    flow.to(run_chat)
     return flow
 
 

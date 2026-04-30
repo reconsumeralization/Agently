@@ -1,25 +1,42 @@
-from agently import TriggerFlow, TriggerFlowRuntimeData
+import asyncio
 
-flow_1 = TriggerFlow()
-
-
-@flow_1.chunk
-async def say_hello(data: TriggerFlowRuntimeData):
-    print("Hello,", data.value)
-    return data.value
+from agently import TriggerFlow
 
 
-@flow_1.chunk
-async def say_bye(data: TriggerFlowRuntimeData):
-    print("Bye,", data.value)
-    return data.value
+async def normalize(data):
+    return str(data.input).strip().lower()
 
 
-flow_1.to(say_hello).to(say_bye).end()
+async def store(data):
+    await data.async_set_state("normalized", data.input)
 
-flow_2 = TriggerFlow(blueprint=flow_1.save_blueprint())
 
-flow_2.when(flow_2.chunks["say_bye"]).to(lambda _: print("One more thing only in flow 2!"))
+def build_flow():
+    flow = TriggerFlow(name="save-load-blueprint-demo")
+    flow.register_chunk_handler(normalize)
+    flow.register_chunk_handler(store)
+    flow.to(normalize).to(store)
+    return flow
 
-flow_1.start("World")
-flow_2.start("Agently")
+
+async def run(flow, value):
+    execution = flow.create_execution()
+    await execution.async_start(value)
+    return await execution.async_close()
+
+
+async def main():
+    source_flow = build_flow()
+    blueprint = source_flow.save_blueprint()
+
+    restored_flow = TriggerFlow(name="restored-blueprint-demo")
+    restored_flow.register_chunk_handler(normalize)
+    restored_flow.register_chunk_handler(store)
+    restored_flow.load_blueprint(blueprint)
+
+    state = await run(restored_flow, "  Agently  ")
+    assert state["normalized"] == "agently"
+    print(state)
+
+
+asyncio.run(main())

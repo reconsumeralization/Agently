@@ -1,38 +1,37 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Data Flow: runtime_data + collect
-def triggerflow_data_flow():
-    # Idea: share execution-scoped data across branches and collect results.
-    # Flow: set_runtime + set_runtime_context -> collect -> when(runtime_data)
-    # Expect: prints "[when runtime]" then two collect outputs.
-    flow = TriggerFlow()
+async def triggerflow_state_flow():
+    flow = TriggerFlow(name="step-04-state-flow")
 
-    async def set_runtime(data: TriggerFlowRuntimeData):
-        data.set_runtime_data("user_id", "u-001")
-        return "runtime ok"
+    async def prepare_user(data: TriggerFlowRuntimeData):
+        await data.async_set_state("user", {"id": "u-001", "role": "admin"})
+        return data.input
 
-    async def set_runtime_context(data: TriggerFlowRuntimeData):
-        data.set_runtime_data("env", "prod")
-        return "runtime context ok"
+    async def prepare_env(data: TriggerFlowRuntimeData):
+        await data.async_set_state("env", {"name": "prod"})
+        return data.input
 
-    # collect waits for multiple branches to fill values
-    (
-        flow.to(set_runtime)
-        .collect("done", "r1", mode="filled_then_empty")
-        .to(lambda data: print("[collect runtime]", data.value))
-    )
-    (
-        flow.to(set_runtime_context)
-        .collect("done", "r2", mode="filled_then_empty")
-        .to(lambda data: print("[collect runtime context]", data.value))
-        .end()
-    )
+    async def summarize(data: TriggerFlowRuntimeData):
+        await data.async_set_state(
+            "summary",
+            {
+                "input": data.input,
+                "user": data.get_state("user"),
+                "env": data.get_state("env"),
+            },
+        )
 
-    # when: wait for runtime_data signal
-    flow.when({"runtime_data": "user_id"}).to(lambda data: print("[when runtime]", data.value))
+    flow.to(prepare_user).to(prepare_env).to(summarize)
 
-    flow.start()
+    execution = flow.create_execution()
+    await execution.async_start("deploy")
+    state = await execution.async_close()
+    assert state["summary"]["user"]["id"] == "u-001"
+    print(state["summary"])
 
 
-# triggerflow_data_flow()
+if __name__ == "__main__":
+    asyncio.run(triggerflow_state_flow())

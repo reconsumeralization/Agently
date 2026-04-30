@@ -1,59 +1,56 @@
+import asyncio
 from pathlib import Path
 
-from agently import TriggerFlow, TriggerFlowRuntimeData
+from agently import TriggerFlow
+
+flow = TriggerFlow(name="execution-state-resume-demo")
 
 
-flow = TriggerFlow()
-
-
-@flow.chunk
-async def prepare_request(data: TriggerFlowRuntimeData):
-    # Save context that should survive process restart.
-    data.set_runtime_data(
-        "request_context",
+async def prepare_request(data):
+    await data.async_set_state(
+        "request",
         {
-            "topic": data.value,
+            "topic": data.input,
             "status": "waiting_feedback",
         },
     )
-    print("[prepare]", data.get_runtime_data("request_context"))
-    return "WAITING_FOR_USER_FEEDBACK"
 
 
-@flow.chunk
-async def resume_with_feedback(data: TriggerFlowRuntimeData):
-    context = data.get_runtime_data("request_context")
-    return {
-        "topic": context.get("topic") if isinstance(context, dict) else None,
-        "feedback": data.value,
-        "status": "done",
-    }
+async def resume_with_feedback(data):
+    request = data.get_state("request", {}) or {}
+    await data.async_set_state(
+        "final",
+        {
+            "topic": request.get("topic"),
+            "feedback": data.input,
+            "status": "done",
+        },
+    )
 
 
 flow.to(prepare_request)
-flow.when("UserFeedback").to(resume_with_feedback).end()
+flow.when("UserFeedback").to(resume_with_feedback)
 
 
-print("=== Step 1: start execution and save checkpoint to file ===")
-execution = flow.start_execution("refund order #A1001", wait_for_result=False)
-state_file = Path(__file__).with_name("execution_state_checkpoint.json")
-execution.save(state_file)
-print(f"saved state file: {state_file}")
+async def main():
+    state_file = Path(__file__).with_name("execution_state_checkpoint.json")
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("refund order #A1001")
+    execution.save(state_file)
+
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.load(state_file)
+    await restored_execution.async_emit(
+        "UserFeedback",
+        {
+            "approved": True,
+            "note": "Customer uploaded a valid receipt.",
+        },
+    )
+    state = await restored_execution.async_close()
+    state_file.unlink(missing_ok=True)
+    assert state["final"]["status"] == "done"
+    print(state["final"])
 
 
-print("\n=== Step 2: simulate restart and restore execution ===")
-restored_execution = flow.create_execution()
-restored_execution.load(state_file)
-restored_execution.emit(
-    "UserFeedback",
-    {
-        "approved": True,
-        "note": "Customer uploaded a valid receipt.",
-    },
-)
-
-
-print("\n=== Step 3: continue flow and get result ===")
-result = restored_execution.get_result(timeout=5)
-print(result)
-state_file.unlink(missing_ok=True)
+asyncio.run(main())

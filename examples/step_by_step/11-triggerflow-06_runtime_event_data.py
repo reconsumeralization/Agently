@@ -1,34 +1,37 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow RuntimeEventData: data, emit, and layers
-def runtime_event_data_demo():
-    # Idea: inspect event metadata and emit a custom event in-flow.
-    # Flow: to(inspect_event) -> emit(CustomEvent) -> when(CustomEvent)
-    # Expect: prints a custom event payload and returns event details.
-    flow = TriggerFlow()
+async def runtime_event_data_demo():
+    flow = TriggerFlow(name="step-06-runtime-event-data")
 
     async def inspect_event(data: TriggerFlowRuntimeData):
-        # RuntimeEventData provides:
-        # - trigger_event / trigger_type / value
-        # - runtime_data accessors (execution-scoped)
-        # - emit / async_emit to trigger custom events
-        # - layer_marks for nested branches
-        data.set_runtime_data("seen_event", data.trigger_event)
-        await data.async_emit("CustomEvent", {"from": data.trigger_event, "value": data.value})
-        return {
-            "event": data.trigger_event,
-            "type": data.trigger_type,
-            "value": data.value,
-            "runtime": data.get_runtime_data("seen_event"),
-            "layer": data.layer_mark,
-        }
+        await data.async_set_state("seen_event", data.event)
+        await data.async_emit("CustomEvent", {"from": data.event, "value": data.input})
+        return data.input
 
-    flow.to(inspect_event).end()
-    flow.when("CustomEvent").to(lambda d: print("[custom]", d.value))
+    async def store_custom_event(data: TriggerFlowRuntimeData):
+        await data.async_set_state(
+            "custom_event",
+            {
+                "event": data.event,
+                "type": data.trigger_type,
+                "payload": data.input,
+                "layer": data.layer_mark,
+            },
+        )
 
-    result = flow.start("hello")
-    print(result)
+    flow.to(inspect_event)
+    flow.when("CustomEvent").to(store_custom_event)
+
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("hello")
+    state = await execution.async_close()
+    assert state["seen_event"] == "START"
+    assert state["custom_event"]["payload"]["value"] == "hello"
+    print(state)
 
 
-# runtime_event_data_demo()
+if __name__ == "__main__":
+    asyncio.run(runtime_event_data_demo())

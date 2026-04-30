@@ -1,48 +1,63 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Result Mechanics: default result, manual result, and branch caveat
-def triggerflow_result_basics_demo():
-    # Idea: start(wait_for_result=True) waits for result_ready.
-    # Flow: main chain -> end() => default result.
-    flow = TriggerFlow()
+async def triggerflow_close_snapshot_demo():
+    flow = TriggerFlow(name="step-12-close-snapshot")
 
     async def work(data: TriggerFlowRuntimeData):
-        return f"work({data.value})"
+        await data.async_set_state("output", f"work({data.input})")
 
-    flow.to(work).end()
-    result = flow.start("task")
+    flow.to(work)
+
+    execution = flow.create_execution()
+    await execution.async_start("task")
+    state = await execution.async_close()
+    assert state["output"] == "work(task)"
+    print(state)
+
+
+async def triggerflow_manual_result_compat_demo():
+    flow = TriggerFlow(name="step-12-manual-result-compat")
+
+    async def work(data: TriggerFlowRuntimeData):
+        await data.async_set_state("state_output", "kept in state")
+        data.set_result({"manual_result": "compatibility override"})
+
+    flow.to(work)
+
+    execution = flow.create_execution()
+    await execution.async_start("task")
+    result = await execution.async_close()
+    assert result == {"manual_result": "compatibility override"}
     print(result)
 
 
-# triggerflow_result_basics_demo()
-
-
-def triggerflow_manual_set_result_demo():
-    # Idea: control the final output explicitly in event-driven flows.
-    # Flow: start_execution -> set_result -> get_result
-    flow = TriggerFlow()
-    flow.to(lambda d: d.value).end()
-
-    execution = flow.start_execution("ignored", wait_for_result=False)
-    execution.set_result("manual result")
-    print(execution.get_result())
-
-
-# triggerflow_manual_set_result_demo()
-
-
-def triggerflow_when_branch_without_result_demo():
-    # Idea: when() branch does not finalize result unless end()/set_result() is used.
-    flow = TriggerFlow()
+async def triggerflow_event_branch_close_demo():
+    flow = TriggerFlow(name="step-12-event-branch-close")
 
     async def emit_event(data: TriggerFlowRuntimeData):
         await data.async_emit("Ping", "pong")
-        return "emitted"
+
+    async def on_ping(data: TriggerFlowRuntimeData):
+        await data.async_set_state("ping", data.input)
 
     flow.to(emit_event)
-    flow.when("Ping").to(lambda d: print("[ping]", d.value))
-    flow.start(wait_for_result=False)
+    flow.when("Ping").to(on_ping)
+
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start(None)
+    state = await execution.async_close()
+    assert state["ping"] == "pong"
+    print(state)
 
 
-# triggerflow_when_branch_without_result_demo()
+async def main():
+    await triggerflow_close_snapshot_demo()
+    await triggerflow_manual_result_compat_demo()
+    await triggerflow_event_branch_close_demo()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

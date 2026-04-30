@@ -1,21 +1,39 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
-from agently_devtools import EvaluationBridge, EvaluationCase, EvaluationRunner
+from agently_devtools import EvaluationBinding, EvaluationBridge, EvaluationCase, EvaluationRunner
 
 
 def build_flow():
     flow = TriggerFlow(name="support-triage-flow")
 
     @flow.chunk
-    def classify(data: TriggerFlowRuntimeData):
-        text = str(data.value).lower()
+    async def classify(data: TriggerFlowRuntimeData):
+        text = str(data.input).lower()
         if "refund" in text:
-            return "billing"
-        if "shipment" in text:
-            return "logistics"
-        return "general"
+            route = "billing"
+        elif "shipment" in text:
+            route = "logistics"
+        else:
+            route = "general"
+        await data.async_set_state("route", route)
 
-    flow.to(classify).end()
+    flow.to(classify)
     return flow
+
+
+async def run_flow(flow: TriggerFlow, value: str):
+    execution = flow.create_execution()
+    await execution.async_start(value)
+    state = await execution.async_close()
+    return state["route"]
+
+
+def build_executor(active_flow: TriggerFlow):
+    def execute(case: EvaluationCase):
+        return asyncio.run(run_flow(active_flow, case.input))
+
+    return execute
 
 
 bridge = EvaluationBridge(
@@ -25,10 +43,14 @@ bridge = EvaluationBridge(
 )
 runner = EvaluationRunner(bridge=bridge)
 
-binding = bridge.bind_triggerflow_factory(
-    build_flow,
+binding = EvaluationBinding(
+    bridge=bridge,
     suite_id="support-routing",
+    target_type="triggerflow",
     target_name="support-triage-flow",
+    executor=build_executor(build_flow()),
+    target_factory=build_flow,
+    target_executor_factory=build_executor,
 )
 
 report = runner.run(

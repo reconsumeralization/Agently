@@ -8,46 +8,34 @@ from agently_devtools import ObservationBridge, InteractiveWrapper
 bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-triggerflow")
 bridge.register(Agently)
 
-
-# Create a TriggerFlow with multiple stages
 flow = TriggerFlow(name="interactive-demo-flow")
 
 
 @flow.chunk
 async def validate_input(data: TriggerFlowRuntimeData):
-    """Validate and prepare the input."""
-    value = data.value
-    if isinstance(value, dict):
-        message = value.get("input", "")
-    else:
-        message = str(value)
-
+    value = data.input
+    message = value.get("input", "") if isinstance(value, dict) else str(value)
     if not message:
         await data.async_put_into_stream("Validation failed: empty input received.\n")
         return {"status": "error", "message": "Empty input received"}
-
     await data.async_put_into_stream(f"Validated input: {message}\n")
     return {"status": "validated", "message": message, "length": len(message)}
 
 
 @flow.chunk
 async def process_message(data: TriggerFlowRuntimeData):
-    """Process the validated message."""
-    payload = data.value
+    payload = data.input if isinstance(data.input, dict) else {}
     if payload.get("status") == "error":
         await data.async_put_into_stream("Skipping processing because validation failed.\n")
         return payload
 
     message = payload.get("message", "")
-
-    # Simple processing: convert to uppercase and add metadata
     processed = {
         "original": message,
         "uppercase": message.upper(),
         "word_count": len(message.split()),
         "status": "processing_complete",
     }
-
     await asyncio.sleep(0.2)
     await data.async_put_into_stream("Transforming message to uppercase...\n")
     await asyncio.sleep(0.2)
@@ -57,35 +45,27 @@ async def process_message(data: TriggerFlowRuntimeData):
 
 @flow.chunk
 async def finalize(data: TriggerFlowRuntimeData):
-    """Finalize and format the result."""
-    result = dict(data.value)
+    result = dict(data.input) if isinstance(data.input, dict) else {"value": data.input}
     if result.get("status") == "error":
         await data.async_put_into_stream("Flow finished with a validation error.\n")
-        await data.async_stop_stream()
-        return result
-
-    result["final_status"] = "completed"
-    await data.async_put_into_stream("Flow complete. Final structured result is ready.\n")
-    await data.async_stop_stream()
-    return result
+    else:
+        result["final_status"] = "completed"
+        await data.async_put_into_stream("Flow complete. Final structured result is ready.\n")
+    await data.async_set_state("result", result)
 
 
-# Connect flow stages
-flow.to(validate_input).to(process_message).to(finalize).end()
+flow.to(validate_input).to(process_message).to(finalize)
 
-
-# Wrap the flow with InteractiveWrapper
 interactive = InteractiveWrapper(
     flow,
     title="TriggerFlow Demo",
-    description="Interactive TriggerFlow that streams stage updates before returning the final structured result",
+    description="Interactive TriggerFlow that streams stage updates before returning the close snapshot.",
 )
 
 
 if __name__ == "__main__":
     print(f"Interactive UI: {interactive.ui_url}")
-    print("The flow streams progress messages for validate -> process -> finalize before showing the final result.")
-    print("If agently-devtools start is running, TriggerFlow runs will also appear in the local DevTools console.")
+    print("The flow streams progress messages for validate -> process -> finalize before close.")
     try:
         interactive.wait()
     finally:

@@ -1,28 +1,28 @@
 import asyncio
-from agently import TriggerFlow, TriggerFlowRuntimeData
 
-flow = TriggerFlow()
+from agently import TriggerFlow
 
-
-async def say_hello(data: TriggerFlowRuntimeData):
-    await asyncio.sleep(0.3)
-    await data.async_put(f"Hello, { data.value }")
-    return data.value
+flow = TriggerFlow(name="runtime-stream-demo")
 
 
-async def say_bye(data: TriggerFlowRuntimeData):
-    await asyncio.sleep(0.3)
-    await data.async_put(f"Bye, { data.value }")
-    return data.value
+async def stream_steps(data):
+    await data.async_put_into_stream({"stage": "start", "input": data.input})
+    await data.async_put_into_stream({"stage": "finish", "input": data.input})
+    await data.async_set_state("done", True)
 
 
-async def stop_streaming(data: TriggerFlowRuntimeData):
-    await data.async_stop_stream()
-    return data.value
+flow.to(stream_steps)
 
 
-flow.to(say_hello).to(say_bye).to(stop_streaming).end()
-execution = flow.create_execution()
-stream = execution.get_runtime_stream(initial_value="Agently")
-for item in stream:
-    print(item)
+async def main():
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("Agently")
+    close_task = asyncio.create_task(execution.async_close())
+    items = [item async for item in execution.get_async_runtime_stream(timeout=None)]
+    state = await close_task
+    assert [item["stage"] for item in items] == ["start", "finish"]
+    assert state["done"] is True
+    print(items)
+
+
+asyncio.run(main())

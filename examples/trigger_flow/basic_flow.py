@@ -1,18 +1,32 @@
-from agently import TriggerFlow, TriggerFlowRuntimeData
+import asyncio
 
-flow = TriggerFlow()
+from agently import TriggerFlow
 
-
-async def say_hello(data: TriggerFlowRuntimeData):
-    print(f"Hello, { data.value }")
-    return data.value
+flow = TriggerFlow(name="basic-flow")
 
 
-async def say_bye(data: TriggerFlowRuntimeData):
-    print(f"Bye, { data.value }")
-    return data.value
+async def say_hello(data):
+    greeting = f"Hello, {data.input}"
+    await data.async_set_state("greeting", greeting)
+    return data.input
 
 
-flow.to(say_hello).to(say_bye).end()
-execution = flow.create_execution()
-result = execution.start("Agently")
+async def say_bye(data):
+    farewell = f"Bye, {data.input}"
+    await data.async_set_state("farewell", farewell)
+    return data.input
+
+
+flow.to(say_hello).to(say_bye)
+
+
+async def main():
+    execution = flow.create_execution()
+    await execution.async_start("Agently")
+    state = await execution.async_close()
+    assert state["greeting"] == "Hello, Agently"
+    assert state["farewell"] == "Bye, Agently"
+    print(state)
+
+
+asyncio.run(main())

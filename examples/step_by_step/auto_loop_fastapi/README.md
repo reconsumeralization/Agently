@@ -16,7 +16,7 @@ uvicorn app.main:app --reload
 ## Docker
 ```bash
 docker build -t agently-auto-loop .
-docker run -p 8000:8000 -e DEEPSEEK_API_KEY=xxx agently-auto-loop
+docker run -p 8000:8000 -e OLLAMA_BASE_URL=http://host.docker.internal:11434/v1 agently-auto-loop
 ```
 
 ## Endpoints

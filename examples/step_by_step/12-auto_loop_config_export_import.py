@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 from agently import TriggerFlow, TriggerFlowRuntimeData
@@ -28,25 +29,25 @@ def tool_calculator(expression: str):
 
 
 def is_final_action(data: TriggerFlowRuntimeData):
-    return isinstance(data.value, dict) and data.value.get("type") == "final"
+    return isinstance(data.input, dict) and data.input.get("type") == "final"
 
 
 async def prepare_context(data: TriggerFlowRuntimeData):
-    question = str(data.value)
-    data.set_runtime_data("question", question)
-    data.set_runtime_data("done_plans", [])
-    data.set_runtime_data("step", 0)
-    data.set_runtime_data("memo", [])
+    question = str(data.input)
+    await data.async_set_state("question", question)
+    await data.async_set_state("done_plans", [])
+    await data.async_set_state("step", 0)
+    await data.async_set_state("memo", [])
     return {"question": question}
 
 
 async def make_next_plan(data: TriggerFlowRuntimeData):
-    question = str(data.get_runtime_data("question", ""))
+    question = str(data.get_state("question", ""))
     lower_question = question.lower()
-    step = int(data.get_runtime_data("step", 0) or 0)
-    done_plans = data.get_runtime_data("done_plans", [])
+    step = int(data.get_state("step", 0) or 0)
+    done_plans = data.get_state("done_plans", [])
 
-    data.set_runtime_data("step", step + 1)
+    await data.async_set_state("step", step + 1)
 
     if step >= 3:
         action = {
@@ -100,7 +101,7 @@ async def make_next_plan(data: TriggerFlowRuntimeData):
 
 
 async def use_tool(data: TriggerFlowRuntimeData):
-    tool_using = data.value["tool_using"]
+    tool_using = data.input["tool_using"]
     tool_name = str(tool_using["tool_name"]).lower()
 
     if tool_name == "knowledge_base":
@@ -110,7 +111,7 @@ async def use_tool(data: TriggerFlowRuntimeData):
     else:
         result = f"Unknown tool: {tool_name}"
 
-    done_plans = data.get_runtime_data("done_plans", [])
+    done_plans = data.get_state("done_plans", [])
     done_plans.append(
         {
             "tool_name": tool_name,
@@ -118,28 +119,27 @@ async def use_tool(data: TriggerFlowRuntimeData):
             "result": result,
         }
     )
-    data.set_runtime_data("done_plans", done_plans)
+    await data.async_set_state("done_plans", done_plans)
     return {"type": "tool_done", "result": result}
 
 
 async def update_memo(data: TriggerFlowRuntimeData):
-    memo = data.get_runtime_data("memo", [])
-    question = str(data.get_runtime_data("question", ""))
+    memo = data.get_state("memo", [])
+    question = str(data.get_state("question", ""))
     if "short" in question.lower():
         memo.append("preference: short answers")
-        data.set_runtime_data("memo", memo)
-    return data.value
+        await data.async_set_state("memo", memo)
+    return data.input
 
 
 async def reply(data: TriggerFlowRuntimeData):
     result = {
-        "question": data.get_runtime_data("question"),
-        "reply": data.value["reply"],
-        "done_plans": data.get_runtime_data("done_plans", []),
-        "memo": data.get_runtime_data("memo", []),
+        "question": data.get_state("question"),
+        "reply": data.input["reply"],
+        "done_plans": data.get_state("done_plans", []),
+        "memo": data.get_state("memo", []),
     }
-    data.set_result(result)
-    return result
+    await data.async_set_state("final", result)
 
 
 def register_auto_loop_handlers(flow: TriggerFlow):
@@ -206,7 +206,14 @@ def load_flow_from_yaml() -> TriggerFlow:
 
 
 ## Auto Loop Config Export / Import: build once, export config, load again
-def triggerflow_auto_loop_config_export_import_demo():
+async def run_flow(flow: TriggerFlow, value: str):
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start(value)
+    state = await execution.async_close()
+    return state["final"]
+
+
+async def triggerflow_auto_loop_config_export_import_demo():
     # Idea: keep the kernel signal-driven, but export a declarative flow config
     # for reuse in JSON / YAML, then reload the flow with registered handlers.
     # Flow: prepare_context -> make_next_plan -> Plan -> use_tool/reply
@@ -215,15 +222,16 @@ def triggerflow_auto_loop_config_export_import_demo():
     export_assets(source_flow)
 
     print("\n=== Source Flow ===")
-    print(source_flow.start("Please answer short: what is the capital of France?"))
+    print(await run_flow(source_flow, "Please answer short: what is the capital of France?"))
 
     json_flow = load_flow_from_json()
     print("\n=== JSON Loaded Flow ===")
-    print(json_flow.start("Please answer short: what is the capital of Japan?"))
+    print(await run_flow(json_flow, "Please answer short: what is the capital of Japan?"))
 
     yaml_flow = load_flow_from_yaml()
     print("\n=== YAML Loaded Flow ===")
-    print(yaml_flow.start("Please calculate 2 + 2"))
+    print(await run_flow(yaml_flow, "Please calculate 2 + 2"))
 
 
-# triggerflow_auto_loop_config_export_import_demo()
+if __name__ == "__main__":
+    asyncio.run(triggerflow_auto_loop_config_export_import_demo())

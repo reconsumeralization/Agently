@@ -1,31 +1,33 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Loop: emit event to re-enter the flow
-def loop_flow_demo():
-    # Idea: create a loop by emitting the same event until a stop condition.
-    # Flow: start_loop -> emit Loop -> loop_step -> emit Loop/LoopEnd
-    # Expect: prints "done: 3".
-    flow = TriggerFlow()
+async def loop_flow_demo():
+    flow = TriggerFlow(name="step-08-loop-flow")
 
     async def start_loop(data: TriggerFlowRuntimeData):
-        await data.async_emit("Loop", 0)
-        return None
+        await data.async_set_state("values", [], emit=False)
+        data.emit_nowait("Loop", 0)
 
     async def loop_step(data: TriggerFlowRuntimeData):
-        count = data.value
-        if count >= 3:
-            await data.async_emit("LoopEnd", count)
-            return None
-        await data.async_emit("Loop", count + 1)
-        return count
+        values = data.get_state("values", []) or []
+        values.append(data.input)
+        await data.async_set_state("values", values, emit=False)
+        if data.input < 3:
+            data.emit_nowait("Loop", data.input + 1)
+        else:
+            await data.async_set_state("done", {"last": data.input, "count": len(values)})
 
     flow.to(start_loop)
     flow.when("Loop").to(loop_step)
-    flow.when("LoopEnd").to(lambda d: f"done: {d.value}").end()
 
-    result = flow.start("start")
-    print(result)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("start")
+    state = await execution.async_close()
+    assert state["values"] == [0, 1, 2, 3]
+    print(state["done"])
 
 
-# loop_flow_demo()
+if __name__ == "__main__":
+    asyncio.run(loop_flow_demo())

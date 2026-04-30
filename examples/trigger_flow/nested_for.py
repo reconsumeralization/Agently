@@ -1,33 +1,47 @@
-from agently import Agently, TriggerFlow
+import asyncio
 
-flow = TriggerFlow()
+from agently import TriggerFlow
+
+flow = TriggerFlow(name="nested-for-demo")
+
+
+async def make_groups(data):
+    return [[f"{data.input}-a", f"{data.input}-b"], [f"{data.input}-c"]]
+
+
+async def expand_group(data):
+    return data.input
+
+
+async def mark_item(data):
+    return {"item": data.input, "ready": True}
+
+
+async def store_nested(data):
+    await data.async_set_state("nested", data.input)
+
 
 (
-    flow.to(lambda _: range(0, 2))
-    .for_each()
-    .to(lambda _: range(0, 2))
-    .for_each()
-    .to(lambda _: ["Hello", "Agently"])
-    .for_each()
-    .to(lambda data: data.value)
-    # Print line "Hello" and line "Agently" (2 * 2) times
-    # in async parallel orders (random orders)
-    .____("INNER LAYER RESULT:", print_info=True, show_value=True)
+    flow.to(make_groups)
+    .for_each(concurrency=2)
+    .to(expand_group)
+    .for_each(concurrency=2)
+    .to(mark_item)
     .end_for_each()
-    # Print ["Hello", "Agently"] (2 * 2) times
-    .____("MIDDLE LAYER RESULT:", print_info=True, show_value=True)
     .end_for_each()
-    # Get ["Hello", "Agently"], ["Hello", "Agently"] 2 times for each loop
-    # so print [["Hello", "Agently"], ["Hello", "Agently"]] 2 times
-    .____("OUTER LAYER RESULT:", print_info=True, show_value=True)
-    .end_for_each()
-    # Get [["Hello", "Agently"], ["Hello", "Agently"]] 2 times for each loop
-    # so print [[["Hello", "Agently"], ["Hello", "Agently"]], [["Hello", "Agently"], ["Hello", "Agently"]]]
-    .____("FINAL RESULT:", print_info=True, show_value=True)
-    .end()
+    .to(store_nested)
 )
 
-result = flow.start()
-# Get final result from .end() chunk
-print(result)
-print(flow.to_mermaid())
+
+async def main():
+    execution = flow.create_execution()
+    await execution.async_start("demo")
+    state = await execution.async_close()
+    assert state["nested"] == [
+        [{"item": "demo-a", "ready": True}, {"item": "demo-b", "ready": True}],
+        [{"item": "demo-c", "ready": True}],
+    ]
+    print(state["nested"])
+
+
+asyncio.run(main())

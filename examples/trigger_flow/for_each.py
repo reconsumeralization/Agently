@@ -1,32 +1,28 @@
 import asyncio
-import random
-from agently import TriggerFlow, TriggerFlowRuntimeData
+
+from agently import TriggerFlow
+
+flow = TriggerFlow(name="for-each-demo")
 
 
-async def handle(data: TriggerFlowRuntimeData):
-    print("START HANDLING:", data.value)
-    await asyncio.sleep(random.randint(0, 100) / 100)
-    print("FINISH HANDLING:", data.value)
-    return data.value
+async def double(data):
+    await asyncio.sleep(0.01)
+    return data.input * 2
 
 
-flow_1 = TriggerFlow()
+async def store_items(data):
+    await data.async_set_state("items", data.input)
 
-flow_1.for_each(concurrency=2).to(handle).end_for_each().to(lambda data: data.value).end()
 
-execution_1 = flow_1.create_execution()
-result = execution_1.start(
-    [
-        1,
-        2,
-        "a",
-        "b",
-        [
-            1,
-            2,
-            3,
-        ],
-        {"say": "hello world"},
-    ]
-)
-print(result)
+flow.for_each(concurrency=2).to(double).end_for_each().to(store_items)
+
+
+async def main():
+    execution = flow.create_execution()
+    await execution.async_start([1, 2, 3])
+    state = await execution.async_close()
+    assert state["items"] == [2, 4, 6]
+    print(state["items"])
+
+
+asyncio.run(main())

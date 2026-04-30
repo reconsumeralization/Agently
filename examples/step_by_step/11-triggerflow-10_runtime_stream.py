@@ -1,78 +1,77 @@
 import asyncio
+import os
+
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Streaming: runtime stream + agent streaming in flow
-def triggerflow_runtime_stream_demo():
-    # Idea: stream progress updates without waiting for the final result.
-    # Flow: put_into_stream steps -> end -> get_runtime_stream
-    # Expect: prints stream events as they arrive.
-    flow = TriggerFlow()
-
-    async def stream_steps(data: TriggerFlowRuntimeData):
-        for i in range(3):
-            data.put_into_stream({"step": i + 1, "status": "working"})
-            await asyncio.sleep(0.05)
-        data.stop_stream()
-        return "done"
-
-    flow.to(stream_steps).end()
-
-    for event in flow.get_runtime_stream("start"):
-        print("[stream]", event)
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 
 
-# triggerflow_runtime_stream_demo()
-
-
-def triggerflow_agent_stream_demo():
-    # Idea: interactive loop with user input + streamed replies.
-    # Flow: input -> emit Loop -> stream reply -> emit Loop
-    # Expect: prints streaming tokens for each user query.
-    agent = Agently.create_agent()
-    agent.set_settings(
+def configure_local_ollama():
+    Agently.set_settings(
         "OpenAICompatible",
         {
-            "base_url": "http://127.0.0.1:11434/v1",
-            "model": "qwen2.5:7b",
+            "base_url": OLLAMA_BASE_URL,
+            "api_key": OLLAMA_API_KEY,
+            "model": OLLAMA_MODEL,
+            "model_type": "chat",
+            "request_options": {"temperature": 0},
         },
     )
 
-    flow = TriggerFlow()
 
-    async def get_input(data: TriggerFlowRuntimeData):
-        try:
-            user_input = input("Question (type 'exit' to stop): ").strip()
-        except EOFError:
-            user_input = "exit"
-        if user_input.lower() == "exit":
-            data.stop_stream()
-            return "exit"
-        data.put_into_stream(f"\n[user] {user_input}\n")
-        await data.async_emit("UserInput", user_input)
-        return "next"
+async def triggerflow_runtime_stream_demo():
+    flow = TriggerFlow(name="step-10-runtime-stream")
+
+    async def stream_steps(data: TriggerFlowRuntimeData):
+        for step in range(3):
+            await data.async_put_into_stream({"step": step + 1, "status": "working"})
+            await asyncio.sleep(0.01)
+        await data.async_set_state("done", True)
+
+    flow.to(stream_steps)
+
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("start")
+    close_task = asyncio.create_task(execution.async_close())
+    events = [event async for event in execution.get_async_runtime_stream(timeout=None)]
+    state = await close_task
+    assert state["done"] is True
+    print(events)
+
+
+async def triggerflow_agent_stream_demo():
+    configure_local_ollama()
+    flow = TriggerFlow(name="step-10-agent-stream")
 
     async def stream_reply(data: TriggerFlowRuntimeData):
-        data.put_into_stream("[assistant] ")
-        try:
-            request = agent.input(data.value)
-            async for chunk in request.get_async_generator(type="delta"):
-                data.put_into_stream(chunk)
-            data.put_into_stream("\n")
-            await data.async_emit("Loop", None)
-            return None
-        except Exception as exc:
-            data.put_into_stream(f"\n[error] {exc}\n")
-            data.stop_stream()
-            return "error"
+        agent = Agently.create_agent()
+        agent.role("Reply in one short sentence.", always=True)
+        response = agent.input(str(data.input)).get_response()
+        async for delta in response.get_async_generator(type="delta"):
+            if delta:
+                await data.async_put_into_stream({"event": "delta", "content": delta})
+        final_reply = await response.async_get_text()
+        await data.async_put_into_stream({"event": "final", "content": final_reply})
+        await data.async_set_state("reply", final_reply)
 
-    # This loop is stream-driven, so we don't set a default result with end().
-    flow.to(get_input)
-    flow.when("UserInput").to(stream_reply)
-    flow.when("Loop").to(get_input)
+    flow.to(stream_reply)
 
-    for event in flow.get_runtime_stream("start", timeout=None):
-        print(event, end="", flush=True)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("Explain TriggerFlow in one sentence.")
+    close_task = asyncio.create_task(execution.async_close())
+    events = [event async for event in execution.get_async_runtime_stream(timeout=None)]
+    state = await close_task
+    assert state["reply"]
+    print(events[-1])
 
 
-triggerflow_agent_stream_demo()
+async def main():
+    await triggerflow_runtime_stream_demo()
+    await triggerflow_agent_stream_demo()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

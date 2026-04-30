@@ -1,22 +1,43 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Result: set_result to control output
-def triggerflow_set_result_demo():
-    # Idea: control the final output explicitly with set_result().
-    # Flow: start_execution -> async work -> set_result -> await result
-    # Expect: prints "final answer: done".
-    flow = TriggerFlow()
+async def triggerflow_close_result_demo():
+    flow = TriggerFlow(name="step-09-close-result")
 
     async def worker(data: TriggerFlowRuntimeData):
-        return f"work({data.value})"
+        await data.async_set_state("output", f"work({data.input})")
 
-    flow.to(worker).end()
+    flow.to(worker)
 
-    execution = flow.start_execution("task-1", wait_for_result=False)
-    execution.set_result("final answer: done")
-    result = execution.get_result()
+    execution = flow.create_execution()
+    await execution.async_start("task-1")
+    state = await execution.async_close()
+    assert state["output"] == "work(task-1)"
+    print(state)
+
+
+async def triggerflow_set_result_compat_demo():
+    flow = TriggerFlow(name="step-09-set-result-compat")
+
+    async def worker(data: TriggerFlowRuntimeData):
+        await data.async_set_state("output", f"work({data.input})")
+        data.set_result({"compat_result": "explicit result still overrides close snapshot"})
+
+    flow.to(worker)
+
+    execution = flow.create_execution()
+    await execution.async_start("task-2")
+    result = await execution.async_close()
+    assert result["compat_result"] == "explicit result still overrides close snapshot"
     print(result)
 
 
-# triggerflow_set_result_demo()
+async def main():
+    await triggerflow_close_result_demo()
+    await triggerflow_set_result_compat_demo()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

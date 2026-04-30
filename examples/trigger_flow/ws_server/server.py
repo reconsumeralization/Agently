@@ -1,95 +1,88 @@
+import asyncio
 import os
-from dotenv import find_dotenv, load_dotenv
-
-load_dotenv(find_dotenv())
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently.types.trigger_flow import RUNTIME_STREAM_STOP
+
+
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 
 Agently.set_settings(
     "OpenAICompatible",
     {
-        "base_url": os.environ["QIANFAN_BASE_URL"],
-        "model": "ernie-lite-8k",
+        "base_url": OLLAMA_BASE_URL,
+        "api_key": OLLAMA_API_KEY,
+        "model": OLLAMA_MODEL,
         "model_type": "chat",
-        "auth": os.environ["QIANFAN_API_KEY"],
+        "request_options": {"temperature": 0.3},
     },
 )
-Agently.set_settings("debug", True)
-
-agent = Agently.create_agent()
 
 app = FastAPI()
-
-flow = TriggerFlow()
+flow = TriggerFlow(name="ws-stream-demo")
 
 
 async def model_response(data: TriggerFlowRuntimeData):
-    response = agent.input(data.value).get_response()
-    agen = response.get_async_generator("delta")
-    async for delta in agen:
-        data.put(("delta", delta))
-    full_reply = await response.async_get_data()
-    data.put(("final", full_reply))
-    data.put(RUNTIME_STREAM_STOP)
-    agent.add_chat_history(
-        {
-            "role": "user",
-            "content": data.value,
-        },
-    )
-    agent.add_chat_history(
-        {
-            "role": "assistant",
-            "content": full_reply,
-        },
-    )
-    return full_reply
+    agent = Agently.create_agent()
+    agent.role("You are a concise and helpful assistant.", always=True)
+    response = agent.input(str(data.input)).get_response()
+
+    async for delta in response.get_async_generator(type="delta"):
+        if delta:
+            await data.async_put_into_stream({"event": "delta", "content": delta})
+
+    full_reply = await response.async_get_text()
+    await data.async_put_into_stream({"event": "final", "content": full_reply})
+    await data.async_set_state("reply", full_reply)
 
 
-flow.to(model_response).end()
+flow.to(model_response)
 
 
 @app.websocket("/")
 async def trigger_flow_websocket(ws: WebSocket):
     await ws.accept()
-    await ws.send_json(
-        {
-            "status": "received",
-            "content": None,
-            "stop": False,
-        }
-    )
+    await ws.send_json({"status": "ready", "content": None, "stop": False})
     try:
         while True:
-            data = await ws.receive_json()
-            runtime_stream = flow.get_async_runtime_stream(data["user_input"], timeout=None)
-            async for event, data in runtime_stream:
-                if event == "delta":
+            payload = await ws.receive_json()
+            execution = flow.create_execution(auto_close=False)
+            await execution.async_start(payload["user_input"])
+            close_task = asyncio.create_task(execution.async_close())
+
+            async for item in execution.get_async_runtime_stream(timeout=None):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("event") == "delta":
                     await ws.send_json(
                         {
                             "status": "received",
-                            "content": data,
+                            "content": item.get("content"),
                             "stop": False,
                         }
                     )
-                elif event == "final":
+                elif item.get("event") == "final":
                     await ws.send_json(
                         {
                             "status": "done",
-                            "content": data,
+                            "content": item.get("content"),
                             "stop": True,
                         }
                     )
+
+            await close_task
     except WebSocketDisconnect:
         pass
-    except:
+    except Exception:
         await ws.close()
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    print("Start WebSocket Server on Port 15596...")
+    print("Start WebSocket Server on http://127.0.0.1:15596")
+    print(f"Using local Ollama model: {OLLAMA_MODEL} ({OLLAMA_BASE_URL})")
     uvicorn.run(app, host="0.0.0.0", port=15596)

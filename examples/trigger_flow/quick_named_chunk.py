@@ -1,15 +1,28 @@
+import asyncio
+
 from agently import TriggerFlow
 
-flow = TriggerFlow()
+flow = TriggerFlow(name="quick-named-chunk")
 
-(
-    flow.to(("get_user_input", lambda _: input("USER:")))
-    .side_branch(lambda data: print(data.value))
-    .if_condition("#exit")
-    .end()
-    .else_condition()
-    .to("get_user_input")
-    .end_condition()
-)
 
-flow.start()
+@flow.chunk("normalize-input")
+async def normalize(data):
+    return str(data.input).strip().lower()
+
+
+async def store(data):
+    await data.async_set_state("normalized", data.input)
+
+
+flow.to(normalize).to(store)
+
+
+async def main():
+    execution = flow.create_execution()
+    await execution.async_start("  Agently  ")
+    state = await execution.async_close()
+    assert state["normalized"] == "agently"
+    print(state["normalized"])
+
+
+asyncio.run(main())

@@ -1,54 +1,43 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Safe Cycle: bounded loop, pause-resume loop, and external re-entry
-def triggerflow_bounded_cycle_demo():
-    # Idea: a cycle is safe if every turn has a clear stop condition.
-    # Flow: START -> loop_step -> emit Loop -> loop_step ... -> set_result
-    # Expect: prints a bounded sequence and final result.
-    flow = TriggerFlow()
+async def triggerflow_bounded_cycle_demo():
+    flow = TriggerFlow(name="step-15-bounded-cycle")
 
     async def loop_step(data: TriggerFlowRuntimeData):
-        current = int(data.get_runtime_data("count", 0) or 0)
-        seen = data.get_runtime_data("seen", []) or []
+        current = int(data.get_state("count", 0) or 0)
+        seen = data.get_state("seen", []) or []
         seen.append(current)
-        data.set_runtime_data("seen", seen, emit=False)
-
+        await data.async_set_state("seen", seen, emit=False)
         if current >= 3:
-            result = {"mode": "bounded", "seen": seen}
-            data.set_result(result)
-            return result
-
-        data.set_runtime_data("count", current + 1, emit=False)
-        await data.async_emit("Loop", current + 1)
-        return current
+            await data.async_set_state("final", {"mode": "bounded", "seen": seen})
+            return
+        await data.async_set_state("count", current + 1, emit=False)
+        data.emit_nowait("Loop", current + 1)
 
     flow.to(loop_step)
     flow.when("Loop").to(loop_step)
 
-    print(flow.start("start"))
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("start")
+    state = await execution.async_close()
+    assert state["final"]["seen"] == [0, 1, 2, 3]
+    print(state["final"])
 
 
-# triggerflow_bounded_cycle_demo()
-
-
-def triggerflow_pause_between_turns_demo():
-    # Idea: instead of self-spinning, pause after each turn and wait for an external resume.
-    # Flow: START -> step -> pause_for -> continue_with -> ResumeLoop -> Loop -> step
-    # Expect: prints one interrupt per turn and exits after the scripted replies.
-    flow = TriggerFlow()
+async def triggerflow_pause_between_turns_demo():
+    flow = TriggerFlow(name="step-15-pause-between-turns")
 
     async def step(data: TriggerFlowRuntimeData):
-        current = int(data.get_runtime_data("count", 0) or 0)
-        turns = data.get_runtime_data("turns", []) or []
+        current = int(data.get_state("count", 0) or 0)
+        turns = data.get_state("turns", []) or []
         turns.append(current)
-        data.set_runtime_data("turns", turns, emit=False)
-
+        await data.async_set_state("turns", turns, emit=False)
         if current >= 2:
-            result = {"mode": "pause_resume", "turns": turns}
-            data.set_result(result)
-            return result
-
+            await data.async_set_state("final", {"mode": "pause_resume", "turns": turns})
+            return
         return await data.async_pause_for(
             type="human_input",
             payload={"question": f"continue from turn {current}?"},
@@ -56,67 +45,56 @@ def triggerflow_pause_between_turns_demo():
         )
 
     async def resume_loop(data: TriggerFlowRuntimeData):
-        answer = data.value if isinstance(data.value, dict) else {}
-        current = int(data.get_runtime_data("count", 0) or 0)
-        if not answer.get("continue", False):
-            result = {
-                "mode": "pause_resume",
-                "turns": data.get_runtime_data("turns", []),
-                "stopped_by_user": True,
-            }
-            data.set_result(result)
-            return result
-
-        data.set_runtime_data("count", current + 1, emit=False)
+        current = int(data.get_state("count", 0) or 0)
+        if not isinstance(data.input, dict) or not data.input.get("continue"):
+            await data.async_set_state("final", {"mode": "pause_resume", "stopped_by_user": True})
+            return
+        await data.async_set_state("count", current + 1, emit=False)
         await data.async_emit("Loop", current + 1)
-        return {"continued": current + 1}
 
     flow.to(step)
     flow.when("Loop").to(step)
     flow.when("ResumeLoop").to(resume_loop)
 
-    execution = flow.start_execution("start", wait_for_result=False)
-
-    scripted_answers = [{"continue": True}, {"continue": True}]
-    for answer in scripted_answers:
-        pending_interrupts = execution.get_pending_interrupts()
-        interrupt_id = next(iter(pending_interrupts))
-        print("[interrupt]", pending_interrupts[interrupt_id]["payload"])
-        execution.continue_with(interrupt_id, answer)
-
-    print(execution.get_result(timeout=5))
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("start")
+    for answer in [{"continue": True}, {"continue": True}]:
+        interrupt_id = next(iter(execution.get_pending_interrupts()))
+        await execution.async_continue_with(interrupt_id, answer)
+    state = await execution.async_close()
+    assert state["final"]["turns"] == [0, 1, 2]
+    print(state["final"])
 
 
-# triggerflow_pause_between_turns_demo()
-
-
-def triggerflow_external_reentry_demo():
-    # Idea: the safest cycle is often not a self-emit loop, but repeated external re-entry.
-    # Flow: START -> init, then external Tick events re-enter the same execution.
-    # Expect: prints a result only after enough external Tick events arrive.
-    flow = TriggerFlow()
+async def triggerflow_external_reentry_demo():
+    flow = TriggerFlow(name="step-15-external-reentry")
 
     async def init(data: TriggerFlowRuntimeData):
-        data.set_runtime_data("total", 0, emit=False)
-        return "waiting_for_ticks"
+        await data.async_set_state("total", 0, emit=False)
 
     async def on_tick(data: TriggerFlowRuntimeData):
-        total = int(data.get_runtime_data("total", 0) or 0) + int(data.value)
-        data.set_runtime_data("total", total, emit=False)
+        total = int(data.get_state("total", 0) or 0) + int(data.input)
+        await data.async_set_state("total", total, emit=False)
         if total >= 3:
-            result = {"mode": "external_reentry", "total": total}
-            data.set_result(result)
-            return result
-        return {"waiting_for_more_ticks": total}
+            await data.async_set_state("final", {"mode": "external_reentry", "total": total})
 
     flow.to(init)
     flow.when("Tick").to(on_tick)
 
-    execution = flow.start_execution("start", wait_for_result=False)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("start")
     for delta in [1, 1, 1]:
-        execution.emit("Tick", delta)
+        await execution.async_emit("Tick", delta)
+    state = await execution.async_close()
+    assert state["final"]["total"] == 3
+    print(state["final"])
 
-    print(execution.get_result(timeout=5))
+
+async def main():
+    await triggerflow_bounded_cycle_demo()
+    await triggerflow_pause_between_turns_demo()
+    await triggerflow_external_reentry_demo()
 
 
-# triggerflow_external_reentry_demo()
+if __name__ == "__main__":
+    asyncio.run(main())

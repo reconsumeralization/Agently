@@ -1,37 +1,41 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow emit + when: custom event routing
-def emit_when_demo():
-    # Idea: use emit + when to fan out work and collect results.
-    # Flow: planner emits Plan.Read/Plan.Write -> when listeners -> collect
-    # Expect: prints collected results; start() does not return a final value here.
-    flow = TriggerFlow()
+async def emit_when_demo():
+    flow = TriggerFlow(name="step-07-emit-when")
 
     async def planner(data: TriggerFlowRuntimeData):
-        # emit two custom events for downstream branches
         await data.async_emit("Plan.Read", {"task": "read"})
         await data.async_emit("Plan.Write", {"task": "write"})
-        return "plan done"
 
     async def reader(data: TriggerFlowRuntimeData):
-        return f"read: {data.value['task']}"
+        await data.async_set_state("read_result", f"read: {data.input['task']}")
 
     async def writer(data: TriggerFlowRuntimeData):
-        return f"write: {data.value['task']}"
+        await data.async_set_state("write_result", f"write: {data.input['task']}")
 
-    # when listens to custom events emitted by planner
-    flow.to(planner).end()
-    flow.when("Plan.Read").to(reader).collect("plan", "read")
-    (
-        flow.when("Plan.Write")
-        .to(writer)
-        .collect("plan", "write")
-        .to(lambda d: print("[collect]", d.value))
-        .end()
-    )
+    async def summarize(data: TriggerFlowRuntimeData):
+        await data.async_set_state(
+            "summary",
+            {
+                "read": data.get_state("read_result"),
+                "write": data.get_state("write_result"),
+            },
+        )
 
-    flow.start("go", wait_for_result=False)
+    flow.to(planner).to(summarize)
+    flow.when("Plan.Read").to(reader)
+    flow.when("Plan.Write").to(writer)
+
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("go")
+    state = await execution.async_close()
+    assert state["read_result"] == "read: read"
+    assert state["write_result"] == "write: write"
+    print(state)
 
 
-# emit_when_demo()
+if __name__ == "__main__":
+    asyncio.run(emit_when_demo())

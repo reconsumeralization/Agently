@@ -1,3 +1,5 @@
+import asyncio
+
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently_devtools import ObservationBridge
 
@@ -7,17 +9,17 @@ ignored_flow = TriggerFlow(name="devtools-ignored-flow")
 
 
 @watched_flow.chunk
-def watched_step(data: TriggerFlowRuntimeData):
-    return {"flow": "watched", "input": data.value}
+async def watched_step(data: TriggerFlowRuntimeData):
+    await data.async_set_state("result", {"flow": "watched", "input": data.input})
 
 
 @ignored_flow.chunk
-def ignored_step(data: TriggerFlowRuntimeData):
-    return {"flow": "ignored", "input": data.value}
+async def ignored_step(data: TriggerFlowRuntimeData):
+    await data.async_set_state("result", {"flow": "ignored", "input": data.input})
 
 
-watched_flow.to(watched_step).end()
-ignored_flow.to(ignored_step).end()
+watched_flow.to(watched_step)
+ignored_flow.to(ignored_step)
 
 bridge = ObservationBridge(
     app_id="agently-main-examples",
@@ -28,10 +30,20 @@ bridge.watch(watched_flow)
 bridge.register(Agently)
 
 
-try:
+async def run_flow(flow: TriggerFlow, value: str):
+    execution = flow.create_execution()
+    await execution.async_start(value)
+    return await execution.async_close()
+
+
+async def main():
     print("Running watched flow")
-    print(watched_flow.start("keep this run"))
+    print(await run_flow(watched_flow, "keep this run"))
     print("Running ignored flow")
-    print(ignored_flow.start("do not upload this run"))
+    print(await run_flow(ignored_flow, "do not upload this run"))
+
+
+try:
+    asyncio.run(main())
 finally:
     bridge.unregister(Agently)

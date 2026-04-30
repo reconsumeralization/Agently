@@ -6,25 +6,22 @@ from agently.builtins.tools import Browse, Search
 
 
 ## Auto Loop: plan -> tool -> plan -> reply (TriggerFlow + chat history + KB)
-def auto_loop_demo():
+async def auto_loop_demo():
     # Idea: a planning loop that keeps asking/using tools until ready to reply,
     # then continues with the next user turn.
     # Flow: input -> plan -> tool -> plan -> reply -> loop
     # Expect: prints a readable "plan/tool/result" process and final replies.
     agent = Agently.create_agent()
     import os
-    import dotenv
 
-    dotenv.load_dotenv(dotenv.find_dotenv())
     agent.set_settings(
         "OpenAICompatible",
         {
-            "base_url": "https://api.deepseek.com/v1",
-            "model": "deepseek-chat",
-            "auth": os.environ.get("DEEPSEEK_API_KEY"),
-            "request_options": {
-                "temperature": 0.7,
-            },
+            "base_url": os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1"),
+            "api_key": os.environ.get("OLLAMA_API_KEY", "ollama"),
+            "model": os.environ.get("OLLAMA_MODEL", "qwen2.5:7b"),
+            "model_type": "chat",
+            "request_options": {"temperature": 0.3},
         },
     )
 
@@ -75,22 +72,24 @@ def auto_loop_demo():
         except EOFError:
             question = "exit"
         if question.lower() == "exit":
-            data.stop_stream()
+            await data.async_set_state("closed_by_user", True)
+            await data.async_put_into_stream("[status] user exit\n")
+            await data.execution.async_close(reason="user_exit")
             return "exit"
         await data.async_emit("UserInput", question)
         return question
 
     async def prepare_context(data: TriggerFlowRuntimeData):
-        question = data.value
-        chat_history = data.get_runtime_data("chat_history") or []
+        question = data.input
+        chat_history = data.get_state("chat_history") or []
         agent.set_chat_history(chat_history)
-        data.set_runtime_data("question", question)
-        data.set_runtime_data("done_plans", [])
-        data.set_runtime_data("step", 0)
-        data.set_runtime_data("print_process", True)
-        if data.get_runtime_data("memo") is None:
-            data.set_runtime_data("memo", [])
-        data.put_into_stream("[status] planning started\n")
+        await data.async_set_state("question", question)
+        await data.async_set_state("done_plans", [])
+        await data.async_set_state("step", 0)
+        await data.async_set_state("print_process", True)
+        if data.get_state("memo") is None:
+            await data.async_set_state("memo", [])
+        await data.async_put_into_stream("[status] planning started\n")
         return question
 
     async def ensure_kb(data: TriggerFlowRuntimeData):
@@ -100,10 +99,10 @@ def auto_loop_demo():
             kb_collection = await build_kb_collection()
 
         if kb_collection is None:
-            data.set_runtime_data("kb_results", [])
+            await data.async_set_state("kb_results", [])
             return []
-        results = kb_collection.query(data.get_runtime_data("question", ""))
-        data.set_runtime_data("kb_results", results)
+        results = kb_collection.query(data.get_state("question", ""))
+        await data.async_set_state("kb_results", results)
         return results
 
     async def build_kb_collection():
@@ -140,11 +139,11 @@ def auto_loop_demo():
             return None
 
     async def make_next_plan(data: TriggerFlowRuntimeData):
-        question = data.get_runtime_data("question")
-        done_plans = data.get_runtime_data("done_plans", [])
-        step = data.get_runtime_data("step") or 0
-        kb_results = data.get_runtime_data("kb_results") or []
-        memo = data.get_runtime_data("memo") or []
+        question = data.get_state("question")
+        done_plans = data.get_state("done_plans", [])
+        step = data.get_state("step") or 0
+        kb_results = data.get_state("kb_results") or []
+        memo = data.get_state("memo") or []
         if step >= 5:
             final_action = {
                 "type": "final",
@@ -205,31 +204,31 @@ def auto_loop_demo():
         async for stream in response.get_async_generator(type="instant"):
             if stream.wildcard_path == "next_step_thinking" and stream.delta:
                 if not thinking_started:
-                    data.put_into_stream("[thinking] ")
+                    await data.async_put_into_stream("[thinking] ")
                     thinking_started = True
-                data.put_into_stream(stream.delta)
+                await data.async_put_into_stream(stream.delta)
             if stream.wildcard_path == "next_step_thinking" and stream.is_complete:
-                data.put_into_stream("\n")
+                await data.async_put_into_stream("\n")
             if stream.wildcard_path == "next_step_action.type" and stream.is_complete:
-                data.put_into_stream(f"[plan] next_action: {stream.value}\n")
+                await data.async_put_into_stream(f"[plan] next_action: {stream.value}\n")
             if stream.wildcard_path == "next_step_action.tool_using.tool_name" and stream.is_complete:
-                data.put_into_stream(f"[plan] tool: {stream.value}\n")
-        result = response.result.get_data()
+                await data.async_put_into_stream(f"[plan] tool: {stream.value}\n")
+        result = await response.result.async_get_data()
         next_action = result["next_step_action"]
-        data.put_into_stream("[status] planning done\n")
-        data.set_runtime_data("step", step + 1)
+        await data.async_put_into_stream("[status] planning done\n")
+        await data.async_set_state("step", step + 1)
         await data.async_emit("Plan", next_action)
         return next_action
 
     async def use_tool(data: TriggerFlowRuntimeData):
-        tool_using_info = data.value["tool_using"]
+        tool_using_info = data.input["tool_using"]
         tool_name = tool_using_info["tool_name"].lower()
         tool = tools_info.get(tool_name)
         if tool is None:
             return {"type": "final", "reply": f"Unknown tool: {tool_name}"}
 
-        data.put_into_stream(f"[status] tool running: {tool_name}\n")
-        if data.get_runtime_data("print_process"):
+        await data.async_put_into_stream(f"[status] tool running: {tool_name}\n")
+        if data.get_state("print_process"):
             print("[🪛 I should use a tool]")
             print("🤔 Purpose:", tool_using_info["purpose"])
             print("🤔 Tool:", tool_using_info["tool_name"])
@@ -240,11 +239,11 @@ def auto_loop_demo():
         else:
             tool_result = tool_func(**tool_using_info["kwargs"])
 
-        if data.get_runtime_data("print_process"):
+        if data.get_state("print_process"):
             print("🎉 Result:", str(tool_result)[:200], "...")
-        data.put_into_stream(f"[status] tool done: {tool_name}\n")
+        await data.async_put_into_stream(f"[status] tool done: {tool_name}\n")
 
-        done_plans = data.get_runtime_data("done_plans", [])
+        done_plans = data.get_state("done_plans", [])
         done_plans.append(
             {
                 "purpose": tool_using_info["purpose"],
@@ -252,28 +251,28 @@ def auto_loop_demo():
                 "result": tool_result,
             }
         )
-        data.set_runtime_data("done_plans", done_plans)
+        await data.async_set_state("done_plans", done_plans)
         return {"type": "tool"}
 
     async def reply(data: TriggerFlowRuntimeData):
-        reply_text = data.value["reply"]
-        if data.get_runtime_data("print_process"):
+        reply_text = data.input["reply"]
+        if data.get_state("print_process"):
             print("[💬 Ready to answer]")
             print("✅ Final answer:", reply_text)
-        data.put_into_stream("[status] reply ready\n")
-        chat_history = data.get_runtime_data("chat_history") or []
-        question = data.get_runtime_data("question")
+        await data.async_put_into_stream("[status] reply ready\n")
+        chat_history = data.get_state("chat_history") or []
+        question = data.get_state("question")
         chat_history.append({"role": "user", "content": question})
         chat_history.append({"role": "assistant", "content": reply_text})
-        data.set_runtime_data("chat_history", chat_history)
+        await data.async_set_state("chat_history", chat_history)
         await data.async_emit("Loop", None)
         return reply_text
 
     async def update_memo(data: TriggerFlowRuntimeData):
         # Keep a runtime memo across turns for preferences, constraints, or facts.
-        memo = data.get_runtime_data("memo") or []
-        question = data.get_runtime_data("question")
-        reply_text = data.value.get("reply", "")
+        memo = data.get_state("memo") or []
+        question = data.get_state("question")
+        reply_text = data.input.get("reply", "")
         result = (
             agent.input({"question": question, "reply": reply_text, "memo": memo})
             .instruct(
@@ -284,12 +283,13 @@ def auto_loop_demo():
                 ]
             )
             .output({"memo": [(str, "Short memo item")]})
-            .start()
+            .async_start()
         )
+        result = await result
         new_memo = result.get("memo", []) if isinstance(result, dict) else []
         if new_memo:
-            data.set_runtime_data("memo", new_memo)
-            data.put_into_stream(f"[memo] {new_memo}\n")
+            await data.async_set_state("memo", new_memo)
+            await data.async_put_into_stream(f"[memo] {new_memo}\n")
         return {"type": "final", "reply": reply_text}
 
     flow.to(start_loop)
@@ -297,7 +297,7 @@ def auto_loop_demo():
     flow.when("UserInput").to(prepare_context).to(ensure_kb).to(make_next_plan)
     (
         flow.when("Plan")
-        .if_condition(lambda d: d.value.get("type") == "final")
+        .if_condition(lambda d: d.input.get("type") == "final")
         .to(reply)
         .to(update_memo)
         .else_condition()
@@ -306,10 +306,14 @@ def auto_loop_demo():
         .end_condition()
     )
 
-    for event in flow.get_runtime_stream("start", timeout=None):
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("start")
+    async for event in execution.get_async_runtime_stream(timeout=None):
         print(event, end="", flush=True)
+    state = await execution.async_close()
 
-    return flow
+    return state
 
 
-# auto_loop_demo()
+if __name__ == "__main__":
+    asyncio.run(auto_loop_demo())

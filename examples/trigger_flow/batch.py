@@ -1,24 +1,40 @@
 import asyncio
-from random import randint
-from agently import TriggerFlow, TriggerFlowRuntimeData
 
-flow = TriggerFlow()
+from agently import TriggerFlow
+
+flow = TriggerFlow(name="batch-demo")
 
 
-async def echo(data: TriggerFlowRuntimeData):
-    num = randint(0, 100) / 100
-    print(f"wait { num }s: { data.value }")
-    await asyncio.sleep(num)
-    return f"wait { num }s: { data.value }"
+def make_handler(label):
+    async def handle(data):
+        await asyncio.sleep(0.01)
+        return f"{label}:{data.input}"
+
+    return handle
+
+
+async def store_batch(data):
+    await data.async_set_state("batch", data.input)
 
 
 flow.batch(
-    ("echo_1", echo),
-    ("echo_2", echo),
-    ("echo_3", echo),
-    ("echo_4", echo),
+    ("draft", make_handler("draft")),
+    ("review", make_handler("review")),
+    ("ship", make_handler("ship")),
     concurrency=2,
-).end()
-execution = flow.create_execution()
-result = execution.start("Agently")
-print(result)
+).to(store_batch)
+
+
+async def main():
+    execution = flow.create_execution()
+    await execution.async_start("demo")
+    state = await execution.async_close()
+    assert state["batch"] == {
+        "draft": "draft:demo",
+        "review": "review:demo",
+        "ship": "ship:demo",
+    }
+    print(state["batch"])
+
+
+asyncio.run(main())

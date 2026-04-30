@@ -1,32 +1,37 @@
+import asyncio
+
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
 
-## TriggerFlow Execution State Resume: save and continue later
-def triggerflow_save_and_resume_state_demo():
-    # Idea: save execution state at waiting point, restore later, then continue.
-    # Flow: start_execution(waiting) -> save() -> load() -> emit feedback -> get_result
-    flow = TriggerFlow()
+async def triggerflow_save_and_resume_state_demo():
+    flow = TriggerFlow(name="step-14-execution-state-resume")
 
     async def prepare(data: TriggerFlowRuntimeData):
-        data.set_runtime_data("ticket", {"id": "T-001", "topic": data.value})
-        return "waiting"
+        await data.async_set_state("ticket", {"id": "T-001", "topic": data.input})
 
     async def finalize(data: TriggerFlowRuntimeData):
-        return {
-            "ticket": data.get_runtime_data("ticket"),
-            "feedback": data.value,
-        }
+        await data.async_set_state(
+            "final",
+            {
+                "ticket": data.get_state("ticket"),
+                "feedback": data.input,
+            },
+        )
 
     flow.to(prepare)
-    flow.when("UserFeedback").to(finalize).end()
+    flow.when("UserFeedback").to(finalize)
 
-    execution = flow.start_execution("refund request", wait_for_result=False)
-    state = execution.save()
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("refund request")
+    saved_state = execution.save()
 
-    restored_execution = flow.create_execution()
-    restored_execution.load(state)
-    restored_execution.emit("UserFeedback", {"approved": True})
-    print(restored_execution.get_result(timeout=5))
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.load(saved_state)
+    await restored_execution.async_emit("UserFeedback", {"approved": True})
+    state = await restored_execution.async_close()
+    assert state["final"]["feedback"]["approved"] is True
+    print(state["final"])
 
 
-# triggerflow_save_and_resume_state_demo()
+if __name__ == "__main__":
+    asyncio.run(triggerflow_save_and_resume_state_demo())

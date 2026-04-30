@@ -214,17 +214,14 @@ Run steps in parallel with a configurable concurrency limit:
 
 ```python
 # Process a list of URLs, max 5 in parallel
-(
-    flow.for_each(url_list, concurrency=5)
-    .to(fetch_page)
-    .to(summarize)
-    .end()
-)
+flow.for_each(url_list, concurrency=5).to(fetch_page).to(summarize).end_for_each().to(store_summaries)
 
 # Fan out to N fixed branches simultaneously
-flow.batch(3).to(strategy_a).collect("results", "a")
-flow.batch(3).to(strategy_b).collect("results", "b")
-flow.batch(3).to(strategy_c).collect("results", "c")
+flow.batch(
+    ("a", strategy_a),
+    ("b", strategy_b),
+    ("c", strategy_c),
+).to(store_strategy_outputs)
 ```
 
 **Event-driven — `when` and `emit`**
@@ -234,7 +231,6 @@ Branch on signals, chunk completions, or data changes — not just linear sequen
 ```python
 flow.when("UserInput").to(process_input).to(plan_next_step)
 flow.when("ToolResult").to(evaluate_result)
-flow.when({"runtime_data": "user_decision"}).to(apply_decision)
 
 # Emit from inside a chunk to trigger other branches
 async def plan_next_step(data: TriggerFlowEventData):
@@ -250,14 +246,15 @@ Save execution state to disk, restore it after a process restart — critical fo
 
 ```python
 # Start execution, save checkpoint immediately
-execution = flow.start_execution(initial_input, wait_for_result=False)
+execution = flow.create_execution(auto_close=False)
+await execution.async_start(initial_input, wait_for_result=False)
 execution.save("checkpoint.json")
 
 # Later — new process, restored state, continue from where it paused
-restored = flow.create_execution()
+restored = flow.create_execution(auto_close=False)
 restored.load("checkpoint.json")
-restored.emit("UserFeedback", {"approved": True, "note": "Looks good."})
-result = restored.get_result(timeout=30)
+await restored.async_emit("UserFeedback", {"approved": True, "note": "Looks good."})
+state = await restored.async_close()
 ```
 
 This makes Agently workflows genuinely restart-safe — suitable for approval gates, multi-day pipelines, and human review loops.

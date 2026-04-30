@@ -145,9 +145,9 @@ if __name__ == "__main__":
 # GET /health 200
 # {'ok': True, 'provider': 'triggerflow', 'model': 'qwen2.5:7b', 'base_url': 'http://127.0.0.1:11434/v1'}
 # POST /flow/chat 200 3.55s
-# {'status': 200, 'data': {'input': 'Give me 3 short suggestions about how to write Python code?', 'reply': "Sure! Here are three short suggestions for writing Python code:\n\n1. **Use Descriptive Variable Names**: Choose variable names that clearly indicate their purpose to make your code more readable.\n2. **Break Down Complex Tasks into Functions**: Divide large tasks into smaller, reusable functions to improve readability and maintainability.\n3. **Document Your Code**: Add comments and docstrings to explain your code's functionality; this helps others (and future you) understand the code."}, 'msg': None}
+# {'status': 200, 'data': {'response': {'input': 'Give me 3 short suggestions about how to write Python code?', 'reply': '...'}}, 'msg': None}
 # GET /flow/chat/get 200 1.18s
-# {'status': 200, 'data': {'input': 'Give me 3 short suggestions about how to write Python code?', 'reply': '1. Use clear and meaningful variable names.\n2. Break down complex tasks into smaller functions.\n3. Add comments to explain your logic, especially for tricky parts.'}, 'msg': None}
+# {'status': 200, 'data': {'response': {'input': 'Give me 3 short suggestions about how to write Python code?', 'reply': '...'}}, 'msg': None}
 # GET /flow/chat/sse (SSE)
 # SSE status: 200
 # SSE {"status": 200, "data": {"event": "delta", "content": "Sure"}, "msg": null}

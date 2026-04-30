@@ -2,10 +2,10 @@
 
 ## 1) Stream hangs or no output
 - Symptom: terminal appears stuck after input.
-- Cause: using sync generators inside an async context, or `get_runtime_stream(..., timeout=None)` without `stop_stream()`.
+- Cause: using sync generators inside an async context, or consuming an execution runtime stream without closing the execution.
 - Fix:
   - In async handlers, use `get_async_generator(...)` and `async for`.
-  - Call `stop_stream()` when you want the runtime stream to end.
+  - Start with `await execution.async_start(...)`, consume `execution.get_async_runtime_stream(...)`, and finish with `execution.async_close()`.
 
 ## 1.1) Streaming output labels spam
 - Symptom: every token prints its own label (e.g., repeated `[thinking]`).
@@ -17,22 +17,17 @@
 - Cause: using sync `get_response().get_generator(...)` inside an async handler.
 - Fix: use `request.get_async_generator(...)` with `async for`.
 
-## 2) TriggerFlow returns `None`
-- Symptom: `flow.start()` returns `None`.
-- Cause: no `end()` or no `set_result()` on the chain that should produce output.
+## 2) TriggerFlow result shape is unexpected
+- Symptom: close returns a full state snapshot instead of a single scalar.
+- Cause: execution lifecycle now treats close as the reliable completion boundary.
 - Fix:
-  - Use `end()` on the main chain, or
-  - call `execution.set_result(...)` explicitly.
+  - Store user-facing output under a stable state key, such as `result` or `final`.
+  - Use `set_result(...)` only as a compatibility override when integrating old callers.
 
-## 2.1) end() placed on the wrong chain
-- Symptom: flow returns the wrong value or ends too early.
-- Cause: `end()` attached to START or the wrong branch.
-- Fix: attach `end()` to the chain that should produce the default result; `when()` branches need explicit `end()` or `set_result()`.
-
-## 3) when() branch does not finalize result
-- Symptom: `start(wait_for_result=True)` times out.
-- Cause: `when()` branches are event-driven and do not set result by default.
-- Fix: add `.end()` on that branch or `set_result()`.
+## 3) when() branch output is missing
+- Symptom: state does not contain the branch output you expected.
+- Cause: `when()` branches are event-driven and only update state if a handler writes state.
+- Fix: call `data.async_set_state(...)` in event handlers and close the execution after pending tasks drain.
 
 ## 4) Concurrency wrapper issues
 - Symptom: wrong handler called in batch/for_each.
@@ -42,7 +37,7 @@
 ## 5) Flow data vs runtime data
 - Symptom: data leaks across executions.
 - Cause: `flow_data` is global.
-- Fix: use `runtime_data` for per-execution state.
+- Fix: use execution state (`data.get_state`, `data.async_set_state`) for per-execution state.
 
 ## 6) Wrong entry point in loop flows
 - Symptom: input never arrives or loop blocks.
