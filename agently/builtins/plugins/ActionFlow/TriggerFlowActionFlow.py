@@ -118,20 +118,20 @@ class TriggerFlowActionFlow:
         flow = TriggerFlow(name=f"action-loop-{ agent_name }")
 
         async def initialize_loop(data):
-            data.set_runtime_data("done_plans", [])
-            data.set_runtime_data("last_round_records", [])
-            data.set_runtime_data("round_index", 0)
+            data.set_state("done_plans", [])
+            data.set_state("last_round_records", [])
+            data.set_state("round_index", 0)
             await data.async_emit("PLAN", None)
             return None
 
         async def plan_step(data):
-            round_index = data.get_runtime_data("round_index", 0)
+            round_index = data.get_state("round_index", 0)
             if not isinstance(round_index, int):
                 round_index = 0
-            done_plans = data.get_runtime_data("done_plans", [])
+            done_plans = data.get_state("done_plans", [])
             if not isinstance(done_plans, list):
                 done_plans = []
-            last_round_records = data.get_runtime_data("last_round_records", [])
+            last_round_records = data.get_state("last_round_records", [])
             if not isinstance(last_round_records, list):
                 last_round_records = []
 
@@ -177,13 +177,13 @@ class TriggerFlowActionFlow:
 
         async def execute_step(data):
             action_calls = data.value if isinstance(data.value, list) else []
-            round_index = data.get_runtime_data("round_index", 0)
+            round_index = data.get_state("round_index", 0)
             if not isinstance(round_index, int):
                 round_index = 0
-            done_plans = data.get_runtime_data("done_plans", [])
+            done_plans = data.get_state("done_plans", [])
             if not isinstance(done_plans, list):
                 done_plans = []
-            last_round_records = data.get_runtime_data("last_round_records", [])
+            last_round_records = data.get_state("last_round_records", [])
             if not isinstance(last_round_records, list):
                 last_round_records = []
 
@@ -278,9 +278,9 @@ class TriggerFlowActionFlow:
                 )
 
             done_plans.extend(records)
-            data.set_runtime_data("done_plans", done_plans)
-            data.set_runtime_data("last_round_records", records)
-            data.set_runtime_data("round_index", round_index + 1)
+            data.set_state("done_plans", done_plans)
+            data.set_state("last_round_records", records)
+            data.set_state("round_index", round_index + 1)
             await data.async_emit("PLAN", None)
             return records
 
@@ -296,10 +296,8 @@ class TriggerFlowActionFlow:
                 tool_phase_run_context=tool_loop_run,
                 settings=settings,
             ):
-                result = await execution.async_start(
-                    wait_for_result=True,
-                    timeout=timeout,
-                )
+                await execution.async_start(wait_for_result=False)
+                result = await execution.async_close(timeout=timeout)
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise

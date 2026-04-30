@@ -23,6 +23,10 @@ TRIGGER_FLOW_STATUS_COMPLETED = "completed"
 TRIGGER_FLOW_STATUS_FAILED = "failed"
 TRIGGER_FLOW_STATUS_CANCELLED = "cancelled"
 
+TRIGGER_FLOW_LIFECYCLE_OPEN = "open"
+TRIGGER_FLOW_LIFECYCLE_SEALED = "sealed"
+TRIGGER_FLOW_LIFECYCLE_CLOSED = "closed"
+
 
 class TriggerFlowPauseSignal(dict[str, Any]):
     def __init__(self, interrupt: dict[str, Any]):

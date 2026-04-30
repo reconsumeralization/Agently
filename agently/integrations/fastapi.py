@@ -17,6 +17,7 @@ from agently.utils import LazyImport
 
 LazyImport.import_package("fastapi", version_constraint=">=0.104")
 
+import asyncio
 import json
 from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
@@ -180,12 +181,10 @@ class FastAPIHelper(FastAPI):
     def _build_response_model(self):
         if not self._use_default_response_warper:
             return None
-        result_type = self._get_triggerflow_result_type()
-        response_data_type = result_type | None if result_type is not None else Any | None
         return create_model(
             f"FastAPIHelperResponseData_{ id(self) }",
             status=(int, ...),
-            data=(response_data_type, None),
+            data=(Any | None, None),
             msg=(str | None, None),
             error=(dict[str, Any] | None, None),
         )
@@ -205,6 +204,73 @@ class FastAPIHelper(FastAPI):
             return await self.post_handler(body)
 
         return typed_post_handler
+
+    def _create_triggerflow_execution(
+        self,
+        request_options: "SerializableMapping",
+    ) -> "TriggerFlowExecution":
+        from agently.core import TriggerFlow, TriggerFlowExecution
+
+        concurrency = request_options.get("concurrency")
+        concurrency = concurrency if isinstance(concurrency, int) else None
+        runtime_resources = request_options.get("runtime_resources")
+        runtime_resources = runtime_resources if isinstance(runtime_resources, dict) else None
+
+        if isinstance(self.response_provider, TriggerFlowExecution):
+            if concurrency is not None:
+                self.response_provider.set_concurrency(concurrency)
+            if runtime_resources:
+                self.response_provider.update_runtime_resources(runtime_resources)
+            return self.response_provider
+
+        if isinstance(self.response_provider, TriggerFlow):
+            return self.response_provider.create_execution(
+                concurrency=concurrency,
+                runtime_resources=runtime_resources,
+                auto_close=False,
+            )
+
+        raise TypeError("Response provider is not a TriggerFlow or TriggerFlowExecution.")
+
+    def _get_triggerflow_async_generator(
+        self,
+        request_data: "SerializableMapping",
+        *,
+        options: "SerializableMapping",
+    ) -> AsyncGenerator:
+        execution = self._create_triggerflow_execution(options)
+        stream_timeout = options.get("stream_timeout", options.get("timeout", None))
+        stream_timeout = stream_timeout if isinstance(stream_timeout, (int, float)) else None
+        close_timeout = options.get("close_timeout")
+        close_timeout = close_timeout if isinstance(close_timeout, (int, float)) else None
+
+        async def generator():
+            await execution.async_start(request_data)
+            close_task = asyncio.create_task(execution.async_close(timeout=close_timeout))
+            try:
+                async for item in execution.get_async_runtime_stream(timeout=stream_timeout):
+                    yield item
+            finally:
+                result = await execution.async_close(timeout=close_timeout)
+                if not close_task.done():
+                    close_task.cancel()
+                else:
+                    result = await close_task
+                _ = result
+
+        return generator()
+
+    async def _async_get_triggerflow_result(
+        self,
+        request_data: "SerializableMapping",
+        *,
+        options: "SerializableMapping",
+    ):
+        execution = self._create_triggerflow_execution(options)
+        close_timeout = options.get("close_timeout", options.get("timeout", None))
+        close_timeout = close_timeout if isinstance(close_timeout, (int, float)) else None
+        await execution.async_start(request_data)
+        return await execution.async_close(timeout=close_timeout)
 
     def _get_async_generator(
         self,
@@ -245,15 +311,7 @@ class FastAPIHelper(FastAPI):
             self.response_provider.input(input_data)
             return FunctionShifter.auto_options_func(self.response_provider.get_async_generator)(**options)
         elif isinstance(self.response_provider, (TriggerFlow, TriggerFlowExecution)):
-            if (
-                isinstance(self.response_provider, TriggerFlowExecution)
-                and "concurrency" in options
-                and isinstance(options["concurrency"], int)
-            ):
-                self.response_provider.set_concurrency(options["concurrency"])
-            return FunctionShifter.auto_options_func(self.response_provider.get_async_runtime_stream)(
-                request_data, **options
-            )
+            return self._get_triggerflow_async_generator(request_data, options=options)
         elif isinstance(self.response_provider, Callable):
             generator = FunctionShifter.auto_options_func(self.response_provider)(request_data, **options)
             if isinstance(generator, Generator):
@@ -308,13 +366,7 @@ class FastAPIHelper(FastAPI):
             self.response_provider.input(input_data)
             return await FunctionShifter.auto_options_func(self.response_provider.async_start)(**options)
         elif isinstance(self.response_provider, (TriggerFlow, TriggerFlowExecution)):
-            if (
-                isinstance(self.response_provider, TriggerFlowExecution)
-                and "concurrency" in options
-                and isinstance(options["concurrency"], int)
-            ):
-                self.response_provider.set_concurrency(options["concurrency"])
-            return await FunctionShifter.auto_options_func(self.response_provider.async_start)(request_data, **options)
+            return await self._async_get_triggerflow_result(request_data, options=options)
         elif isinstance(self.response_provider, Callable):
             generator = FunctionShifter.auto_options_func(self.response_provider)(request_data, **options)
             if isinstance(generator, Generator):

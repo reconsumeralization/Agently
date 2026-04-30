@@ -18,13 +18,10 @@ async def test_trigger_flow_runtime_data_namespaces_and_flow_resources():
     async def prepare(data: TriggerFlowRuntimeData):
         data.state.set("draft", {"topic": data.value})
         data.flow_state.set("shared_flag", True)
-        return {
-            "draft": data.state.get("draft"),
-            "shared_flag": data.flow_state.get("shared_flag"),
-            "logger": data.require_resource("logger"),
-        }
+        data.state.set("shared_flag", data.flow_state.get("shared_flag"))
+        data.state.set("logger", data.require_resource("logger"))
 
-    flow.to(prepare).end()
+    flow.to(prepare)
     result = await flow.async_start("pricing")
 
     assert result == {
@@ -40,12 +37,14 @@ async def test_trigger_flow_execution_resources_override_flow_defaults():
     flow.update_runtime_resources(tool_name="flow-tool")
 
     async def inspect_resource(data: TriggerFlowRuntimeData):
-        return data.require_resource("tool_name")
+        data.state.set("tool_name", data.require_resource("tool_name"))
 
-    flow.to(inspect_resource).end()
+    flow.to(inspect_resource)
 
-    assert await flow.async_start("start") == "flow-tool"
-    assert await flow.async_start("start", runtime_resources={"tool_name": "execution-tool"}) == "execution-tool"
+    assert await flow.async_start("start") == {"tool_name": "flow-tool"}
+    assert await flow.async_start("start", runtime_resources={"tool_name": "execution-tool"}) == {
+        "tool_name": "execution-tool"
+    }
 
 
 @pytest.mark.asyncio
@@ -144,15 +143,15 @@ async def test_trigger_flow_condition_handler_can_use_runtime_resources():
         return bool(data.require_resource("take_left"))
 
     async def left(data: TriggerFlowRuntimeData):
-        return "left"
+        data.state.set("branch", "left")
 
     async def right(data: TriggerFlowRuntimeData):
-        return "right"
+        data.state.set("branch", "right")
 
-    flow.if_condition(should_take_left).to(left).else_condition().to(right).end_condition().end()
+    flow.if_condition(should_take_left).to(left).else_condition().to(right).end_condition()
 
-    assert await flow.async_start("x", runtime_resources={"take_left": True}) == "left"
-    assert await flow.async_start("x", runtime_resources={"take_left": False}) == "right"
+    assert await flow.async_start("x", runtime_resources={"take_left": True}) == {"branch": "left"}
+    assert await flow.async_start("x", runtime_resources={"take_left": False}) == {"branch": "right"}
 
 
 @pytest.mark.asyncio
@@ -161,9 +160,9 @@ async def test_trigger_flow_config_round_trip_with_runtime_resources():
 
     async def render(data: TriggerFlowRuntimeData):
         renderer = cast(Callable[[Any], Any], data.require_resource("renderer"))
-        return renderer(data.value)
+        data.state.set("rendered", renderer(data.value))
 
-    flow.to(render).end()
+    flow.to(render)
     config = flow.get_flow_config()
 
     assert "renderer" not in json.dumps(config)
@@ -176,4 +175,4 @@ async def test_trigger_flow_config_round_trip_with_runtime_resources():
         "hello",
         runtime_resources={"renderer": lambda value: value.upper()},
     )
-    assert result == "HELLO"
+    assert result == {"rendered": "HELLO"}

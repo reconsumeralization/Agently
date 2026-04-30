@@ -240,6 +240,30 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
     set_result: Callable[[ResultT], None]
     get_result: Callable[..., ResultT | None]
 
+    @property
+    def value(self) -> ValueT:
+        return self._value
+
+    @value.setter
+    def value(self, value: ValueT):
+        self._value = value
+
+    @property
+    def input(self) -> ValueT:
+        return self._value
+
+    @input.setter
+    def input(self, value: ValueT):
+        self._value = value
+
+    @property
+    def inputs(self) -> ValueT:
+        return self._value
+
+    @inputs.setter
+    def inputs(self, value: ValueT):
+        self._value = value
+
     def __init__(
         self,
         *,
@@ -290,14 +314,21 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         self.async_set_runtime_data = execution.async_set_runtime_data
         self.async_append_runtime_data = execution.async_append_runtime_data
         self.async_del_runtime_data = execution.async_del_runtime_data
+        self.get_state = execution.get_state
+        self.set_state = execution.set_state
+        self.append_state = execution.append_state
+        self.del_state = execution.del_state
+        self.async_set_state = execution.async_set_state
+        self.async_append_state = execution.async_append_state
+        self.async_del_state = execution.async_del_state
         self.state = _TriggerFlowDataNamespace(
-            getter=self.get_runtime_data,
-            setter=self.set_runtime_data,
-            appender=self.append_runtime_data,
-            deleter=self.del_runtime_data,
-            async_setter=self.async_set_runtime_data,
-            async_appender=self.async_append_runtime_data,
-            async_deleter=self.async_del_runtime_data,
+            getter=self.get_state,
+            setter=self.set_state,
+            appender=self.append_state,
+            deleter=self.del_state,
+            async_setter=self.async_set_state,
+            async_appender=self.async_append_state,
+            async_deleter=self.async_del_state,
         )
         self.flow_state = _TriggerFlowDataNamespace(
             getter=self.get_flow_data,
@@ -315,9 +346,6 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         self.set_resource = execution.set_runtime_resource
         self.del_resource = execution.del_runtime_resource
 
-        self.emit = execution.emit
-        self.async_emit = execution.async_emit
-
         def _origin_chunk_payload():
             if self.chunk_run_context is None:
                 return None
@@ -327,6 +355,59 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
                 "chunk_name": self.chunk_run_context.meta.get("chunk_name"),
                 "operator_kind": self.chunk_run_context.meta.get("operator_kind"),
             }
+
+        def _chunk_signal_meta(meta: dict[str, Any] | None = None):
+            origin_chunk = _origin_chunk_payload()
+            if origin_chunk is None:
+                return meta
+            merged_meta = dict(meta) if isinstance(meta, dict) else {}
+            merged_meta.setdefault("origin_chunk", origin_chunk)
+            return merged_meta
+
+        def _emit_from_chunk(
+            trigger_event: str,
+            value: Any = None,
+            _layer_marks: list[str] | None = None,
+            **kwargs,
+        ):
+            kwargs.setdefault("_source", "chunk")
+            kwargs["_meta"] = _chunk_signal_meta(kwargs.get("_meta"))
+            return execution.emit(trigger_event, value, _layer_marks, **kwargs)
+
+        async def _async_emit_from_chunk(
+            trigger_event: str,
+            value: Any = None,
+            _layer_marks: list[str] | None = None,
+            **kwargs,
+        ):
+            kwargs.setdefault("_source", "chunk")
+            kwargs["_meta"] = _chunk_signal_meta(kwargs.get("_meta"))
+            return await execution.async_emit(trigger_event, value, _layer_marks, **kwargs)
+
+        def _emit_nowait_from_chunk(
+            trigger_event: str,
+            value: Any = None,
+            _layer_marks: list[str] | None = None,
+            **kwargs,
+        ):
+            kwargs.setdefault("_source", "chunk")
+            kwargs["_meta"] = _chunk_signal_meta(kwargs.get("_meta"))
+            return execution.emit_nowait(trigger_event, value, _layer_marks, **kwargs)
+
+        async def _async_emit_nowait_from_chunk(
+            trigger_event: str,
+            value: Any = None,
+            _layer_marks: list[str] | None = None,
+            **kwargs,
+        ):
+            kwargs.setdefault("_source", "chunk")
+            kwargs["_meta"] = _chunk_signal_meta(kwargs.get("_meta"))
+            return await execution.async_emit_nowait(trigger_event, value, _layer_marks, **kwargs)
+
+        self.emit = _emit_from_chunk
+        self.async_emit = _async_emit_from_chunk
+        self.emit_nowait = _emit_nowait_from_chunk
+        self.async_emit_nowait = _async_emit_nowait_from_chunk
 
         self.put = lambda stream_item: execution.put_into_stream(
             stream_item,

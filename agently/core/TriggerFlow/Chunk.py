@@ -48,14 +48,14 @@ class TriggerFlowChunk:
         result = await FunctionShifter.asyncify(self._handler)(data)
         if isinstance(result, TriggerFlowPauseSignal) or data.execution.is_waiting():
             return result
-        await data.async_emit(self.trigger, result, _layer_marks=data._layer_marks.copy())
+        await data.async_emit(self.trigger, result, _layer_marks=data._layer_marks.copy(), _source="chunk")
         return result
 
     def call(self, data: "TriggerFlowRuntimeData"):
         result = FunctionShifter.syncify(self._handler)(data)
         if isinstance(result, TriggerFlowPauseSignal) or data.execution.is_waiting():
             return result
-        data.emit(self.trigger, result, _layer_marks=data._layer_marks.copy())
+        data.emit(self.trigger, result, _layer_marks=data._layer_marks.copy(), _source="chunk")
         return result
 
     @property

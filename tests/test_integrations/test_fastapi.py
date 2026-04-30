@@ -51,7 +51,7 @@ async def test_fastapi_helper_post_uses_triggerflow_contract_for_runtime_and_ope
         assert response.status_code == 200
         assert response.json() == {
             "status": 200,
-            "data": {"answer": "HELLO"},
+            "data": {"$final_result": {"answer": "HELLO"}},
             "msg": None,
         }
 
@@ -70,7 +70,6 @@ async def test_fastapi_helper_post_uses_triggerflow_contract_for_runtime_and_ope
     assert post_schema["x-agently-triggerflow-contract"]["system_stream"]["interrupt"]["label"] == "TriggerFlowInterruptEvent"
     assert sse_schema["x-agently-triggerflow-contract"]["stream"]["label"] == "StreamItem"
     assert "AskInput" in openapi["components"]["schemas"]
-    assert "FinalResult" in openapi["components"]["schemas"]
 
 
 @pytest.mark.asyncio

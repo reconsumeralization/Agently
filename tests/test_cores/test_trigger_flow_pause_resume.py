@@ -27,7 +27,7 @@ async def test_trigger_flow_pause_continue_with_saved_interrupt():
     flow.to(ask_feedback)
     flow.when("UserFeedback").to(finalize).end()
 
-    execution = await flow.async_start_execution("pricing", wait_for_result=False)
+    execution = await flow.async_start_execution("pricing")
     pending_interrupts = execution.get_pending_interrupts()
 
     assert execution.get_status() == "waiting"
@@ -44,7 +44,9 @@ async def test_trigger_flow_pause_continue_with_saved_interrupt():
 
     await restored_execution.async_continue_with(interrupt_id, {"approved": True})
     result = await restored_execution.async_get_result(timeout=1)
+    close_snapshot = await restored_execution.async_close()
 
+    assert close_snapshot["$final_result"] == result
     assert restored_execution.get_status() == "completed"
     assert result == {
         "draft": {"topic": "pricing"},
@@ -128,8 +130,8 @@ async def test_trigger_flow_batch_state_is_isolated_per_execution():
     execution_2 = flow.create_execution()
 
     await asyncio.gather(
-        execution_1.async_start("first", wait_for_result=False),
-        execution_2.async_start("second", wait_for_result=False),
+        execution_1.async_start("first"),
+        execution_2.async_start("second"),
     )
 
     result_1 = await execution_1.async_get_result(timeout=1)

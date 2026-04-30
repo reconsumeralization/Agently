@@ -54,8 +54,7 @@ def test_trigger_flow_contract_validates_input_stream_and_result():
     assert events[0].question == "hello"
 
     result = flow.start(AskInput(question="world"))
-    assert isinstance(result, FinalResult)
-    assert result.answer == "WORLD"
+    assert result == {"$final_result": FinalResult(answer="WORLD")}
 
 
 def test_trigger_flow_contract_rejects_invalid_initial_input():

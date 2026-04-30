@@ -87,10 +87,11 @@ def _read_sub_flow_value_by_path(root_value: Any, path: tuple[str, ...], *, scop
 
 class _ParentSubFlowCaptureSource:
     def __init__(self, data):
+        flow_data = data.get_flow_data(None, {}, no_warning=True)
         self._scopes = {
             "value": data.value,
             "runtime_data": data.state.to_dict(),
-            "flow_data": data.flow_state.to_dict(),
+            "flow_data": flow_data if isinstance(flow_data, dict) else {},
             "resources": data.resources.to_dict(),
         }
 
@@ -105,6 +106,11 @@ class _SubFlowWriteBackSource:
     def read_path(self, scope: str, path: tuple[str, ...]):
         if scope != "result":
             raise KeyError(f"Unsupported TriggerFlow sub flow write back source scope '{ scope }'.")
+        if isinstance(self._result, dict) and "$final_result" in self._result:
+            try:
+                return _read_sub_flow_value_by_path(self._result["$final_result"], path, scope=scope)
+            except KeyError:
+                return _read_sub_flow_value_by_path(self._result, path, scope=scope)
         return _read_sub_flow_value_by_path(self._result, path, scope=scope)
 
 
@@ -713,7 +719,7 @@ class TriggerFlowBlueprint:
             options.get("capture"),
             mode="capture",
         )
-        _, write_back_bindings = self._compile_sub_flow_bindings(
+        normalized_write_back, write_back_bindings = self._compile_sub_flow_bindings(
             options.get("write_back"),
             mode="write_back",
         )
@@ -737,6 +743,7 @@ class TriggerFlowBlueprint:
 
             sub_flow_execution = isolated_sub_flow.create_execution(
                 concurrency=concurrency,
+                auto_close=False,
                 parent_run_context=resolve_parent_run_context() or data.execution.run_context,
             )
             captured_runtime_data = capture_target.build_runtime_data()
@@ -754,28 +761,31 @@ class TriggerFlowBlueprint:
                 )
             )
             try:
-                await sub_flow_execution.async_start(
-                    capture_target.build_input(),
-                    wait_for_result=False,
-                )
+                await sub_flow_execution._async_run_start(capture_target.build_input())
                 if sub_flow_execution.is_waiting():
                     raise NotImplementedError(
                         "TriggerFlow sub flow does not yet support child flow pause/resume "
                         "or external re-entry."
                     )
-                result = await sub_flow_execution.async_get_result(timeout=None)
+                result = await sub_flow_execution.async_close(reason="sub_flow_completed")
             finally:
                 stream_bridge_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stream_bridge_task
 
-            write_back_target = _SubFlowWriteBackTarget(data.value)
-            self._apply_sub_flow_bindings(
-                write_back_bindings,
-                source=_SubFlowWriteBackSource(result),
-                target=write_back_target,
-            )
-            write_back_target.apply(data)
+            if normalized_write_back is None:
+                if isinstance(result, dict) and "$final_result" in result:
+                    data.value = result["$final_result"]
+                else:
+                    data.value = result
+            else:
+                write_back_target = _SubFlowWriteBackTarget(data.value)
+                self._apply_sub_flow_bindings(
+                    write_back_bindings,
+                    source=_SubFlowWriteBackSource(result),
+                    target=write_back_target,
+                )
+                write_back_target.apply(data)
             await data.async_emit(
                 emit_signal["trigger_event"],
                 data.value,
@@ -1494,6 +1504,10 @@ class TriggerFlowBlueprint:
         skip_exceptions: bool = False,
         concurrency: int | None = None,
         run_context=None,
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 10.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
     ):
         handlers_snapshot: TriggerFlowAllHandlers = {
             "event": {k: v.copy() for k, v in self._handlers["event"].items()},
@@ -1507,6 +1521,10 @@ class TriggerFlowBlueprint:
             skip_exceptions=skip_exceptions,
             concurrency=concurrency,
             run_context=run_context,
+            auto_close=auto_close,
+            auto_close_timeout=auto_close_timeout,
+            owner_id=owner_id,
+            lease_ttl=lease_ttl,
         )
 
     def copy(self, *, name: str | None = None):

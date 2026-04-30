@@ -14,6 +14,7 @@
 
 import uuid
 import asyncio
+import warnings
 from pathlib import Path
 
 from typing import Callable, Any, Literal, TYPE_CHECKING, overload, AsyncGenerator, Generator, Generic, TypeVar, cast
@@ -69,7 +70,9 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
 
-        self.get_flow_data = self._flow_data.get
+        self._set_flow_data = FunctionShifter.syncify(self._async_set_flow_data)
+        self._append_flow_data = FunctionShifter.syncify(self._async_append_flow_data)
+        self._del_flow_data = FunctionShifter.syncify(self._async_del_flow_data)
         self.set_flow_data = FunctionShifter.syncify(self.async_set_flow_data)
         self.append_flow_data = FunctionShifter.syncify(self.async_append_flow_data)
         self.del_flow_data = FunctionShifter.syncify(self.async_del_flow_data)
@@ -141,6 +144,10 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 10.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
         execution_id = uuid.uuid4().hex
         skip_exceptions = skip_exceptions if skip_exceptions is not None else self._skip_exceptions
@@ -165,6 +172,10 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             skip_exceptions=skip_exceptions,
             concurrency=concurrency,
             run_context=execution_run_context,
+            auto_close=auto_close,
+            auto_close_timeout=auto_close_timeout,
+            owner_id=owner_id,
+            lease_ttl=lease_ttl,
         )
         if runtime_resources:
             execution.update_runtime_resources(runtime_resources)
@@ -297,23 +308,104 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             if execution.id in self._executions:
                 del self._executions[execution.id]
 
+    def _warn_flow_data_api(self, method_name: str, *, no_warning: bool = False):
+        if no_warning:
+            return
+        warnings.warn(
+            f"TriggerFlow.{ method_name }() accesses flow-scoped data shared by all executions. "
+            "Prefer execution state APIs for concurrent workflows, or pass no_warning=True if the shared scope is intentional.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    def _get_flow_data(
+        self,
+        key: Any | None = None,
+        default: Any = None,
+        *,
+        inherit: bool = True,
+        no_warning: bool = False,
+    ):
+        self._warn_flow_data_api("_get_flow_data", no_warning=no_warning)
+        return self._flow_data.get(key, default, inherit=inherit)
+
+    def get_flow_data(
+        self,
+        key: Any | None = None,
+        default: Any = None,
+        *,
+        inherit: bool = True,
+        no_warning: bool = False,
+    ):
+        self._warn_flow_data_api("get_flow_data", no_warning=no_warning)
+        return self._flow_data.get(key, default, inherit=inherit)
+
+    async def _async_set_flow_data(
+        self,
+        key: str,
+        value: Any,
+        *,
+        emit: bool = True,
+        no_warning: bool = False,
+    ):
+        self._warn_flow_data_api("_async_set_flow_data", no_warning=no_warning)
+        return await self._async_change_flow_data("set", key, value, emit=emit)
+
+    async def _async_append_flow_data(
+        self,
+        key: str,
+        value: Any,
+        *,
+        emit: bool = True,
+        no_warning: bool = False,
+    ):
+        self._warn_flow_data_api("_async_append_flow_data", no_warning=no_warning)
+        return await self._async_change_flow_data("append", key, value, emit=emit)
+
+    async def _async_del_flow_data(
+        self,
+        key: str,
+        *,
+        emit: bool = True,
+        no_warning: bool = False,
+    ):
+        self._warn_flow_data_api("_async_del_flow_data", no_warning=no_warning)
+        return await self._async_change_flow_data("del", key, None, emit=emit)
+
     async def async_start_execution(
         self,
         initial_value: InputT | None,
         *,
         wait_for_result: bool = False,
+        timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 10.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
+        if wait_for_result is not False:
+            warnings.warn(
+                "TriggerFlow.async_start_execution(..., wait_for_result=...) is deprecated and ignored. "
+                "start_execution() now always returns the execution handle.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        effective_auto_close_timeout = timeout if timeout is not None else auto_close_timeout
         execution = self.create_execution(
             concurrency=concurrency,
             runtime_resources=runtime_resources,
             run_context=run_context,
             parent_run_context=parent_run_context,
+            auto_close=auto_close,
+            auto_close_timeout=effective_auto_close_timeout,
+            owner_id=owner_id,
+            lease_ttl=lease_ttl,
         )
-        await execution.async_start(initial_value, wait_for_result=wait_for_result)
+        await execution._async_run_start(initial_value)
         return execution
 
     async def _async_change_flow_data(
@@ -348,6 +440,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
                             key,
                             value,
                             trigger_type="flow_data",
+                            _source="flow_data",
                         )
                     )
             if futures:
@@ -359,7 +452,9 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         value: Any,
         *,
         emit: bool = True,
+        no_warning: bool = False,
     ):
+        self._warn_flow_data_api("async_set_flow_data", no_warning=no_warning)
         return await self._async_change_flow_data("set", key, value, emit=emit)
 
     async def async_append_flow_data(
@@ -368,7 +463,9 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         value: Any,
         *,
         emit: bool = True,
+        no_warning: bool = False,
     ):
+        self._warn_flow_data_api("async_append_flow_data", no_warning=no_warning)
         return await self._async_change_flow_data("append", key, value, emit=emit)
 
     async def async_del_flow_data(
@@ -376,7 +473,9 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         key: str,
         *,
         emit: bool = True,
+        no_warning: bool = False,
     ):
+        self._warn_flow_data_api("async_del_flow_data", no_warning=no_warning)
         return await self._async_change_flow_data("del", key, None, emit=emit)
 
     @overload
@@ -385,11 +484,15 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         initial_value: InputT | None = None,
         *,
         wait_for_result: Literal[True] = True,
-        timeout: float | None = 10.0,
+        timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 0.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
     ) -> ResultT: ...
 
     @overload
@@ -398,11 +501,15 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         initial_value: InputT | None = None,
         *,
         wait_for_result: Literal[False],
-        timeout: float | None = 10.0,
+        timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 0.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
     ) -> None: ...
 
     def start(
@@ -410,12 +517,16 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         initial_value: InputT | None = None,
         *,
         wait_for_result: bool = True,
-        timeout: float | None = 10.0,
+        timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
-    ) -> ResultT | None:
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 0.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
+    ) -> Any:
         return FunctionShifter.syncify(self.async_start)(
             initial_value,
             wait_for_result=wait_for_result,
@@ -424,6 +535,10 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             runtime_resources=runtime_resources,
             run_context=run_context,
             parent_run_context=parent_run_context,
+            auto_close=auto_close,
+            auto_close_timeout=auto_close_timeout,
+            owner_id=owner_id,
+            lease_ttl=lease_ttl,
         )
 
     @overload
@@ -432,11 +547,15 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         initial_value: InputT | None = None,
         *,
         wait_for_result: Literal[True] = True,
-        timeout: float | None = 10.0,
+        timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 0.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
     ) -> ResultT: ...
 
     @overload
@@ -445,11 +564,15 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         initial_value: InputT | None = None,
         *,
         wait_for_result: Literal[False],
-        timeout: float | None = 10.0,
+        timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 0.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
     ) -> None: ...
 
     async def async_start(
@@ -457,21 +580,44 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         initial_value: InputT | None = None,
         *,
         wait_for_result: bool = True,
-        timeout: float | None = 10.0,
+        timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
-    ) -> ResultT | None:
+        auto_close: bool = True,
+        auto_close_timeout: float | None = 0.0,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
+    ) -> Any:
+        if not auto_close:
+            raise ValueError(
+                "TriggerFlow.start()/async_start() require auto_close=True because the execution handle is hidden. "
+                "Use start_execution()/create_execution() for manual lifecycle control."
+            )
+        if wait_for_result is False:
+            warnings.warn(
+                "TriggerFlow.start()/async_start(..., wait_for_result=False) is deprecated and ignored. "
+                "The hidden execution path now always waits for close and returns the close snapshot. "
+                "Use start_execution()/create_execution() for non-blocking execution control.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        effective_auto_close_timeout = timeout if timeout is not None else auto_close_timeout
         execution = await self.async_start_execution(
             initial_value,
+            wait_for_result=False,
+            timeout=effective_auto_close_timeout,
             concurrency=concurrency,
             runtime_resources=runtime_resources,
             run_context=run_context,
             parent_run_context=parent_run_context,
+            auto_close=auto_close,
+            auto_close_timeout=effective_auto_close_timeout,
+            owner_id=owner_id,
+            lease_ttl=lease_ttl,
         )
-        if wait_for_result:
-            return await execution.async_get_result(timeout=timeout)
+        return await execution._async_wait_for_close_snapshot()
 
     def get_async_runtime_stream(
         self,
@@ -488,6 +634,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             runtime_resources=runtime_resources,
             run_context=run_context,
             parent_run_context=parent_run_context,
+            auto_close_timeout=0.0,
         )
         return execution.get_async_runtime_stream(
             initial_value,
@@ -509,6 +656,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             runtime_resources=runtime_resources,
             run_context=run_context,
             parent_run_context=parent_run_context,
+            auto_close_timeout=0.0,
         )
         return execution.get_runtime_stream(
             initial_value,

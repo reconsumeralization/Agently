@@ -14,6 +14,12 @@ def _operator_ids(config: dict):
     return {operator["id"] for operator in config["operators"]}
 
 
+def _compat_result(value: Any):
+    if isinstance(value, dict) and "$final_result" in value:
+        return value["$final_result"]
+    return value
+
+
 class ContractConfigInput(BaseModel):
     topic: str
 
@@ -46,7 +52,7 @@ async def test_trigger_flow_config_round_trip_with_inspected_chunk_handler():
     restored.load_json_flow(json_content)
 
     result = await restored.async_start(3)
-    assert result == 6
+    assert _compat_result(result) == 6
 
 
 def test_trigger_flow_config_and_mermaid_include_contract_metadata():
@@ -116,7 +122,7 @@ async def test_trigger_flow_batch_round_trip_and_mermaid():
     restored.load_flow_config(config)
 
     result = await restored.async_start(5)
-    assert result == 21
+    assert _compat_result(result) == 21
 
 
 @pytest.mark.asyncio
@@ -134,7 +140,7 @@ async def test_trigger_flow_for_each_round_trip():
     restored.load_yaml_flow(yaml_content)
 
     result = await restored.async_start([1, 2, 3])
-    assert result == [3, 6, 9]
+    assert _compat_result(result) == [3, 6, 9]
 
 
 @pytest.mark.asyncio
@@ -159,8 +165,8 @@ async def test_trigger_flow_match_round_trip():
     restored.register_chunk_handler(odd_branch)
     restored.load_flow_config(config)
 
-    assert await restored.async_start(4) == "even"
-    assert await restored.async_start(5) == "odd"
+    assert _compat_result(await restored.async_start(4)) == "even"
+    assert _compat_result(await restored.async_start(5)) == "odd"
 
 
 @pytest.mark.asyncio
@@ -190,7 +196,7 @@ async def test_trigger_flow_pause_round_trip_after_import():
     restored.register_chunk_handler(finalize)
     restored.load_flow_config(config)
 
-    execution = await restored.async_start_execution("pricing", wait_for_result=False)
+    execution = await restored.async_start_execution("pricing")
     pending_interrupts = execution.get_pending_interrupts()
     interrupt_id = next(iter(pending_interrupts))
 
@@ -255,7 +261,7 @@ async def test_trigger_flow_stream_and_result_events_include_origin_chunk():
         flow.to(emit_and_complete).end()
 
         result = await flow.async_start("done")
-        assert result == {"answer": "done"}
+        assert _compat_result(result) == {"answer": "done"}
 
         stream_event = next(
             event
@@ -425,7 +431,7 @@ async def test_trigger_flow_sub_flow_round_trip_and_runtime():
 
     parent_flow.to(parent_prepare).to_sub_flow(child_flow).to(parent_finalize).end()
 
-    assert await parent_flow.async_start(2) == 55
+    assert _compat_result(await parent_flow.async_start(2)) == 55
 
     config = parent_flow.get_flow_config()
     assert _operator_by_kind(config, "sub_flow")
@@ -437,7 +443,7 @@ async def test_trigger_flow_sub_flow_round_trip_and_runtime():
     restored.register_chunk_handler(child_finalize)
     restored.load_flow_config(config)
 
-    assert await restored.async_start(2) == 55
+    assert _compat_result(await restored.async_start(2)) == 55
 
 
 @pytest.mark.asyncio
@@ -505,7 +511,7 @@ async def test_trigger_flow_sub_flow_capture_and_write_back_round_trip():
         "latest_topic": "sub-flow",
     }
 
-    assert await parent_flow.async_start("news") == expected
+    assert _compat_result(await parent_flow.async_start("news")) == expected
 
     config = parent_flow.get_flow_config()
     sub_flow_operator = _operator_by_kind(config, "sub_flow")[0]
@@ -518,7 +524,37 @@ async def test_trigger_flow_sub_flow_capture_and_write_back_round_trip():
     restored.register_chunk_handler(child_collect)
     restored.load_flow_config(config)
 
-    assert await restored.async_start("news") == expected
+    assert _compat_result(await restored.async_start("news")) == expected
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_sub_flow_write_back_can_read_close_snapshot_state():
+    child_flow = TriggerFlow(name="child-close-snapshot-flow")
+
+    async def child_step(data: TriggerFlowRuntimeData):
+        await data.async_set_state("child_report", {"received": data.value})
+
+    child_flow.to(child_step)
+
+    parent_flow = TriggerFlow(name="parent-close-snapshot-flow")
+
+    async def parent_prepare(data: TriggerFlowRuntimeData):
+        return {"payload": data.value}
+
+    async def parent_finalize(data: TriggerFlowRuntimeData):
+        await data.async_set_state("final", data.value)
+
+    parent_flow.to(parent_prepare).to_sub_flow(
+        child_flow,
+        capture={"input": "value.payload"},
+        write_back={"value": "result.child_report"},
+    ).to(parent_finalize)
+
+    execution = parent_flow.create_execution()
+    await execution.async_start("topic")
+    result = await execution.async_close()
+
+    assert result["final"] == {"received": "topic"}
 
 
 @pytest.mark.asyncio
@@ -535,8 +571,8 @@ async def test_trigger_flow_sub_flow_uses_isolated_child_flow_state():
     parent_flow = TriggerFlow(name="parent-isolated-flow")
     parent_flow.to(child_flow).end()
 
-    assert await parent_flow.async_start("first") == 1
-    assert await parent_flow.async_start("second") == 1
+    assert _compat_result(await parent_flow.async_start("first")) == 1
+    assert _compat_result(await parent_flow.async_start("second")) == 1
     assert child_flow.get_flow_data("count") is None
 
 
@@ -560,7 +596,7 @@ async def test_trigger_flow_sub_flow_bridges_child_runtime_stream():
 
     parent_flow.to(child_flow).to(parent_finalize).end()
 
-    execution = await parent_flow.async_start_execution(2, wait_for_result=False)
+    execution = await parent_flow.async_start_execution(2)
     runtime_stream = execution.get_async_runtime_stream(timeout=1)
     items = [item async for item in runtime_stream]
 
@@ -592,7 +628,7 @@ async def test_trigger_flow_sub_flow_inherits_parent_run_lineage():
         hook_name=hook_name,
     )
     try:
-        assert await parent_flow.async_start(2) == 3
+        assert _compat_result(await parent_flow.async_start(2)) == 3
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
@@ -647,7 +683,7 @@ async def test_trigger_flow_emits_definition_runtime_event():
         hook_name=hook_name,
     )
     try:
-        assert await flow.async_start(2) == 3
+        assert _compat_result(await flow.async_start(2)) == 3
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
@@ -692,7 +728,7 @@ async def test_trigger_flow_chunk_runtime_events_include_input_output_and_origin
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
-    assert result == {"final": 14}
+    assert _compat_result(result) == {"final": 14}
 
     chunk_started = next(
         event
@@ -809,7 +845,7 @@ async def test_trigger_flow_repeated_internal_helper_names_do_not_conflict():
     flow.to(lambda data: data.value).____("first", print_info=True).____("second", print_info=True).end()
 
     result = await flow.async_start("ok")
-    assert result == "ok"
+    assert _compat_result(result) == "ok"
 
 
 def test_trigger_flow_import_fails_without_registered_handler():

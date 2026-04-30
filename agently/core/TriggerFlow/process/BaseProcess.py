@@ -15,6 +15,7 @@
 
 import uuid
 import copy
+import warnings
 from asyncio import Event, Semaphore
 
 from typing import Callable, Any, Literal, TYPE_CHECKING, overload, cast, TypeAlias
@@ -638,6 +639,13 @@ class TriggerFlowBaseProcess:
         )
 
     def end(self):
+        warnings.warn(
+            "TriggerFlowProcess.end() is deprecated. It only installs a compatibility result sink that writes "
+            "'$final_result'. New code should rely on execution close snapshots and runtime lifecycle APIs.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         async def set_default_result(data: "TriggerFlowRuntimeData"):
             result = data._system_runtime_data.get("result")
             if result is EMPTY:
