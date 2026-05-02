@@ -47,6 +47,9 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
         OpenAICompatible,
     )
+    from agently.builtins.plugins.ModelRequester.AnthropicCompatible import (
+        AnthropicCompatible,
+    )
     from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import (
         OpenAIResponsesCompatible,
     )
@@ -55,6 +58,11 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
         "ModelRequester",
         OpenAICompatible,
         activate=True,
+    )
+    plugin_manager.register(
+        "ModelRequester",
+        AnthropicCompatible,
+        activate=False,
     )
     plugin_manager.register(
         "ModelRequester",
