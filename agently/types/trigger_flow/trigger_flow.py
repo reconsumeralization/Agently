@@ -232,7 +232,6 @@ class _TriggerFlowSignalInfo:
 
 
 class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
-    value: ValueT
     put: Callable[[StreamT], None]
     async_put: Callable[[StreamT], Any]
     put_into_stream: Callable[[StreamT], None]

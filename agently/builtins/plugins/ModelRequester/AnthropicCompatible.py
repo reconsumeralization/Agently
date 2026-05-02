@@ -364,6 +364,8 @@ class AnthropicCompatible(OpenAIResponsesCompatible):
                 value_format="serializable",
                 default_value={},
             )
+        max_tokens_config = self.plugin_settings.get("max_tokens", 4096)
+        max_tokens = int(max_tokens_config) if isinstance(max_tokens_config, (int, float, str)) else 4096
 
         request_options.update(
             {
@@ -371,7 +373,7 @@ class AnthropicCompatible(OpenAIResponsesCompatible):
                     "model",
                     self.plugin_settings.get("default_model", "claude-sonnet-4-20250514"),
                 ),
-                "max_tokens": int(self.plugin_settings.get("max_tokens", 4096)),
+                "max_tokens": max_tokens,
             }
         )
 

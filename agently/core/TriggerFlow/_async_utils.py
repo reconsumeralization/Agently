@@ -20,12 +20,12 @@ from typing import Any, Awaitable
 
 
 async def gather_cancel_on_error(*awaitables: Awaitable[Any] | asyncio.Task[Any]):
-    tasks: list[asyncio.Task[Any]] = []
+    tasks: list[asyncio.Future[Any]] = []
     for awaitable in awaitables:
         if isinstance(awaitable, asyncio.Task):
             tasks.append(awaitable)
         else:
-            tasks.append(asyncio.create_task(awaitable))
+            tasks.append(asyncio.ensure_future(awaitable))
     try:
         return await asyncio.gather(*tasks)
     except BaseException:
