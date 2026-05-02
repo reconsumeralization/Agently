@@ -1,5 +1,5 @@
 import asyncio
-from typing import cast
+from typing import Any, Callable, cast
 
 from agently import TriggerFlow, TriggerFlowRuntimeData
 
@@ -33,7 +33,7 @@ async def triggerflow_runtime_resources_demo():
     async def finalize(data: TriggerFlowRuntimeData):
         request = data.get_state("request") or {}
         logger = cast(SimpleLogger, data.require_resource("logger"))
-        search = data.require_resource("search_tool")
+        search = cast(Callable[[str], list[dict[str, Any]]], data.require_resource("search_tool"))
         results = search(str(request.get("query") or ""))
         logger.info(f"searched {len(results)} items")
         await data.async_set_state(

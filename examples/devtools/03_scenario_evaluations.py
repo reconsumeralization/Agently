@@ -1,3 +1,5 @@
+# pyright: reportMissingImports=false
+
 import asyncio
 
 from agently import TriggerFlow, TriggerFlowRuntimeData

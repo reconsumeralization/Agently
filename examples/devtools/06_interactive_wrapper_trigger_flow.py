@@ -1,3 +1,5 @@
+# pyright: reportMissingImports=false
+
 """InteractiveWrapper example using a TriggerFlow with streamed stage updates."""
 
 import asyncio

@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any, cast
 from typing import cast
 
 from agently import TriggerFlow, TriggerFlowRuntimeData
@@ -134,7 +135,7 @@ async def triggerflow_sub_flow_capture_write_back_demo():
     stream_items = [item async for item in execution.get_async_runtime_stream(timeout=None)]
     state = await close_task
     assert state["child_report"]["mode"] == "multi"
-    assert stream_items[-1]["scope"] == "parent"
+    assert cast(dict[str, Any], stream_items[-1])["scope"] == "parent"
     print({"stream": stream_items, "state": state})
 
 

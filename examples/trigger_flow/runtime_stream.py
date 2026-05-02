@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any, cast
 
 from agently import TriggerFlow
 
@@ -20,7 +21,7 @@ async def main():
     close_task = asyncio.create_task(execution.async_close())
     items = [item async for item in execution.get_async_runtime_stream(timeout=None)]
     state = await close_task
-    assert [item["stage"] for item in items] == ["start", "finish"]
+    assert [cast(dict[str, Any], item)["stage"] for item in items] == ["start", "finish"]
     assert state["done"] is True
     print(items)
 

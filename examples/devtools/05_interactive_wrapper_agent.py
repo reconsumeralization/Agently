@@ -1,3 +1,5 @@
+# pyright: reportMissingImports=false
+
 """InteractiveWrapper example using an Agently Agent with streamed UI output."""
 
 from agently import Agently

@@ -1,3 +1,5 @@
+# pyright: reportMissingImports=false
+
 """Basic InteractiveWrapper example using a streaming callable."""
 
 import time
