@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from agently.core import PluginManager
     from agently.types.data import (
         InstantStreamingContentType,
+        OutputValidateHandler,
         PromptStandardSlot,
         ResponseContentType,
         RunContext,
@@ -103,9 +104,11 @@ class ModelRequest:
         )
         self.extension_handlers = ExtensionHandlers(
             {
-                "prefixes": [],
-                "base_suffixes": [],
+                "request_prefixes": [],
+                "broadcast_prefixes": [],
                 "broadcast_suffixes": [],
+                "finally": [],
+                "validate_handlers": [],
             },
             name="Request-ExtensionHandlers",
             parent=parent_extension_handlers,
@@ -272,8 +275,12 @@ class ModelRequest:
         prompt: list[dict[str, Any]],
         *,
         mappings: dict[str, Any] | None = None,
-    ):
+        ):
         self.prompt.set("attachment", prompt, mappings=mappings)
+        return self
+
+    def validate(self, handler: "OutputValidateHandler"):
+        self.extension_handlers.append("validate_handlers", handler)
         return self
 
     # Response & Result
@@ -312,6 +319,7 @@ class ModelRequest:
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -323,6 +331,7 @@ class ModelRequest:
         return await response.async_get_data(
             type=type,
             ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -333,6 +342,7 @@ class ModelRequest:
         *,
         ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -343,6 +353,7 @@ class ModelRequest:
         response = self.get_response(parent_run_context=parent_run_context)
         return await response.async_get_data_object(
             ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,

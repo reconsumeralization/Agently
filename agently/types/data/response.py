@@ -14,7 +14,7 @@
 
 from functools import lru_cache
 
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable, Literal, TypeAlias
 from typing_extensions import TypedDict
 
 from pydantic import BaseModel, model_validator
@@ -22,6 +22,9 @@ from pydantic import BaseModel, model_validator
 if TYPE_CHECKING:
     from agently.utils import GeneratorConsumer
     from agently.types.data.serializable import SerializableValue
+    from agently.core import Prompt
+    from agently.utils import Settings
+    from agently.types.data.event import RunContext
 
 AgentlyModelResponseEvent = Literal[
     "error",
@@ -57,6 +60,85 @@ class AgentlyModelResult(TypedDict):
     result_object: BaseModel | None
     errors: list[Exception]
     extra: dict[str, Any] | None
+
+
+OutputValidateResultDict = TypedDict(
+    "OutputValidateResultDict",
+    {
+        "ok": bool,
+        "reason": str | None,
+        "payload": dict[str, Any] | None,
+        "validator_name": str | None,
+        "no_retry": bool | None,
+        "stop": bool | None,
+        "error": Exception | str | None,
+        "exception": Exception | str | None,
+        "raise": Exception | str | None,
+    },
+    total=False,
+)
+
+
+class OutputValidateContext:
+    def __init__(
+        self,
+        *,
+        value: dict[str, Any],
+        agent_name: str,
+        response_id: str,
+        attempt_index: int,
+        retry_count: int,
+        max_retries: int,
+        prompt: "Prompt",
+        settings: "Settings",
+        request_run_context: "RunContext | None",
+        model_run_context: "RunContext | None",
+        response_text: str,
+        parsed_result: Any,
+        result_object: BaseModel | None,
+        meta: dict[str, Any] | None = None,
+    ):
+        self.value = value
+        self.input = value
+        self.agent_name = agent_name
+        self.response_id = response_id
+        self.attempt_index = attempt_index
+        self.retry_count = retry_count
+        self.max_retries = max_retries
+        self.prompt = prompt
+        self.settings = settings
+        self.request_run_context = request_run_context
+        self.model_run_context = model_run_context
+        self.response_text = response_text
+        self.raw_text = response_text
+        self.parsed_result = parsed_result
+        self.result_object = result_object
+        self.typed = result_object
+        self.meta = meta.copy() if isinstance(meta, dict) else {}
+
+    def to_dict(self):
+        return {
+            "value": self.value,
+            "input": self.input,
+            "agent_name": self.agent_name,
+            "response_id": self.response_id,
+            "attempt_index": self.attempt_index,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "response_text": self.response_text,
+            "parsed_result": self.parsed_result,
+            "result_object": self.result_object,
+            "meta": self.meta.copy(),
+            "request_run_context": self.request_run_context,
+            "model_run_context": self.model_run_context,
+        }
+
+
+OutputValidateResult: TypeAlias = bool | OutputValidateResultDict
+OutputValidateHandler: TypeAlias = Callable[
+    [dict[str, Any], OutputValidateContext],
+    OutputValidateResult | Awaitable[OutputValidateResult],
+]
 
 
 class StreamingData(BaseModel):

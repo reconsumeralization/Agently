@@ -64,3 +64,22 @@ data = response.result.get_data(
 ```
 
 `key_style` supports `dot` or `slash` paths.
+
+## validate: business-rule guarantees
+
+`get_data()` and `get_data_object()` also support custom validation:
+
+```python
+data = response.result.get_data(
+  ensure_keys=["intro"],
+  validate_handler=lambda result, context: result["intro"].strip() != "",
+  max_retries=2,
+)
+```
+
+Rules:
+
+- `ensure_keys` checks path existence
+- `validate` checks value correctness
+- both share the same retry budget
+- on one `response.result`, validate runs once and its outcome is reused across later `get_data()` / `get_data_object()` reads

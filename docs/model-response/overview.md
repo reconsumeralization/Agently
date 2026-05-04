@@ -50,3 +50,5 @@ print(text)
 print(data)
 print(meta)
 ```
+
+When output control uses `ensure_keys` or `validate`, keeping one `response` also keeps one retry/validation outcome. Re-reading `response.result.get_data()` and `response.result.get_data_object()` does not re-request the model or rerun validators.

@@ -140,7 +140,7 @@ graph LR
 
 ### 1. Contract-First Output Control
 
-Define the schema once. Mark required leaves with `True`. Use `ensure_keys` as a supplement for runtime-dependent paths, and use `ensure_all_keys=True` when you want the whole structure strictly enforced.
+Define the schema once. Mark required leaves with `True`. Use `ensure_keys` as a supplement for runtime-dependent paths, use `.validate()` / `validate_handler=` for value-level business rules, and use `ensure_all_keys=True` when you want the whole structure strictly enforced.
 
 ```python
 result = (
@@ -564,7 +564,7 @@ Agently is a **development framework**, but it's designed to satisfy exactly tho
 
 | Harness property | How Agently delivers it |
 |:--|:--|
-| **Stable output interfaces** | `output()` schema `True` markers + `ensure_keys` supplements + `ensure_all_keys` strict mode |
+| **Stable output interfaces** | `output()` schema `True` markers + `ensure_keys` supplements + custom `validate()` handlers + `ensure_all_keys` strict mode |
 | **Observable internals** | `action_logs`, `tool_logs`, DevTools `ObservationBridge`, per-layer structured logs |
 | **Pluggable runtime layers** | ActionRuntime, ActionFlow, and ActionExecutor are independent plugin slots |
 | **Separation of concerns** | Prompt slots, settings hierarchy, Session, and TriggerFlow are distinct composable layers |

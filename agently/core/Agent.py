@@ -24,7 +24,7 @@ from agently.utils import Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
-    from agently.types.data import PromptStandardSlot, ChatMessage, ChatMessageDict, RunContext
+    from agently.types.data import OutputValidateHandler, PromptStandardSlot, ChatMessage, ChatMessageDict, RunContext
 
 
 class BaseAgent:
@@ -54,6 +54,7 @@ class BaseAgent:
                 "broadcast_prefixes": [],
                 "broadcast_suffixes": [],
                 "finally": [],
+                "validate_handlers": [],
             },
             name=f"Agent-{ self.name }-ExtensionHandlers",
         )
@@ -193,6 +194,7 @@ class BaseAgent:
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -204,6 +206,7 @@ class BaseAgent:
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -216,6 +219,7 @@ class BaseAgent:
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -227,6 +231,7 @@ class BaseAgent:
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -238,6 +243,7 @@ class BaseAgent:
         *,
         ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -248,6 +254,7 @@ class BaseAgent:
         return self.request.get_data_object(
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -259,6 +266,7 @@ class BaseAgent:
         *,
         ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -269,6 +277,7 @@ class BaseAgent:
         return await self.request.async_get_data_object(
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -291,6 +300,7 @@ class BaseAgent:
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -300,6 +310,7 @@ class BaseAgent:
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
@@ -312,6 +323,7 @@ class BaseAgent:
         type: Literal['original', 'parsed', 'all'] = "parsed",
         ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
@@ -321,11 +333,16 @@ class BaseAgent:
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
             parent_run_context=parent_run_context,
         )
+
+    def validate(self, handler: "OutputValidateHandler"):
+        self.extension_handlers.append("validate_handlers", handler)
+        return self
 
     # Basic Methods
     def set_agent_prompt(

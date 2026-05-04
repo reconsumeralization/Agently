@@ -17,7 +17,8 @@ This is a compatibility entry for the old section root path. The recommended han
 
 1. Start with [Overview](/en/output-control/overview)
 2. Read [ensure_keys](/en/output-control/ensure-keys) when key fields must be stable
-3. Read [Instant Streaming](/en/output-control/instant-streaming) when you need structured fields while streaming
+3. Read [Custom Validation](/en/output-control/validate) when key existence is not enough and business rules depend on field values
+4. Read [Instant Streaming](/en/output-control/instant-streaming) when you need structured fields while streaming
 
 ## Related Skills
 
