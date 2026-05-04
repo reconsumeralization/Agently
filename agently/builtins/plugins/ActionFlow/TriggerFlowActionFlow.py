@@ -318,6 +318,8 @@ class TriggerFlowActionFlow:
                     }
                 )
             raise
+        if isinstance(result, dict):
+            result = result.get("$final_result")
         if not isinstance(result, list):
             return []
         normalized = [action._normalize_execution_record(record, None, index) for index, record in enumerate(result)]

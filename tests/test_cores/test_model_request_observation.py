@@ -559,9 +559,10 @@ async def test_trigger_flow_runtime_context_auto_inherits_parent_run_for_agent_a
         flow.to(run_inside_flow).end()
 
         result = await flow.async_start("start")
+        final = result.get("$final_result", result)
 
-        assert "Morning briefing prepared." in result["agent_text"]
-        assert "Morning briefing prepared." in result["request_text"]
+        assert "Morning briefing prepared." in final["agent_text"]
+        assert "Morning briefing prepared." in final["request_text"]
 
         workflow_start = next(
             event
@@ -629,9 +630,10 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
         flow.to_sub_flow(sub_flow, capture={"input": "value"}, write_back={"value": "result"}).end()
 
         result = await flow.async_start("topic")
+        final = result.get("$final_result", result)
 
-        assert "Morning briefing prepared." in result["agent_text"]
-        assert "Morning briefing prepared." in result["request_text"]
+        assert "Morning briefing prepared." in final["agent_text"]
+        assert "Morning briefing prepared." in final["request_text"]
 
         workflow_runs = [
             event.run
