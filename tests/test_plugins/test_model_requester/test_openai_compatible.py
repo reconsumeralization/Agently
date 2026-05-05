@@ -74,7 +74,7 @@ async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict,
 
 
 @pytest.mark.asyncio
-async def test_main():
+async def test_main(require_ollama):
     request_settings = cast(
         ModelRequesterSettings,
         SerializableStateDataNamespace(Agently.settings, "plugins.ModelRequester.OpenAICompatible"),

@@ -28,7 +28,7 @@ def configure_ollama(request_settings: ModelRequesterSettings):
 
 
 @pytest.mark.asyncio
-async def test_single_request():
+async def test_single_request(require_ollama):
     request = ModelRequest(
         Agently.plugin_manager,
         parent_settings=Agently.settings,
@@ -49,7 +49,7 @@ async def test_single_request():
 
 
 @pytest.mark.asyncio
-async def test_multiple_responses_independent_consumption():
+async def test_multiple_responses_independent_consumption(require_ollama):
     request = ModelRequest(
         Agently.plugin_manager,
         parent_settings=Agently.settings,

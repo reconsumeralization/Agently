@@ -27,7 +27,7 @@ def configure_ollama(request_settings: "ModelRequesterSettings"):
     request_settings["auth"] = None
 
 
-def test_model_request():
+def test_model_request(require_ollama):
     Agently.set_settings("response.streaming_parse", True)
     Agently.set_settings("response.streaming_parse_path_style", "slash")
     request = ModelRequest(
