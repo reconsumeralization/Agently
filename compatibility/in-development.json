@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "framework": "agently",
+  "target_version": "4.1.1.1",
+  "release_train": "2026-05-companion-v1-patch1",
+  "notes": "Current public development-line manifest for the next Agently release before publication.",
+  "companions": {
+    "devtools": {
+      "companion_package": "agently-devtools",
+      "runtime_protocol": "agently-devtools.observation-runtime.v1",
+      "recommended_version_specifier": ">=0.1.3,<0.2.0"
+    },
+    "skills": {
+      "repository": "Agently-Skills",
+      "authoring_protocol": "agently-skills.authoring.v1",
+      "devtools_guidance_protocol": "agently-skills.devtools-guidance.v1",
+      "recommended_ref": "main"
+    },
+    "docs": {
+      "repository": "docs",
+      "public_surface_protocol": "agently-docs.public-surface.v1"
+    }
+  }
+}

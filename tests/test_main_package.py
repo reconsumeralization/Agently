@@ -2,6 +2,11 @@ import logging
 import pytest
 import yaml
 from agently import Agently
+from agently.compatibility import (
+    get_current_release_manifest,
+    get_devtools_compatibility_manifest,
+    get_skills_compatibility_manifest,
+)
 
 
 _RUNTIME_LOG_KEYS = (
@@ -210,6 +215,25 @@ def test_request_quick_prompt_preserves_explicit_mappings():
     request.instruct("Hello ${name}", mappings={"name": "Alice"})
 
     assert request.prompt.to_prompt_object().instruct == "Hello Alice"
+
+
+def test_devtools_compatibility_manifest_declares_runtime_protocol():
+    manifest = get_devtools_compatibility_manifest()
+
+    assert manifest["companion_package"] == "agently-devtools"
+    assert manifest["runtime_protocol"].startswith("agently-devtools.observation-runtime.v")
+    assert manifest["recommended_version_specifier"]
+    assert manifest["framework_version"] == get_current_release_manifest()["framework_version"]
+
+
+def test_skills_compatibility_manifest_declares_authoring_protocols():
+    manifest = get_skills_compatibility_manifest()
+
+    assert manifest["repository"] == "Agently-Skills"
+    assert manifest["authoring_protocol"].startswith("agently-skills.authoring.v")
+    assert manifest["devtools_guidance_protocol"].startswith(
+        "agently-skills.devtools-guidance.v"
+    )
 
 
 def test_agent_quick_prompt_supports_key_value_and_kwargs():

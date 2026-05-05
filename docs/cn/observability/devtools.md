@@ -66,4 +66,6 @@ DevTools 消费端应 fail open（宽容失败）：
 - 关联运行链路时优先使用 `run` 字段，不要解析 `message`
 - TriggerFlow 图应从 flow definition 和 runtime metadata 派生，不维护第二份手写图
 
+发布管理上，包版本只能解决一部分问题。未发布分支之间的协作应以 Agently 在 `agently/compatibility.py` 中声明的 runtime protocol 为第一判断依据，包版本范围只作为升级建议。已发布历史版本的分版本 manifest 位于 Agently 主仓库的 `compatibility/releases/<framework_version>.json`。对于已经发布、但早于这套 manifest 机制的 `4.1.0.2` 到 `4.1.1`，DevTools 可以回退到内置的 legacy protocol 映射；超出这段历史窗口，如果仍然没有 manifest，就应视为“兼容性未被验证”，而不是默认兼容。
+
 runtime event schema 和 TriggerFlow 事件别名规则见 [Event Center](event-center.md)。

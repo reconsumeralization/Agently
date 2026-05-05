@@ -66,4 +66,6 @@ DevTools consumers should fail open:
 - prefer `run` lineage fields over parsing `message`
 - treat TriggerFlow graphs as derived from flow definitions and runtime metadata, not as a separate manual graph
 
+For release management, package versions are only part of the story. Unreleased branch work uses a runtime protocol declared by Agently in `agently/compatibility.py`; DevTools should compare that protocol first, then use package version ranges as upgrade guidance. Historical published manifests live under the Agently source registry at `compatibility/releases/<framework_version>.json`. For legacy published releases `4.1.0.2` through `4.1.1`, DevTools may fall back to the built-in legacy protocol mapping because those builds predate the manifest. Outside that legacy window, missing manifest support should be treated as unverified compatibility.
+
 See [Event Center](event-center.md) for the runtime event schema and alias rules.
