@@ -428,9 +428,9 @@ print(result)
 Official Agently Skills give AI coding assistants (Claude Code, Cursor, etc.) the knowledge to implement Agently patterns correctly, without re-explaining the framework each session.
 
 - **Repo:** https://github.com/AgentEra/Agently-Skills
-- **Install:** `npx skills add AgentEra/Agently-Skills`
+- **Install:** choose your target agent first, then install the `app` bundle from the Agently-Skills README. For Codex, start with `export AGENT=codex`.
 
-Covers: single-request design · TriggerFlow orchestration · multi-agent · MCP · Session · FastAPI integration · LangChain/LangGraph migration playbooks.
+Covers: new app development via the `app` bundle, plus LangChain/LangGraph/LlamaIndex/CrewAI migration via the `migration` bundle.
 
 ### Agently DevTools — Runtime Observation & Scaffolding
 

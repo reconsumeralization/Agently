@@ -428,9 +428,9 @@ print(result)
 官方 Agently Skills 让 AI 编程助手（Claude Code、Cursor 等）掌握正确的 Agently 使用模式，不用每次会话重新解释框架。
 
 - **仓库：** https://github.com/AgentEra/Agently-Skills
-- **安装：** `npx skills add AgentEra/Agently-Skills`
+- **安装：** 先选择目标 agent，再按 Agently-Skills README 安装 `app` bundle。Codex 可以从 `export AGENT=codex` 开始。
 
-覆盖：单次请求设计 · TriggerFlow 编排 · 多智能体 · MCP · Session · FastAPI 集成 · LangChain/LangGraph 迁移 Playbook。
+覆盖：通过 `app` bundle 开发新应用，通过 `migration` bundle 从 LangChain、LangGraph、LlamaIndex、CrewAI 迁移。
 
 ### Agently DevTools — 运行时观测与脚手架
 
