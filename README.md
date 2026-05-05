@@ -383,7 +383,7 @@ Agently.set_settings(
 # Change base_url + model to switch providers — business code unchanged
 ```
 
-Supported: OpenAI · DeepSeek · Anthropic Claude (via proxy) · Qwen · Mistral · Llama · local Ollama · any OpenAI-compatible endpoint.
+Supported: OpenAI · DeepSeek · Anthropic Claude (native) · Qwen · Mistral · Llama · local Ollama · OpenAI-compatible endpoints.
 
 ---
 

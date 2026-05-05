@@ -383,7 +383,7 @@ Agently.set_settings(
 # 只改 base_url 和 model 两个字段，即可切换到任何 OpenAI 兼容端点
 ```
 
-支持：OpenAI · DeepSeek · Anthropic Claude（通过兼容代理）· 通义千问 · Mistral · Llama · 本地 Ollama · 任何 OpenAI 兼容端点。
+支持：OpenAI · DeepSeek · Anthropic Claude（原生协议）· 通义千问 · Mistral · Llama · 本地 Ollama · OpenAI 兼容端点。
 
 ---
 
