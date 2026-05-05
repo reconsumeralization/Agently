@@ -1,7 +1,5 @@
 # pyright: reportMissingImports=false
 
-import asyncio
-
 from agently import TriggerFlow, TriggerFlowRuntimeData
 from agently_devtools import EvaluationBinding, EvaluationBridge, EvaluationCase, EvaluationRunner
 
@@ -25,15 +23,14 @@ def build_flow():
 
 
 async def run_flow(flow: TriggerFlow, value: str):
-    execution = flow.create_execution()
-    await execution.async_start(value)
-    state = await execution.async_close()
+    execution = flow.create_execution(auto_close=True, auto_close_timeout=0.1)
+    state = await execution.async_start(value)
     return state["route"]
 
 
 def build_executor(active_flow: TriggerFlow):
-    def execute(case: EvaluationCase):
-        return asyncio.run(run_flow(active_flow, case.input))
+    async def execute(case: EvaluationCase):
+        return await run_flow(active_flow, case.input)
 
     return execute
 
