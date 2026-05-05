@@ -208,6 +208,21 @@ Legacy `tool` APIs (`@agent.tool_func`, `agent.use_tool()`) continue to work and
 
 TriggerFlow goes well beyond chaining functions. It's a full workflow engine with concurrency, event-driven branching, human-in-the-loop interrupts, and execution persistence.
 
+**Execution Lifecycle — Close Snapshots**
+
+Agently 4.1.1 makes execution lifecycle explicit. Short scripts can rely on auto-close, while services, workers, streaming routes, and human-in-the-loop flows should own an execution and close it for a final snapshot:
+
+```python
+execution = flow.create_execution(auto_close=False)
+await execution.async_start(initial_input, wait_for_result=False)
+
+# emit events, resume from checkpoints, or stream runtime updates...
+
+snapshot = await execution.async_close()
+```
+
+`close()` / `async_close()` returns the full execution snapshot. Legacy `.end()` result sinks remain compatible, but new code should treat close snapshots as the completion contract.
+
 **Concurrency — `batch` and `for_each`**
 
 Run steps in parallel with a configurable concurrency limit:

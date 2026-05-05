@@ -208,6 +208,21 @@ print(response.result.full_result_data["extra"]["action_logs"])
 
 TriggerFlow 远不止是函数链。它是一个完整的工作流引擎，支持并发、事件驱动分支、人工审批中断和执行状态持久化。
 
+**执行生命周期 — Close Snapshot**
+
+Agently 4.1.1 明确了执行生命周期。短脚本可以依赖 auto-close；服务、worker、流式接口和人工审批流程应该持有 execution，并通过 close 拿到最终快照：
+
+```python
+execution = flow.create_execution(auto_close=False)
+await execution.async_start(initial_input, wait_for_result=False)
+
+# emit 事件、从检查点恢复，或持续输出 runtime stream...
+
+snapshot = await execution.async_close()
+```
+
+`close()` / `async_close()` 返回完整 execution snapshot。旧的 `.end()` result sink 仍然兼容，但新代码应把 close snapshot 作为完成契约。
+
 **并发 — `batch` 与 `for_each`**
 
 以可配置的并发上限并行运行步骤：
