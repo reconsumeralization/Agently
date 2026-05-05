@@ -208,9 +208,38 @@ Legacy `tool` APIs (`@agent.tool_func`, `agent.use_tool()`) continue to work and
 
 TriggerFlow goes well beyond chaining functions. It's a full workflow engine with concurrency, event-driven branching, human-in-the-loop interrupts, and execution persistence.
 
-**Execution Lifecycle — Close Snapshots**
+**Execution Lifecycle — `open -> sealed -> closed`**
 
-Agently 4.1.1 makes execution lifecycle explicit. Short scripts can rely on auto-close, while services, workers, streaming routes, and human-in-the-loop flows should own an execution and close it for a final snapshot:
+Agently 4.1.1 makes TriggerFlow execution lifecycle explicit. This is not just a return-value change; it defines when a workflow can still accept outside input, when it is draining, and when its result is frozen:
+
+```mermaid
+stateDiagram-v2
+    [*] --> open: create / start
+    open --> sealed: seal()
+    open --> closed: auto_close idle timeout
+    open --> closed: close()
+    sealed --> open: unseal()
+    sealed --> closed: close()
+    closed --> [*]
+```
+
+| State | External input | In-flight work | Runtime stream / result |
+|---|---|---|---|
+| `open` | accepts `emit()` / `continue_with()` | chunks, internal emits, tasks continue | stream is live; state can still change |
+| `sealed` | rejects new external input | already-accepted events, internal emits, and tasks drain | stream remains live; snapshot is not frozen |
+| `closed` | rejects everything | no new work | stream is stopped; close snapshot is frozen |
+
+`close()` / `async_close()` seals first, drains pending work, stops the runtime stream, then returns the execution state snapshot. If `timeout=` is passed to close, it is a drain timeout for in-flight work, not an auto-close timer.
+
+This changes how you should choose entry APIs:
+
+| Situation | Use | Return / contract |
+|---|---|---|
+| Quick script with all inputs known up front | `flow.start(...)` / `flow.async_start(...)` | hidden execution closes automatically and returns the close snapshot |
+| Service, worker, SSE/WebSocket route, webhook, or human approval | `flow.start_execution(...)` or `flow.create_execution(auto_close=False)` | caller owns the execution handle and decides when to close |
+| Pre-built execution with `auto_close=True` | `execution.async_start(...)` | waits for auto-close and returns the close snapshot |
+| Pre-built execution with `auto_close=False` | `execution.async_start(...)` | returns the execution itself; caller must close explicitly |
+| FastAPI Helper with a `TriggerFlow` provider | `FastAPIHelper(response_provider=flow)` | response `data` is the close snapshot, not a coerced legacy `result` field |
 
 ```python
 execution = flow.create_execution(auto_close=False)
@@ -221,7 +250,7 @@ await execution.async_start(initial_input, wait_for_result=False)
 snapshot = await execution.async_close()
 ```
 
-`close()` / `async_close()` returns the full execution snapshot. Legacy `.end()` result sinks remain compatible, but new code should treat close snapshots as the completion contract.
+Only execution state enters the close snapshot and `save()` / `load()` checkpoints. Runtime resources such as clients, callbacks, sockets, and file handles must be re-injected after restore. Legacy `.end()` / `set_result()` result sinks remain compatible by writing `"$final_result"` into the snapshot, but new code should treat close snapshots as the completion contract.
 
 **Concurrency — `batch` and `for_each`**
 

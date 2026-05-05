@@ -208,9 +208,38 @@ print(response.result.full_result_data["extra"]["action_logs"])
 
 TriggerFlow 远不止是函数链。它是一个完整的工作流引擎，支持并发、事件驱动分支、人工审批中断和执行状态持久化。
 
-**执行生命周期 — Close Snapshot**
+**执行生命周期 — `open -> sealed -> closed`**
 
-Agently 4.1.1 明确了执行生命周期。短脚本可以依赖 auto-close；服务、worker、流式接口和人工审批流程应该持有 execution，并通过 close 拿到最终快照：
+Agently 4.1.1 明确了 TriggerFlow execution 生命周期。这不只是返回值变化，而是在定义 workflow 何时还能接外部输入、何时只做 drain、何时结果已经冻结：
+
+```mermaid
+stateDiagram-v2
+    [*] --> open: create / start
+    open --> sealed: seal()
+    open --> closed: auto_close idle timeout
+    open --> closed: close()
+    sealed --> open: unseal()
+    sealed --> closed: close()
+    closed --> [*]
+```
+
+| 状态 | 外部输入 | 在途工作 | Runtime stream / 结果 |
+|---|---|---|---|
+| `open` | 接受 `emit()` / `continue_with()` | chunk、内部 emit、已注册 task 继续 | stream 存活；state 还能变化 |
+| `sealed` | 拒绝新的外部输入 | 已接受事件、内部 emit 链和 task 继续 drain | stream 仍存活；snapshot 未冻结 |
+| `closed` | 全部拒绝 | 不再接新工作 | stream 已停止；close snapshot 已冻结 |
+
+`close()` / `async_close()` 会先 seal，再 drain 待办工作，停止 runtime stream，最后返回 execution state snapshot。传给 close 的 `timeout=` 是在途工作的 drain timeout，不是 auto-close 计时器。
+
+这会影响入口 API 选择：
+
+| 场景 | 使用 | 返回 / 契约 |
+|---|---|---|
+| 输入都已知的快速脚本 | `flow.start(...)` / `flow.async_start(...)` | 隐式 execution 自动 close，返回 close snapshot |
+| 服务、worker、SSE/WebSocket、webhook、人工审批 | `flow.start_execution(...)` 或 `flow.create_execution(auto_close=False)` | 调用方持有 execution handle，并决定何时 close |
+| 预创建 execution 且 `auto_close=True` | `execution.async_start(...)` | 等 auto-close 后返回 close snapshot |
+| 预创建 execution 且 `auto_close=False` | `execution.async_start(...)` | 返回 execution 本身；调用方必须显式 close |
+| FastAPI Helper 使用 `TriggerFlow` provider | `FastAPIHelper(response_provider=flow)` | 响应 `data` 是 close snapshot，不再被强行压成旧的 `result` 字段 |
 
 ```python
 execution = flow.create_execution(auto_close=False)
@@ -221,7 +250,7 @@ await execution.async_start(initial_input, wait_for_result=False)
 snapshot = await execution.async_close()
 ```
 
-`close()` / `async_close()` 返回完整 execution snapshot。旧的 `.end()` result sink 仍然兼容，但新代码应把 close snapshot 作为完成契约。
+只有 execution state 会进入 close snapshot 和 `save()` / `load()` 检查点。client、callback、socket、文件句柄这类 runtime resources 需要在恢复后重新注入。旧的 `.end()` / `set_result()` result sink 仍然兼容，会把结果写入 snapshot 的 `"$final_result"`；新代码应把 close snapshot 作为完成契约。
 
 **并发 — `batch` 与 `for_each`**
 
