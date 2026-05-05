@@ -45,7 +45,7 @@ Claude differs from OpenAI in concrete ways the plugin handles:
 - The streaming event shape uses `message_start`, `content_block_delta`, `message_delta`, etc., not OpenAI's `chat.completion.chunk`.
 - Tool calling has Anthropic's own request/response shape.
 
-Internally, `AnthropicCompatible` shares only generic requester plumbing through a base prototype. The request body construction and parsing are Anthropic-specific. Don't think of it as "OpenAI with a different URL" — it isn't.
+`AnthropicCompatible` directly implements `ModelRequester`. The request body construction and parsing are Anthropic-specific. Don't think of it as "OpenAI with a different URL" — it isn't.
 
 ## Per-agent overrides
 

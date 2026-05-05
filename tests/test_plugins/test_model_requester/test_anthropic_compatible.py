@@ -9,6 +9,7 @@ from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import (
     AnthropicCompatible,
 )
+from agently.types.plugins import ModelRequester
 import agently.builtins.plugins.ModelRequester.AnthropicCompatible as anthropic_module
 
 
@@ -90,6 +91,10 @@ def test_generate_request_uses_messages_path_and_default_model():
     assert request["request_options"]["max_tokens"] == 4096
     assert request["headers"]["anthropic-version"] == "2023-06-01"
     assert request["data"]["messages"] == [{"role": "user", "content": "hello"}]
+
+
+def test_inherits_model_requester_protocol_instead_of_responses_plugin():
+    assert AnthropicCompatible.__bases__ == (ModelRequester,)
 
 
 def test_generate_request_maps_system_and_rich_content():

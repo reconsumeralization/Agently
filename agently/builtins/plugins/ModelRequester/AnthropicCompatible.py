@@ -12,17 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal, cast
+import time
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal, cast, get_args, get_origin
 from typing_extensions import TypedDict
 
-from httpx import AsyncClient, HTTPStatusError, RequestError
-from httpx_sse import SSEError
+from httpx import AsyncClient, ReadError, HTTPStatusError, RequestError, Timeout
+from httpx_sse import aconnect_sse, SSEError
+from stamina import retry
 
+from agently.types.plugins import ModelRequester
 from agently.types.data import AgentlyRequestData, SerializableValue
 from agently.utils import DataFormatter, SettingsNamespace
-
-from .OpenAIResponsesCompatible import OpenAIResponsesCompatible
 
 if TYPE_CHECKING:
     from agently.core.Prompt import Prompt
@@ -48,7 +50,7 @@ class AnthropicCompatibleSettings(TypedDict, total=False):
     max_tokens: int
 
 
-class AnthropicCompatible(OpenAIResponsesCompatible):
+class AnthropicCompatible(ModelRequester):
     name = "AnthropicCompatible"
 
     DEFAULT_SETTINGS = {
@@ -97,6 +99,279 @@ class AnthropicCompatible(OpenAIResponsesCompatible):
 
         if self.prompt["attachment"]:
             self.plugin_settings["rich_content"] = True
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    def _get_timeout_mode(self) -> Literal["http", "first_token"]:
+        timeout_mode = self.plugin_settings.get("timeout_mode", "first_token")
+        if timeout_mode == "http":
+            return "http"
+        return "first_token"
+
+    def _get_timeout_configs(self) -> dict[str, Any]:
+        return DataFormatter.to_str_key_dict(
+            self.plugin_settings.get(
+                "timeout",
+                {
+                    "connect": 30.0,
+                    "read": 120.0,
+                    "write": 30.0,
+                    "pool": 30.0,
+                },
+            ),
+            default_value={},
+        )
+
+    def _get_http_timeout(self, *, disable_read: bool = False) -> Timeout:
+        timeout_configs = self._get_timeout_configs().copy()
+        if disable_read:
+            timeout_configs["read"] = None
+        return Timeout(**timeout_configs)
+
+    def _get_first_token_timeout_seconds(self) -> float | None:
+        read_timeout = self._get_timeout_configs().get("read")
+        if isinstance(read_timeout, (int, float)) and read_timeout > 0:
+            return float(read_timeout)
+        return None
+
+    def _should_use_first_token_timeout(self, request_data: "AgentlyRequestData") -> bool:
+        return self._get_timeout_mode() == "first_token" and bool(request_data.stream)
+
+    async def _aiter_with_first_token_timeout(
+        self,
+        generator: AsyncGenerator[Any, None],
+        *,
+        timeout_seconds: float | None,
+    ) -> AsyncGenerator[Any, None]:
+        if timeout_seconds is None:
+            async for item in generator:
+                yield item
+            return
+
+        try:
+            first_item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
+        except asyncio.TimeoutError as e:
+            await generator.aclose()
+            raise TimeoutError(f"First token timeout after { timeout_seconds } seconds.") from e
+
+        yield first_item
+        async for item in generator:
+            yield item
+
+    async def _aiter_sse_with_retry(
+        self,
+        client: AsyncClient,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, Any],
+        json: "SerializableValue",
+    ):
+        last_event_id = ""
+        reconnection_delay = 0.0
+
+        @retry(on=ReadError)
+        async def _aiter_sse():
+            nonlocal last_event_id, reconnection_delay
+            time.sleep(reconnection_delay)
+            headers.update({"Accept": "text/event-stream"})
+            if last_event_id:
+                headers.update({"Last-Event-ID": last_event_id})
+
+            async with aconnect_sse(client, method, url, headers=headers, json=json) as event_source:
+                try:
+                    async for sse in event_source.aiter_sse():
+                        last_event_id = sse.id
+                        if sse.retry is not None:
+                            reconnection_delay = sse.retry / 1000
+                        yield sse
+                except GeneratorExit:
+                    pass
+
+        return _aiter_sse()
+
+    @staticmethod
+    def _build_simple_type_schema(type_name: str) -> dict[str, Any]:
+        normalized = type_name.strip()
+        scalar_mapping = {
+            "str": "string",
+            "string": "string",
+            "int": "integer",
+            "integer": "integer",
+            "float": "number",
+            "number": "number",
+            "bool": "boolean",
+            "boolean": "boolean",
+            "None": "null",
+            "none": "null",
+        }
+        if normalized in scalar_mapping:
+            return {"type": scalar_mapping[normalized]}
+        if normalized in {"Any", "any", "unknown", "object"}:
+            return {}
+        if normalized.startswith("list[") and normalized.endswith("]"):
+            item_type = normalized[5:-1].strip()
+            return {"type": "array", "items": AnthropicCompatible._build_simple_type_schema(item_type)}
+        if normalized.startswith("dict[") and normalized.endswith("]"):
+            return {"type": "object"}
+        if normalized.startswith("Literal[") and normalized.endswith("]"):
+            literal_body = normalized[len("Literal[") : -1]
+            values = [item.strip() for item in literal_body.split(",") if item.strip()]
+            enum_values = []
+            for value in values:
+                try:
+                    enum_values.append(json.loads(value))
+                except Exception:
+                    enum_values.append(value.strip("'\""))
+            schema: dict[str, Any] = {"enum": enum_values}
+            if len(enum_values) > 0:
+                if all(isinstance(item, str) for item in enum_values):
+                    schema["type"] = "string"
+                elif all(isinstance(item, bool) for item in enum_values):
+                    schema["type"] = "boolean"
+                elif all(isinstance(item, int) and not isinstance(item, bool) for item in enum_values):
+                    schema["type"] = "integer"
+                elif all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in enum_values):
+                    schema["type"] = "number"
+            return schema
+        if "|" in normalized:
+            options = [part.strip() for part in normalized.split("|") if part.strip()]
+            return {"anyOf": [AnthropicCompatible._build_simple_type_schema(option) for option in options]}
+        return {}
+
+    @classmethod
+    def _annotation_to_schema(cls, annotation: Any) -> dict[str, Any]:
+        if annotation is None:
+            return {"type": "null"}
+        if isinstance(annotation, dict):
+            return cls._kwargs_to_json_schema(cast(dict[str, Any], annotation))
+        if isinstance(annotation, str):
+            return cls._build_simple_type_schema(annotation)
+
+        origin = get_origin(annotation)
+        if origin is list:
+            args = get_args(annotation)
+            item_annotation = args[0] if args else Any
+            return {"type": "array", "items": cls._annotation_to_schema(item_annotation)}
+        if origin is dict:
+            return {"type": "object"}
+        if origin is Literal:
+            literal_values = list(get_args(annotation))
+            schema: dict[str, Any] = {"enum": literal_values}
+            if len(literal_values) > 0:
+                first_value = literal_values[0]
+                if isinstance(first_value, str):
+                    schema["type"] = "string"
+                elif isinstance(first_value, bool):
+                    schema["type"] = "boolean"
+                elif isinstance(first_value, int) and not isinstance(first_value, bool):
+                    schema["type"] = "integer"
+                elif isinstance(first_value, float):
+                    schema["type"] = "number"
+            return schema
+        if origin is not None:
+            return cls._build_simple_type_schema(str(DataFormatter.sanitize(annotation)))
+
+        if isinstance(annotation, type):
+            base_mapping = {
+                str: {"type": "string"},
+                int: {"type": "integer"},
+                float: {"type": "number"},
+                bool: {"type": "boolean"},
+            }
+            if annotation in base_mapping:
+                return base_mapping[annotation].copy()
+            if hasattr(annotation, "model_json_schema"):
+                try:
+                    return cast(dict[str, Any], annotation.model_json_schema())
+                except Exception:
+                    return {"type": "object"}
+        sanitized = DataFormatter.sanitize(annotation)
+        if isinstance(sanitized, dict):
+            return cls._kwargs_to_json_schema(cast(dict[str, Any], sanitized))
+        if isinstance(sanitized, str):
+            return cls._build_simple_type_schema(sanitized)
+        return {}
+
+    @classmethod
+    def _kwargs_to_json_schema(cls, kwargs_schema: dict[str, Any] | None) -> dict[str, Any]:
+        properties: dict[str, Any] = {}
+        additional_properties: bool | dict[str, Any] = False
+        if not isinstance(kwargs_schema, dict) or len(kwargs_schema) == 0:
+            return {"type": "object", "properties": {}}
+
+        for key, raw_value in kwargs_schema.items():
+            if key == "<*>":
+                wildcard_value = raw_value
+                wildcard_annotation = wildcard_value[0] if isinstance(wildcard_value, tuple) and wildcard_value else wildcard_value
+                wildcard_schema = cls._annotation_to_schema(wildcard_annotation)
+                additional_properties = wildcard_schema if len(wildcard_schema) > 0 else True
+                continue
+
+            annotation = raw_value
+            description = None
+            if isinstance(raw_value, tuple):
+                annotation = raw_value[0] if len(raw_value) > 0 else Any
+                if len(raw_value) > 1 and isinstance(raw_value[1], str) and raw_value[1]:
+                    description = raw_value[1]
+            schema = cls._annotation_to_schema(annotation)
+            if description:
+                schema = schema.copy()
+                schema["description"] = description
+            properties[str(key)] = schema
+
+        result: dict[str, Any] = {
+            "type": "object",
+            "properties": properties,
+        }
+        if additional_properties is not False:
+            result["additionalProperties"] = additional_properties
+        else:
+            result["additionalProperties"] = False
+        return result
+
+    @classmethod
+    def _tool_name(cls, tool: dict[str, Any]) -> str | None:
+        name = tool.get("name", tool.get("action_id"))
+        return str(name) if isinstance(name, str) and name.strip() else None
+
+    @staticmethod
+    def _create_tool_call_state(call_id: str, index: int) -> dict[str, Any]:
+        return {
+            "call_id": call_id,
+            "index": index,
+            "name": "",
+            "arguments": "",
+            "name_emitted": False,
+            "any_argument_delta_emitted": False,
+        }
+
+    @staticmethod
+    def _emit_tool_call_chunk(
+        tool_state: dict[str, Any],
+        *,
+        arguments_delta: str | None = None,
+        name_only: bool = False,
+    ) -> dict[str, Any]:
+        function_payload: dict[str, Any] = {}
+        if not tool_state.get("name_emitted") and tool_state.get("name"):
+            function_payload["name"] = str(tool_state["name"])
+            tool_state["name_emitted"] = True
+        if not name_only and arguments_delta is not None:
+            function_payload["arguments"] = arguments_delta
+            tool_state["any_argument_delta_emitted"] = True
+        return {
+            "index": int(tool_state.get("index", 0)),
+            "id": str(tool_state.get("call_id", "")),
+            "type": "function",
+            "function": function_payload,
+        }
 
     @staticmethod
     def _content_text_block(text: Any) -> dict[str, Any]:

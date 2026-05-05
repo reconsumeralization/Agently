@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -24,13 +26,13 @@ from typing import (
 )
 from typing_extensions import TypedDict
 
-from httpx import AsyncClient, HTTPStatusError, RequestError
-from httpx_sse import SSEError
+from httpx import AsyncClient, ReadError, HTTPStatusError, RequestError, Timeout
+from httpx_sse import aconnect_sse, SSEError
+from stamina import retry
 
+from agently.types.plugins import ModelRequester
 from agently.types.data import AgentlyRequestData, SerializableValue
 from agently.utils import DataFormatter, SettingsNamespace
-
-from .OpenAICompatible import OpenAICompatible
 
 if TYPE_CHECKING:
     from agently.core.Prompt import Prompt
@@ -53,7 +55,7 @@ class OpenAIResponsesCompatibleSettings(TypedDict, total=False):
     strict_role_orders: bool
 
 
-class OpenAIResponsesCompatible(OpenAICompatible):
+class OpenAIResponsesCompatible(ModelRequester):
     name = "OpenAIResponsesCompatible"
 
     DEFAULT_SETTINGS = {
@@ -99,8 +101,101 @@ class OpenAIResponsesCompatible(OpenAICompatible):
         if self.prompt["attachment"]:
             self.plugin_settings["rich_content"] = True
 
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    def _get_timeout_mode(self) -> Literal["http", "first_token"]:
+        timeout_mode = self.plugin_settings.get("timeout_mode", "first_token")
+        if timeout_mode == "http":
+            return "http"
+        return "first_token"
+
+    def _get_timeout_configs(self) -> dict[str, Any]:
+        return DataFormatter.to_str_key_dict(
+            self.plugin_settings.get(
+                "timeout",
+                {
+                    "connect": 30.0,
+                    "read": 120.0,
+                    "write": 30.0,
+                    "pool": 30.0,
+                },
+            ),
+            default_value={},
+        )
+
+    def _get_http_timeout(self, *, disable_read: bool = False) -> Timeout:
+        timeout_configs = self._get_timeout_configs().copy()
+        if disable_read:
+            timeout_configs["read"] = None
+        return Timeout(**timeout_configs)
+
+    def _get_first_token_timeout_seconds(self) -> float | None:
+        read_timeout = self._get_timeout_configs().get("read")
+        if isinstance(read_timeout, (int, float)) and read_timeout > 0:
+            return float(read_timeout)
+        return None
+
     def _should_use_first_token_timeout(self, request_data: "AgentlyRequestData") -> bool:
         return self._get_timeout_mode() == "first_token" and bool(request_data.stream)
+
+    async def _aiter_with_first_token_timeout(
+        self,
+        generator: AsyncGenerator[Any, None],
+        *,
+        timeout_seconds: float | None,
+    ) -> AsyncGenerator[Any, None]:
+        if timeout_seconds is None:
+            async for item in generator:
+                yield item
+            return
+
+        try:
+            first_item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
+        except asyncio.TimeoutError as e:
+            await generator.aclose()
+            raise TimeoutError(f"First token timeout after { timeout_seconds } seconds.") from e
+
+        yield first_item
+        async for item in generator:
+            yield item
+
+    async def _aiter_sse_with_retry(
+        self,
+        client: AsyncClient,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, Any],
+        json: "SerializableValue",
+    ):
+        last_event_id = ""
+        reconnection_delay = 0.0
+
+        @retry(on=ReadError)
+        async def _aiter_sse():
+            nonlocal last_event_id, reconnection_delay
+            time.sleep(reconnection_delay)
+            headers.update({"Accept": "text/event-stream"})
+            if last_event_id:
+                headers.update({"Last-Event-ID": last_event_id})
+
+            async with aconnect_sse(client, method, url, headers=headers, json=json) as event_source:
+                try:
+                    async for sse in event_source.aiter_sse():
+                        last_event_id = sse.id
+                        if sse.retry is not None:
+                            reconnection_delay = sse.retry / 1000
+                        yield sse
+                except GeneratorExit:
+                    pass
+
+        return _aiter_sse()
 
     @staticmethod
     def _build_simple_type_schema(type_name: str) -> dict[str, Any]:
@@ -246,6 +341,42 @@ class OpenAIResponsesCompatible(OpenAICompatible):
     def _tool_name(cls, tool: dict[str, Any]) -> str | None:
         name = tool.get("name", tool.get("action_id"))
         return str(name) if isinstance(name, str) and name.strip() else None
+
+    @staticmethod
+    def _create_tool_call_state(call_id: str, index: int) -> dict[str, Any]:
+        return {
+            "call_id": call_id,
+            "index": index,
+            "name": "",
+            "arguments": "",
+            "name_emitted": False,
+            "any_argument_delta_emitted": False,
+        }
+
+    @staticmethod
+    def _emit_tool_call_chunk(
+        tool_state: dict[str, Any],
+        *,
+        arguments_delta: str | None = None,
+        name_only: bool = False,
+    ) -> dict[str, Any]:
+        function_payload: dict[str, Any] = {}
+        if not tool_state.get("name_emitted") and tool_state.get("name"):
+            function_payload["name"] = str(tool_state["name"])
+            tool_state["name_emitted"] = True
+        if not name_only and arguments_delta is not None:
+            function_payload["arguments"] = arguments_delta
+            tool_state["any_argument_delta_emitted"] = True
+        return {
+            "index": int(tool_state.get("index", 0)),
+            "id": str(tool_state.get("call_id", "")),
+            "type": "function",
+            "function": function_payload,
+        }
+
+    @staticmethod
+    def _collect_output_items(completed_output_items: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+        return [completed_output_items[index] for index in sorted(completed_output_items.keys())]
 
     @classmethod
     def _convert_prompt_tools(cls, prompt_tools: Any) -> list[dict[str, Any]]:
@@ -650,37 +781,6 @@ class OpenAIResponsesCompatible(OpenAICompatible):
                 yield "error", e
             finally:
                 await client.aclose()
-
-    @staticmethod
-    def _create_tool_call_state(call_id: str, index: int) -> dict[str, Any]:
-        return {
-            "call_id": call_id,
-            "index": index,
-            "name": "",
-            "arguments": "",
-            "name_emitted": False,
-            "any_argument_delta_emitted": False,
-        }
-
-    @staticmethod
-    def _emit_tool_call_chunk(tool_state: dict[str, Any], *, arguments_delta: str | None = None, name_only: bool = False) -> dict[str, Any]:
-        function_payload: dict[str, Any] = {}
-        if not tool_state.get("name_emitted") and tool_state.get("name"):
-            function_payload["name"] = str(tool_state["name"])
-            tool_state["name_emitted"] = True
-        if not name_only and arguments_delta is not None:
-            function_payload["arguments"] = arguments_delta
-            tool_state["any_argument_delta_emitted"] = True
-        return {
-            "index": int(tool_state.get("index", 0)),
-            "id": str(tool_state.get("call_id", "")),
-            "type": "function",
-            "function": function_payload,
-        }
-
-    @staticmethod
-    def _collect_output_items(completed_output_items: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
-        return [completed_output_items[index] for index in sorted(completed_output_items.keys())]
 
     async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResponseGenerator":
         meta: dict[str, Any] = {}

@@ -44,7 +44,7 @@ Agently.set_settings("OpenAIResponsesCompatible", {
 })
 ```
 
-`OpenAIResponsesCompatible` is a sibling of `OpenAICompatible`; pick whichever matches the protocol your endpoint exposes. Internally they share a small base prototype, but neither plugin inherits from the other.
+`OpenAIResponsesCompatible` is a sibling of `OpenAICompatible`; pick whichever matches the protocol your endpoint exposes. Both plugins directly implement `ModelRequester`; neither plugin inherits from the other.
 
 ## What "OpenAI-compatible" actually covers
 

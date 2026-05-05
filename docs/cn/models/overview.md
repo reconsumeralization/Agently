@@ -32,7 +32,7 @@ HTTP 调用模型端点
 
 ## 为什么是三个插件而不是一个
 
-旧文档曾暗示「所有 provider 都走 OpenAICompatible」——这已经不准确。`OpenAICompatible`、`OpenAIResponsesCompatible`、`AnthropicCompatible` 是相互独立的 requester 插件，只共享一层很薄的内部 prototype；各自维护自己的协议映射。Anthropic 尤其会构造自己的请求体——`anthropic_version`、`anthropic_beta`、必填的 `max_tokens`，以及 Claude 期望的 `messages`/`system` 字段形态。这些差异已经足够把 Claude 配错——所以新文档把它单独成一条路径。
+旧文档曾暗示「所有 provider 都走 OpenAICompatible」——这已经不准确。`OpenAICompatible`、`OpenAIResponsesCompatible`、`AnthropicCompatible` 是相互独立的 requester 插件；每个插件都直接实现 `ModelRequester` 协议，并各自维护自己的协议映射。Anthropic 尤其会构造自己的请求体——`anthropic_version`、`anthropic_beta`、必填的 `max_tokens`，以及 Claude 期望的 `messages`/`system` 字段形态。这些差异已经足够把 Claude 配错——所以新文档把它单独成一条路径。
 
 如果你指向 `https://api.anthropic.com`（或某个走相同协议的 Claude 兼容代理），用 [AnthropicCompatible](anthropic-compatible.md)。其他情况（OpenAI、DeepSeek、Qwen、Ollama、Kimi、GLM、MiniMax、Doubao、SiliconFlow、Groq、ERNIE、走 OpenAI 兼容模式的 Gemini，以及任何说 OpenAI Chat Completions API 的私有网关），用 [OpenAICompatible](openai-compatible.md)。
 

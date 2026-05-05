@@ -45,7 +45,7 @@ Claude 与 OpenAI 在以下方面有插件需处理的具体差异：
 - 流式事件形态用 `message_start`、`content_block_delta`、`message_delta` 等，而非 OpenAI 的 `chat.completion.chunk`。
 - tool calling 用 Anthropic 自己的请求 / 响应形态。
 
-`AnthropicCompatible` 内部只通过基础 prototype 共享通用 requester 管道；请求体构造与解析仍然是 Anthropic 专属。不要把它想成「OpenAI 换 URL」。
+`AnthropicCompatible` 直接实现 `ModelRequester`；请求体构造与解析仍然是 Anthropic 专属。不要把它想成「OpenAI 换 URL」。
 
 ## Per-agent 覆盖
 

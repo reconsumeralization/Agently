@@ -44,7 +44,7 @@ Agently.set_settings("OpenAIResponsesCompatible", {
 })
 ```
 
-`OpenAIResponsesCompatible` 是 `OpenAICompatible` 的兄弟；按你端点暴露的协议选。内部只共享一层基础 prototype，两个插件彼此不继承。
+`OpenAIResponsesCompatible` 是 `OpenAICompatible` 的兄弟；按你端点暴露的协议选。两个插件都直接实现 `ModelRequester`，彼此不继承。
 
 ## 「OpenAI 兼容」实际覆盖什么
 

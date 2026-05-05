@@ -11,6 +11,7 @@ from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import (
     OpenAIResponsesCompatible,
 )
+from agently.types.plugins import ModelRequester
 import agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible as responses_module
 
 
@@ -96,6 +97,10 @@ def test_generate_request_uses_responses_path_and_latest_default_model():
             "content": [{"type": "input_text", "text": "hello"}],
         }
     ]
+
+
+def test_inherits_model_requester_protocol_instead_of_openai_plugin():
+    assert OpenAIResponsesCompatible.__bases__ == (ModelRequester,)
 
 
 def test_generate_request_maps_rich_content_and_preserves_instructions():
