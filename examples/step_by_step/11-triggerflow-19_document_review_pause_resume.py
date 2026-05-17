@@ -86,6 +86,7 @@ def build_model_decided_pause_flow() -> TriggerFlow:
 
     async def model_review_gate(data: TriggerFlowRuntimeData):
         if data.is_resume:
+            assert data.resume.origin_signal is not None
             approval = data.resume.value if isinstance(data.resume.value, dict) else {}
             model_decision = data.get_state("model_decision") or {}
             status = "approved_after_human_review" if approval.get("approved") else "blocked_by_human_review"

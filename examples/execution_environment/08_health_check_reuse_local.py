@@ -63,8 +63,8 @@ async def main_async():
     print("[PROVIDER_COUNTS]")
     pprint({"ensure_count": provider.ensure_count, "release_count": provider.release_count})
 
-    assert first["handle_id"] == "flaky:1"
-    assert second["handle_id"] == "flaky:2"
+    assert first.get("handle_id") == "flaky:1"
+    assert second.get("handle_id") == "flaky:2"
     assert provider.ensure_count == 2
     assert provider.release_count == 1
 

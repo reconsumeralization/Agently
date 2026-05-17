@@ -26,10 +26,16 @@ pprint(records)
 print("\nMODEL-VISIBLE ACTION RESULTS")
 pprint(Action.to_action_results([records]))
 
-artifact_ref = records["artifact_refs"][0]
+artifact_refs = records.get("artifact_refs") or []
+assert artifact_refs
+artifact_ref = artifact_refs[0]
+artifact_id = artifact_ref.get("artifact_id")
+action_call_id = artifact_ref.get("action_call_id")
+assert artifact_id is not None
+assert action_call_id is not None
 raw_artifact = agent.action.read_action_artifact(
-    artifact_id=artifact_ref["artifact_id"],
-    action_call_id=artifact_ref["action_call_id"],
+    artifact_id=artifact_id,
+    action_call_id=action_call_id,
 )
 
 print("\nRECALLED RAW ARTIFACT")
