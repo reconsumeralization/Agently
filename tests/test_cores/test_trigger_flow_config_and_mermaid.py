@@ -856,6 +856,7 @@ async def test_trigger_flow_sub_flow_resume_requires_reinjected_resources_after_
 
     async def child_finalize(data: TriggerFlowRuntimeData):
         service = data.require_resource("resume_service")
+        assert callable(service)
         return service(data.value)
 
     child_flow.to(child_pause).to(child_finalize).end()

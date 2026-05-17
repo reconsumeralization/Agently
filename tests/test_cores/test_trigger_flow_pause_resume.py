@@ -95,6 +95,7 @@ async def test_trigger_flow_pause_resume_to_self_exposes_resume_context():
 
     async def gate(data: TriggerFlowRuntimeData):
         if data.is_resume:
+            assert data.resume.origin_signal is not None
             await data.async_set_state(
                 "resume",
                 {
