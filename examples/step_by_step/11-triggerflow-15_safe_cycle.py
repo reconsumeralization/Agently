@@ -41,7 +41,7 @@ async def triggerflow_pause_between_turns_demo():
         return await data.async_pause_for(
             type="human_input",
             payload={"question": f"continue from turn {current}?"},
-            resume_event="ResumeLoop",
+            resume_to={"event": "ResumeLoop"},
         )
 
     async def resume_loop(data: TriggerFlowRuntimeData):
