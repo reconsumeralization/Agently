@@ -74,7 +74,7 @@ await restored.async_continue_with(interrupt_id, {"approved": True})
 snapshot = await restored.async_close()
 ```
 
-`get_pending_interrupts()` 返回 `pause_for(...)` 创建的 interrupt id 集合。`continue_with(id, payload)` 恢复对应挂起的 chunk。
+`get_pending_interrupts()` 返回 `pause_for(...)` 创建的 interrupt id 集合。`continue_with(id, payload)` 解析一个 interrupt，并按该 interrupt 的 `resume_to` 目标继续图。
 
 ## Flow blueprint save / load
 

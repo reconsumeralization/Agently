@@ -124,14 +124,14 @@ async def handle_one(data):
 
 ### 需要人工批准
 
-加 `pause_for` 步骤。execution 必须用 `auto_close=False` 创建；通过 `continue_with` 或 emit `resume_event` 恢复。
+加 `pause_for` 步骤。execution 必须用 `auto_close=False` 创建；通过 `continue_with` 和显式 `resume_to` 目标恢复。
 
 ```python
 async def ask(data):
     return await data.async_pause_for(
         type="approval",
         payload={"summary": data.input["summary"]},
-        resume_event="ApprovalGiven",
+        resume_to="next",
     )
 ```
 

@@ -119,6 +119,26 @@ def build_parent_flow():
 
 子流内 `data.async_put_into_stream(...)` 推的 item 出现在**父 execution** 的 runtime stream。从外部消费者看子流像是同一个 execution 的一部分。
 
+## 子流 pause 会投影到父 execution
+
+如果子流调用 `pause_for(...)`，父 execution 也会进入 waiting。外部系统仍只管理父 execution id 和父 interrupt id：
+
+```python
+execution = parent_flow.create_execution(auto_close=False)
+await execution.async_start(input_value)
+
+root_interrupt_id = next(iter(execution.get_pending_interrupts()))
+saved = execution.save()
+
+restored = parent_flow.create_execution(auto_close=False, runtime_resources={...})
+restored.load(saved)
+await restored.async_continue_with(root_interrupt_id, {"approved": True})
+```
+
+投影出来的 interrupt 会带 `sub_flow_frame_id` 与 `local_interrupt_id` 便于调试，但调用方应把父 interrupt id 当作公开 handle。子流完成后，`write_back` 正常执行，父 flow 继续下游。
+
+预编排文档审批闸门例子见 `examples/step_by_step/11-triggerflow-20_document_review_subflow_pause_resume.py`：子流包含明确的 pause chunk，并通过 `when("LegalApprovalSubmitted")` 等待审批事件；父 execution 仍然只暴露投影后的 root interrupt，用它保存、加载、恢复。
+
 ## 何时用子流
 
 - 子可复用 —— 多个父 flow 用，或独立用。
