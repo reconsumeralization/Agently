@@ -84,7 +84,17 @@ async def ask_model_for_review_decision(document: str) -> dict[str, Any]:
 def build_model_decided_pause_flow() -> TriggerFlow:
     flow = TriggerFlow(name="step-19-model-decided-document-review-pause")
 
-    async def model_review_gate(data: TriggerFlowRuntimeData):
+    async def model_assess_document(data: TriggerFlowRuntimeData):
+        document = str(data.input)
+        decision = await ask_model_for_review_decision(document)
+        await data.async_set_state("document", document, emit=False)
+        await data.async_set_state("model_decision", decision, emit=False)
+        return {
+            "document": document,
+            "decision": decision,
+        }
+
+    async def autonomous_pause_gate(data: TriggerFlowRuntimeData):
         if data.is_resume:
             assert data.resume.origin_signal is not None
             approval = data.resume.value if isinstance(data.resume.value, dict) else {}
@@ -102,9 +112,9 @@ def build_model_decided_pause_flow() -> TriggerFlow:
             await data.async_set_state("reviewed", reviewed)
             return reviewed
 
-        decision = await ask_model_for_review_decision(str(data.input))
-        await data.async_set_state("document", data.input, emit=False)
-        await data.async_set_state("model_decision", decision, emit=False)
+        assessment = data.input if isinstance(data.input, dict) else {}
+        raw_decision = assessment.get("decision")
+        decision: dict[str, Any] = raw_decision if isinstance(raw_decision, dict) else {}
 
         if decision.get("should_pause"):
             return await data.async_pause_for(
@@ -135,7 +145,7 @@ def build_model_decided_pause_flow() -> TriggerFlow:
         }
         await data.async_set_state("final_report", final_report)
 
-    flow.to(model_review_gate).to(finalize)
+    flow.to(model_assess_document).to(autonomous_pause_gate).to(finalize)
     return flow
 
 
