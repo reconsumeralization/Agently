@@ -54,6 +54,79 @@ async def test_trigger_flow_pause_continue_with_saved_interrupt():
     }
 
 
+@pytest.mark.asyncio
+async def test_trigger_flow_pause_resume_to_next_continues_downstream_after_load():
+    flow = TriggerFlow()
+
+    async def ask_feedback(data: TriggerFlowRuntimeData):
+        await data.async_set_state("draft", {"topic": data.value})
+        return await data.async_pause_for(
+            type="human_input",
+            payload={"question": "approve?"},
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finalize(data: TriggerFlowRuntimeData):
+        return {
+            "draft": data.get_state("draft"),
+            "feedback": data.value,
+        }
+
+    flow.to(ask_feedback).to(finalize).end()
+
+    execution = await flow.async_start_execution("pricing", wait_for_result=False)
+    saved_state = execution.save()
+    restored = flow.create_execution(auto_close=False)
+    restored.load(saved_state)
+
+    await restored.async_continue_with("approval", {"approved": True})
+    result = await restored.async_get_result(timeout=1)
+
+    assert result == {
+        "draft": {"topic": "pricing"},
+        "feedback": {"approved": True},
+    }
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_pause_resume_to_self_exposes_resume_context():
+    flow = TriggerFlow()
+
+    async def gate(data: TriggerFlowRuntimeData):
+        if data.is_resume:
+            await data.async_set_state(
+                "resume",
+                {
+                    "interrupt_id": data.resume.interrupt_id,
+                    "value": data.resume.value,
+                    "origin_event": data.resume.origin_signal["trigger_event"],
+                    "input": data.value,
+                },
+            )
+            return "approved"
+        return await data.async_pause_for(
+            type="approval",
+            payload={"value": data.value},
+            interrupt_id="gate",
+            resume_to="self",
+        )
+
+    flow.to(gate).end()
+    execution = await flow.async_start_execution("document", wait_for_result=False)
+
+    await execution.async_continue_with("gate", {"approved": True})
+    snapshot = await execution.async_close()
+
+    assert snapshot["resume"] == {
+        "interrupt_id": "gate",
+        "value": {"approved": True},
+        "origin_event": "START",
+        "input": "document",
+    }
+    assert snapshot["$final_result"] == "approved"
+
+
 def test_trigger_flow_public_interrupt_event_type_matches_runtime_stream_shape():
     flow = TriggerFlow()
 

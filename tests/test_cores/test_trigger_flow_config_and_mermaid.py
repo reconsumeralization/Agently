@@ -788,23 +788,105 @@ def test_trigger_flow_sub_flow_rejects_invalid_capture_and_write_back_specs():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_sub_flow_rejects_child_pause_resume():
+async def test_trigger_flow_sub_flow_projects_child_pause_and_resumes_from_root_after_load():
     child_flow = TriggerFlow(name="child-pause-flow")
+
+    async def child_pause(data: TriggerFlowRuntimeData):
+        await data.async_set_state("topic", data.input["topic"])
+        return await data.async_pause_for(
+            type="human_input",
+            payload={"question": "continue?"},
+            interrupt_id="child-approval",
+            resume_to="next",
+        )
+
+    async def child_finalize(data: TriggerFlowRuntimeData):
+        return {
+            "approved": data.value["approved"],
+            "topic": data.get_state("topic"),
+        }
+
+    child_flow.to(child_pause).to(child_finalize).end()
+
+    parent_flow = TriggerFlow(name="parent-pause-flow")
+
+    async def parent_prepare(data: TriggerFlowRuntimeData):
+        return {"topic": data.value}
+
+    async def parent_finalize(data: TriggerFlowRuntimeData):
+        return {"child": data.value}
+
+    parent_flow.to(parent_prepare).to_sub_flow(child_flow).to(parent_finalize).end()
+
+    execution = parent_flow.create_execution(auto_close=False)
+    await execution.async_start("pricing", wait_for_result=False)
+
+    pending = execution.get_pending_interrupts()
+    assert len(pending) == 1
+    root_interrupt_id, root_interrupt = next(iter(pending.items()))
+    assert root_interrupt["local_interrupt_id"] == "child-approval"
+    assert root_interrupt["sub_flow_frame_id"]
+
+    saved_state = execution.save()
+    restored = parent_flow.create_execution(auto_close=False)
+    restored.load(saved_state)
+
+    await restored.async_continue_with(root_interrupt_id, {"approved": True})
+    result = await restored.async_get_result(timeout=1)
+
+    assert result == {
+        "child": {
+            "approved": True,
+            "topic": "pricing",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_sub_flow_resume_requires_reinjected_resources_after_load():
+    child_flow = TriggerFlow(name="child-pause-resource-flow")
 
     async def child_pause(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(
             type="human_input",
             payload={"question": "continue?"},
-            resume_event="ResumeChild",
+            interrupt_id="child-resource-approval",
+            resume_to="next",
         )
 
-    child_flow.to(child_pause).end()
+    async def child_finalize(data: TriggerFlowRuntimeData):
+        service = data.require_resource("resume_service")
+        return service(data.value)
 
-    parent_flow = TriggerFlow(name="parent-pause-flow")
-    parent_flow.to(child_flow).end()
+    child_flow.to(child_pause).to(child_finalize).end()
 
-    with pytest.raises(NotImplementedError, match="pause/resume"):
-        await parent_flow.async_start("topic")
+    parent_flow = TriggerFlow(name="parent-pause-resource-flow")
+    parent_flow.to_sub_flow(
+        child_flow,
+        capture={"resources": {"resume_service": "resources.resume_service"}},
+    ).end()
+
+    execution = parent_flow.create_execution(
+        auto_close=False,
+        runtime_resources={"resume_service": lambda payload: {"ok": payload["approved"]}},
+    )
+    await execution.async_start({"topic": "pricing"}, wait_for_result=False)
+    root_interrupt_id = next(iter(execution.get_pending_interrupts()))
+    saved_state = execution.save()
+
+    missing_resource = parent_flow.create_execution(auto_close=False)
+    missing_resource.load(saved_state)
+    with pytest.raises(KeyError, match="missing required runtime resource"):
+        await missing_resource.async_continue_with(root_interrupt_id, {"approved": True})
+
+    restored = parent_flow.create_execution(
+        auto_close=False,
+        runtime_resources={"resume_service": lambda payload: {"ok": payload["approved"]}},
+    )
+    restored.load(saved_state)
+    await restored.async_continue_with(root_interrupt_id, {"approved": True})
+
+    assert await restored.async_get_result(timeout=1) == {"ok": True}
 
 
 def test_trigger_flow_mermaid_shows_sub_flow_box_and_nested_flow():
