@@ -16,7 +16,7 @@ from typing import Optional, Any, Type, cast, overload
 from agently.utils import (
     StateData,
     Settings,
-    warn_deprecated_once,
+    DeprecationWarnings,
 )
 from agently.types.plugins import AgentlyPlugin, AgentlyPluginType
 
@@ -46,7 +46,7 @@ class PluginManager:
         activate: bool = True,
     ) -> "PluginManager":
         if plugin_type == "ToolManager":
-            warn_deprecated_once(
+            DeprecationWarnings.warn_deprecated_once(
                 "PluginManager.register.ToolManager",
                 "ToolManager plugins are deprecated as an internal runtime layer. "
                 "Use Action, ActionRuntime, ActionFlow, and ActionExecutor plugins instead.",

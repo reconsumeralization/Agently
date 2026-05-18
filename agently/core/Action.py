@@ -60,7 +60,7 @@ from agently.types.plugins import (
     StandardActionExecutionHandler,
     StandardActionPlanningHandler,
 )
-from agently.utils import FunctionShifter, Settings, SettingsNamespace, warn_deprecated_once
+from agently.utils import DeprecationWarnings, FunctionShifter, Settings, SettingsNamespace
 from agently.utils import DataFormatter, LazyImport
 
 if TYPE_CHECKING:
@@ -662,7 +662,7 @@ class _DeprecatedActionManagerProxy:
         self._name = name
 
     def __getattr__(self, item: str):
-        warn_deprecated_once(
+        DeprecationWarnings.warn_deprecated_once(
             f"Action.{ self._name }.proxy",
             f"Action.{ self._name } is deprecated. Use Action directly; `tool` remains only as a public surface alias.",
             stacklevel=2,
@@ -798,7 +798,7 @@ class Action:
 
     @property
     def action_manager(self):
-        warn_deprecated_once(
+        DeprecationWarnings.warn_deprecated_once(
             "Action.action_manager",
             "Action.action_manager is deprecated. Use Action directly.",
             stacklevel=2,
@@ -807,7 +807,7 @@ class Action:
 
     @property
     def tool_manager(self):
-        warn_deprecated_once(
+        DeprecationWarnings.warn_deprecated_once(
             "Action.tool_manager",
             "Action.tool_manager is deprecated. Use Action directly; `tool` remains a public surface alias.",
             stacklevel=2,

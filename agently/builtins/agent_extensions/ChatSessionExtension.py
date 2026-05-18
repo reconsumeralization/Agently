@@ -20,7 +20,7 @@ from typing import Any, Literal, Sequence, TYPE_CHECKING, cast
 
 from agently.core import BaseAgent
 from agently.types.data import ChatMessage, ChatMessageDict
-from agently.utils import StateData, DataPathBuilder, warn_once
+from agently.utils import DeprecationWarnings, StateData, DataPathBuilder
 
 if TYPE_CHECKING:
     from agently.types.data import ChatMessage, AgentlyModelResult, PromptStandardSlot
@@ -44,7 +44,7 @@ class ChatSessionExtension(BaseAgent):
 
         self.extension_handlers.append("finally", self.__finally)
 
-        warn_once(
+        DeprecationWarnings.warn_deprecated_once(
             "ChatSessionExtension.__init__",
             "[Agently Extensions] ChatSessionExtension is deprecated and will be removed in future version, use SessionExtension which is mixed in by default instead.",
             stacklevel=2,

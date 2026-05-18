@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar
 
 from agently.core import BaseAgent
-from agently.utils import FunctionShifter, warn_deprecated_once
+from agently.utils import DeprecationWarnings, FunctionShifter
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -787,7 +787,7 @@ class ActionExtension(BaseAgent):
         round_index: int = 0,
         max_rounds: int | None = None,
     ) -> list["ToolCommand"]:
-        warn_deprecated_once(
+        DeprecationWarnings.warn_deprecated_once(
             "ActionExtension.async_must_call",
             "Method .async_must_call() is deprecated and will be removed in future version, "
             "please use .async_generate_tool_command() instead.",
@@ -810,7 +810,7 @@ class ActionExtension(BaseAgent):
         round_index: int = 0,
         max_rounds: int | None = None,
     ) -> list["ToolCommand"]:
-        warn_deprecated_once(
+        DeprecationWarnings.warn_deprecated_once(
             "ActionExtension.must_call",
             "Method .must_call() is deprecated and will be removed in future version, "
             "please use .generate_tool_command() instead.",
