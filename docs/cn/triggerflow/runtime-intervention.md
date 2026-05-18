@@ -14,12 +14,11 @@ Runtime intervention 让外部代码在 execution 仍然 open 时补充上下文
 
 ## 模式
 
-创建 execution 时必须显式开启 intervention：
+Runtime intervention 默认关闭，除非创建 execution 时显式开启，或 flow 声明了显式 intervention point：
 
 ```python
 execution = flow.create_execution(
     auto_close=False,
-    intervention_mode="planned",  # "planned" | "auto"
 )
 ```
 
@@ -33,6 +32,8 @@ execution = flow.create_execution(
     .to(risk_assessment)
 )
 ```
+
+flow 声明了 `intervention_point(...)` 时，如果 `create_execution(...)` 省略 `intervention_mode`，TriggerFlow 会推断为 planned 模式。只有在明确希望本次 execution 禁用 intervention 时，才传 `intervention_mode=None`。
 
 `intervention_mode="auto"` 会在 chunk dispatch 前检查 pending intervention。带 target 的 intervention 会在第一个匹配 operator id、name、kind、group id 或 group kind 的 operator 前插入；不带 target 的 intervention 会在下一个 chunk 边界插入。声明了 `intervention_point(...)` 的 flow 不能用 auto 模式。
 
@@ -64,13 +65,12 @@ async def risk_assessment(data: TriggerFlowRuntimeData):
     for item in supplements:
         await data.async_mark_intervention_consumed(
             item["id"],
-            consumer="risk_assessment",
             status="applied",
         )
     return result
 ```
 
-读取不会自动消费。用 `mark_intervention_consumed(...)` 写入按 consumer 记录的审计项，status 支持 `"applied"` 和 `"ignored"`。
+读取不会自动消费。用 `mark_intervention_consumed(...)` 写入按 consumer 记录的审计项，status 支持 `"applied"` 和 `"ignored"`。Runtime data 会默认把 `consumer` 填成当前 chunk 名；execution 级调用仍需要显式传入 consumer。
 
 ## Close 与持久化
 

@@ -62,7 +62,6 @@ def build_document_review_flow() -> TriggerFlow:
         for item in interventions:
             await data.async_mark_intervention_consumed(
                 item["id"],
-                consumer="risk_assessment",
                 status="applied",
                 note="Included in the risk assessment inputs.",
             )
@@ -90,7 +89,7 @@ def build_document_review_flow() -> TriggerFlow:
 
 async def main():
     flow = build_document_review_flow()
-    execution = flow.create_execution(auto_close=False, intervention_mode="planned")
+    execution = flow.create_execution(auto_close=False)
 
     start_task = asyncio.create_task(execution.async_start(DOCUMENT_DRAFT))
     await asyncio.sleep(0.01)
@@ -113,14 +112,14 @@ async def main():
             "id": intervention["id"],
             "status": inserted["status"],
             "target": inserted["target"],
-            "consumer_status": inserted["consumers"]["risk_assessment"]["status"],
+            "consumer_status": inserted["consumers"]["assess_risk"]["status"],
         }
     )
     print("[FINAL_REPORT]")
     pprint(snapshot["final_report"])
 
     assert inserted["id"] == intervention["id"]
-    assert inserted["consumers"]["risk_assessment"]["status"] == "applied"
+    assert inserted["consumers"]["assess_risk"]["status"] == "applied"
     assert snapshot["final_report"] == {
         "doc_id": "contract-2026-09",
         "risk_level": "medium",
@@ -145,11 +144,11 @@ if __name__ == "__main__":
 #  'supplement_count': 1}
 #
 # How it works:
-# - The execution uses intervention_mode="planned", so insertion only happens
-#   at the explicit .intervention_point(name="before_risk_assessment", ...).
+# - The flow declares .intervention_point(name="before_risk_assessment", ...),
+#   so execution creation infers planned intervention mode.
 # - The reviewer adds context while extract_terms is still running.
 # - assess_risk reads the inserted context with data.get_interventions(...) and
-#   records an applied consumer audit entry.
+#   records an applied audit entry; the consumer defaults to the chunk name.
 #
 # ASCII flow:
 # start

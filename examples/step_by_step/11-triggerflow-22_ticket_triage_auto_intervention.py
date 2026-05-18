@@ -55,7 +55,6 @@ def build_ticket_triage_flow() -> TriggerFlow:
         for item in interventions:
             await data.async_mark_intervention_consumed(
                 item["id"],
-                consumer="classify_ticket",
                 status="applied",
                 note="Included in priority and SLA classification.",
             )
@@ -148,7 +147,8 @@ if __name__ == "__main__":
 #   an explicit .intervention_point(...).
 # - The pending intervention targets the chunk name "classify_ticket".
 # - TriggerFlow inserts it immediately before dispatching that chunk, then the
-#   chunk reads it with data.get_interventions(...) and records consumption.
+#   chunk reads it with data.get_interventions(...) and records consumption; the
+#   consumer defaults to the chunk name.
 #
 # ASCII flow:
 # start

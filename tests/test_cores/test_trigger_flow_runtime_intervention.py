@@ -19,6 +19,16 @@ async def test_trigger_flow_intervention_disabled_mode_rejects_without_state_cha
 
 
 @pytest.mark.asyncio
+async def test_trigger_flow_explicit_none_intervention_mode_disables_planned_inference():
+    flow = TriggerFlow()
+    flow.intervention_point(name="before_start")
+    execution = flow.create_execution(auto_close=False, intervention_mode=None)
+
+    with pytest.raises(RuntimeError, match="runtime intervention is disabled"):
+        await execution.async_intervene({"text": "late note"})
+
+
+@pytest.mark.asyncio
 async def test_trigger_flow_planned_intervention_point_passes_through_without_pending_item():
     flow = TriggerFlow()
 
@@ -57,7 +67,6 @@ async def test_trigger_flow_planned_intervention_point_inserts_matching_pending_
         for intervention in interventions:
             await data.async_mark_intervention_consumed(
                 intervention["id"],
-                consumer="assess",
                 status="applied",
             )
         return {
@@ -66,7 +75,7 @@ async def test_trigger_flow_planned_intervention_point_inserts_matching_pending_
         }
 
     flow.to(extract).intervention_point(name="before_assess", target="before_assess").to(assess).end()
-    execution = flow.create_execution(auto_close=False, intervention_mode="planned")
+    execution = flow.create_execution(auto_close=False)
 
     start_task = asyncio.create_task(execution.async_start("contract"))
     await asyncio.sleep(0)

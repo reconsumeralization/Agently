@@ -14,12 +14,11 @@ Use runtime intervention when a user adds a note, correction, attachment summary
 
 ## Modes
 
-Intervention is disabled unless you opt in when creating the execution:
+Intervention is disabled unless you opt in or the flow declares an explicit intervention point:
 
 ```python
 execution = flow.create_execution(
     auto_close=False,
-    intervention_mode="planned",  # "planned" | "auto"
 )
 ```
 
@@ -33,6 +32,8 @@ With `intervention_mode="planned"`, only explicit intervention points insert pen
     .to(risk_assessment)
 )
 ```
+
+When a flow declares `intervention_point(...)`, `create_execution(...)` infers planned mode if `intervention_mode` is omitted. Pass `intervention_mode=None` only when you deliberately want to disable intervention for that execution.
 
 With `intervention_mode="auto"`, TriggerFlow checks pending interventions before chunk dispatch. Targeted interventions insert before the first matching operator id, name, kind, group id, or group kind. Untargeted interventions insert at the next chunk boundary. A flow that declares `intervention_point(...)` cannot run in auto mode.
 
@@ -64,13 +65,12 @@ async def risk_assessment(data: TriggerFlowRuntimeData):
     for item in supplements:
         await data.async_mark_intervention_consumed(
             item["id"],
-            consumer="risk_assessment",
             status="applied",
         )
     return result
 ```
 
-Reading is not consumption. Use `mark_intervention_consumed(...)` to write a per-consumer audit entry with status `"applied"` or `"ignored"`.
+Reading is not consumption. Use `mark_intervention_consumed(...)` to write a per-consumer audit entry with status `"applied"` or `"ignored"`. Runtime data defaults `consumer` to the current chunk name; execution-level calls still require an explicit consumer.
 
 ## Close And Persistence
 

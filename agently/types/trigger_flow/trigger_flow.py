@@ -375,6 +375,17 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
                 "operator_kind": self.chunk_run_context.meta.get("operator_kind"),
             }
 
+        def _default_intervention_consumer():
+            origin_chunk = _origin_chunk_payload()
+            if isinstance(origin_chunk, dict):
+                chunk_name = origin_chunk.get("chunk_name")
+                if chunk_name:
+                    return str(chunk_name)
+                chunk_id = origin_chunk.get("chunk_id")
+                if chunk_id:
+                    return str(chunk_id)
+            return "chunk"
+
         def _chunk_signal_meta(meta: dict[str, Any] | None = None):
             origin_chunk = _origin_chunk_payload()
             if origin_chunk is None:
@@ -452,8 +463,41 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         self.interventions = execution._get_visible_interventions_snapshot()
         self.get_interventions = self._get_visible_interventions
         self.get_latest_intervention = self._get_latest_visible_intervention
-        self.mark_intervention_consumed = execution.mark_intervention_consumed
-        self.async_mark_intervention_consumed = execution.async_mark_intervention_consumed
+
+        def _mark_intervention_consumed_from_chunk(
+            intervention_id: str,
+            *,
+            consumer: str | None = None,
+            status: Literal["applied", "ignored"] = "applied",
+            note: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ):
+            return execution.mark_intervention_consumed(
+                intervention_id,
+                consumer=consumer if consumer is not None else _default_intervention_consumer(),
+                status=status,
+                note=note,
+                metadata=metadata,
+            )
+
+        async def _async_mark_intervention_consumed_from_chunk(
+            intervention_id: str,
+            *,
+            consumer: str | None = None,
+            status: Literal["applied", "ignored"] = "applied",
+            note: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ):
+            return await execution.async_mark_intervention_consumed(
+                intervention_id,
+                consumer=consumer if consumer is not None else _default_intervention_consumer(),
+                status=status,
+                note=note,
+                metadata=metadata,
+            )
+
+        self.mark_intervention_consumed = _mark_intervention_consumed_from_chunk
+        self.async_mark_intervention_consumed = _async_mark_intervention_consumed_from_chunk
 
         self.set_result = lambda result: execution.set_result(
             result,

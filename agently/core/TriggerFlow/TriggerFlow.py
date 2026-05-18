@@ -45,6 +45,15 @@ ContractInputT = TypeVar("ContractInputT")
 ContractStreamT = TypeVar("ContractStreamT")
 ContractResultT = TypeVar("ContractResultT")
 
+
+class _InterventionModeUnset:
+    __slots__ = ()
+
+
+_INTERVENTION_MODE_UNSET = _InterventionModeUnset()
+_INTERVENTION_MODE_DEFAULT = cast(Any, _INTERVENTION_MODE_UNSET)
+
+
 class TriggerFlow(Generic[InputT, StreamT, ResultT]):
     def __init__(
         self,
@@ -111,6 +120,24 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         self.match = self._start_process.match
         self.if_condition = self._start_process.if_condition
 
+    def _has_intervention_points(self):
+        return any(
+            operator.get("kind") == "intervention_point"
+            for operator in self._blue_print.definition.operators
+        )
+
+    def _resolve_intervention_mode(
+        self,
+        intervention_mode: Any,
+    ) -> Literal["planned", "auto"] | None:
+        if isinstance(intervention_mode, _InterventionModeUnset):
+            if self._has_intervention_points():
+                return "planned"
+            return None
+        if intervention_mode is None:
+            return None
+        return intervention_mode
+
     @overload
     def chunk(self, handler_or_name: "TriggerFlowHandler") -> TriggerFlowChunk: ...
 
@@ -151,11 +178,12 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         auto_close_timeout: float | None = 10.0,
         owner_id: str | None = None,
         lease_ttl: float | None = None,
-        intervention_mode: Literal["planned", "auto"] | None = None,
+        intervention_mode: Literal["planned", "auto"] | None = _INTERVENTION_MODE_DEFAULT,
         intervention_policy: Any = None,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
         execution_id = uuid.uuid4().hex
         skip_exceptions = skip_exceptions if skip_exceptions is not None else self._skip_exceptions
+        intervention_mode = self._resolve_intervention_mode(intervention_mode)
         parent_run_context = resolve_parent_run_context(parent_run_context)
         execution_run_context = run_context
         if execution_run_context is None:
@@ -395,7 +423,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         auto_close_timeout: float | None = 10.0,
         owner_id: str | None = None,
         lease_ttl: float | None = None,
-        intervention_mode: Literal["planned", "auto"] | None = None,
+        intervention_mode: Literal["planned", "auto"] | None = _INTERVENTION_MODE_DEFAULT,
         intervention_policy: Any = None,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
         if wait_for_result is not False:
