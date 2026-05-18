@@ -46,6 +46,7 @@ This handbook is organized as a learning path. If you have not run a single requ
    - [Event Center](observability/event-center.md)
    - [DevTools](observability/devtools.md)
    - [Coding Agents](development/coding-agents.md)
+   - [Release Workflows](development/release-workflows.md)
 
 6. **Models** — protocol layers and per-provider recipes
    - [Models Overview](models/overview.md)
