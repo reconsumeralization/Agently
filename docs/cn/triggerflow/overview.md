@@ -109,7 +109,7 @@ handler 内 `data` 暴露：
 | `data.async_set_state(key, value)` / `get_state(key)` | execution-local 可序列化 state |
 | `data.async_emit(event, payload)` | 触发 `when(event)` 分支 |
 | `data.async_put_into_stream(item)` | 推到 runtime stream |
-| `data.async_pause_for(type=..., resume_event=...)` | 暂停等待外部恢复 |
+| `data.async_pause_for(type=..., resume_to=...)` | 暂停等待外部图恢复 |
 | `data.require_resource(name)` | 取你注入的 live 对象 |
 | `return value` | 成为下一 chunk 的 `data.input` |
 

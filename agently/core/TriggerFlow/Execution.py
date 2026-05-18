@@ -19,6 +19,7 @@ import warnings
 import json
 import yaml
 import time
+import copy
 from pathlib import Path
 from json import JSONDecodeError
 from contextvars import ContextVar
@@ -199,6 +200,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._system_runtime_data.set("lifecycle_state", self._lifecycle_state)
         self._system_runtime_data.set("state_version", self._state_version)
         self._system_runtime_data.set("interrupts", {})
+        self._system_runtime_data.set("sub_flow_frames", {})
         self._system_runtime_data.set("last_signal", None)
         self._system_runtime_data.set("result", EMPTY)
         self._system_runtime_data.set("result_ready", asyncio.Event())
@@ -796,6 +798,37 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             if isinstance(interrupt, dict) and interrupt.get("status") == "waiting"
         }
 
+    def _has_pending_interrupts(self):
+        return bool(self.get_pending_interrupts())
+
+    def _refresh_waiting_status(self):
+        if self._has_pending_interrupts():
+            self._set_status(TRIGGER_FLOW_STATUS_WAITING)
+        elif self._status == TRIGGER_FLOW_STATUS_WAITING:
+            self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
+
+    def _get_sub_flow_frames(self) -> dict[str, Any]:
+        frames = self._system_runtime_data.get("sub_flow_frames", {}, inherit=False)
+        return frames if isinstance(frames, dict) else {}
+
+    def get_sub_flow_frames(self):
+        return copy.deepcopy(self._get_sub_flow_frames())
+
+    def _set_sub_flow_frame(self, frame_id: str, frame: dict[str, Any]):
+        frames = self._get_sub_flow_frames().copy()
+        frames[str(frame_id)] = frame
+        self._system_runtime_data.set("sub_flow_frames", frames)
+        self._bump_state_version()
+        return frame
+
+    def _build_resume_context(self, interrupt_id: str, interrupt: dict[str, Any], value: Any):
+        return {
+            "interrupt_id": interrupt_id,
+            "value": value,
+            "interrupt": self._to_serializable_value(interrupt),
+            "origin_signal": interrupt.get("source_signal"),
+        }
+
     def _set_runtime_resource(self, key: str, value: Any):
         self._runtime_resources.set(str(key), value)
         return self
@@ -932,6 +965,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             "runtime_data": json.loads(self._runtime_data.dump("json")),
             "flow_data": json.loads(self._trigger_flow._flow_data.dump("json")),
             "interrupts": self._to_serializable_value(self._get_interrupts()),
+            "sub_flow_frames": self._to_serializable_value(self._get_sub_flow_frames()),
             "last_signal": self._serialize_signal(self.get_last_signal()),
             "resource_keys": sorted(str(key) for key in self.get_runtime_resources().keys()),
             "managed_resource_keys": sorted(
@@ -1034,6 +1068,12 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if not isinstance(interrupts, dict):
             raise TypeError(f"Can not load key 'interrupts', expect dictionary but got: { type(interrupts) }")
 
+        sub_flow_frames = state.get("sub_flow_frames", {})
+        if not isinstance(sub_flow_frames, dict):
+            raise TypeError(
+                f"Can not load key 'sub_flow_frames', expect dictionary but got: { type(sub_flow_frames) }"
+            )
+
         last_signal_state = state.get("last_signal", None)
         if last_signal_state is not None and not isinstance(last_signal_state, dict):
             raise TypeError(
@@ -1090,6 +1130,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             self._system_runtime_data.set("result", EMPTY)
         self._system_runtime_data.set("result_ready", result_ready)
         self._system_runtime_data.set("interrupts", interrupts)
+        self._system_runtime_data.set("sub_flow_frames", sub_flow_frames)
         self._system_runtime_data.set("last_signal", last_signal_state)
         self._set_status(status)
         self._auto_close = bool(state.get("auto_close", self._auto_close))
@@ -1228,11 +1269,16 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 continue
             if interrupt_state.get("status") != "waiting":
                 continue
-            if interrupt_state.get("resume_event") != signal.trigger_event:
+            resume_to = interrupt_state.get("resume_to")
+            resume_event = interrupt_state.get("resume_event")
+            target_event = resume_to.get("event") if isinstance(resume_to, dict) else resume_event
+            if target_event != signal.trigger_event:
                 continue
             interrupt = dict(interrupt_state)
             interrupt["status"] = "resumed"
             interrupt["response"] = signal.value
+            interrupt["resume_value"] = signal.value
+            interrupt["resumed_at"] = time.time()
             interrupt["resumed_by_signal_id"] = signal.id
             interrupts[interrupt_id] = interrupt
             resumed_interrupts.append(interrupt)
@@ -1241,7 +1287,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             return
 
         self._system_runtime_data.set("interrupts", interrupts)
-        self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
+        self._refresh_waiting_status()
         self._bump_state_version()
         await self._emit_runtime_event(
             "triggerflow.execution_resumed",
@@ -1680,15 +1726,39 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         payload: Any = None,
         resume_event: str | None = None,
         interrupt_id: str | None = None,
+        resume_to: Any = None,
     ):
         interrupt_id = interrupt_id if interrupt_id is not None else uuid.uuid4().hex
         interrupts = self._get_interrupts().copy()
+        current_signal = self.get_last_signal()
+        origin_chunk = self._get_origin_chunk_payload()
+        source_operator_id = origin_chunk.get("chunk_id") if isinstance(origin_chunk, dict) else None
+        continuation_event = None
+        if source_operator_id:
+            operator = self._get_handler_operator(str(source_operator_id))
+            if isinstance(operator, dict):
+                for signal in operator.get("emit_signals", []):
+                    if isinstance(signal, dict) and signal.get("role") == "continuation":
+                        continuation_event = signal.get("trigger_event")
+                        break
+        normalized_resume_to = resume_to
+        if normalized_resume_to is None:
+            normalized_resume_to = {"event": resume_event} if resume_event else "next"
         interrupt = {
             "id": interrupt_id,
             "type": type,
             "payload": payload,
             "resume_event": resume_event,
+            "resume_to": normalized_resume_to,
             "status": "waiting",
+            "source_execution_id": self.id,
+            "source_flow_name": self._trigger_flow.name,
+            "source_operator_id": source_operator_id,
+            "source_signal": self._serialize_signal(current_signal),
+            "continuation_event": continuation_event,
+            "created_at": time.time(),
+            "resumed_at": None,
+            "resume_value": None,
         }
         interrupts[interrupt_id] = interrupt
         self._system_runtime_data.set("interrupts", interrupts)
@@ -1707,7 +1777,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 "action": "pause",
                 "execution_id": self.id,
                 "interrupt": self._to_serializable_value(interrupt),
-                "signal": self._serialize_signal(self.get_last_signal()),
+                "signal": self._serialize_signal(current_signal),
             },
             _skip_contract_validation=True,
         )
@@ -1746,6 +1816,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             raise ValueError(f"Can not continue execution { self.id }, interrupt '{ interrupt_id }' is not waiting.")
         interrupt["status"] = "resumed"
         interrupt["response"] = value
+        interrupt["resume_value"] = value
+        interrupt["resumed_at"] = time.time()
         interrupts[interrupt_id] = interrupt
         self._system_runtime_data.set("interrupts", interrupts)
         self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
@@ -1769,17 +1841,88 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             },
             _skip_contract_validation=True,
         )
-        resume_event = interrupt.get("resume_event")
-        if resume_event:
+
+        sub_flow_frame_id = interrupt.get("sub_flow_frame_id")
+        if sub_flow_frame_id:
+            return await self._trigger_flow._blue_print.async_resume_sub_flow_frame(
+                self,
+                str(sub_flow_frame_id),
+                interrupt_id,
+                value,
+            )
+
+        resume_to = interrupt.get("resume_to")
+        if isinstance(resume_to, dict) and resume_to.get("event"):
             await self._async_dispatch_signal(
                 self._build_signal(
-                    str(resume_event),
+                    str(resume_to["event"]),
                     value,
                     trigger_type="event",
                     source="interrupt",
-                    meta={"interrupt_id": interrupt_id},
+                    meta={
+                        "interrupt_id": interrupt_id,
+                        "resume": self._build_resume_context(interrupt_id, interrupt, value),
+                    },
                 )
             )
+        elif resume_to == "self":
+            source_signal = self._restore_signal(interrupt.get("source_signal"))
+            if source_signal is None:
+                raise RuntimeError(
+                    f"Can not resume execution { self.id } interrupt '{ interrupt_id }' to self "
+                    "because the original signal is missing."
+                )
+            await self._async_dispatch_signal(
+                self._build_signal(
+                    source_signal.trigger_event,
+                    source_signal.value,
+                    source_signal.layer_marks.copy(),
+                    trigger_type=source_signal.trigger_type,
+                    source="interrupt",
+                    meta={
+                        **source_signal.meta,
+                        "interrupt_id": interrupt_id,
+                        "resume": self._build_resume_context(interrupt_id, interrupt, value),
+                    },
+                )
+            )
+        elif resume_to == "next":
+            continuation_event = interrupt.get("continuation_event")
+            if not continuation_event:
+                raise RuntimeError(
+                    f"Can not resume execution { self.id } interrupt '{ interrupt_id }' to next "
+                    "because the paused operator has no continuation event."
+                )
+            source_signal = self._restore_signal(interrupt.get("source_signal"))
+            await self._async_dispatch_signal(
+                self._build_signal(
+                    str(continuation_event),
+                    value,
+                    source_signal.layer_marks.copy() if source_signal is not None else None,
+                    trigger_type="event",
+                    source="interrupt",
+                    meta={
+                        "interrupt_id": interrupt_id,
+                        "resume": self._build_resume_context(interrupt_id, interrupt, value),
+                    },
+                )
+            )
+        else:
+            resume_event = interrupt.get("resume_event")
+            if resume_event:
+                await self._async_dispatch_signal(
+                    self._build_signal(
+                        str(resume_event),
+                        value,
+                        trigger_type="event",
+                        source="interrupt",
+                        meta={
+                            "interrupt_id": interrupt_id,
+                            "resume": self._build_resume_context(interrupt_id, interrupt, value),
+                        },
+                    )
+                )
+        self._refresh_waiting_status()
         return interrupt
 
     # Runtime Stream

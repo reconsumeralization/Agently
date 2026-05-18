@@ -1,6 +1,7 @@
 from pprint import pprint
 
 from agently import Agently
+from agently.types.data import ActionResult
 
 from _shared_model import configure_model, print_model_provider
 
@@ -54,7 +55,7 @@ def main():
     agent.use_actions([add, multiply])
 
     history: list[dict] = []
-    records: list[dict] = []
+    records: list[ActionResult] = []
     answer = ""
 
     for round_no in range(1, 5):
@@ -75,10 +76,10 @@ def main():
         )
         records.append(record)
         history.append({
-            "action_id": record["action_id"],
-            "kwargs": record["kwargs"],
-            "result": record["result"],
-            "status": record["status"],
+            "action_id": record.get("action_id"),
+            "kwargs": record.get("kwargs"),
+            "result": record.get("result"),
+            "status": record.get("status"),
         })
 
     print("[ACTION_HISTORY]")

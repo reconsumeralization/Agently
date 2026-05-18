@@ -74,7 +74,7 @@ await restored.async_continue_with(interrupt_id, {"approved": True})
 snapshot = await restored.async_close()
 ```
 
-`get_pending_interrupts()` returns ids of interrupts created via `pause_for(...)`. `continue_with(id, payload)` resumes the corresponding suspended chunk.
+`get_pending_interrupts()` returns ids of interrupts created via `pause_for(...)`. `continue_with(id, payload)` resolves one interrupt and resumes the graph according to that interrupt's `resume_to` target.
 
 ## Flow blueprint save / load
 

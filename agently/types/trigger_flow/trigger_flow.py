@@ -231,6 +231,23 @@ class _TriggerFlowSignalInfo:
         }
 
 
+class _TriggerFlowResumeInfo:
+    def __init__(self, data: dict[str, Any] | None):
+        payload = data if isinstance(data, dict) else {}
+        self.interrupt_id = payload.get("interrupt_id")
+        self.value = payload.get("value")
+        self.interrupt = payload.get("interrupt")
+        self.origin_signal = payload.get("origin_signal")
+
+    def to_dict(self):
+        return {
+            "interrupt_id": self.interrupt_id,
+            "value": self.value,
+            "interrupt": self.interrupt,
+            "origin_signal": self.origin_signal,
+        }
+
+
 class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
     put: Callable[[StreamT], None]
     async_put: Callable[[StreamT], Any]
@@ -287,6 +304,9 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         self.signal_id = signal.id if signal is not None else None
         self.signal_source = signal.source if signal is not None else None
         self.signal_meta = signal.meta.copy() if signal is not None else {}
+        resume_context = self.signal_meta.get("resume") if isinstance(self.signal_meta, dict) else None
+        self.is_resume = isinstance(resume_context, dict)
+        self.resume = _TriggerFlowResumeInfo(resume_context if isinstance(resume_context, dict) else None)
         self.signal_info = _TriggerFlowSignalInfo(
             trigger_event=trigger_event,
             trigger_type=trigger_type,

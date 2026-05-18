@@ -142,11 +142,10 @@ close 上的 `timeout=` 是 **drain timeout** —— 在途 task 的最大等待
 # 这个 flow 暂停等用户输入 —— 不要用 flow.start()
 flow = TriggerFlow(name="approval")
 async def ask(data):
-    return await data.async_pause_for(type="approval", resume_event="ApprovalGiven")
+    return await data.async_pause_for(type="approval", resume_to="next")
 async def commit(data):
     await data.async_set_state("approved", data.input)
-flow.to(ask)
-flow.when("ApprovalGiven").to(commit)
+flow.to(ask).to(commit)
 
 execution = flow.create_execution(auto_close=False)
 await execution.async_start(None)

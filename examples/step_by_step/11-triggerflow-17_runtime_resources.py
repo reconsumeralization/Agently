@@ -27,7 +27,7 @@ async def triggerflow_runtime_resources_demo():
         return await data.async_pause_for(
             type="human_input",
             payload={"question": f"search news for '{query}'?"},
-            resume_event="UserFeedback",
+            resume_to="next",
         )
 
     async def finalize(data: TriggerFlowRuntimeData):
@@ -45,8 +45,7 @@ async def triggerflow_runtime_resources_demo():
             },
         )
 
-    flow.to(prepare)
-    flow.when("UserFeedback").to(finalize)
+    flow.to(prepare).to(finalize)
 
     execution = flow.create_execution(auto_close=False)
     await execution.async_start("AI chips")

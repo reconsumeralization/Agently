@@ -109,7 +109,7 @@ Inside a chunk handler, `data` exposes:
 | `data.async_set_state(key, value)` / `get_state(key)` | execution-local serializable state |
 | `data.async_emit(event, payload)` | trigger `when(event)` branches |
 | `data.async_put_into_stream(item)` | push to runtime stream |
-| `data.async_pause_for(type=..., resume_event=...)` | pause for external resumption |
+| `data.async_pause_for(type=..., resume_to=...)` | pause for external graph resumption |
 | `data.require_resource(name)` | fetch a live object you injected |
 | `return value` | becomes the next chunk's `data.input` |
 

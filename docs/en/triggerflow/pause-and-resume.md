@@ -8,7 +8,7 @@ keywords: Agently, TriggerFlow, pause_for, continue_with, interrupt, human-in-th
 
 > Languages: **English** · [中文](../../cn/triggerflow/pause-and-resume.md)
 
-`pause_for(...)` lets a chunk suspend itself, returning control to the framework while it waits for an external event. The execution stays alive but idle. Auto-close is paused while a `pause_for` is outstanding. When the outside calls `continue_with(...)` (or the configured `resume_event` arrives via `emit`), the chunk wakes up with the supplied payload as its result.
+`pause_for(...)` lets a chunk stop at a durable interrupt barrier while it waits for an external event. The execution stays alive but idle. Auto-close is paused while a `pause_for` is outstanding. When the outside calls `continue_with(...)`, TriggerFlow resumes the graph according to the interrupt's resume target.
 
 ## Suspend with pause_for
 
@@ -17,7 +17,7 @@ async def ask(data: TriggerFlowRuntimeData):
     return await data.async_pause_for(
         type="human_input",
         payload={"question": f"Approve action for {data.input}?"},
-        resume_event="ApprovalGiven",
+        resume_to="next",
     )
 ```
 
@@ -25,15 +25,16 @@ What `pause_for` does:
 
 - Records an interrupt with a unique id.
 - Stops the auto-close timer for this execution.
-- Returns to the framework. The chunk's coroutine is suspended.
+- Returns to the framework. Durable continuation is graph-based, not Python stack persistence.
 - The interrupt is exposed via `execution.get_pending_interrupts()`.
-- When `continue_with(interrupt_id, payload)` is called (or an `emit(resume_event, payload)` matches), the awaited call returns the payload.
+- When `continue_with(interrupt_id, payload)` is called, the graph resumes according to `resume_to`.
 
 | Argument | Meaning |
 |---|---|
 | `type=` | a string label (e.g. `"human_input"`, `"approval"`, `"webhook"`). The application uses this to decide how to surface the interrupt. |
 | `payload=` | structured details for whatever's responsible for resuming (UI to render a question, webhook recipient, etc.). |
-| `resume_event=` | optional. If set, an `emit` of this event also resumes the pause (in addition to direct `continue_with`). |
+| `resume_to=` | optional target for `continue_with`: `"next"`, `"self"`, or `{"event": "EventName"}`. |
+| `resume_event=` | compatibility shortcut. If set without `resume_to`, `continue_with` and matching `emit(...)` route to that event. |
 | `interrupt_id=` | optional. Specify the id yourself; otherwise the framework generates one. |
 
 ## Resume with continue_with
@@ -43,15 +44,22 @@ interrupt_id = next(iter(execution.get_pending_interrupts()))
 await execution.async_continue_with(interrupt_id, {"approved": True})
 ```
 
-The payload becomes the return value of the suspended `await data.async_pause_for(...)` call. The chunk continues from there.
+With `resume_to="next"`, the payload becomes the paused chunk's output and the next `.to(...)` receives it.
 
-If you specified `resume_event="ApprovalGiven"`, this also works:
+With `resume_to="self"`, the same chunk runs again. Use `data.is_resume` and `data.resume.value`:
 
 ```python
-await execution.async_emit("ApprovalGiven", {"approved": True})
+async def gate(data: TriggerFlowRuntimeData):
+    if data.is_resume:
+        return {"decision": data.resume.value}
+    return await data.async_pause_for(
+        type="approval",
+        payload={"question": "Approve?"},
+        resume_to="self",
+    )
 ```
 
-The first matching interrupt is resumed.
+With `resume_to={"event": "ApprovalGiven"}`, TriggerFlow emits that event with the resume payload. `resume_event="ApprovalGiven"` keeps the older event-based behavior.
 
 ## Worked example
 
@@ -67,7 +75,7 @@ async def main():
         return await data.async_pause_for(
             type="approval",
             payload={"question": f"Approve refund for ticket {data.input}?"},
-            resume_event="ApprovalGiven",
+            resume_to="next",
         )
 
     async def commit(data: TriggerFlowRuntimeData):
@@ -91,6 +99,11 @@ asyncio.run(main())
 ```
 
 Note: this flow uses `pause_for(...)`. It must be created with `flow.create_execution(...)` (or `flow.start_execution(...)`), **not** `flow.start(...)` — the hidden execution sugar has no handle the outside can use to call `continue_with`.
+
+For a document-review example where the model itself decides to interrupt the
+workflow, see `examples/step_by_step/11-triggerflow-19_document_review_pause_resume.py`.
+It uses `pause_for(..., resume_to="self")` inside the model-owned gate, so the
+same gate re-enters with `data.is_resume` and `data.resume` after human review.
 
 ## Pause across process restarts
 
@@ -127,7 +140,8 @@ If you want a specific id, supply `interrupt_id="my-id"` to `pause_for(...)` and
 
 | Pattern | Use |
 |---|---|
-| `pause_for` + `continue_with` | the chunk needs to **return** with the payload and resume from there |
+| `pause_for(..., resume_to="next")` + `continue_with` | the next graph step should receive the resume payload |
+| `pause_for(..., resume_to="self")` + `continue_with` | the same chunk should run again with `data.resume` context |
 | `emit` + `when(...)` | a separate handler should run when an event happens; the original chunk doesn't need to wait |
 
 Pause is the right choice for human-in-the-loop because the chunk's logic depends on the human response. Emit/when is the right choice for fan-out side effects.

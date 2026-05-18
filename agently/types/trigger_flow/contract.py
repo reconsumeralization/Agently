@@ -34,12 +34,18 @@ class TriggerFlowInterrupt(TypedDict):
     status: Literal["waiting", "resumed"]
     payload: NotRequired[Any]
     resume_event: NotRequired[str | None]
+    resume_to: NotRequired[Any]
     response: NotRequired[Any]
+    local_interrupt_id: NotRequired[str | None]
+    source_execution_id: NotRequired[str | None]
+    source_flow_name: NotRequired[str | None]
+    source_operator_id: NotRequired[str | None]
+    sub_flow_frame_id: NotRequired[str | None]
 
 
 class TriggerFlowInterruptEvent(TypedDict):
     type: Literal["interrupt"]
-    action: Literal["pause", "resume"]
+    action: Literal["pause", "resume", "project"]
     execution_id: str
     interrupt: TriggerFlowInterrupt
     signal: NotRequired[dict[str, Any] | None]
