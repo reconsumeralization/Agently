@@ -82,4 +82,5 @@ system fields to application state.
 
 - [Lifecycle](lifecycle.md) - start, seal, close, and close snapshots
 - [State and Resources](state-and-resources.md) - choosing state keys
+- [Runtime Intervention](runtime-intervention.md) - how the intervention ledger is populated
 - [Compatibility](compatibility.md) - migrating from `.end()` and `set_result()`

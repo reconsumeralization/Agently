@@ -52,12 +52,46 @@ class TriggerFlowInterruptEvent(TypedDict):
     value: NotRequired[Any]
 
 
-TriggerFlowSystemStreamEvent: TypeAlias = TriggerFlowInterruptEvent
+class TriggerFlowInterventionConsumer(TypedDict):
+    status: Literal["applied", "ignored"]
+    note: str | None
+    metadata: dict[str, Any]
+    consumed_at: float
+
+
+class TriggerFlowIntervention(TypedDict):
+    id: str
+    version: int
+    status: Literal["pending", "inserted", "expired", "rejected"]
+    payload: Any
+    target: NotRequired[str | None]
+    author: NotRequired[str | None]
+    note: NotRequired[str | None]
+    metadata: dict[str, Any]
+    created_at: float
+    inserted_at: float | None
+    insertion: dict[str, Any] | None
+    rejected_at: float | None
+    reject_reason: str | None
+    expired_at: float | None
+    consumers: dict[str, TriggerFlowInterventionConsumer]
+
+
+class TriggerFlowInterventionEvent(TypedDict):
+    type: Literal["intervention"]
+    action: Literal["append", "insert", "expire", "consume", "reject"]
+    execution_id: str
+    intervention: TriggerFlowIntervention
+
+
+TriggerFlowSystemStreamEvent: TypeAlias = TriggerFlowInterruptEvent | TriggerFlowInterventionEvent
 TRIGGER_FLOW_INTERRUPT_EVENT_SCHEMA = TypeAdapter(TriggerFlowInterruptEvent).json_schema()
+TRIGGER_FLOW_INTERVENTION_EVENT_SCHEMA = TypeAdapter(TriggerFlowInterventionEvent).json_schema()
 
 
 class TriggerFlowSystemStreamMetadata(TypedDict, total=False):
     interrupt: TriggerFlowContractEntry
+    intervention: TriggerFlowContractEntry
 
 
 class TriggerFlowContractMetadata(TypedDict, total=False):

@@ -18,6 +18,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import TypeAdapter, ValidationError
 
 from agently.types.trigger_flow import (
+    TRIGGER_FLOW_INTERVENTION_EVENT_SCHEMA,
     TRIGGER_FLOW_INTERRUPT_EVENT_SCHEMA,
     TriggerFlowContractEntry,
     TriggerFlowContractMetadata,
@@ -128,6 +129,10 @@ class TriggerFlowContract(Generic[InputT, StreamT, ResultT]):
             "interrupt": {
                 "label": "TriggerFlowInterruptEvent",
                 "schema": copy.deepcopy(TRIGGER_FLOW_INTERRUPT_EVENT_SCHEMA),
+            },
+            "intervention": {
+                "label": "TriggerFlowInterventionEvent",
+                "schema": copy.deepcopy(TRIGGER_FLOW_INTERVENTION_EVENT_SCHEMA),
             }
         }
         if initial_input is None and stream is None and result is None and not meta:

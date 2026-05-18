@@ -449,6 +449,11 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         self.is_waiting = execution.is_waiting
         self.get_interrupt = execution.get_interrupt
         self.get_pending_interrupts = execution.get_pending_interrupts
+        self.interventions = execution._get_visible_interventions_snapshot()
+        self.get_interventions = self._get_visible_interventions
+        self.get_latest_intervention = self._get_latest_visible_intervention
+        self.mark_intervention_consumed = execution.mark_intervention_consumed
+        self.async_mark_intervention_consumed = execution.async_mark_intervention_consumed
 
         self.set_result = lambda result: execution.set_result(
             result,
@@ -472,6 +477,32 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
 
     def layer_out(self):
         self._layer_marks = self._layer_marks[:-1] if len(self._layer_marks) > 0 else []
+
+    def _copy_intervention(self, intervention: dict[str, Any]):
+        return StateData({"value": intervention}).get("value")
+
+    def _get_visible_interventions(
+        self,
+        status: str | None = None,
+        target: str | None = None,
+        since_version: int | None = None,
+    ):
+        interventions = []
+        for intervention in self.interventions:
+            if status is not None and intervention.get("status") != status:
+                continue
+            if target is not None and intervention.get("target") != target:
+                continue
+            if since_version is not None and int(intervention.get("version", 0)) <= since_version:
+                continue
+            interventions.append(self._copy_intervention(intervention))
+        return interventions
+
+    def _get_latest_visible_intervention(self, default: Any = None, **filters: Any):
+        interventions = self._get_visible_interventions(**filters)
+        if not interventions:
+            return default
+        return interventions[-1]
 
 
 TriggerFlowEventData = TriggerFlowRuntimeData
