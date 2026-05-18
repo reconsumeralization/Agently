@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.2.1",
-  "release_train": "2026-05-4.1.2.1",
+  "target_version": "4.1.2.2",
+  "release_train": "2026-05-4.1.2.2",
   "notes": "Current public development-line manifest for the next Agently release before publication.",
   "companions": {
     "devtools": {

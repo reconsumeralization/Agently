@@ -109,6 +109,7 @@ async def main():
 - `data.put_into_stream(item)` 是同步版。
 - `execution.get_async_runtime_stream(timeout=...)` 按到达顺序产出 item。execution close 时 stream 也关。
 - 同步消费：`execution.get_runtime_stream(timeout=...)`。
+- TriggerFlow 也会写入 interrupt 和 runtime intervention 的 fail-open system item。只关心业务 stream item 的 consumer 应忽略未知 `type`。
 
 ### Stream timeout vs auto-close timeout
 
@@ -137,5 +138,6 @@ Agently 还会通过 Event Center 发出 **observation event**（观测事件）
 
 - [模式](patterns.md) —— `when` 是几个流控原语之一
 - [Pause 与 Resume](pause-and-resume.md) —— `continue_with(interrupt_id, payload)` 是恢复路径，与 `emit` 分开
+- [Runtime Intervention](runtime-intervention.md) —— 在安全边界插入补充上下文
 - [Lifecycle](lifecycle.md) —— `close()` 对 runtime stream 做了什么
 - [Event Center](../observability/event-center.md) —— 框架级 observation event

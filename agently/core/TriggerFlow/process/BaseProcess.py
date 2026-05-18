@@ -15,7 +15,6 @@
 
 import uuid
 import copy
-import warnings
 from asyncio import Event, Semaphore
 
 from typing import Callable, Any, Literal, TYPE_CHECKING, overload, cast, TypeAlias
@@ -35,6 +34,7 @@ if TYPE_CHECKING:
 from ..Chunk import TriggerFlowChunk
 from agently.types.data import EMPTY
 from agently.types.trigger_flow import TriggerFlowBlockData
+from agently.utils import DeprecationWarnings
 
 
 class _UnsetType:
@@ -420,6 +420,66 @@ class TriggerFlowBaseProcess:
             name=name,
         )
 
+    def intervention_point(
+        self,
+        *,
+        name: str,
+        target: str | None = None,
+    ):
+        if not isinstance(name, str) or not name:
+            raise ValueError("TriggerFlow intervention_point() requires a non-empty name.")
+        normalized_target = str(target) if target is not None else None
+        point_identity = {
+            "kind": "intervention_point",
+            "name": name,
+        }
+        point_id = self._blue_print.make_stable_operator_id("intervention-point", point_identity)
+        point_trigger = f"InterventionPoint[{ name }]-{ point_id }"
+        emit_signal = self._event_signal(point_trigger, role="continuation")
+        parent_group_id, parent_group_kind = self._current_definition_parent_group()
+
+        async def insert_interventions(data: "TriggerFlowRuntimeData"):
+            operator = data.execution._get_handler_operator(point_id)
+            await data.execution._async_insert_planned_interventions(
+                target=normalized_target,
+                operator=operator,
+                signal=data.signal,
+            )
+            await data.async_emit(
+                point_trigger,
+                data.value,
+                _layer_marks=data._layer_marks.copy(),
+            )
+
+        self._blue_print.add_handler(
+            self.trigger_type,
+            self.trigger_event,
+            insert_interventions,
+            id=point_id,
+        )
+        self._blue_print.definition.add_operator(
+            id=point_id,
+            kind="intervention_point",
+            name=name,
+            listen_signals=self._definition_signals,
+            emit_signals=[emit_signal],
+            options={"target": normalized_target},
+            group_id=self._definition_group_id,
+            group_kind=self._definition_group_kind,
+            parent_group_id=parent_group_id,
+            parent_group_kind=parent_group_kind,
+        )
+        return self._new(
+            trigger_event=point_trigger,
+            trigger_type="event",
+            blueprint=self._blue_print,
+            block_data=self._block_data,
+            definition_signals=[emit_signal],
+            definition_group_id=self._definition_group_id,
+            definition_group_kind=self._definition_group_kind,
+            **self._options,
+        )
+
     def batch(
         self,
         *chunks: "TriggerFlowChunk | TriggerFlowHandler | tuple[str, TriggerFlowHandler]",
@@ -655,10 +715,10 @@ class TriggerFlowBaseProcess:
         )
 
     def end(self):
-        warnings.warn(
+        DeprecationWarnings.warn_deprecated_once(
+            "TriggerFlowProcess.end",
             "TriggerFlowProcess.end() is deprecated. It only installs a compatibility result sink that writes "
             "'$final_result'. New code should rely on execution close snapshots and runtime lifecycle APIs.",
-            DeprecationWarning,
             stacklevel=2,
         )
 

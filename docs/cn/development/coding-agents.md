@@ -80,10 +80,13 @@ done
 
 特别地，skill **不得**推荐 deprecated 路径如 `.end()`、`set_result()`、`wait_for_result=`、旧 `runtime_data`。如果你发现某 skill 推荐其中之一，请向 `Agently-Skills` 提 issue。
 
+新增框架 deprecation 时，必须通过 `agently.utils.DeprecationWarnings.warn_deprecated_once(...)` 或 `agently.utils.warn_deprecated_once(...)` alias 搭配稳定 API key 发 warning。不要直接新增 `warnings.warn(..., DeprecationWarning, ...)`；deprecated API warning 设计为每个 Python 进程内每个 API 只发一次，并遵守 `runtime.show_deprecation_warnings`。
+
 ## 4.1 之后的默认推荐
 
 当你审计或编写面向 Agently `4.1+` 的指导时，coding agent 应默认偏向这些用法：
 
+- API 形态：遵守奥卡姆剃刀原则。如无必要，勿增实体、方法、facade 或兼容补丁；已有表面能清晰承载语义时优先复用。若只是命名表意不清，优先建议窄别名或文档澄清，而不是再加一个容易重叠的方法。
 - 结构化输出：固定必填叶子直接写在 `.output(...)` 的 `(TypeExpr, "description", True)` 里。手动 `ensure_keys=` 只留给条件路径或运行时决定的路径。
 - Actions：新代码从 `@agent.action_func` 和 `agent.use_actions(...)` 起步。`tool_func`、`use_tool`、`use_tools` 是兼容别名，不是首选推荐。
 - TriggerFlow lifecycle：把 `close()` / `async_close()` 和 close snapshot 视为规范收尾路径。不要把 `.end()`、`set_result()`、`get_result()`、`wait_for_result=` 当正常起点。
@@ -99,6 +102,12 @@ done
 ## 验证脚本
 
 数个 skill 携带验证脚本（如 `validate/validate_native_usage.py`）。coding agent 在宣布任务完成前可跑它们，确认用户项目遵循推荐路径。例如 TriggerFlow 验证器检查没有 deprecated API 作为推荐起点。
+
+功能验收通过还要求完成 spec 对齐：把相关 spec 更新为最终实现方案，已完整落地的 planned spec 移入 `spec/implemented/`，并在同一工作项里更新 `spec/README.md`。
+
+用户可见 feature work 必须为功能所对应的场景新增或更新 examples。example 应在声明环境中可运行，使用当前推荐 API，并通过输出、断言或注释把关键运行时行为展示出来。`Expected key output` 注释应保留一次实际运行中的稳定关键值，而不是只写“可以看到 X”一类泛化描述。当输出本身不足以解释行为时，可在 example 注释中补充简短工作原理或 ASCII 流程图。
+
+汇报 API、推荐用法、examples 或兼容线变化时，应给出能直观看出新用法的简短样例代码。能用当前用法或 before/after 片段说明时，优先用代码片段而不是抽象描述。
 
 ## 另见
 

@@ -142,11 +142,10 @@ close 上的 `timeout=` 是 **drain timeout** —— 在途 task 的最大等待
 # 这个 flow 暂停等用户输入 —— 不要用 flow.start()
 flow = TriggerFlow(name="approval")
 async def ask(data):
-    return await data.async_pause_for(type="approval", resume_event="ApprovalGiven")
+    return await data.async_pause_for(type="approval", resume_to="next")
 async def commit(data):
     await data.async_set_state("approved", data.input)
-flow.to(ask)
-flow.when("ApprovalGiven").to(commit)
+flow.to(ask).to(commit)
 
 execution = flow.create_execution(auto_close=False)
 await execution.async_start(None)
@@ -167,6 +166,7 @@ snapshot = await execution.async_close()
 ## 另见
 
 - [State 与 Resources](state-and-resources.md) —— 什么进 snapshot
+- [Execution Result](execution-result.md) —— 通过统一 facade 读取 snapshot、state、兼容 result 和 metadata
 - [Pause 与 Resume](pause-and-resume.md) —— `pause_for` 与 `continue_with`
 - [持久化与 Blueprint](persistence-and-blueprint.md) —— `save` / `load`
 - [兼容](compatibility.md) —— 从旧 API 迁移

@@ -12,6 +12,8 @@ keywords: Agently, TriggerFlow, 兼容, deprecated, end, set_result, wait_for_re
 
 高层转变：新 lifecycle 把 **close snapshot** 当作规范返回值。试图算单一「result」的旧 API —— `.end()`、`set_result()`、`get_result()`、`wait_for_result=` —— 作为兼容入口保留，但不推荐用于新代码。
 
+Deprecation warning 按 deprecated API 在每个 Python 进程内只发一次。重复调用继续工作但不重复刷同一条 warning；不同 deprecated API 仍会各自提示一次。如果生产环境需要全局关闭 Agently deprecation warning，设置 `runtime.show_deprecation_warnings=False`。
+
 ## .end() —— 定义期 DSL，不是 lifecycle 动作
 
 `.end()` 历史上被用作「结束」flow 的方式。它当前实际行为更窄：
@@ -49,6 +51,10 @@ async def step_b(data):
 `set_result(value)` 写到同一 `"$final_result"` state key。`get_result()` 读它（或回退 close snapshot）。
 
 状态：**Deprecated** —— 都发警告。
+
+必须桥接兼容代码时，优先用
+`await execution.result.async_get_final_result()`，不要新增 `get_result()`
+调用点。它保留同样的查找顺序，但兼容意图更明确。
 
 ### 旧
 

@@ -142,11 +142,10 @@ What close does, in order:
 # This flow pauses for user input — DO NOT use flow.start()
 flow = TriggerFlow(name="approval")
 async def ask(data):
-    return await data.async_pause_for(type="approval", resume_event="ApprovalGiven")
+    return await data.async_pause_for(type="approval", resume_to="next")
 async def commit(data):
     await data.async_set_state("approved", data.input)
-flow.to(ask)
-flow.when("ApprovalGiven").to(commit)
+flow.to(ask).to(commit)
 
 execution = flow.create_execution(auto_close=False)
 await execution.async_start(None)
@@ -167,6 +166,7 @@ If you'd written `await flow.async_start(None)` instead, the hidden execution wo
 ## See also
 
 - [State and Resources](state-and-resources.md) — what makes it into the snapshot
+- [Execution Result](execution-result.md) — reading snapshots, state, compatibility results, and metadata through one facade
 - [Pause and Resume](pause-and-resume.md) — `pause_for` and `continue_with`
 - [Persistence and Blueprint](persistence-and-blueprint.md) — `save` / `load`
 - [Compatibility](compatibility.md) — migration from older APIs

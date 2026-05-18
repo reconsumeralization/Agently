@@ -231,6 +231,23 @@ class _TriggerFlowSignalInfo:
         }
 
 
+class _TriggerFlowResumeInfo:
+    def __init__(self, data: dict[str, Any] | None):
+        payload = data if isinstance(data, dict) else {}
+        self.interrupt_id = payload.get("interrupt_id")
+        self.value = payload.get("value")
+        self.interrupt = payload.get("interrupt")
+        self.origin_signal = payload.get("origin_signal")
+
+    def to_dict(self):
+        return {
+            "interrupt_id": self.interrupt_id,
+            "value": self.value,
+            "interrupt": self.interrupt,
+            "origin_signal": self.origin_signal,
+        }
+
+
 class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
     put: Callable[[StreamT], None]
     async_put: Callable[[StreamT], Any]
@@ -287,6 +304,9 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         self.signal_id = signal.id if signal is not None else None
         self.signal_source = signal.source if signal is not None else None
         self.signal_meta = signal.meta.copy() if signal is not None else {}
+        resume_context = self.signal_meta.get("resume") if isinstance(self.signal_meta, dict) else None
+        self.is_resume = isinstance(resume_context, dict)
+        self.resume = _TriggerFlowResumeInfo(resume_context if isinstance(resume_context, dict) else None)
         self.signal_info = _TriggerFlowSignalInfo(
             trigger_event=trigger_event,
             trigger_type=trigger_type,
@@ -354,6 +374,17 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
                 "chunk_name": self.chunk_run_context.meta.get("chunk_name"),
                 "operator_kind": self.chunk_run_context.meta.get("operator_kind"),
             }
+
+        def _default_intervention_consumer():
+            origin_chunk = _origin_chunk_payload()
+            if isinstance(origin_chunk, dict):
+                chunk_name = origin_chunk.get("chunk_name")
+                if chunk_name:
+                    return str(chunk_name)
+                chunk_id = origin_chunk.get("chunk_id")
+                if chunk_id:
+                    return str(chunk_id)
+            return "chunk"
 
         def _chunk_signal_meta(meta: dict[str, Any] | None = None):
             origin_chunk = _origin_chunk_payload()
@@ -429,6 +460,44 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         self.is_waiting = execution.is_waiting
         self.get_interrupt = execution.get_interrupt
         self.get_pending_interrupts = execution.get_pending_interrupts
+        self.interventions = execution._get_visible_interventions_snapshot()
+        self.get_interventions = self._get_visible_interventions
+        self.get_latest_intervention = self._get_latest_visible_intervention
+
+        def _mark_intervention_consumed_from_chunk(
+            intervention_id: str,
+            *,
+            consumer: str | None = None,
+            status: Literal["applied", "ignored"] = "applied",
+            note: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ):
+            return execution.mark_intervention_consumed(
+                intervention_id,
+                consumer=consumer if consumer is not None else _default_intervention_consumer(),
+                status=status,
+                note=note,
+                metadata=metadata,
+            )
+
+        async def _async_mark_intervention_consumed_from_chunk(
+            intervention_id: str,
+            *,
+            consumer: str | None = None,
+            status: Literal["applied", "ignored"] = "applied",
+            note: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ):
+            return await execution.async_mark_intervention_consumed(
+                intervention_id,
+                consumer=consumer if consumer is not None else _default_intervention_consumer(),
+                status=status,
+                note=note,
+                metadata=metadata,
+            )
+
+        self.mark_intervention_consumed = _mark_intervention_consumed_from_chunk
+        self.async_mark_intervention_consumed = _async_mark_intervention_consumed_from_chunk
 
         self.set_result = lambda result: execution.set_result(
             result,
@@ -452,6 +521,32 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
 
     def layer_out(self):
         self._layer_marks = self._layer_marks[:-1] if len(self._layer_marks) > 0 else []
+
+    def _copy_intervention(self, intervention: dict[str, Any]):
+        return StateData({"value": intervention}).get("value")
+
+    def _get_visible_interventions(
+        self,
+        status: str | None = None,
+        target: str | None = None,
+        since_version: int | None = None,
+    ):
+        interventions = []
+        for intervention in self.interventions:
+            if status is not None and intervention.get("status") != status:
+                continue
+            if target is not None and intervention.get("target") != target:
+                continue
+            if since_version is not None and int(intervention.get("version", 0)) <= since_version:
+                continue
+            interventions.append(self._copy_intervention(intervention))
+        return interventions
+
+    def _get_latest_visible_intervention(self, default: Any = None, **filters: Any):
+        interventions = self._get_visible_interventions(**filters)
+        if not interventions:
+            return default
+        return interventions[-1]
 
 
 TriggerFlowEventData = TriggerFlowRuntimeData

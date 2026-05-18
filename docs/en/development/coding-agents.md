@@ -79,10 +79,13 @@ Documentation tells humans what's possible. Skills tell coding agents what's rec
 
 In particular, skills must NOT recommend deprecated paths like `.end()`, `set_result()`, `wait_for_result=`, or the old `runtime_data` API. If you find a skill recommending one of these, file an issue against `Agently-Skills`.
 
+When adding a framework deprecation, route the warning through `agently.utils.DeprecationWarnings.warn_deprecated_once(...)` or the `agently.utils.warn_deprecated_once(...)` alias with a stable API key. Do not add direct `warnings.warn(..., DeprecationWarning, ...)` calls; deprecated API warnings are intentionally once per API per Python process and respect `runtime.show_deprecation_warnings`.
+
 ## Post-4.1 defaults
 
 When you audit or author guidance for Agently `4.1+`, these are the defaults coding agents should prefer:
 
+- API shape: apply Occam's razor. Do not add a new entity, method, facade, or compatibility patch when an existing surface already expresses the concept. If a name is unclear, prefer a narrow alias or documentation clarification over another overlapping method.
 - Structured output: for fixed required leaves, mark `(TypeExpr, "description", True)` directly in `.output(...)`. Use manual `ensure_keys=` only for conditional or runtime-dependent paths.
 - Actions: new code should start from `@agent.action_func` and `agent.use_actions(...)`. `tool_func`, `use_tool`, and `use_tools` are compatibility aliases, not the primary recommendation.
 - TriggerFlow lifecycle: treat `close()` / `async_close()` and the close snapshot as the canonical completion path. Do not recommend `.end()`, `set_result()`, `get_result()`, or `wait_for_result=` as the normal starting point.
@@ -98,6 +101,12 @@ If your team has internal patterns layered on top of Agently (a particular proje
 ## Validation scripts
 
 Several skills ship validation scripts (e.g., `validate/validate_native_usage.py`). Coding agents can run these to confirm a user's project follows the recommended path before declaring a task complete. For example, the TriggerFlow validator checks that no deprecated API is being used as the recommended starting point.
+
+Feature acceptance also requires spec reconciliation: update the relevant spec to the final implemented design, move fully landed planned specs into `spec/implemented/`, and update `spec/README.md` in the same work item.
+
+User-visible feature work must add or update examples for the scenario the feature enables. Keep the example runnable in its declared environment, aligned with the current recommended API, and explicit about the important runtime behavior. Its `Expected key output` comment should preserve stable key values from one real run, not a generic "shows X" description. When the behavior is not obvious from output alone, add concise working-principle notes or an ASCII flow diagram in the example comment.
+
+When reporting API, recommended usage, examples, or compatibility changes, include concise sample code that shows the updated usage shape. Prefer current usage snippets or before/after snippets over abstract prose when that makes the change easier to inspect.
 
 ## See also
 

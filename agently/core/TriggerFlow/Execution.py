@@ -19,6 +19,7 @@ import warnings
 import json
 import yaml
 import time
+import copy
 from pathlib import Path
 from json import JSONDecodeError
 from contextvars import ContextVar
@@ -28,13 +29,19 @@ from typing import Any, Literal, TYPE_CHECKING, overload, AsyncGenerator, Genera
 if TYPE_CHECKING:
     from .TriggerFlow import TriggerFlow
     from agently.types.trigger_flow import TriggerFlowAllHandlers
-    from agently.types.data import ExecutionEnvironmentHandle, ExecutionEnvironmentRequirement, RunContext, SerializableValue
+    from agently.types.data import (
+        ExecutionEnvironmentHandle,
+        ExecutionEnvironmentRequirement,
+        RunContext,
+        SerializableValue,
+    )
 
-from agently.utils import StateData, FunctionShifter, GeneratorConsumer, Settings
+from agently.utils import DeprecationWarnings, StateData, FunctionShifter, GeneratorConsumer, Settings
 from agently.core.RuntimeContext import bind_runtime_context, get_current_chunk_run_context
 from agently.types.trigger_flow import (
     TriggerFlowContractMetadata,
     TriggerFlowContractSpec,
+    TriggerFlowInterventionEvent,
     TriggerFlowInterruptEvent,
     TriggerFlowRuntimeData,
     RUNTIME_STREAM_STOP,
@@ -59,6 +66,137 @@ InputT = TypeVar("InputT")
 StreamT = TypeVar("StreamT")
 ResultT = TypeVar("ResultT")
 COMPAT_FINAL_RESULT_KEY = "$final_result"
+INTERVENTIONS_STATE_KEY = "$interventions"
+TriggerFlowInterventionMode = Literal["planned", "auto"] | None
+
+
+class TriggerFlowExecutionResult(Generic[ResultT]):
+    def __init__(self, execution: "TriggerFlowExecution[Any, Any, ResultT]"):
+        self._execution = execution
+        self.get_final_result = FunctionShifter.syncify(self.async_get_final_result)
+
+    def _state_view(self):
+        if self._execution._closed_event.is_set() and self._execution._close_result is not None:
+            state = self._execution._close_result
+        else:
+            state = self._execution._runtime_state_snapshot()
+        return state if isinstance(state, dict) else {}
+
+    def _copy_value(self, value: Any):
+        return StateData({"value": value}).get("value")
+
+    def _resolve_final_result_or_snapshot(self):
+        compat_result = self._execution._get_state(COMPAT_FINAL_RESULT_KEY, EMPTY, inherit=False)
+        if compat_result is not EMPTY:
+            return compat_result
+
+        result = self._execution._system_runtime_data.get("result")
+        if result is not EMPTY:
+            return result
+
+        if self._execution._close_result is not None:
+            return self._execution._close_result
+        return self._execution._build_close_snapshot()
+
+    def get_state(self, key: Any | None = None, default: Any = None):
+        state = StateData(self._state_view())
+        return state.get(key, default, inherit=False)
+
+    async def async_get_final_result(self, timeout: float | None = None) -> ResultT | None:
+        if self._execution._compat_result_exists() or self._execution._closed_event.is_set():
+            return cast(ResultT | None, self._resolve_final_result_or_snapshot())
+
+        result_ready = self._execution._system_runtime_data.get("result_ready")
+        waiters: list[asyncio.Task[Any]] = []
+        if isinstance(result_ready, asyncio.Event):
+            waiters.append(asyncio.create_task(result_ready.wait()))
+        waiters.append(asyncio.create_task(self._execution._closed_event.wait()))
+
+        try:
+            if timeout is None:
+                done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                done, _ = await asyncio.wait(
+                    waiters,
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+        finally:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+        if not done:
+            warnings.warn(
+                f"Can not get the compatibility result of trigger flow { self._execution.id } because it took too "
+                "long and timeout.\nUse close()/async_close(), reduce auto_close_timeout, or pass timeout=None to "
+                f"wait forever. Timeout: { timeout }"
+            )
+            return None
+        return cast(ResultT | None, self._resolve_final_result_or_snapshot())
+
+    def _read_intervention_records(self):
+        records = self._execution._system_runtime_data.get("interventions", EMPTY, inherit=False)
+        if records is EMPTY:
+            records = self._execution._get_state(INTERVENTIONS_STATE_KEY, EMPTY, inherit=False)
+        if records is EMPTY:
+            records = self._execution._get_state("interventions", EMPTY, inherit=False)
+        if records is EMPTY:
+            return []
+        if isinstance(records, dict):
+            return [record for record in records.values() if isinstance(record, dict)]
+        if isinstance(records, list):
+            return [record for record in records if isinstance(record, dict)]
+        return []
+
+    def get_interventions(
+        self,
+        status: str | None = None,
+        target: str | None = None,
+        since_version: int | None = None,
+        consumed_by: str | None = None,
+    ):
+        interventions = []
+        for record in self._read_intervention_records():
+            if status is not None and record.get("status") != status:
+                continue
+            if target is not None and record.get("target") != target:
+                continue
+            if since_version is not None and int(record.get("version", 0)) <= since_version:
+                continue
+            if consumed_by is not None:
+                consumers = record.get("consumers", {})
+                legacy_consumed_by = record.get("consumed_by")
+                if isinstance(consumers, dict) and consumed_by in consumers:
+                    pass
+                elif isinstance(legacy_consumed_by, (list, tuple, set)) and consumed_by in legacy_consumed_by:
+                    pass
+                elif legacy_consumed_by == consumed_by:
+                    pass
+                else:
+                    continue
+            interventions.append(self._copy_value(record))
+        return interventions
+
+    def get_latest_intervention(self, default: Any = None, **filters: Any):
+        interventions = self.get_interventions(**filters)
+        if not interventions:
+            return default
+        return interventions[-1]
+
+    def get_meta(self):
+        return {
+            "execution_id": self._execution.id,
+            "flow_name": self._execution._trigger_flow.name,
+            "status": self._execution._status,
+            "lifecycle_state": self._execution._lifecycle_state,
+            "created_at": self._execution._created_at,
+            "started_at": self._execution._started_at,
+            "closed_at": self._execution._closed_at,
+            "close_reason": self._execution._close_reason,
+            "state_version": self._execution._state_version,
+        }
 
 
 class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
@@ -76,7 +214,23 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         owner_id: str | None = None,
         lease_ttl: float | None = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        intervention_mode: TriggerFlowInterventionMode = None,
+        intervention_policy: Any = None,
     ):
+        if intervention_mode not in {None, "planned", "auto"}:
+            raise ValueError("TriggerFlow intervention_mode must be one of: None, 'planned', 'auto'.")
+        if intervention_mode == "auto":
+            planned_points = [
+                operator
+                for operator in trigger_flow._blue_print.definition.operators
+                if operator.get("kind") == "intervention_point"
+            ]
+            if planned_points:
+                names = [str(operator.get("name") or operator.get("id")) for operator in planned_points]
+                raise ValueError(
+                    "TriggerFlow intervention_mode='auto' can not be used with explicit intervention points. "
+                    f"Found: { names }"
+                )
         # Basic Attributions
         self.id = id if id is not None else uuid.uuid4().hex
         self._handlers = handlers
@@ -132,6 +286,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._close_result: Any = None
         self._closed_event = asyncio.Event()
         self._runtime_stream_stopped = False
+        self._intervention_mode: TriggerFlowInterventionMode = intervention_mode
+        self._intervention_policy = intervention_policy
+        self._intervention_policy_name = self._resolve_intervention_policy_name(intervention_policy)
+        self._interventions_version = 0
+        self._intervention_lock = asyncio.Lock()
 
         # Settings
         self.settings = Settings(
@@ -183,6 +342,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         # Pause / Continue
         self.pause_for = FunctionShifter.syncify(self.async_pause_for)
         self.continue_with = FunctionShifter.syncify(self.async_continue_with)
+        self.intervene = FunctionShifter.syncify(self.async_intervene)
+        self.mark_intervention_consumed = FunctionShifter.syncify(self.async_mark_intervention_consumed)
 
         # Result
         self.get_result = FunctionShifter.syncify(self.async_get_result)
@@ -199,11 +360,17 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._system_runtime_data.set("lifecycle_state", self._lifecycle_state)
         self._system_runtime_data.set("state_version", self._state_version)
         self._system_runtime_data.set("interrupts", {})
+        self._system_runtime_data.set("interventions", {})
+        self._system_runtime_data.set("intervention_mode", self._intervention_mode)
+        self._system_runtime_data.set("intervention_policy", self._intervention_policy_name)
+        self._system_runtime_data.set("intervention_version", self._interventions_version)
+        self._system_runtime_data.set("sub_flow_frames", {})
         self._system_runtime_data.set("last_signal", None)
         self._system_runtime_data.set("result", EMPTY)
         self._system_runtime_data.set("result_ready", asyncio.Event())
         self._runtime_stream_queue = asyncio.Queue()
         self._runtime_stream_consumer: GeneratorConsumer | None = None
+        self.result = TriggerFlowExecutionResult(self)
 
     async def _ensure_execution_environments(self):
         if not self._execution_environment_requirements:
@@ -238,6 +405,377 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     def _to_serializable_value(self, value: Any):
         return json.loads(StateData({"value": value}).dump("json"))["value"]
 
+    def _copy_value(self, value: Any):
+        return StateData({"value": value}).get("value")
+
+    def _resolve_intervention_policy_name(self, policy: Any):
+        if policy is None:
+            return "builtin" if self._intervention_mode == "auto" else None
+        return getattr(policy, "__name__", type(policy).__name__)
+
+    def _get_intervention_records(self) -> dict[str, dict[str, Any]]:
+        records = self._system_runtime_data.get("interventions", {}, inherit=False)
+        return records if isinstance(records, dict) else {}
+
+    def _write_intervention_records(self, records: dict[str, dict[str, Any]], *, bump: bool = True):
+        serializable_records = self._to_serializable_value(records)
+        self._system_runtime_data.set("interventions", serializable_records)
+        self._system_runtime_data.set("intervention_version", self._interventions_version)
+        self._runtime_data.set(INTERVENTIONS_STATE_KEY, serializable_records)
+        if bump:
+            self._bump_state_version()
+
+    def _intervention_matches_target(self, intervention: dict[str, Any], target: str | None):
+        intervention_target = intervention.get("target")
+        if target is None:
+            return intervention_target is None
+        return intervention_target == target
+
+    def _sorted_intervention_records(self):
+        return sorted(
+            (
+                record
+                for record in self._get_intervention_records().values()
+                if isinstance(record, dict)
+            ),
+            key=lambda record: int(record.get("version", 0)),
+        )
+
+    def get_interventions(
+        self,
+        status: str | None = None,
+        target: str | None = None,
+        since_version: int | None = None,
+    ):
+        interventions = []
+        for record in self._sorted_intervention_records():
+            if status is not None and record.get("status") != status:
+                continue
+            if target is not None and record.get("target") != target:
+                continue
+            if since_version is not None and int(record.get("version", 0)) <= since_version:
+                continue
+            interventions.append(self._copy_value(record))
+        return interventions
+
+    def get_pending_interventions(self, target: str | None = None):
+        return self.get_interventions(status="pending", target=target)
+
+    def get_latest_intervention(self, default: Any = None, **filters: Any):
+        interventions = self.get_interventions(**filters)
+        if not interventions:
+            return default
+        return interventions[-1]
+
+    def _get_visible_interventions_snapshot(self):
+        return self.get_interventions(status="inserted")
+
+    async def _emit_intervention_event(self, event_type: str, action: str, intervention: dict[str, Any]):
+        serializable_intervention = self._to_serializable_value(intervention)
+        stream_event = cast(
+            TriggerFlowInterventionEvent,
+            {
+                "type": "intervention",
+                "action": action,
+                "execution_id": self.id,
+                "intervention": serializable_intervention,
+            },
+        )
+        await self.async_put_into_stream(stream_event, _skip_contract_validation=True)
+        await self._emit_runtime_event(
+            event_type,
+            message=f"TriggerFlow execution '{ self.id }' intervention '{ action }'.",
+            payload={"intervention": serializable_intervention},
+        )
+
+    async def async_intervene(
+        self,
+        payload: Any,
+        *,
+        author: str | None = None,
+        note: str | None = None,
+        target: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        if self._intervention_mode is None:
+            raise RuntimeError(
+                "TriggerFlow runtime intervention is disabled for this execution. "
+                "Create the execution with intervention_mode='planned' or intervention_mode='auto'."
+            )
+        if self._lifecycle_state != TRIGGER_FLOW_LIFECYCLE_OPEN:
+            raise RuntimeError(
+                f"TriggerFlow execution { self.id } can not accept interventions while lifecycle state is "
+                f"'{ self._lifecycle_state }'."
+            )
+        if metadata is not None and not isinstance(metadata, dict):
+            raise TypeError(f"TriggerFlow intervention metadata must be a dictionary, got: { type(metadata) }.")
+
+        serializable_payload = self._to_serializable_value(payload)
+        serializable_metadata = self._to_serializable_value(metadata or {})
+        if target is not None:
+            target = str(target)
+        if author is not None:
+            author = str(author)
+        if note is not None:
+            note = str(note)
+
+        async with self._intervention_lock:
+            self._interventions_version += 1
+            intervention_id = uuid.uuid4().hex
+            intervention = {
+                "id": intervention_id,
+                "version": self._interventions_version,
+                "status": "pending",
+                "payload": serializable_payload,
+                "target": target,
+                "author": author,
+                "note": note,
+                "metadata": serializable_metadata,
+                "created_at": time.time(),
+                "inserted_at": None,
+                "insertion": None,
+                "rejected_at": None,
+                "reject_reason": None,
+                "expired_at": None,
+                "consumers": {},
+            }
+            records = self._get_intervention_records().copy()
+            records[intervention_id] = intervention
+            self._write_intervention_records(records)
+            self._mark_activity()
+
+        await self._emit_intervention_event(
+            "triggerflow.intervention_received",
+            "append",
+            intervention,
+        )
+        return self._copy_value(intervention)
+
+    def _build_intervention_insertion(
+        self,
+        *,
+        mode: Literal["planned", "auto"],
+        operator: dict[str, Any] | None,
+        signal: TriggerFlowSignal | None,
+        policy_name: str | None = None,
+    ):
+        inserted_at = time.time()
+        insertion = {
+            "mode": mode,
+            "operator_id": operator.get("id") if isinstance(operator, dict) else None,
+            "operator_name": operator.get("name") if isinstance(operator, dict) else None,
+            "operator_kind": operator.get("kind") if isinstance(operator, dict) else None,
+            "group_id": operator.get("group_id") if isinstance(operator, dict) else None,
+            "group_kind": operator.get("group_kind") if isinstance(operator, dict) else None,
+            "signal": self._serialize_signal(signal),
+            "inserted_at": inserted_at,
+        }
+        if policy_name is not None:
+            insertion["policy"] = policy_name
+        return inserted_at, insertion
+
+    async def _async_insert_interventions(
+        self,
+        intervention_ids: list[str],
+        *,
+        mode: Literal["planned", "auto"],
+        operator: dict[str, Any] | None,
+        signal: TriggerFlowSignal | None,
+        policy_name: str | None = None,
+    ):
+        inserted: list[dict[str, Any]] = []
+        if not intervention_ids:
+            return inserted
+        async with self._intervention_lock:
+            records = self._get_intervention_records().copy()
+            inserted_at, insertion = self._build_intervention_insertion(
+                mode=mode,
+                operator=operator,
+                signal=signal,
+                policy_name=policy_name,
+            )
+            for intervention_id in intervention_ids:
+                record = records.get(str(intervention_id))
+                if not isinstance(record, dict) or record.get("status") != "pending":
+                    continue
+                updated = dict(record)
+                updated["status"] = "inserted"
+                updated["inserted_at"] = inserted_at
+                updated["insertion"] = self._copy_value(insertion)
+                records[str(intervention_id)] = updated
+                inserted.append(updated)
+            if inserted:
+                self._write_intervention_records(records)
+                self._mark_activity()
+        for intervention in inserted:
+            await self._emit_intervention_event(
+                "triggerflow.intervention_inserted",
+                "insert",
+                intervention,
+            )
+        return [self._copy_value(intervention) for intervention in inserted]
+
+    async def _async_insert_planned_interventions(
+        self,
+        *,
+        target: str | None,
+        operator: dict[str, Any] | None,
+        signal: TriggerFlowSignal | None,
+    ):
+        if self._intervention_mode != "planned":
+            return []
+        pending_ids = [
+            record["id"]
+            for record in self._sorted_intervention_records()
+            if record.get("status") == "pending" and self._intervention_matches_target(record, target)
+        ]
+        return await self._async_insert_interventions(
+            pending_ids,
+            mode="planned",
+            operator=operator,
+            signal=signal,
+        )
+
+    def _operator_matches_intervention_target(self, operator: dict[str, Any], target: Any):
+        if target is None:
+            return False
+        target_value = str(target)
+        candidates = {
+            str(operator.get("id", "")),
+            str(operator.get("name", "")),
+            str(operator.get("kind", "")),
+            str(operator.get("group_id", "")),
+            str(operator.get("group_kind", "")),
+        }
+        return target_value in candidates
+
+    def _builtin_auto_intervention_ids(self, context: dict[str, Any]):
+        operator = context["operator"]
+        pending = context["pending_interventions"]
+        selected: list[str] = []
+        for intervention in pending:
+            target = intervention.get("target")
+            if target is not None and self._operator_matches_intervention_target(operator, target):
+                selected.append(str(intervention["id"]))
+                continue
+            if target is None and operator.get("kind") == "chunk":
+                selected.append(str(intervention["id"]))
+        return selected
+
+    async def _async_auto_intervention_ids(self, context: dict[str, Any]):
+        if self._intervention_policy is None:
+            return self._builtin_auto_intervention_ids(context)
+        result = await FunctionShifter.asyncify(self._intervention_policy)(context)
+        if result is None:
+            return []
+        if isinstance(result, str):
+            return [result]
+        return [str(item) for item in result]
+
+    async def _async_apply_auto_interventions(self, operator: dict[str, Any] | None, signal: TriggerFlowSignal):
+        if self._intervention_mode != "auto" or operator is None:
+            return []
+        pending = self.get_pending_interventions()
+        if not pending:
+            return []
+        context = {
+            "execution_id": self.id,
+            "flow_name": self._trigger_flow.name,
+            "signal": signal.to_state_dict(),
+            "operator": self._to_serializable_value(operator),
+            "operator_id": operator.get("id"),
+            "operator_name": operator.get("name"),
+            "operator_kind": operator.get("kind"),
+            "group_id": operator.get("group_id"),
+            "group_kind": operator.get("group_kind"),
+            "pending_interventions": pending,
+            "state": self._runtime_state_snapshot(),
+            "latest_inserted_version": max(
+                [int(item.get("version", 0)) for item in self.get_interventions(status="inserted")] or [0]
+            ),
+        }
+        try:
+            selected_ids = await self._async_auto_intervention_ids(context)
+        except Exception as error:
+            await self._emit_runtime_event(
+                "triggerflow.intervention_rejected",
+                level="WARNING",
+                message=f"TriggerFlow execution '{ self.id }' intervention policy failed.",
+                payload={"operator_id": operator.get("id")},
+                error=error,
+            )
+            return []
+        return await self._async_insert_interventions(
+            selected_ids,
+            mode="auto",
+            operator=operator,
+            signal=signal,
+            policy_name=self._intervention_policy_name,
+        )
+
+    async def async_mark_intervention_consumed(
+        self,
+        intervention_id: str,
+        *,
+        consumer: str,
+        status: Literal["applied", "ignored"] = "applied",
+        note: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        if status not in {"applied", "ignored"}:
+            raise ValueError("TriggerFlow intervention consumption status must be 'applied' or 'ignored'.")
+        if not consumer:
+            raise ValueError("TriggerFlow intervention consumer must be a non-empty string.")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise TypeError(f"TriggerFlow intervention metadata must be a dictionary, got: { type(metadata) }.")
+        async with self._intervention_lock:
+            records = self._get_intervention_records().copy()
+            if intervention_id not in records:
+                raise KeyError(f"TriggerFlow intervention '{ intervention_id }' not found.")
+            intervention = dict(records[intervention_id])
+            consumers = intervention.get("consumers", {})
+            if not isinstance(consumers, dict):
+                consumers = {}
+            consumers[str(consumer)] = {
+                "status": status,
+                "note": str(note) if note is not None else None,
+                "metadata": self._to_serializable_value(metadata or {}),
+                "consumed_at": time.time(),
+            }
+            intervention["consumers"] = consumers
+            records[intervention_id] = intervention
+            self._write_intervention_records(records)
+            self._mark_activity()
+        await self._emit_intervention_event(
+            "triggerflow.intervention_consumed",
+            "consume",
+            intervention,
+        )
+        return self._copy_value(intervention)
+
+    async def _async_expire_pending_interventions(self):
+        expired: list[dict[str, Any]] = []
+        async with self._intervention_lock:
+            records = self._get_intervention_records().copy()
+            expired_at = time.time()
+            for intervention_id, intervention in list(records.items()):
+                if not isinstance(intervention, dict) or intervention.get("status") != "pending":
+                    continue
+                updated = dict(intervention)
+                updated["status"] = "expired"
+                updated["expired_at"] = expired_at
+                records[intervention_id] = updated
+                expired.append(updated)
+            if expired:
+                self._write_intervention_records(records)
+        for intervention in expired:
+            await self._emit_intervention_event(
+                "triggerflow.intervention_expired",
+                "expire",
+                intervention,
+            )
+        return expired
+
     def _set_status(self, status: str):
         self._status = status
         self._system_runtime_data.set("status", status)
@@ -271,15 +809,14 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
     def is_idle(self):
         return self._active_handler_count == 0 and not any(
-            task is not self._auto_close_task and not task.done()
-            for task in self._pending_tasks
+            task is not self._auto_close_task and not task.done() for task in self._pending_tasks
         )
 
     def _warn_runtime_data_api(self, method_name: str):
-        warnings.warn(
+        DeprecationWarnings.warn_deprecated_once(
+            f"TriggerFlowExecution.{ method_name }",
             f"TriggerFlowExecution.{ method_name }() is deprecated; "
             "use execution state APIs such as get_state()/set_state() instead.",
-            DeprecationWarning,
             stacklevel=3,
         )
 
@@ -403,11 +940,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 if task is not current_task and task is not self._auto_close_task and not task.done()
             ]
             if current_task in self._pending_tasks:
-                pending = [
-                    task
-                    for task in pending
-                    if not self._task_origins.get(task, "").startswith("emit")
-                ]
+                pending = [task for task in pending if not self._task_origins.get(task, "").startswith("emit")]
             if not pending:
                 return results
 
@@ -583,6 +1116,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             await self.async_seal(reason=reason)
 
         await self._drain_pending_tasks(timeout=timeout)
+        await self._async_expire_pending_interventions()
 
         result = self._build_close_snapshot()
         if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
@@ -796,6 +1330,37 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             if isinstance(interrupt, dict) and interrupt.get("status") == "waiting"
         }
 
+    def _has_pending_interrupts(self):
+        return bool(self.get_pending_interrupts())
+
+    def _refresh_waiting_status(self):
+        if self._has_pending_interrupts():
+            self._set_status(TRIGGER_FLOW_STATUS_WAITING)
+        elif self._status == TRIGGER_FLOW_STATUS_WAITING:
+            self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
+
+    def _get_sub_flow_frames(self) -> dict[str, Any]:
+        frames = self._system_runtime_data.get("sub_flow_frames", {}, inherit=False)
+        return frames if isinstance(frames, dict) else {}
+
+    def get_sub_flow_frames(self):
+        return copy.deepcopy(self._get_sub_flow_frames())
+
+    def _set_sub_flow_frame(self, frame_id: str, frame: dict[str, Any]):
+        frames = self._get_sub_flow_frames().copy()
+        frames[str(frame_id)] = frame
+        self._system_runtime_data.set("sub_flow_frames", frames)
+        self._bump_state_version()
+        return frame
+
+    def _build_resume_context(self, interrupt_id: str, interrupt: dict[str, Any], value: Any):
+        return {
+            "interrupt_id": interrupt_id,
+            "value": value,
+            "interrupt": self._to_serializable_value(interrupt),
+            "origin_signal": interrupt.get("source_signal"),
+        }
+
     def _set_runtime_resource(self, key: str, value: Any):
         self._runtime_resources.set(str(key), value)
         return self
@@ -922,16 +1487,19 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             "lease_until": self._lease_until,
             "heartbeat_at": self._heartbeat_at,
             "pending_task_count": len(
-                [
-                    task
-                    for task in self._pending_tasks
-                    if task is not self._auto_close_task and not task.done()
-                ]
+                [task for task in self._pending_tasks if task is not self._auto_close_task and not task.done()]
             ),
             "run_context": self.run_context.model_dump(mode="json"),
             "runtime_data": json.loads(self._runtime_data.dump("json")),
             "flow_data": json.loads(self._trigger_flow._flow_data.dump("json")),
             "interrupts": self._to_serializable_value(self._get_interrupts()),
+            "intervention": {
+                "mode": self._intervention_mode,
+                "policy": self._intervention_policy_name,
+                "version": self._interventions_version,
+                "ledger": self._to_serializable_value(self._get_intervention_records()),
+            },
+            "sub_flow_frames": self._to_serializable_value(self._get_sub_flow_frames()),
             "last_signal": self._serialize_signal(self.get_last_signal()),
             "resource_keys": sorted(str(key) for key in self.get_runtime_resources().keys()),
             "managed_resource_keys": sorted(
@@ -1034,6 +1602,25 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if not isinstance(interrupts, dict):
             raise TypeError(f"Can not load key 'interrupts', expect dictionary but got: { type(interrupts) }")
 
+        intervention_state = state.get("intervention", {})
+        if intervention_state is None:
+            intervention_state = {}
+        if not isinstance(intervention_state, dict):
+            raise TypeError(
+                f"Can not load key 'intervention', expect dictionary/None but got: { type(intervention_state) }"
+            )
+        interventions = intervention_state.get("ledger", runtime_data.get(INTERVENTIONS_STATE_KEY, {}))
+        if interventions is None:
+            interventions = {}
+        if not isinstance(interventions, dict):
+            raise TypeError(
+                f"Can not load key 'intervention.ledger', expect dictionary but got: { type(interventions) }"
+            )
+
+        sub_flow_frames = state.get("sub_flow_frames", {})
+        if not isinstance(sub_flow_frames, dict):
+            raise TypeError(f"Can not load key 'sub_flow_frames', expect dictionary but got: { type(sub_flow_frames) }")
+
         last_signal_state = state.get("last_signal", None)
         if last_signal_state is not None and not isinstance(last_signal_state, dict):
             raise TypeError(
@@ -1090,6 +1677,28 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             self._system_runtime_data.set("result", EMPTY)
         self._system_runtime_data.set("result_ready", result_ready)
         self._system_runtime_data.set("interrupts", interrupts)
+        self._intervention_mode = cast(TriggerFlowInterventionMode, intervention_state.get("mode", self._intervention_mode))
+        if self._intervention_mode not in {None, "planned", "auto"}:
+            self._intervention_mode = None
+        saved_policy = intervention_state.get("policy", self._intervention_policy_name)
+        self._intervention_policy_name = str(saved_policy) if saved_policy is not None else None
+        if self._intervention_policy is not None:
+            self._intervention_policy_name = self._resolve_intervention_policy_name(self._intervention_policy)
+        try:
+            self._interventions_version = int(intervention_state.get("version", 0))
+        except (TypeError, ValueError):
+            self._interventions_version = 0
+        if interventions:
+            self._interventions_version = max(
+                self._interventions_version,
+                max(int(record.get("version", 0)) for record in interventions.values() if isinstance(record, dict)),
+            )
+        self._system_runtime_data.set("interventions", self._to_serializable_value(interventions))
+        self._system_runtime_data.set("intervention_mode", self._intervention_mode)
+        self._system_runtime_data.set("intervention_policy", self._intervention_policy_name)
+        self._system_runtime_data.set("intervention_version", self._interventions_version)
+        self._runtime_data.set(INTERVENTIONS_STATE_KEY, self._to_serializable_value(interventions))
+        self._system_runtime_data.set("sub_flow_frames", sub_flow_frames)
         self._system_runtime_data.set("last_signal", last_signal_state)
         self._set_status(status)
         self._auto_close = bool(state.get("auto_close", self._auto_close))
@@ -1228,11 +1837,16 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 continue
             if interrupt_state.get("status") != "waiting":
                 continue
-            if interrupt_state.get("resume_event") != signal.trigger_event:
+            resume_to = interrupt_state.get("resume_to")
+            resume_event = interrupt_state.get("resume_event")
+            target_event = resume_to.get("event") if isinstance(resume_to, dict) else resume_event
+            if target_event != signal.trigger_event:
                 continue
             interrupt = dict(interrupt_state)
             interrupt["status"] = "resumed"
             interrupt["response"] = signal.value
+            interrupt["resume_value"] = signal.value
+            interrupt["resumed_at"] = time.time()
             interrupt["resumed_by_signal_id"] = signal.id
             interrupts[interrupt_id] = interrupt
             resumed_interrupts.append(interrupt)
@@ -1241,7 +1855,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             return
 
         self._system_runtime_data.set("interrupts", interrupts)
-        self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
+        self._refresh_waiting_status()
         self._bump_state_version()
         await self._emit_runtime_event(
             "triggerflow.execution_resumed",
@@ -1313,17 +1927,27 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                         },
                     }
                 )
+                await self._async_apply_auto_interventions(operator, signal)
 
-                async def run_handler(handler_func, *, handler_id: str):
+                async def run_handler(
+                    handler_func,
+                    *,
+                    handler_id: str,
+                    bound_operator: dict[str, Any] | None,
+                    bound_chunk_run_context: RunContext | None,
+                ):
                     self._active_handler_count += 1
+
                     async def execute_handler():
-                        if operator is not None and chunk_run_context is not None:
+                        if bound_operator is not None and bound_chunk_run_context is not None:
                             await self._emit_chunk_runtime_event(
                                 "chunk.started",
-                                chunk_run_context,
-                                operator=operator,
+                                bound_chunk_run_context,
+                                operator=bound_operator,
                                 signal=signal,
-                                message=f"Chunk '{ chunk_run_context.meta.get('chunk_name', chunk_run_context.run_id) }' started.",
+                                message=(
+                                    f"Chunk '{ bound_chunk_run_context.meta.get('chunk_name', bound_chunk_run_context.run_id) }' started."
+                                ),
                                 payload={
                                     "status": "running",
                                     "input": self._serialize_runtime_value(signal.value),
@@ -1334,23 +1958,25 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                         try:
                             with bind_runtime_context(
                                 parent_run_context=(
-                                    chunk_run_context if chunk_run_context is not None else self.run_context
+                                    bound_chunk_run_context
+                                    if bound_chunk_run_context is not None
+                                    else self.run_context
                                 ),
-                                chunk_run_context=chunk_run_context,
+                                chunk_run_context=bound_chunk_run_context,
                             ):
                                 return await handler_func
                         except BaseException as error:
                             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                                 raise
-                            if operator is not None and chunk_run_context is not None:
+                            if bound_operator is not None and bound_chunk_run_context is not None:
                                 await self._emit_chunk_runtime_event(
                                     "chunk.failed",
-                                    chunk_run_context,
-                                    operator=operator,
+                                    bound_chunk_run_context,
+                                    operator=bound_operator,
                                     signal=signal,
                                     level="ERROR",
                                     message=(
-                                        f"Chunk '{ chunk_run_context.meta.get('chunk_name', chunk_run_context.run_id) }' failed."
+                                        f"Chunk '{ bound_chunk_run_context.meta.get('chunk_name', bound_chunk_run_context.run_id) }' failed."
                                     ),
                                     payload={
                                         "status": "failed",
@@ -1377,13 +2003,15 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                             finally:
                                 self._concurrency_depth.reset(token)
 
-                        if operator is not None and chunk_run_context is not None:
+                        if bound_operator is not None and bound_chunk_run_context is not None:
                             await self._emit_chunk_runtime_event(
                                 "chunk.completed",
-                                chunk_run_context,
-                                operator=operator,
+                                bound_chunk_run_context,
+                                operator=bound_operator,
                                 signal=signal,
-                                message=f"Chunk '{ chunk_run_context.meta.get('chunk_name', chunk_run_context.run_id) }' completed.",
+                                message=(
+                                    f"Chunk '{ bound_chunk_run_context.meta.get('chunk_name', bound_chunk_run_context.run_id) }' completed."
+                                ),
                                 payload={
                                     "status": "waiting" if self.is_waiting() else "completed",
                                     "returned_pause_signal": isinstance(result, TriggerFlowPauseSignal),
@@ -1415,7 +2043,14 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 )
                 tasks.append(
                     self._track_task(
-                        asyncio.ensure_future(run_handler(handler_task, handler_id=handler_id)),
+                        asyncio.ensure_future(
+                            run_handler(
+                                handler_task,
+                                handler_id=handler_id,
+                                bound_operator=operator,
+                                bound_chunk_run_context=chunk_run_context,
+                            )
+                        ),
                         origin=f"handler:{ handler_id }",
                     )
                 )
@@ -1439,7 +2074,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                         message=f"TriggerFlow execution '{ self.id }' failed.",
                         payload={"last_signal": signal.to_debug_dict()},
                         error=error,
-                )
+                    )
                 raise
         self._mark_activity()
         return None
@@ -1542,12 +2177,12 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return await self.async_del_state(key, emit=emit)
 
     def _warn_wait_for_result_deprecated(self, method_name: str):
-        warnings.warn(
+        DeprecationWarnings.warn_deprecated_once(
+            f"TriggerFlowExecution.{ method_name }.wait_for_result",
             f"TriggerFlowExecution.{ method_name }(..., wait_for_result=...) is deprecated. "
             "Execution start behavior is now driven by auto_close: "
             "auto-close executions wait for close; manual-close executions start and return the execution handle. "
             "Use create_execution()/start_execution() for explicit lifecycle control.",
-            DeprecationWarning,
             stacklevel=3,
         )
 
@@ -1680,15 +2315,39 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         payload: Any = None,
         resume_event: str | None = None,
         interrupt_id: str | None = None,
+        resume_to: Any = None,
     ):
         interrupt_id = interrupt_id if interrupt_id is not None else uuid.uuid4().hex
         interrupts = self._get_interrupts().copy()
+        current_signal = self.get_last_signal()
+        origin_chunk = self._get_origin_chunk_payload()
+        source_operator_id = origin_chunk.get("chunk_id") if isinstance(origin_chunk, dict) else None
+        continuation_event = None
+        if source_operator_id:
+            operator = self._get_handler_operator(str(source_operator_id))
+            if isinstance(operator, dict):
+                for signal in operator.get("emit_signals", []):
+                    if isinstance(signal, dict) and signal.get("role") == "continuation":
+                        continuation_event = signal.get("trigger_event")
+                        break
+        normalized_resume_to = resume_to
+        if normalized_resume_to is None:
+            normalized_resume_to = {"event": resume_event} if resume_event else "next"
         interrupt = {
             "id": interrupt_id,
             "type": type,
             "payload": payload,
             "resume_event": resume_event,
+            "resume_to": normalized_resume_to,
             "status": "waiting",
+            "source_execution_id": self.id,
+            "source_flow_name": self._trigger_flow.name,
+            "source_operator_id": source_operator_id,
+            "source_signal": self._serialize_signal(current_signal),
+            "continuation_event": continuation_event,
+            "created_at": time.time(),
+            "resumed_at": None,
+            "resume_value": None,
         }
         interrupts[interrupt_id] = interrupt
         self._system_runtime_data.set("interrupts", interrupts)
@@ -1707,7 +2366,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 "action": "pause",
                 "execution_id": self.id,
                 "interrupt": self._to_serializable_value(interrupt),
-                "signal": self._serialize_signal(self.get_last_signal()),
+                "signal": self._serialize_signal(current_signal),
             },
             _skip_contract_validation=True,
         )
@@ -1746,6 +2405,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             raise ValueError(f"Can not continue execution { self.id }, interrupt '{ interrupt_id }' is not waiting.")
         interrupt["status"] = "resumed"
         interrupt["response"] = value
+        interrupt["resume_value"] = value
+        interrupt["resumed_at"] = time.time()
         interrupts[interrupt_id] = interrupt
         self._system_runtime_data.set("interrupts", interrupts)
         self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
@@ -1769,23 +2430,94 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             },
             _skip_contract_validation=True,
         )
-        resume_event = interrupt.get("resume_event")
-        if resume_event:
+
+        sub_flow_frame_id = interrupt.get("sub_flow_frame_id")
+        if sub_flow_frame_id:
+            return await self._trigger_flow._blue_print.async_resume_sub_flow_frame(
+                self,
+                str(sub_flow_frame_id),
+                interrupt_id,
+                value,
+            )
+
+        resume_to = interrupt.get("resume_to")
+        if isinstance(resume_to, dict) and resume_to.get("event"):
             await self._async_dispatch_signal(
                 self._build_signal(
-                    str(resume_event),
+                    str(resume_to["event"]),
                     value,
                     trigger_type="event",
                     source="interrupt",
-                    meta={"interrupt_id": interrupt_id},
+                    meta={
+                        "interrupt_id": interrupt_id,
+                        "resume": self._build_resume_context(interrupt_id, interrupt, value),
+                    },
                 )
             )
+        elif resume_to == "self":
+            source_signal = self._restore_signal(interrupt.get("source_signal"))
+            if source_signal is None:
+                raise RuntimeError(
+                    f"Can not resume execution { self.id } interrupt '{ interrupt_id }' to self "
+                    "because the original signal is missing."
+                )
+            await self._async_dispatch_signal(
+                self._build_signal(
+                    source_signal.trigger_event,
+                    source_signal.value,
+                    source_signal.layer_marks.copy(),
+                    trigger_type=source_signal.trigger_type,
+                    source="interrupt",
+                    meta={
+                        **source_signal.meta,
+                        "interrupt_id": interrupt_id,
+                        "resume": self._build_resume_context(interrupt_id, interrupt, value),
+                    },
+                )
+            )
+        elif resume_to == "next":
+            continuation_event = interrupt.get("continuation_event")
+            if not continuation_event:
+                raise RuntimeError(
+                    f"Can not resume execution { self.id } interrupt '{ interrupt_id }' to next "
+                    "because the paused operator has no continuation event."
+                )
+            source_signal = self._restore_signal(interrupt.get("source_signal"))
+            await self._async_dispatch_signal(
+                self._build_signal(
+                    str(continuation_event),
+                    value,
+                    source_signal.layer_marks.copy() if source_signal is not None else None,
+                    trigger_type="event",
+                    source="interrupt",
+                    meta={
+                        "interrupt_id": interrupt_id,
+                        "resume": self._build_resume_context(interrupt_id, interrupt, value),
+                    },
+                )
+            )
+        else:
+            resume_event = interrupt.get("resume_event")
+            if resume_event:
+                await self._async_dispatch_signal(
+                    self._build_signal(
+                        str(resume_event),
+                        value,
+                        trigger_type="event",
+                        source="interrupt",
+                        meta={
+                            "interrupt_id": interrupt_id,
+                            "resume": self._build_resume_context(interrupt_id, interrupt, value),
+                        },
+                    )
+                )
+        self._refresh_waiting_status()
         return interrupt
 
     # Runtime Stream
     async def async_put_into_stream(
         self,
-        stream_item: StreamT | TriggerFlowInterruptEvent,
+        stream_item: StreamT | TriggerFlowInterruptEvent | TriggerFlowInterventionEvent,
         *,
         _skip_contract_validation: bool = False,
         _origin_chunk: dict[str, Any] | None = None,
@@ -1836,13 +2568,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         *,
         initial_value: InputT | None,
         timeout: float | None,
-    ) -> AsyncGenerator[StreamT | TriggerFlowInterruptEvent, None]:
+    ) -> AsyncGenerator[StreamT | TriggerFlowInterruptEvent | TriggerFlowInterventionEvent, None]:
         temp_execution_task = None
         try:
             if not self._started:
-                temp_execution_task = asyncio.create_task(
-                    self._async_run_start(initial_value=initial_value)
-                )
+                temp_execution_task = asyncio.create_task(self._async_run_start(initial_value=initial_value))
             while True:
                 if timeout is not None:
                     try:
@@ -1872,7 +2602,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         initial_value: InputT | None = None,
         *,
         timeout: float | None = 10,
-    ) -> AsyncGenerator[StreamT | TriggerFlowInterruptEvent, None]:
+    ) -> AsyncGenerator[StreamT | TriggerFlowInterruptEvent | TriggerFlowInterventionEvent, None]:
         if self._runtime_stream_consumer is None:
             self._runtime_stream_consumer = GeneratorConsumer(
                 self._consume_runtime_stream(
@@ -1887,7 +2617,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         initial_value: InputT | None = None,
         *,
         timeout: float | None = 10,
-    ) -> Generator[StreamT | TriggerFlowInterruptEvent, None, None]:
+    ) -> Generator[StreamT | TriggerFlowInterruptEvent | TriggerFlowInterventionEvent, None, None]:
         if self._runtime_stream_consumer is None:
             self._runtime_stream_consumer = GeneratorConsumer(
                 self._consume_runtime_stream(
@@ -1907,10 +2637,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self._build_close_snapshot()
 
     def set_result(self, result: ResultT, *, _origin_chunk: dict[str, Any] | None = None):
-        warnings.warn(
+        DeprecationWarnings.warn_deprecated_once(
+            "TriggerFlowExecution.set_result",
             "TriggerFlowExecution.set_result() is deprecated; write execution state directly and let close() return "
             "the close snapshot. For compatibility, set_result() now writes '$final_result'.",
-            DeprecationWarning,
             stacklevel=2,
         )
         result = cast(ResultT, self._trigger_flow._contract.validate_result(result))
@@ -1948,11 +2678,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 )
 
     async def async_get_result(self, *, timeout: float | None = None) -> ResultT | None:
-        warnings.warn(
+        DeprecationWarnings.warn_deprecated_once(
+            "TriggerFlowExecution.get_result",
             "TriggerFlowExecution.get_result()/async_get_result() are compatibility APIs; "
             "prefer close()/async_close() and execution state APIs for lifecycle-oriented workflows. "
             "get_result() now returns '$final_result' when present, otherwise the close snapshot.",
-            DeprecationWarning,
             stacklevel=2,
         )
-        return cast(ResultT | None, await self._async_wait_for_compat_result_or_close(timeout=timeout))
+        return await self.result.async_get_final_result(timeout=timeout)

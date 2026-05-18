@@ -31,6 +31,7 @@ The first argument to `set_settings(...)` is a dotted path. Common paths:
 | `runtime.show_tool_logs` | compatibility alias for `runtime.show_action_logs` in existing tool-loop examples |
 | `runtime.show_trigger_flow_logs` | enable console logs for TriggerFlow execution / signal events; `True` is equivalent to `"simple"` |
 | `runtime.show_runtime_logs` | enable console logs for request, session, chunk, `runtime.print`, and other generic observation events; `True` is equivalent to `"simple"` |
+| `runtime.show_deprecation_warnings` | emit deprecated API warnings; defaults to `True`, set to `False` / `"off"` to silence deprecation warnings globally |
 | `runtime.session_id` | bind a request to an explicit session id |
 
 You can also pass a single dict and Agently merges by key:
@@ -102,6 +103,14 @@ Agently.set_settings("runtime.show_runtime_logs", "detail")
 ```
 
 Each switch accepts `False` / `"off"`, `True` / `"simple"`, or `"detail"`. `"simple"` prints summaries and warning/error/critical events; `"detail"` prints the full observation event stream for that family. Action loop events render as `ActionLoop`; concrete `action.*` events render with the action name and `action_type`. `runtime.show_tool_logs` remains accepted for existing code and enables the same Action Runtime log family when `runtime.show_action_logs` is not set. Start events render as `Started`, normal completion renders as `Completed`, and only failure events or explicit failure payloads render as `Failed`.
+
+Production deployments that intentionally keep legacy compatibility calls can silence deprecation warnings globally:
+
+```python
+Agently.set_settings("runtime.show_deprecation_warnings", False)
+```
+
+This only affects Agently deprecation warnings. Operational runtime warnings, errors, and risky-scope warnings such as `flow_data` remain controlled by their own APIs and settings.
 
 ## See also
 

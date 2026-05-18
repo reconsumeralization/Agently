@@ -112,6 +112,7 @@ Mechanics:
 - `data.put_into_stream(item)` is the sync variant.
 - `execution.get_async_runtime_stream(timeout=...)` yields items as they arrive. The stream closes when the execution closes.
 - Sync consumer: `execution.get_runtime_stream(timeout=...)`.
+- TriggerFlow also writes fail-open system items for interrupts and runtime intervention. Consumers that only expect business stream items should ignore unknown `type` values.
 
 ### Stream timeout vs auto-close timeout
 
@@ -140,5 +141,6 @@ Agently also emits **observation events** through the Event Center, for example 
 
 - [Patterns](patterns.md) — `when` is one of several flow-control primitives
 - [Pause and Resume](pause-and-resume.md) — `continue_with(interrupt_id, payload)` is the resume path, separate from `emit`
+- [Runtime Intervention](runtime-intervention.md) — supplemental context inserted at safe boundaries
 - [Lifecycle](lifecycle.md) — what `close()` does to the runtime stream
 - [Event Center](../observability/event-center.md) — framework-level observation events

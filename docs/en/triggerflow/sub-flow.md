@@ -119,6 +119,30 @@ What happens:
 
 Items pushed via `data.async_put_into_stream(...)` inside the child show up in the **parent execution's** runtime stream. From an external consumer's point of view, sub-flows look like part of the same execution.
 
+## Child pauses project to the parent
+
+If a child flow calls `pause_for(...)`, the parent execution becomes waiting too. External systems still manage only the parent execution id and the parent interrupt id:
+
+```python
+execution = parent_flow.create_execution(auto_close=False)
+await execution.async_start(input_value)
+
+root_interrupt_id = next(iter(execution.get_pending_interrupts()))
+saved = execution.save()
+
+restored = parent_flow.create_execution(auto_close=False, runtime_resources={...})
+restored.load(saved)
+await restored.async_continue_with(root_interrupt_id, {"approved": True})
+```
+
+The projected interrupt includes `sub_flow_frame_id` and `local_interrupt_id` for debugging, but callers should treat the parent interrupt id as the public handle. After the child finishes, `write_back` runs normally and the parent continues downstream.
+
+For a prearranged document-review approval gate, see
+`examples/step_by_step/11-triggerflow-20_document_review_subflow_pause_resume.py`.
+The child sub-flow has an explicit pause chunk and waits through
+`when("LegalApprovalSubmitted")`; the parent still saves, reloads, and resumes
+through the projected root interrupt.
+
 ## When to use a sub-flow
 
 - The child is reusable — used by multiple parent flows or independently.

@@ -20,10 +20,13 @@ async def main():
     await execution.async_start("Agently")
     close_task = asyncio.create_task(execution.async_close())
     items = [item async for item in execution.get_async_runtime_stream(timeout=None)]
-    state = await close_task
-    assert [cast(dict[str, Any], item)["stage"] for item in items] == ["start", "finish"]
-    assert state["done"] is True
-    print(items)
+    await close_task
+    assert [cast(dict[str, Any], item)["stage"] for item in items] == [
+        "start",
+        "finish",
+    ]
+    assert execution.result.get_state("done") is True
+    print({"items": items, "meta": execution.result.get_meta()})
 
 
 asyncio.run(main())

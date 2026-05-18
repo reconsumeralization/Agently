@@ -47,6 +47,7 @@ from agently.utils import StateData, StateDataNamespace
 from agently.core.RuntimeContext import resolve_parent_run_context
 from .Chunk import TriggerFlowChunk
 from .Execution import TriggerFlowExecution
+from .Control import TriggerFlowPauseSignal, TRIGGER_FLOW_STATUS_WAITING
 from .Definition import (
     TriggerFlowDefinition,
     build_callable_ref,
@@ -737,6 +738,182 @@ class TriggerFlowBlueprint:
                 return
             await parent_execution.async_put_into_stream(stream_item)
 
+    def _build_sub_flow_resource_bindings(
+        self,
+        capture_bindings: Sequence[_CompiledSubFlowBinding],
+    ):
+        bindings: dict[str, str] = {}
+        for binding in capture_bindings:
+            if binding.target_scope != "resources" or binding.source_scope != "resources":
+                continue
+            target_key = ".".join(binding.target_path)
+            source_key = ".".join(binding.source_path)
+            if target_key and source_key:
+                bindings[target_key] = source_key
+        return bindings
+
+    def _apply_sub_flow_resource_bindings(
+        self,
+        child_execution: TriggerFlowExecution,
+        parent_execution: TriggerFlowExecution,
+        resource_bindings: Mapping[str, str],
+    ):
+        for target_key, source_key in resource_bindings.items():
+            child_execution.set_runtime_resource(
+                str(target_key),
+                parent_execution.require_runtime_resource(str(source_key)),
+            )
+
+    def _restore_sub_flow_frame_resources(
+        self,
+        child_execution: TriggerFlowExecution,
+        parent_execution: TriggerFlowExecution,
+        frame: dict[str, Any],
+    ):
+        resource_bindings = frame.get("resource_bindings", {})
+        if isinstance(resource_bindings, Mapping):
+            self._apply_sub_flow_resource_bindings(
+                child_execution,
+                parent_execution,
+                resource_bindings,
+            )
+        for resource_key in frame.get("resource_keys", []):
+            key = str(resource_key)
+            if child_execution.get_runtime_resource(key, EMPTY) is not EMPTY:
+                continue
+            child_execution.set_runtime_resource(
+                key,
+                parent_execution.require_runtime_resource(key),
+            )
+
+    def _make_sub_flow_frame_id(self, parent_execution: TriggerFlowExecution, operator_id: str):
+        return f"{ parent_execution.id }:{ operator_id }:{ uuid.uuid4().hex }"
+
+    def _build_sub_flow_parent_data(
+        self,
+        parent_execution: TriggerFlowExecution,
+        frame: dict[str, Any],
+        operator: dict[str, Any],
+    ):
+        from agently.types.trigger_flow import TriggerFlowRuntimeData
+
+        parent_signal = parent_execution._restore_signal(frame.get("parent_signal"))
+        if parent_signal is None:
+            parent_signal = parent_execution._build_signal(
+                "START",
+                frame.get("parent_value"),
+                trigger_type="event",
+                source="sub_flow",
+            )
+        chunk_run_context = parent_execution._create_chunk_run_context(operator, parent_signal)
+        return TriggerFlowRuntimeData(
+            trigger_event=parent_signal.trigger_event,
+            trigger_type=parent_signal.trigger_type,
+            value=frame.get("parent_value"),
+            execution=parent_execution,
+            _layer_marks=list(frame.get("parent_layer_marks", [])),
+            signal=parent_signal,
+            chunk_run_context=chunk_run_context,
+        )
+
+    async def _project_child_interrupts(
+        self,
+        *,
+        parent_execution: TriggerFlowExecution,
+        child_execution: TriggerFlowExecution,
+        frame: dict[str, Any],
+    ):
+        pending_child_interrupts = child_execution.get_pending_interrupts()
+        projected_interrupts = dict(frame.get("projected_interrupts", {}))
+        parent_interrupts = parent_execution._get_interrupts().copy()
+        projected_root_ids: list[str] = []
+
+        for child_interrupt_id, child_interrupt in pending_child_interrupts.items():
+            root_interrupt_id = None
+            for stored_root_id, stored_child_id in projected_interrupts.items():
+                if stored_child_id == child_interrupt_id:
+                    root_interrupt_id = stored_root_id
+                    break
+            if root_interrupt_id is None:
+                root_interrupt_id = f"{ frame['frame_id'] }:{ child_interrupt_id }"
+                projected_interrupts[root_interrupt_id] = child_interrupt_id
+
+            root_interrupt = copy.deepcopy(child_interrupt)
+            root_interrupt.update(
+                {
+                    "id": root_interrupt_id,
+                    "local_interrupt_id": child_interrupt_id,
+                    "status": "waiting",
+                    "source_execution_id": child_execution.id,
+                    "source_flow_name": child_execution._trigger_flow.name,
+                    "sub_flow_frame_id": frame["frame_id"],
+                    "child_interrupt": copy.deepcopy(child_interrupt),
+                }
+            )
+            parent_interrupts[root_interrupt_id] = root_interrupt
+            projected_root_ids.append(root_interrupt_id)
+
+            await parent_execution.async_put_into_stream(
+                {
+                    "type": "interrupt",
+                    "action": "project",
+                    "execution_id": parent_execution.id,
+                    "interrupt": parent_execution._to_serializable_value(root_interrupt),
+                    "value": parent_execution._to_serializable_value(child_interrupt.get("payload")),
+                },
+                _skip_contract_validation=True,
+            )
+
+        frame["status"] = "waiting"
+        frame["child_saved_state"] = child_execution.save()
+        frame["projected_interrupts"] = projected_interrupts
+        frame["resource_keys"] = sorted(str(key) for key in child_execution.get_runtime_resources().keys())
+        frame["projected_root_interrupt_ids"] = projected_root_ids
+        parent_execution._system_runtime_data.set("interrupts", parent_interrupts)
+        parent_execution._set_sub_flow_frame(frame["frame_id"], frame)
+        parent_execution._set_status(TRIGGER_FLOW_STATUS_WAITING)
+        return projected_root_ids
+
+    async def _complete_sub_flow_frame(
+        self,
+        *,
+        parent_execution: TriggerFlowExecution,
+        child_execution: TriggerFlowExecution,
+        frame: dict[str, Any],
+        operator: dict[str, Any],
+        normalized_write_back: Any,
+        write_back_bindings: Sequence[_CompiledSubFlowBinding],
+    ):
+        result = await child_execution.async_close(reason="sub_flow_completed")
+        data = self._build_sub_flow_parent_data(parent_execution, frame, operator)
+        if normalized_write_back is None:
+            if isinstance(result, dict) and "$final_result" in result:
+                data.value = result["$final_result"]
+            else:
+                data.value = result
+        else:
+            write_back_target = _SubFlowWriteBackTarget(data.value)
+            self._apply_sub_flow_bindings(
+                write_back_bindings,
+                source=_SubFlowWriteBackSource(result),
+                target=write_back_target,
+            )
+            write_back_target.apply(data)
+
+        frame["status"] = "completed"
+        frame["child_saved_state"] = child_execution.save()
+        frame["result"] = parent_execution._to_serializable_value(result)
+        parent_execution._set_sub_flow_frame(frame["frame_id"], frame)
+
+        emit_signal = operator["emit_signals"][0]
+        await data.async_emit(
+            emit_signal["trigger_event"],
+            data.value,
+            _layer_marks=data._layer_marks.copy(),
+        )
+        parent_execution._refresh_waiting_status()
+        return result
+
     def _build_sub_flow_from_operator(self, operator: dict[str, Any]):
         from .TriggerFlow import TriggerFlow
 
@@ -769,7 +946,6 @@ class TriggerFlowBlueprint:
         *,
         trigger_flow: "TriggerFlow | None" = None,
     ):
-        emit_signal = operator["emit_signals"][0]
         options = operator.get("options", {})
         _, capture_bindings = self._compile_sub_flow_bindings(
             options.get("capture"),
@@ -781,6 +957,7 @@ class TriggerFlowBlueprint:
         )
         concurrency = operator["options"].get("concurrency")
         sub_flow_template = trigger_flow if trigger_flow is not None else self._build_sub_flow_from_operator(operator)
+        resource_bindings = self._build_sub_flow_resource_bindings(capture_bindings)
 
         async def call_sub_flow(data):
             isolated_sub_flow = self._instantiate_isolated_sub_flow(sub_flow_template)
@@ -809,6 +986,12 @@ class TriggerFlowBlueprint:
             captured_resources = capture_target.build_resources()
             if captured_resources:
                 sub_flow_execution.update_runtime_resources(captured_resources)
+            if resource_bindings:
+                self._apply_sub_flow_resource_bindings(
+                    sub_flow_execution,
+                    data.execution,
+                    resource_bindings,
+                )
 
             stream_bridge_task = asyncio.create_task(
                 self._bridge_sub_flow_runtime_stream(
@@ -819,34 +1002,65 @@ class TriggerFlowBlueprint:
             try:
                 await sub_flow_execution._async_run_start(capture_target.build_input())
                 if sub_flow_execution.is_waiting():
-                    raise NotImplementedError(
-                        "TriggerFlow sub flow does not yet support child flow pause/resume "
-                        "or external re-entry."
+                    frame_id = self._make_sub_flow_frame_id(data.execution, operator["id"])
+                    frame = {
+                        "frame_id": frame_id,
+                        "status": "waiting",
+                        "parent_execution_id": data.execution.id,
+                        "parent_operator_id": operator["id"],
+                        "child_execution_id": sub_flow_execution.id,
+                        "child_flow_name": isolated_sub_flow.name,
+                        "parent_signal": data.execution._serialize_signal(data.signal),
+                        "parent_layer_marks": data._layer_marks.copy(),
+                        "parent_value": _clone_sub_flow_value(data.value),
+                        "child_saved_state": sub_flow_execution.save(),
+                        "projected_interrupts": {},
+                        "resource_bindings": dict(resource_bindings),
+                        "resource_keys": sorted(str(key) for key in sub_flow_execution.get_runtime_resources().keys()),
+                    }
+                    projected_root_ids = await self._project_child_interrupts(
+                        parent_execution=data.execution,
+                        child_execution=sub_flow_execution,
+                        frame=frame,
                     )
-                result = await sub_flow_execution.async_close(reason="sub_flow_completed")
+                    root_interrupt = (
+                        data.execution.get_interrupt(projected_root_ids[0])
+                        if projected_root_ids
+                        else {
+                            "id": frame_id,
+                            "type": "sub_flow",
+                            "status": "waiting",
+                            "sub_flow_frame_id": frame_id,
+                        }
+                    )
+                    return TriggerFlowPauseSignal(root_interrupt)
+                result = await self._complete_sub_flow_frame(
+                    parent_execution=data.execution,
+                    child_execution=sub_flow_execution,
+                    frame={
+                        "frame_id": self._make_sub_flow_frame_id(data.execution, operator["id"]),
+                        "status": "running",
+                        "parent_execution_id": data.execution.id,
+                        "parent_operator_id": operator["id"],
+                        "child_execution_id": sub_flow_execution.id,
+                        "child_flow_name": isolated_sub_flow.name,
+                        "parent_signal": data.execution._serialize_signal(data.signal),
+                        "parent_layer_marks": data._layer_marks.copy(),
+                        "parent_value": _clone_sub_flow_value(data.value),
+                        "projected_interrupts": {},
+                        "resource_bindings": dict(resource_bindings),
+                        "resource_keys": sorted(str(key) for key in sub_flow_execution.get_runtime_resources().keys()),
+                    },
+                    operator=operator,
+                    normalized_write_back=normalized_write_back,
+                    write_back_bindings=write_back_bindings,
+                )
             finally:
                 stream_bridge_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stream_bridge_task
 
-            if normalized_write_back is None:
-                if isinstance(result, dict) and "$final_result" in result:
-                    data.value = result["$final_result"]
-                else:
-                    data.value = result
-            else:
-                write_back_target = _SubFlowWriteBackTarget(data.value)
-                self._apply_sub_flow_bindings(
-                    write_back_bindings,
-                    source=_SubFlowWriteBackSource(result),
-                    target=write_back_target,
-                )
-                write_back_target.apply(data)
-            await data.async_emit(
-                emit_signal["trigger_event"],
-                data.value,
-                _layer_marks=data._layer_marks.copy(),
-            )
+            return result
 
         for signal in operator["listen_signals"]:
             self.add_handler(
@@ -855,6 +1069,75 @@ class TriggerFlowBlueprint:
                 call_sub_flow,
                 id=operator["id"],
             )
+
+    async def async_resume_sub_flow_frame(
+        self,
+        parent_execution: TriggerFlowExecution,
+        frame_id: str,
+        root_interrupt_id: str,
+        value: Any = None,
+    ):
+        frames = parent_execution._get_sub_flow_frames()
+        if frame_id not in frames:
+            raise KeyError(
+                f"Can not resume TriggerFlow sub flow frame '{ frame_id }' because it was not found."
+            )
+        frame = copy.deepcopy(frames[frame_id])
+        operator = self.definition.get_operator(str(frame["parent_operator_id"]))
+        options = operator.get("options", {})
+        _, write_back_bindings = self._compile_sub_flow_bindings(
+            options.get("write_back"),
+            mode="write_back",
+        )
+        normalized_write_back = options.get("write_back")
+        child_flow = self._build_sub_flow_from_operator(operator)
+        child_execution = child_flow.create_execution(
+            concurrency=options.get("concurrency"),
+            auto_close=False,
+            parent_run_context=parent_execution.run_context,
+        )
+        child_execution.load(frame["child_saved_state"])
+        self._restore_sub_flow_frame_resources(child_execution, parent_execution, frame)
+
+        child_interrupt_id = frame.get("projected_interrupts", {}).get(root_interrupt_id)
+        if not child_interrupt_id:
+            raise KeyError(
+                f"Can not resume TriggerFlow sub flow frame '{ frame_id }' because root interrupt "
+                f"'{ root_interrupt_id }' is not mapped to a child interrupt."
+            )
+
+        stream_bridge_task = asyncio.create_task(
+            self._bridge_sub_flow_runtime_stream(
+                child_execution,
+                parent_execution,
+            )
+        )
+        try:
+            await child_execution.async_continue_with(str(child_interrupt_id), value)
+            if child_execution.is_waiting():
+                projected_root_ids = await self._project_child_interrupts(
+                    parent_execution=parent_execution,
+                    child_execution=child_execution,
+                    frame=frame,
+                )
+                root_interrupt = (
+                    parent_execution.get_interrupt(projected_root_ids[0])
+                    if projected_root_ids
+                    else parent_execution.get_interrupt(root_interrupt_id)
+                )
+                return TriggerFlowPauseSignal(root_interrupt or {})
+            return await self._complete_sub_flow_frame(
+                parent_execution=parent_execution,
+                child_execution=child_execution,
+                frame=frame,
+                operator=operator,
+                normalized_write_back=normalized_write_back,
+                write_back_bindings=write_back_bindings,
+            )
+        finally:
+            stream_bridge_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stream_bridge_task
 
     def attach_sub_flow(
         self,
@@ -1392,6 +1675,25 @@ class TriggerFlowBlueprint:
         for signal in operator["listen_signals"]:
             self.add_handler(signal["trigger_type"], signal["trigger_event"], collect_branches, id=operator["id"])
 
+    def _compile_intervention_point_operator(self, operator: dict[str, Any]):
+        emit_signal = operator["emit_signals"][0]
+        target = operator.get("options", {}).get("target")
+
+        async def insert_interventions(data):
+            await data.execution._async_insert_planned_interventions(
+                target=str(target) if target is not None else None,
+                operator=operator,
+                signal=data.signal,
+            )
+            await data.async_emit(
+                emit_signal["trigger_event"],
+                data.value,
+                _layer_marks=data._layer_marks.copy(),
+            )
+
+        for signal in operator["listen_signals"]:
+            self.add_handler(signal["trigger_type"], signal["trigger_event"], insert_interventions, id=operator["id"])
+
     def _compile_result_sink_operator(self, operator: dict[str, Any]):
         async def set_default_result(data):
             result = data._system_runtime_data.get("result")
@@ -1427,6 +1729,8 @@ class TriggerFlowBlueprint:
             self._compile_match_collect_operator(operator)
         elif kind == "collect_branch":
             self._compile_collect_branch_operator(operator)
+        elif kind == "intervention_point":
+            self._compile_intervention_point_operator(operator)
         elif kind == "sub_flow":
             self._compile_sub_flow_operator(operator)
         elif kind == "result_sink":
@@ -1583,6 +1887,8 @@ class TriggerFlowBlueprint:
         owner_id: str | None = None,
         lease_ttl: float | None = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        intervention_mode: Literal["planned", "auto"] | None = None,
+        intervention_policy: Any = None,
     ):
         handlers_snapshot: TriggerFlowAllHandlers = {
             "event": {k: v.copy() for k, v in self._handlers["event"].items()},
@@ -1601,6 +1907,8 @@ class TriggerFlowBlueprint:
             owner_id=owner_id,
             lease_ttl=lease_ttl,
             execution_environments=execution_environments,
+            intervention_mode=intervention_mode,
+            intervention_policy=intervention_policy,
         )
 
     def copy(self, *, name: str | None = None):

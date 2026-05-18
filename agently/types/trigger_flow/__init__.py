@@ -17,10 +17,14 @@ from .contract import (
     TriggerFlowContractEntry,
     TriggerFlowContractMetadata,
     TriggerFlowContractSpec,
+    TriggerFlowIntervention,
+    TriggerFlowInterventionConsumer,
+    TriggerFlowInterventionEvent,
     TriggerFlowInterrupt,
     TriggerFlowInterruptEvent,
     TriggerFlowSystemStreamEvent,
     TriggerFlowSystemStreamMetadata,
+    TRIGGER_FLOW_INTERVENTION_EVENT_SCHEMA,
     TRIGGER_FLOW_INTERRUPT_EVENT_SCHEMA,
 )
 from .trigger_flow import (

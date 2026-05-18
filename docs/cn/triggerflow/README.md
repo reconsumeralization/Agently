@@ -10,5 +10,7 @@
 6. [Sub-Flow](sub-flow.md)：父子 flow 组合。
 7. [持久化与 Blueprint](persistence-and-blueprint.md)：save/load 与定义导出。
 8. [Pause 与 Resume](pause-and-resume.md)：人工介入和外部恢复。
-9. [模型集成](model-integration.md)：在 chunk 内调用 agent / request。
-10. [兼容](compatibility.md)：迁移旧 `.end()`、`set_result()`、`runtime_data`。
+9. [Runtime Intervention](runtime-intervention.md)：不暂停、不改 graph，向运行中的 execution 补充上下文。
+10. [模型集成](model-integration.md)：在 chunk 内调用 agent / request。
+11. [Execution Result](execution-result.md)：读取 snapshot、state、兼容 result、intervention 和 metadata。
+12. [兼容](compatibility.md)：迁移旧 `.end()`、`set_result()`、`runtime_data`。

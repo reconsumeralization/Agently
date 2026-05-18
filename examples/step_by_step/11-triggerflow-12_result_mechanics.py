@@ -11,11 +11,14 @@ async def triggerflow_close_snapshot_demo():
 
     flow.to(work)
 
-    execution = flow.create_execution()
+    execution = flow.create_execution(auto_close=False)
     await execution.async_start("task")
-    state = await execution.async_close()
-    assert state["output"] == "work(task)"
-    print(state)
+    snapshot = await execution.async_close()
+    result = execution.result
+    assert snapshot is not None
+    assert snapshot["output"] == "work(task)"
+    assert result.get_state("output") == "work(task)"
+    print(snapshot)
 
 
 async def triggerflow_manual_result_compat_demo():
@@ -27,11 +30,18 @@ async def triggerflow_manual_result_compat_demo():
 
     flow.to(work)
 
-    execution = flow.create_execution()
+    execution = flow.create_execution(auto_close=False)
     await execution.async_start("task")
-    result = await execution.async_close()
-    assert result == {"manual_result": "compatibility override"}
-    print(result)
+    snapshot = await execution.async_close()
+    result = execution.result
+    assert snapshot is not None
+    final_result = await result.async_get_final_result()
+    assert snapshot == {
+        "state_output": "kept in state",
+        "$final_result": {"manual_result": "compatibility override"},
+    }
+    assert final_result == {"manual_result": "compatibility override"}
+    print({"snapshot": snapshot, "final_result": final_result})
 
 
 async def triggerflow_event_branch_close_demo():
@@ -49,8 +59,11 @@ async def triggerflow_event_branch_close_demo():
     execution = flow.create_execution(auto_close=False)
     await execution.async_start(None)
     state = await execution.async_close()
-    assert state["ping"] == "pong"
-    print(state)
+    result = execution.result
+    assert state is not None
+    assert result.get_state("ping") == "pong"
+    assert result.get_meta()["lifecycle_state"] == "closed"
+    print({"state": state, "meta": result.get_meta()})
 
 
 async def main():

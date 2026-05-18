@@ -17,6 +17,8 @@ from .core import TriggerFlow, TriggerFlowBlueprint
 from .types.trigger_flow import (
     TriggerFlowContractSpec,
     TriggerFlowEventData,
+    TriggerFlowIntervention,
+    TriggerFlowInterventionEvent,
     TriggerFlowInterruptEvent,
     TriggerFlowRuntimeData,
     TriggerFlowSystemStreamEvent,
@@ -31,6 +33,8 @@ __all__ = [
     "TriggerFlowContractSpec",
     "TriggerFlowRuntimeData",
     "TriggerFlowEventData",
+    "TriggerFlowIntervention",
+    "TriggerFlowInterventionEvent",
     "TriggerFlowInterruptEvent",
     "TriggerFlowSystemStreamEvent",
     "TriggerFlowBlueprint",

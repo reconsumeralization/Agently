@@ -27,10 +27,11 @@ if TYPE_CHECKING:
 from agently.types.trigger_flow import (
     TriggerFlowBlockData,
     TriggerFlowContractMetadata,
+    TriggerFlowInterventionEvent,
     TriggerFlowInterruptEvent,
 )
 from agently.types.data import RunContext
-from agently.utils import Settings, StateData, FunctionShifter
+from agently.utils import DeprecationWarnings, Settings, StateData, FunctionShifter
 from agently.core.RuntimeContext import resolve_parent_run_context
 from .BluePrint import TriggerFlowBlueprint
 from .Process import TriggerFlowProcess
@@ -43,6 +44,15 @@ ResultT = TypeVar("ResultT")
 ContractInputT = TypeVar("ContractInputT")
 ContractStreamT = TypeVar("ContractStreamT")
 ContractResultT = TypeVar("ContractResultT")
+
+
+class _InterventionModeUnset:
+    __slots__ = ()
+
+
+_INTERVENTION_MODE_UNSET = _InterventionModeUnset()
+_INTERVENTION_MODE_DEFAULT = cast(Any, _INTERVENTION_MODE_UNSET)
+
 
 class TriggerFlow(Generic[InputT, StreamT, ResultT]):
     def __init__(
@@ -103,11 +113,30 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         self.when = self._start_process.when
         self.to = self._start_process.to
         self.to_sub_flow = self._start_process.to_sub_flow
+        self.intervention_point = self._start_process.intervention_point
         self.side_branch = self._start_process.side_branch
         self.batch = self._start_process.batch
         self.for_each = self._start_process.for_each
         self.match = self._start_process.match
         self.if_condition = self._start_process.if_condition
+
+    def _has_intervention_points(self):
+        return any(
+            operator.get("kind") == "intervention_point"
+            for operator in self._blue_print.definition.operators
+        )
+
+    def _resolve_intervention_mode(
+        self,
+        intervention_mode: Any,
+    ) -> Literal["planned", "auto"] | None:
+        if isinstance(intervention_mode, _InterventionModeUnset):
+            if self._has_intervention_points():
+                return "planned"
+            return None
+        if intervention_mode is None:
+            return None
+        return intervention_mode
 
     @overload
     def chunk(self, handler_or_name: "TriggerFlowHandler") -> TriggerFlowChunk: ...
@@ -149,9 +178,12 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         auto_close_timeout: float | None = 10.0,
         owner_id: str | None = None,
         lease_ttl: float | None = None,
+        intervention_mode: Literal["planned", "auto"] | None = _INTERVENTION_MODE_DEFAULT,
+        intervention_policy: Any = None,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
         execution_id = uuid.uuid4().hex
         skip_exceptions = skip_exceptions if skip_exceptions is not None else self._skip_exceptions
+        intervention_mode = self._resolve_intervention_mode(intervention_mode)
         parent_run_context = resolve_parent_run_context(parent_run_context)
         execution_run_context = run_context
         if execution_run_context is None:
@@ -178,6 +210,8 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             owner_id=owner_id,
             lease_ttl=lease_ttl,
             execution_environments=execution_environments,
+            intervention_mode=intervention_mode,
+            intervention_policy=intervention_policy,
         )
         if runtime_resources:
             execution.update_runtime_resources(runtime_resources)
@@ -389,12 +423,14 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         auto_close_timeout: float | None = 10.0,
         owner_id: str | None = None,
         lease_ttl: float | None = None,
+        intervention_mode: Literal["planned", "auto"] | None = _INTERVENTION_MODE_DEFAULT,
+        intervention_policy: Any = None,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
         if wait_for_result is not False:
-            warnings.warn(
+            DeprecationWarnings.warn_deprecated_once(
+                "TriggerFlow.async_start_execution.wait_for_result",
                 "TriggerFlow.async_start_execution(..., wait_for_result=...) is deprecated and ignored. "
                 "start_execution() now always returns the execution handle.",
-                DeprecationWarning,
                 stacklevel=2,
             )
         effective_auto_close_timeout = timeout if timeout is not None else auto_close_timeout
@@ -408,6 +444,8 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             owner_id=owner_id,
             lease_ttl=lease_ttl,
             execution_environments=execution_environments,
+            intervention_mode=intervention_mode,
+            intervention_policy=intervention_policy,
         )
         await execution._async_run_start(initial_value)
         return execution
@@ -607,11 +645,11 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
                 "Use start_execution()/create_execution() for manual lifecycle control."
             )
         if wait_for_result is False:
-            warnings.warn(
+            DeprecationWarnings.warn_deprecated_once(
+                "TriggerFlow.start.wait_for_result_false",
                 "TriggerFlow.start()/async_start(..., wait_for_result=False) is deprecated and ignored. "
                 "The hidden execution path now always waits for close and returns the close snapshot. "
                 "Use start_execution()/create_execution() for non-blocking execution control.",
-                DeprecationWarning,
                 stacklevel=2,
             )
         effective_auto_close_timeout = timeout if timeout is not None else auto_close_timeout
@@ -640,7 +678,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
-    ) -> AsyncGenerator[StreamT | TriggerFlowInterruptEvent, None]:
+    ) -> AsyncGenerator[StreamT | TriggerFlowInterruptEvent | TriggerFlowInterventionEvent, None]:
         execution = self.create_execution(
             concurrency=concurrency,
             runtime_resources=runtime_resources,
@@ -662,7 +700,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         runtime_resources: dict[str, Any] | None = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
-    ) -> Generator[StreamT | TriggerFlowInterruptEvent, None, None]:
+    ) -> Generator[StreamT | TriggerFlowInterruptEvent | TriggerFlowInterventionEvent, None, None]:
         execution = self.create_execution(
             concurrency=concurrency,
             runtime_resources=runtime_resources,

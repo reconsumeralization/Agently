@@ -121,7 +121,7 @@ async def maybe_request_approval(data):
         return await data.async_pause_for(
             type="approval",
             payload={"ticket_id": data.input["id"], "amount": data.input["amount"]},
-            resume_event="RefundApproved",
+            resume_to="next",
         )
     return data.input
 ```

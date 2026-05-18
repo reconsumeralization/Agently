@@ -48,9 +48,11 @@ async def main():
         },
     )
     state = await restored_execution.async_close()
+    result = restored_execution.result
+    assert state is not None
     state_file.unlink(missing_ok=True)
-    assert state["final"]["status"] == "done"
-    print(state["final"])
+    assert result.get_state("final.status") == "done"
+    print({"final": state["final"], "meta": result.get_meta()})
 
 
 asyncio.run(main())

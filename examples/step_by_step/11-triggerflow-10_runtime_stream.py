@@ -37,9 +37,9 @@ async def triggerflow_runtime_stream_demo():
     await execution.async_start("start")
     close_task = asyncio.create_task(execution.async_close())
     events = [event async for event in execution.get_async_runtime_stream(timeout=None)]
-    state = await close_task
-    assert state["done"] is True
-    print(events)
+    await close_task
+    assert execution.result.get_state("done") is True
+    print({"events": events, "meta": execution.result.get_meta()})
 
 
 async def triggerflow_agent_stream_demo():
@@ -63,9 +63,14 @@ async def triggerflow_agent_stream_demo():
     await execution.async_start("Explain TriggerFlow in one sentence.")
     close_task = asyncio.create_task(execution.async_close())
     events = [event async for event in execution.get_async_runtime_stream(timeout=None)]
-    state = await close_task
-    assert state["reply"]
-    print(events[-1])
+    await close_task
+    assert execution.result.get_state("reply")
+    print(
+        {
+            "last_event": events[-1],
+            "execution_id": execution.result.get_meta()["execution_id"],
+        }
+    )
 
 
 async def main():

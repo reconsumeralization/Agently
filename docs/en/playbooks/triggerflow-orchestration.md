@@ -124,14 +124,14 @@ See [Patterns](../triggerflow/patterns.md) for `batch`, `for_each`, and concurre
 
 ### Need human approval
 
-Add a `pause_for` step. The execution must be created with `auto_close=False`; you'll resume via `continue_with` or by emitting the configured `resume_event`.
+Add a `pause_for` step. The execution must be created with `auto_close=False`; resume with `continue_with` and an explicit `resume_to` target.
 
 ```python
 async def ask(data):
     return await data.async_pause_for(
         type="approval",
         payload={"summary": data.input["summary"]},
-        resume_event="ApprovalGiven",
+        resume_to="next",
     )
 ```
 

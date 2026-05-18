@@ -6,6 +6,7 @@ Use this as a compact, agent-oriented guide to the utilities in `agently/utils`.
 - data shaping: `DataFormatter`, `StateData`, `SerializableStateData`, `Settings`
 - path and JSON helpers: `DataLocator`, `DataPathBuilder`, `StreamingJSONCompleter`, `StreamingJSONParser`
 - async/sync bridging: `FunctionShifter`, `GeneratorConsumer`
+- deprecations: `DeprecationWarnings`
 - dynamic deps: `LazyImport`
 - storage: `Storage`, `AsyncStorage`
 - misc: `Logger`, `Messenger`, `PythonSandbox`
@@ -78,6 +79,18 @@ Usage:
 When to use:
 - Broadcast streaming output to multiple subscribers.
 - Merge history + live updates reliably.
+
+### DeprecationWarnings
+Purpose: emit Agently deprecation warnings once per deprecated API per Python process.
+
+Key methods:
+- `warn_deprecated_once(key, message, stacklevel=2)`: emit a `DeprecationWarning` for a stable API key only on first use.
+- `log_deprecated_once(key, logger, message)`: log a deprecation message once for a stable API key.
+- `reset_registry()`: clear the once-per-process registry for tests.
+
+When to use:
+- Any framework deprecation warning.
+- Do not use this as a generic warning helper.
 
 ### LazyImport
 Purpose: import optional deps and optionally auto-install via pip with version constraints.

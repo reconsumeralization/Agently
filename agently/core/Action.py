@@ -18,7 +18,6 @@ import asyncio
 import inspect
 import json
 import uuid
-import warnings
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -61,7 +60,7 @@ from agently.types.plugins import (
     StandardActionExecutionHandler,
     StandardActionPlanningHandler,
 )
-from agently.utils import FunctionShifter, Settings, SettingsNamespace
+from agently.utils import DeprecationWarnings, FunctionShifter, Settings, SettingsNamespace
 from agently.utils import DataFormatter, LazyImport
 
 if TYPE_CHECKING:
@@ -663,9 +662,9 @@ class _DeprecatedActionManagerProxy:
         self._name = name
 
     def __getattr__(self, item: str):
-        warnings.warn(
+        DeprecationWarnings.warn_deprecated_once(
+            f"Action.{ self._name }.proxy",
             f"Action.{ self._name } is deprecated. Use Action directly; `tool` remains only as a public surface alias.",
-            DeprecationWarning,
             stacklevel=2,
         )
         return getattr(self._action, item)
@@ -799,18 +798,18 @@ class Action:
 
     @property
     def action_manager(self):
-        warnings.warn(
+        DeprecationWarnings.warn_deprecated_once(
+            "Action.action_manager",
             "Action.action_manager is deprecated. Use Action directly.",
-            DeprecationWarning,
             stacklevel=2,
         )
         return self._deprecated_action_manager
 
     @property
     def tool_manager(self):
-        warnings.warn(
+        DeprecationWarnings.warn_deprecated_once(
+            "Action.tool_manager",
             "Action.tool_manager is deprecated. Use Action directly; `tool` remains a public surface alias.",
-            DeprecationWarning,
             stacklevel=2,
         )
         return self._deprecated_tool_manager
