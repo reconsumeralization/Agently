@@ -10,6 +10,7 @@ Suggested reading order:
 6. [Sub-Flow](sub-flow.md): parent-child flow composition.
 7. [Persistence and Blueprint](persistence-and-blueprint.md): save/load and definition export.
 8. [Pause and Resume](pause-and-resume.md): human intervention and external resume.
-9. [Model Integration](model-integration.md): calling agents / requests inside chunks.
-10. [Execution Result](execution-result.md): reading snapshots, state, compatibility results, interventions, and metadata.
-11. [Compatibility](compatibility.md): migrating old `.end()`, `set_result()`, and `runtime_data`.
+9. [Runtime Intervention](runtime-intervention.md): adding supplemental context without pausing or mutating the graph.
+10. [Model Integration](model-integration.md): calling agents / requests inside chunks.
+11. [Execution Result](execution-result.md): reading snapshots, state, compatibility results, interventions, and metadata.
+12. [Compatibility](compatibility.md): migrating old `.end()`, `set_result()`, and `runtime_data`.

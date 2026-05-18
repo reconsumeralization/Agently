@@ -1675,6 +1675,25 @@ class TriggerFlowBlueprint:
         for signal in operator["listen_signals"]:
             self.add_handler(signal["trigger_type"], signal["trigger_event"], collect_branches, id=operator["id"])
 
+    def _compile_intervention_point_operator(self, operator: dict[str, Any]):
+        emit_signal = operator["emit_signals"][0]
+        target = operator.get("options", {}).get("target")
+
+        async def insert_interventions(data):
+            await data.execution._async_insert_planned_interventions(
+                target=str(target) if target is not None else None,
+                operator=operator,
+                signal=data.signal,
+            )
+            await data.async_emit(
+                emit_signal["trigger_event"],
+                data.value,
+                _layer_marks=data._layer_marks.copy(),
+            )
+
+        for signal in operator["listen_signals"]:
+            self.add_handler(signal["trigger_type"], signal["trigger_event"], insert_interventions, id=operator["id"])
+
     def _compile_result_sink_operator(self, operator: dict[str, Any]):
         async def set_default_result(data):
             result = data._system_runtime_data.get("result")
@@ -1710,6 +1729,8 @@ class TriggerFlowBlueprint:
             self._compile_match_collect_operator(operator)
         elif kind == "collect_branch":
             self._compile_collect_branch_operator(operator)
+        elif kind == "intervention_point":
+            self._compile_intervention_point_operator(operator)
         elif kind == "sub_flow":
             self._compile_sub_flow_operator(operator)
         elif kind == "result_sink":
@@ -1866,6 +1887,8 @@ class TriggerFlowBlueprint:
         owner_id: str | None = None,
         lease_ttl: float | None = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        intervention_mode: Literal["planned", "auto"] | None = None,
+        intervention_policy: Any = None,
     ):
         handlers_snapshot: TriggerFlowAllHandlers = {
             "event": {k: v.copy() for k, v in self._handlers["event"].items()},
@@ -1884,6 +1907,8 @@ class TriggerFlowBlueprint:
             owner_id=owner_id,
             lease_ttl=lease_ttl,
             execution_environments=execution_environments,
+            intervention_mode=intervention_mode,
+            intervention_policy=intervention_policy,
         )
 
     def copy(self, *, name: str | None = None):

@@ -104,6 +104,8 @@ Several skills ship validation scripts (e.g., `validate/validate_native_usage.py
 
 Feature acceptance also requires spec reconciliation: update the relevant spec to the final implemented design, move fully landed planned specs into `spec/implemented/`, and update `spec/README.md` in the same work item.
 
+User-visible feature work must add or update examples for the scenario the feature enables. Keep the example runnable in its declared environment, aligned with the current recommended API, and explicit about the important runtime behavior. Its `Expected key output` comment should preserve stable key values from one real run, not a generic "shows X" description. When the behavior is not obvious from output alone, add concise working-principle notes or an ASCII flow diagram in the example comment.
+
 When reporting API, recommended usage, examples, or compatibility changes, include concise sample code that shows the updated usage shape. Prefer current usage snippets or before/after snippets over abstract prose when that makes the change easier to inspect.
 
 ## See also

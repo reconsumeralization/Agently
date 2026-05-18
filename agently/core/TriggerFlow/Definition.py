@@ -386,6 +386,8 @@ class TriggerFlowDefinition:
             return "match result"
         if kind == "collect_branch":
             return f"collect\\n{ operator['options'].get('collection_name', '') }"
+        if kind == "intervention_point":
+            return f"intervention\\n{ name or operator['options'].get('target') or '' }"
         if kind == "sub_flow":
             return f"subflow\\n{ operator.get('name') or operator['options'].get('sub_flow_name', 'child') }"
         if kind == "result_sink":
