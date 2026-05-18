@@ -62,7 +62,7 @@ from agently.types.plugins import (
 )
 ```
 
-> The older `ToolManager` plugin type and `AgentlyToolManager` class are kept for explicit legacy use only and emit deprecation warnings. Don't write new plugins against `ToolManager`.
+> The older `ToolManager` plugin type and `AgentlyToolManager` class are kept for explicit legacy use only and emit deprecation warnings once per deprecated API per Python process, unless `runtime.show_deprecation_warnings` is disabled. Don't write new plugins against `ToolManager`.
 
 ## The preferred surface — actions
 

@@ -15,7 +15,6 @@
 
 import uuid
 import copy
-import warnings
 from asyncio import Event, Semaphore
 
 from typing import Callable, Any, Literal, TYPE_CHECKING, overload, cast, TypeAlias
@@ -35,6 +34,7 @@ if TYPE_CHECKING:
 from ..Chunk import TriggerFlowChunk
 from agently.types.data import EMPTY
 from agently.types.trigger_flow import TriggerFlowBlockData
+from agently.utils import warn_deprecated_once
 
 
 class _UnsetType:
@@ -655,10 +655,10 @@ class TriggerFlowBaseProcess:
         )
 
     def end(self):
-        warnings.warn(
+        warn_deprecated_once(
+            "TriggerFlowProcess.end",
             "TriggerFlowProcess.end() is deprecated. It only installs a compatibility result sink that writes "
             "'$final_result'. New code should rely on execution close snapshots and runtime lifecycle APIs.",
-            DeprecationWarning,
             stacklevel=2,
         )
 

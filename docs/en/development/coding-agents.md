@@ -79,6 +79,8 @@ Documentation tells humans what's possible. Skills tell coding agents what's rec
 
 In particular, skills must NOT recommend deprecated paths like `.end()`, `set_result()`, `wait_for_result=`, or the old `runtime_data` API. If you find a skill recommending one of these, file an issue against `Agently-Skills`.
 
+When adding a framework deprecation, route the warning through `agently.utils.warn_deprecated_once(...)` or `warn_once(...)` with a stable API key. Do not add direct `warnings.warn(..., DeprecationWarning, ...)` calls; deprecated API warnings are intentionally once per API per Python process and respect `runtime.show_deprecation_warnings`.
+
 ## Post-4.1 defaults
 
 When you audit or author guidance for Agently `4.1+`, these are the defaults coding agents should prefer:

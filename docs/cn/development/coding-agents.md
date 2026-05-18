@@ -80,6 +80,8 @@ done
 
 特别地，skill **不得**推荐 deprecated 路径如 `.end()`、`set_result()`、`wait_for_result=`、旧 `runtime_data`。如果你发现某 skill 推荐其中之一，请向 `Agently-Skills` 提 issue。
 
+新增框架 deprecation 时，必须通过 `agently.utils.warn_deprecated_once(...)` 或带稳定 API key 的 `warn_once(...)` 发 warning。不要直接新增 `warnings.warn(..., DeprecationWarning, ...)`；deprecated API warning 设计为每个 Python 进程内每个 API 只发一次，并遵守 `runtime.show_deprecation_warnings`。
+
 ## 4.1 之后的默认推荐
 
 当你审计或编写面向 Agently `4.1+` 的指导时，coding agent 应默认偏向这些用法：

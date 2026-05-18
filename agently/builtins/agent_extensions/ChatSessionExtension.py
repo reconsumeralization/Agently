@@ -15,13 +15,12 @@
 
 import uuid
 import yaml
-from warnings import warn
 
 from typing import Any, Literal, Sequence, TYPE_CHECKING, cast
 
 from agently.core import BaseAgent
 from agently.types.data import ChatMessage, ChatMessageDict
-from agently.utils import StateData, DataPathBuilder
+from agently.utils import StateData, DataPathBuilder, warn_once
 
 if TYPE_CHECKING:
     from agently.types.data import ChatMessage, AgentlyModelResult, PromptStandardSlot
@@ -45,8 +44,10 @@ class ChatSessionExtension(BaseAgent):
 
         self.extension_handlers.append("finally", self.__finally)
 
-        warn(
-            "[Agently Extensions] ChatSessionExtension is deprecated and will be removed in future version, use SessionExtension which is mixed in by default instead."
+        warn_once(
+            "ChatSessionExtension.__init__",
+            "[Agently Extensions] ChatSessionExtension is deprecated and will be removed in future version, use SessionExtension which is mixed in by default instead.",
+            stacklevel=2,
         )
 
     def activate_chat_session(self, chat_session_id: str | None = None):

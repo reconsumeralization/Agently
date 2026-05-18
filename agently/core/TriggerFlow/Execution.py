@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from agently.types.trigger_flow import TriggerFlowAllHandlers
     from agently.types.data import ExecutionEnvironmentHandle, ExecutionEnvironmentRequirement, RunContext, SerializableValue
 
-from agently.utils import StateData, FunctionShifter, GeneratorConsumer, Settings
+from agently.utils import StateData, FunctionShifter, GeneratorConsumer, Settings, warn_deprecated_once
 from agently.core.RuntimeContext import bind_runtime_context, get_current_chunk_run_context
 from agently.types.trigger_flow import (
     TriggerFlowContractMetadata,
@@ -278,10 +278,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         )
 
     def _warn_runtime_data_api(self, method_name: str):
-        warnings.warn(
+        warn_deprecated_once(
+            f"TriggerFlowExecution.{ method_name }",
             f"TriggerFlowExecution.{ method_name }() is deprecated; "
             "use execution state APIs such as get_state()/set_state() instead.",
-            DeprecationWarning,
             stacklevel=3,
         )
 
@@ -1588,12 +1588,12 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return await self.async_del_state(key, emit=emit)
 
     def _warn_wait_for_result_deprecated(self, method_name: str):
-        warnings.warn(
+        warn_deprecated_once(
+            f"TriggerFlowExecution.{ method_name }.wait_for_result",
             f"TriggerFlowExecution.{ method_name }(..., wait_for_result=...) is deprecated. "
             "Execution start behavior is now driven by auto_close: "
             "auto-close executions wait for close; manual-close executions start and return the execution handle. "
             "Use create_execution()/start_execution() for explicit lifecycle control.",
-            DeprecationWarning,
             stacklevel=3,
         )
 
@@ -2050,10 +2050,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self._build_close_snapshot()
 
     def set_result(self, result: ResultT, *, _origin_chunk: dict[str, Any] | None = None):
-        warnings.warn(
+        warn_deprecated_once(
+            "TriggerFlowExecution.set_result",
             "TriggerFlowExecution.set_result() is deprecated; write execution state directly and let close() return "
             "the close snapshot. For compatibility, set_result() now writes '$final_result'.",
-            DeprecationWarning,
             stacklevel=2,
         )
         result = cast(ResultT, self._trigger_flow._contract.validate_result(result))
@@ -2091,11 +2091,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 )
 
     async def async_get_result(self, *, timeout: float | None = None) -> ResultT | None:
-        warnings.warn(
+        warn_deprecated_once(
+            "TriggerFlowExecution.get_result",
             "TriggerFlowExecution.get_result()/async_get_result() are compatibility APIs; "
             "prefer close()/async_close() and execution state APIs for lifecycle-oriented workflows. "
             "get_result() now returns '$final_result' when present, otherwise the close snapshot.",
-            DeprecationWarning,
             stacklevel=2,
         )
         return cast(ResultT | None, await self._async_wait_for_compat_result_or_close(timeout=timeout))
