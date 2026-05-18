@@ -15,7 +15,7 @@
 
 from .TriggerFlow import TriggerFlow
 from .BluePrint import TriggerFlowBlueprint
-from .Execution import TriggerFlowExecution
+from .Execution import TriggerFlowExecution, TriggerFlowExecutionResult
 from .Chunk import TriggerFlowChunk
 from .Process import TriggerFlowProcess
 from .process import (

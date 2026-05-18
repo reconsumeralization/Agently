@@ -52,6 +52,11 @@ If you have flow configs that still call `.end()`, they keep working — the val
 
 Status: **Deprecated** — both emit deprecation warnings.
 
+When you must bridge compatibility code, prefer
+`await execution.result.async_get_final_result()` over adding new
+`get_result()` call sites. It keeps the same lookup order while making the
+compatibility intent explicit.
+
 ### Old
 
 ```python

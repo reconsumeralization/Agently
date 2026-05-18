@@ -85,6 +85,7 @@ When adding a framework deprecation, route the warning through `agently.utils.De
 
 When you audit or author guidance for Agently `4.1+`, these are the defaults coding agents should prefer:
 
+- API shape: apply Occam's razor. Do not add a new entity, method, facade, or compatibility patch when an existing surface already expresses the concept. If a name is unclear, prefer a narrow alias or documentation clarification over another overlapping method.
 - Structured output: for fixed required leaves, mark `(TypeExpr, "description", True)` directly in `.output(...)`. Use manual `ensure_keys=` only for conditional or runtime-dependent paths.
 - Actions: new code should start from `@agent.action_func` and `agent.use_actions(...)`. `tool_func`, `use_tool`, and `use_tools` are compatibility aliases, not the primary recommendation.
 - TriggerFlow lifecycle: treat `close()` / `async_close()` and the close snapshot as the canonical completion path. Do not recommend `.end()`, `set_result()`, `get_result()`, or `wait_for_result=` as the normal starting point.
@@ -100,6 +101,10 @@ If your team has internal patterns layered on top of Agently (a particular proje
 ## Validation scripts
 
 Several skills ship validation scripts (e.g., `validate/validate_native_usage.py`). Coding agents can run these to confirm a user's project follows the recommended path before declaring a task complete. For example, the TriggerFlow validator checks that no deprecated API is being used as the recommended starting point.
+
+Feature acceptance also requires spec reconciliation: update the relevant spec to the final implemented design, move fully landed planned specs into `spec/implemented/`, and update `spec/README.md` in the same work item.
+
+When reporting API, recommended usage, examples, or compatibility changes, include concise sample code that shows the updated usage shape. Prefer current usage snippets or before/after snippets over abstract prose when that makes the change easier to inspect.
 
 ## See also
 

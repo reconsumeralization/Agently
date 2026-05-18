@@ -11,4 +11,5 @@
 7. [持久化与 Blueprint](persistence-and-blueprint.md)：save/load 与定义导出。
 8. [Pause 与 Resume](pause-and-resume.md)：人工介入和外部恢复。
 9. [模型集成](model-integration.md)：在 chunk 内调用 agent / request。
-10. [兼容](compatibility.md)：迁移旧 `.end()`、`set_result()`、`runtime_data`。
+10. [Execution Result](execution-result.md)：读取 snapshot、state、兼容 result、intervention 和 metadata。
+11. [兼容](compatibility.md)：迁移旧 `.end()`、`set_result()`、`runtime_data`。

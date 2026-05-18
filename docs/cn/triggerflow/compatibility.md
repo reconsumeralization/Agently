@@ -52,6 +52,10 @@ async def step_b(data):
 
 状态：**Deprecated** —— 都发警告。
 
+必须桥接兼容代码时，优先用
+`await execution.result.async_get_final_result()`，不要新增 `get_result()`
+调用点。它保留同样的查找顺序，但兼容意图更明确。
+
 ### 旧
 
 ```python

@@ -166,6 +166,7 @@ snapshot = await execution.async_close()
 ## 另见
 
 - [State 与 Resources](state-and-resources.md) —— 什么进 snapshot
+- [Execution Result](execution-result.md) —— 通过统一 facade 读取 snapshot、state、兼容 result 和 metadata
 - [Pause 与 Resume](pause-and-resume.md) —— `pause_for` 与 `continue_with`
 - [持久化与 Blueprint](persistence-and-blueprint.md) —— `save` / `load`
 - [兼容](compatibility.md) —— 从旧 API 迁移
