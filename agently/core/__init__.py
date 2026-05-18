@@ -30,6 +30,7 @@ from .TriggerFlow import (
     TriggerFlow,
     TriggerFlowBlueprint,
     TriggerFlowExecution,
+    TriggerFlowExecutionResult,
     TriggerFlowChunk,
 )
 from .Session import Session

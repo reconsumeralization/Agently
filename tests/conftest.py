@@ -31,9 +31,9 @@ def require_ollama():
 
 
 @pytest.fixture(autouse=True)
-def reset_warning_once_registry():
-    from agently.utils import _reset_warning_once_registry_for_tests
+def reset_deprecation_warning_registry():
+    from agently.utils import reset_deprecation_warning_registry as reset_registry
 
-    _reset_warning_once_registry_for_tests()
+    reset_registry()
     yield
-    _reset_warning_once_registry_for_tests()
+    reset_registry()

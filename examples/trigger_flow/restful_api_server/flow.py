@@ -41,5 +41,6 @@ def dump_flow():
 async def run_flow(value: int):
     execution = dump_flow().create_execution()
     await execution.async_start(value)
-    state = await execution.async_close()
-    return state["response"]
+    await execution.async_close()
+    result = execution.result
+    return result.get_state("response")

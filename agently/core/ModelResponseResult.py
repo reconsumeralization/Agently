@@ -21,7 +21,7 @@ import warnings
 from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, cast, overload, Generator, Mapping, Sequence
 
 from agently.core.RuntimeContext import bind_runtime_context
-from agently.utils import FunctionShifter, DataFormatter, DataLocator, DataPathBuilder, warn_once
+from agently.utils import DeprecationWarnings, FunctionShifter, DataFormatter, DataLocator, DataPathBuilder
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -813,7 +813,7 @@ class ModelResponseResult:
     ) -> Generator:
         if type is None:
             if content is not None:
-                warn_once(
+                DeprecationWarnings.warn_deprecated_once(
                     "ModelResponseResult.get_generator.content",
                     "Parameter `content` in method .get_generator() is  deprecated and will be removed in future "
                     "version, please use parameter `type` instead.",
@@ -871,7 +871,7 @@ class ModelResponseResult:
     ) -> AsyncGenerator:
         if type is None:
             if content is not None:
-                warn_once(
+                DeprecationWarnings.warn_deprecated_once(
                     "ModelResponseResult.get_async_generator.content",
                     "Parameter `content` in method .get_async_generator() is  deprecated and will be removed in "
                     "future version, please use parameter `type` instead.",

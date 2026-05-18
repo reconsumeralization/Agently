@@ -22,7 +22,9 @@ async def prepare(data: TriggerFlowRuntimeData):
 
 @flow.chunk
 async def finalize(data: TriggerFlowRuntimeData):
-    payload = dict(data.input) if isinstance(data.input, dict) else {"value": data.input}
+    payload = (
+        dict(data.input) if isinstance(data.input, dict) else {"value": data.input}
+    )
     payload["status"] = "completed"
     await data.async_set_state("result", payload)
 
@@ -33,7 +35,8 @@ flow.to(prepare).to(finalize)
 async def main():
     execution = flow.create_execution()
     await execution.async_start("release readiness")
-    print(await execution.async_close())
+    snapshot = await execution.async_close()
+    print({"snapshot": snapshot, "meta": execution.result.get_meta()})
 
 
 try:

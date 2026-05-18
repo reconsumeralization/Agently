@@ -7,17 +7,16 @@ import pytest
 from agently import Agently, TriggerFlow
 from agently.core.Session import Session
 from agently.utils import (
-    _reset_warning_once_registry_for_tests,
+    DeprecationWarnings,
     log_deprecated_once,
-    log_warning_once,
+    reset_deprecation_warning_registry,
     warn_deprecated_once,
-    warn_once,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AGENTLY_ROOT = PROJECT_ROOT / "agently"
-WARNING_HELPER = AGENTLY_ROOT / "utils" / "_warnings.py"
+WARNING_HELPER = AGENTLY_ROOT / "utils" / "DeprecationWarnings.py"
 
 
 def _collect_call_text(call: ast.Call) -> str:
@@ -43,14 +42,10 @@ def _is_warning_log_call(call: ast.Call) -> bool:
     return isinstance(call.func, ast.Attribute) and call.func.attr == "warning"
 
 
-def test_warn_once_emits_once_per_key():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        warn_once("test.key", "first")
-        warn_once("test.key", "first")
-        warn_once("test.other", "second")
-
-    assert [str(item.message) for item in caught] == ["first", "second"]
+def test_deprecation_warning_helpers_use_class_closure_exports():
+    assert warn_deprecated_once is DeprecationWarnings.warn_deprecated_once
+    assert log_deprecated_once is DeprecationWarnings.log_deprecated_once
+    assert reset_deprecation_warning_registry is DeprecationWarnings.reset_registry
 
 
 def test_warn_deprecated_once_preserves_deprecation_warning_category():
@@ -67,20 +62,14 @@ def test_warn_deprecated_once_preserves_deprecation_warning_category():
     assert Path(caught[0].filename) == Path(__file__)
 
 
-def test_log_warning_once_emits_once_per_key():
-    class Logger:
-        def __init__(self):
-            self.messages: list[str] = []
+def test_reset_deprecation_warning_registry_allows_deprecation_warning_again():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warn_deprecated_once("test.reset.deprecated", "first")
+        reset_deprecation_warning_registry()
+        warn_deprecated_once("test.reset.deprecated", "second")
 
-        def warning(self, message: str):
-            self.messages.append(message)
-
-    logger = Logger()
-    log_warning_once("test.log", logger, "first")
-    log_warning_once("test.log", logger, "first")
-    log_warning_once("test.log.other", logger, "second")
-
-    assert logger.messages == ["first", "second"]
+    assert [str(item.message) for item in caught] == ["first", "second"]
 
 
 def test_deprecation_warning_setting_defaults_to_enabled():

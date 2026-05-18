@@ -34,10 +34,9 @@ from .StreamingJSONCompleter import StreamingJSONCompleter
 from .StreamingJSONParser import StreamingJSONParser
 from .PythonSandbox import PythonSandbox
 from .TimeInfo import TimeInfo
-from ._warnings import (
-    warn_once,
+from .DeprecationWarnings import (
+    DeprecationWarnings,
     warn_deprecated_once,
-    log_warning_once,
     log_deprecated_once,
-    _reset_warning_once_registry_for_tests,
+    reset_deprecation_warning_registry,
 )

@@ -11,4 +11,5 @@ Suggested reading order:
 7. [Persistence and Blueprint](persistence-and-blueprint.md): save/load and definition export.
 8. [Pause and Resume](pause-and-resume.md): human intervention and external resume.
 9. [Model Integration](model-integration.md): calling agents / requests inside chunks.
-10. [Compatibility](compatibility.md): migrating old `.end()`, `set_result()`, and `runtime_data`.
+10. [Execution Result](execution-result.md): reading snapshots, state, compatibility results, interventions, and metadata.
+11. [Compatibility](compatibility.md): migrating old `.end()`, `set_result()`, and `runtime_data`.
