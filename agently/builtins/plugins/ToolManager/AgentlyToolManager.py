@@ -15,12 +15,11 @@
 from __future__ import annotations
 
 import inspect
-import warnings
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Coroutine, Literal, ParamSpec, TypeVar, cast, get_args, get_origin, get_type_hints
 
 from agently.core.Action import ActionDispatcher, ActionRegistry
 from agently.types.plugins import ToolManager
-from agently.utils import DataFormatter, FunctionShifter, LazyImport, SettingsNamespace
+from agently.utils import DataFormatter, FunctionShifter, LazyImport, SettingsNamespace, warn_deprecated_once
 from agently.types.data import ActionSpec
 
 if TYPE_CHECKING:
@@ -37,10 +36,10 @@ class AgentlyToolManager(ToolManager):
     DEFAULT_SETTINGS = {}
 
     def __init__(self, settings: "Settings"):
-        warnings.warn(
+        warn_deprecated_once(
+            "AgentlyToolManager.__init__",
             "AgentlyToolManager is deprecated as an internal runtime layer. Use Action directly; "
             "`tool` APIs remain public surface aliases.",
-            DeprecationWarning,
             stacklevel=2,
         )
         from agently.base import event_center, plugin_manager

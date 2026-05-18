@@ -51,4 +51,5 @@ runtime:
   show_tool_logs: "off"
   show_trigger_flow_logs: "off"
   show_runtime_logs: "off"
+  show_deprecation_warnings: True
   httpx_log_level: "WARNING"

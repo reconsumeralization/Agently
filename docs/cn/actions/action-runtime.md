@@ -62,7 +62,7 @@ from agently.types.plugins import (
 )
 ```
 
-> 旧的 `ToolManager` 插件类型与 `AgentlyToolManager` 类仅作为遗留兼容保留并发 deprecation 警告。新插件不要写在 `ToolManager` 上。
+> 旧的 `ToolManager` 插件类型与 `AgentlyToolManager` 类仅作为遗留兼容保留；deprecation warning 按 deprecated API 在每个 Python 进程内只发一次，除非关闭了 `runtime.show_deprecation_warnings`。新插件不要写在 `ToolManager` 上。
 
 ## 推荐入口 —— actions
 

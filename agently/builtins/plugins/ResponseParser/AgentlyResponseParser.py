@@ -32,6 +32,7 @@ from agently.utils import (
     FunctionShifter,
     StreamingJSONCompleter,
     StreamingJSONParser,
+    warn_once,
 )
 
 if TYPE_CHECKING:
@@ -341,8 +342,10 @@ class AgentlyResponseParser(ResponseParser):
     ) -> Any:
         await self._wait_for_consumer_result()
         if type is None and content is not None:
-            warnings.warn(
-                f"Parameter `content` in method .async_get_data() is  deprecated and will be removed in future version, please use parameter `type` instead."
+            warn_once(
+                "AgentlyResponseParser.async_get_data.content",
+                "Parameter `content` in method .async_get_data() is  deprecated and will be removed in future version, please use parameter `type` instead.",
+                stacklevel=2,
             )
             type = content
         match type:
@@ -383,8 +386,10 @@ class AgentlyResponseParser(ResponseParser):
         if type in ("instant", "streaming_parse") and self._prompt_object.output_format == "json":
             streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
         if type is None and content is not None:
-            warnings.warn(
-                f"Parameter `content` in method .get_async_generator() is  deprecated and will be removed in future version, please use parameter `type` instead."
+            warn_once(
+                "AgentlyResponseParser.get_async_generator.content",
+                "Parameter `content` in method .get_async_generator() is  deprecated and will be removed in future version, please use parameter `type` instead.",
+                stacklevel=2,
             )
             type = content
         try:
@@ -437,8 +442,10 @@ class AgentlyResponseParser(ResponseParser):
         if type in ("instant", "streaming_parse") and self._prompt_object.output_format == "json":
             streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
         if type is None and content is not None:
-            warnings.warn(
-                f"Parameter `content` in method .get_generator() is  deprecated and will be removed in future version, please use parameter `type` instead."
+            warn_once(
+                "AgentlyResponseParser.get_generator.content",
+                "Parameter `content` in method .get_generator() is  deprecated and will be removed in future version, please use parameter `type` instead.",
+                stacklevel=2,
             )
             type = content
         for event, data in parsed_generator:

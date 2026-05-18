@@ -25,7 +25,7 @@ import json5
 import yaml
 
 from agently.types.data import ChatMessage, ChatMessageDict
-from agently.utils import FunctionShifter, Settings, SettingsNamespace, DataLocator
+from agently.utils import FunctionShifter, Settings, SettingsNamespace, DataLocator, warn_deprecated_once
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -155,10 +155,10 @@ class Session:
         return self
 
     def register_execution_handlers(self, strategy_name: str, execution_handler: "ExecutionHandler"):
-        warn(
+        warn_deprecated_once(
+            "Session.register_execution_handlers",
             "Session.register_execution_handlers() is deprecated and will be removed in a future version; "
             "use Session.register_resize_handler() instead.",
-            DeprecationWarning,
             stacklevel=2,
         )
         return self.register_resize_handler(strategy_name, execution_handler)
@@ -260,10 +260,10 @@ class Session:
             warn(f"Can not find strategy '{ strategy_name }' in resize handlers dictionary in Session <{ self.id }>.")
 
     async def async_execute_strategy(self, strategy_name: str):
-        warn(
+        warn_deprecated_once(
+            "Session.async_execute_strategy",
             "Session.async_execute_strategy() is deprecated and will be removed in a future version; "
             "use Session.async_run_resize_strategy() instead.",
-            DeprecationWarning,
             stacklevel=2,
         )
         await self.async_run_resize_strategy(strategy_name)

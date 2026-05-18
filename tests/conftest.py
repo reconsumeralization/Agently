@@ -28,3 +28,12 @@ def is_ollama_available() -> bool:
 def require_ollama():
     if not is_ollama_available():
         pytest.skip("Ollama not reachable")
+
+
+@pytest.fixture(autouse=True)
+def reset_warning_once_registry():
+    from agently.utils import _reset_warning_once_registry_for_tests
+
+    _reset_warning_once_registry_for_tests()
+    yield
+    _reset_warning_once_registry_for_tests()

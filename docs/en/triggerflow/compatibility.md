@@ -12,6 +12,8 @@ This is the **only** page where deprecated TriggerFlow APIs appear as recommende
 
 The high-level shift is: the new lifecycle treats the **close snapshot** as the canonical return value. Older APIs that tried to compute a single "result" — `.end()`, `set_result()`, `get_result()`, `wait_for_result=` — are kept as compatibility surfaces but are not recommended for new code.
 
+Deprecation warnings are emitted once per deprecated API per Python process. Repeated calls keep working without repeating the same warning, while different deprecated APIs still warn independently. If production needs to silence Agently deprecation warnings globally, set `runtime.show_deprecation_warnings=False`.
+
 ## .end() — definition-time DSL, not a lifecycle action
 
 `.end()` was historically used as the way to "finish" a flow. Its actual current behavior is narrower:

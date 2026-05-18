@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
 from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar
 
 from agently.core import BaseAgent
-from agently.utils import FunctionShifter
+from agently.utils import FunctionShifter, warn_deprecated_once
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -788,10 +787,10 @@ class ActionExtension(BaseAgent):
         round_index: int = 0,
         max_rounds: int | None = None,
     ) -> list["ToolCommand"]:
-        warnings.warn(
+        warn_deprecated_once(
+            "ActionExtension.async_must_call",
             "Method .async_must_call() is deprecated and will be removed in future version, "
             "please use .async_generate_tool_command() instead.",
-            DeprecationWarning,
             stacklevel=2,
         )
         return await self.async_generate_tool_command(
@@ -811,10 +810,10 @@ class ActionExtension(BaseAgent):
         round_index: int = 0,
         max_rounds: int | None = None,
     ) -> list["ToolCommand"]:
-        warnings.warn(
+        warn_deprecated_once(
+            "ActionExtension.must_call",
             "Method .must_call() is deprecated and will be removed in future version, "
             "please use .generate_tool_command() instead.",
-            DeprecationWarning,
             stacklevel=2,
         )
         return self.generate_tool_command(

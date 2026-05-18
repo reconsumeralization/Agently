@@ -16,7 +16,7 @@ import logging
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
-from agently.utils import Settings, create_logger
+from agently.utils import Settings, create_logger, log_deprecated_once
 from agently.core import (
     Action,
     ExecutionEnvironmentManager,
@@ -263,7 +263,11 @@ class AgentlyMain(Generic[A]):
     def set_debug_console(self, debug_console_status: Literal["ON", "OFF"]):
         # Deprecated: debug console mode is retired and no longer participates in runtime.
         if debug_console_status == "ON":
-            self.logger.warning("`set_debug_console(\"ON\")` is deprecated and has no effect.")
+            log_deprecated_once(
+                "Agently.set_debug_console.ON",
+                self.logger,
+                "`set_debug_console(\"ON\")` is deprecated and has no effect.",
+            )
         return self
 
     def set_log_level(self, log_level: "RuntimeEventLevel"):

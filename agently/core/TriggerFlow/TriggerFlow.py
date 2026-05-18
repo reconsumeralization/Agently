@@ -30,7 +30,7 @@ from agently.types.trigger_flow import (
     TriggerFlowInterruptEvent,
 )
 from agently.types.data import RunContext
-from agently.utils import Settings, StateData, FunctionShifter
+from agently.utils import Settings, StateData, FunctionShifter, warn_deprecated_once
 from agently.core.RuntimeContext import resolve_parent_run_context
 from .BluePrint import TriggerFlowBlueprint
 from .Process import TriggerFlowProcess
@@ -391,10 +391,10 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         lease_ttl: float | None = None,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
         if wait_for_result is not False:
-            warnings.warn(
+            warn_deprecated_once(
+                "TriggerFlow.async_start_execution.wait_for_result",
                 "TriggerFlow.async_start_execution(..., wait_for_result=...) is deprecated and ignored. "
                 "start_execution() now always returns the execution handle.",
-                DeprecationWarning,
                 stacklevel=2,
             )
         effective_auto_close_timeout = timeout if timeout is not None else auto_close_timeout
@@ -607,11 +607,11 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
                 "Use start_execution()/create_execution() for manual lifecycle control."
             )
         if wait_for_result is False:
-            warnings.warn(
+            warn_deprecated_once(
+                "TriggerFlow.start.wait_for_result_false",
                 "TriggerFlow.start()/async_start(..., wait_for_result=False) is deprecated and ignored. "
                 "The hidden execution path now always waits for close and returns the close snapshot. "
                 "Use start_execution()/create_execution() for non-blocking execution control.",
-                DeprecationWarning,
                 stacklevel=2,
             )
         effective_auto_close_timeout = timeout if timeout is not None else auto_close_timeout
