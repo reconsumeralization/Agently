@@ -214,4 +214,4 @@ if __name__ == "__main__":
 #   |
 # json_flow.load_json_flow(json_path)
 # run_flow(json_flow, "Brief release note")
-#   -> collect_request -> to_sub_flow(child) -> finalize -> state["final"]["mode"]=="single" 
+#   -> collect_request -> to_sub_flow(child) -> finalize -> state["final"]["mode"]=="single"

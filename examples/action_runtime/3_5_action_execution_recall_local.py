@@ -67,4 +67,4 @@ pprint(raw_artifact)
 #   |
 #   v
 # Action.to_action_results([records]) -> compact model-visible dict
-# agent.action.read_action_artifact(artifact_id, action_call_id) -> raw artifact 
+# agent.action.read_action_artifact(artifact_id, action_call_id) -> raw artifact

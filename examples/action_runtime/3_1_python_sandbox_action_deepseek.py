@@ -51,4 +51,4 @@ if __name__ == "__main__":
 # ActionResult(model_digest=..., artifact_refs=[...])
 #   |
 #   v
-# model reply: "average=20.0, max-minus-min gap=34" 
+# model reply: "average=20.0, max-minus-min gap=34"

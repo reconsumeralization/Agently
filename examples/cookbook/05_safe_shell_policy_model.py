@@ -71,4 +71,4 @@ if __name__ == "__main__":
 #   |
 #   v
 # [ACTION_RECORDS]: [{"cmd":"pwd","status":"success"}, {"cmd":"ls","status":"error",...}]
-# assertion: pwd record has status="success", ls record has error="cmd_not_allowed" 
+# assertion: pwd record has status="success", ls record has error="cmd_not_allowed"

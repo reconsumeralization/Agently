@@ -43,4 +43,4 @@ if __name__ == "__main__":
 # ActionResult records returned
 #   |
 #   v
-# model reply: "The result is 59.25." 
+# model reply: "The result is 59.25."

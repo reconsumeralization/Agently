@@ -40,4 +40,4 @@ asyncio.run(main())
 # Flow (two concurrent executions):
 # Execution A: emit_nowait("PING", "one")  ->  on_ping  ->  state["last_ping"] = "one"
 # Execution B: emit_nowait("PING", "two")  ->  on_ping  ->  state["last_ping"] = "two"
-# asyncio.gather() runs both; first.last_ping=="one", second.last_ping=="two" 
+# asyncio.gather() runs both; first.last_ping=="one", second.last_ping=="two"
