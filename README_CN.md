@@ -1,228 +1,262 @@
-<img width="640" alt="image" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
+<img width="640" alt="Agently" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4.1 — AI 应用开发框架
+# Agently 4.1 - AI 应用开发框架
 
-> **构建输出稳定、行为可观测、流程可维护的生产级 AI 应用。**
+> 构建结构化输出稳定、Action 可观测、可服务化暴露、工作流可持续运行的模型应用。
 
 [English](https://github.com/AgentEra/Agently/blob/main/README.md) | [中文介绍](https://github.com/AgentEra/Agently/blob/main/README_CN.md)
 
-[![license](https://img.shields.io/badge/许可证-Apache%202.0-blue.svg)](https://github.com/AgentEra/Agently/blob/main/LICENSE)
+[![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/AgentEra/Agently/blob/main/LICENSE)
 [![PyPI version](https://img.shields.io/pypi/v/agently.svg)](https://pypi.org/project/agently/)
 [![Downloads](https://img.shields.io/pypi/dm/agently.svg)](https://pypistats.org/packages/agently)
 [![GitHub Stars](https://img.shields.io/github/stars/AgentEra/Agently.svg?style=social)](https://github.com/AgentEra/Agently/stargazers)
 [![Twitter Follow](https://img.shields.io/twitter/follow/AgentlyTech?style=social)](https://x.com/AgentlyTech)
 <a href="https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf">
-<img alt="WeChat" src="https://img.shields.io/badge/微信交流群-加入我们-brightgreen?logo=wechat&style=flat-square">
+<img alt="WeChat" src="https://img.shields.io/badge/WeChat%20Group-Join-brightgreen?logo=wechat&style=flat-square">
 </a>
 
 <p align="center">
-  <a href="https://github.com/AgentEra/Agently/discussions"><img src="https://img.shields.io/badge/💬_社区讨论-分享想法-blueviolet?style=for-the-badge"></a>
-  <a href="https://agently.cn"><img src="https://img.shields.io/badge/🌐_访问官网-获取文档-brightgreen?style=for-the-badge"></a>
-  <a href="https://github.com/AgentEra/Agently/issues"><img src="https://img.shields.io/badge/🐛_报告问题-帮助改进-red?style=for-the-badge"></a>
+  <b><a href="https://agently.cn/docs">文档</a> · <a href="#快速开始">快速开始</a> · <a href="#为什么选择-agently">为什么选择 Agently</a> · <a href="#核心能力">核心能力</a> · <a href="#架构">架构</a> · <a href="#生态">生态</a></b>
 </p>
 
 ---
 
-<p align="center">
-  <b>🔥 <a href="https://agently.cn/docs">文档</a> · 🚀 <a href="#快速开始">快速开始</a> · 🏗️ <a href="#架构设计">架构设计</a> · 💡 <a href="#核心能力">核心能力</a> · 🧩 <a href="#生态工具">生态工具</a></b>
-</p>
+## 这份 README 面向谁
 
----
+Agently 面向的是正在从“模型偶尔能做对”走向“应用必须稳定做对”的团队：
 
-## 为什么需要 Agently？
+- 构建 assistant、内部 copilot、知识工具、运营流程或 AI API 的产品工程师
+- 需要清晰扩展模型 provider、工具、MCP server、沙箱、工作流和观测能力的平台团队
+- 正在比较 AI 框架的技术负责人，关注可维护性、显式控制、可调试性和生产交付边界
+- 使用 coding agent 的开发者，希望框架推荐实践可以沉淀成可复用的项目指导
 
-LangChain、CrewAI、AutoGen 各自解决了真实问题——但它们都是为探索而优化，不是为交付。把 AI 应用真正送上线的团队，往往在同样的地方碰墙：
+核心设计问题是：怎样保留模型能力，同时让应用代码拥有稳定契约、可观测执行和可重启的工作流边界？
 
-| 框架 | 擅长的事 | 生产交付时遇到的问题 |
-|:--|:--|:--|
-| LangChain | 生态广、原型快 | 输出无类型约束、Chain 难以单元测试、状态管理复杂 |
-| CrewAI | 角色化 Agent 团队、自然语言任务协调 | 路由黑盒、可观测性弱、生产故障难排查 |
-| AutoGen | 会话式多 Agent、科研探索 | 循环不可预期、无内置状态持久化、难以确定性部署 |
-| **Agently** | **工程级 AI 应用** | 契约式输出 · 可测/可暂停/可持久化的 TriggerFlow · 托管执行环境 · Action recall · 工程项目级配置管理 |
+## 为什么选择 Agently
 
-Agently 从一开始就为"能跑的 demo"和"稳定运行的生产系统"之间的鸿沟而设计：
+很多 AI 框架擅长探索，或擅长组装广泛的 integration stack。Agently 优化的是让模型应用扛住模型切换、输出漂移、流式 UX、Action 执行、工作流信号和服务边界的工程层。
 
-- **稳定输出** — 契约式 schema，强制关键字段存在，失败自动重试
-- **可测试的编排** — TriggerFlow 每个分支都是普通 Python 函数，可以独立单元测试
-- **可观测的 Action** — 每次函数、MCP、沙箱、内置 action 调用都有输入、输出、耗时和 artifact 引用
-- **暂停、恢复、持久化** — 执行状态可保存到磁盘，进程重启后从断点继续
-- **托管执行资源** — Python、Shell、Node.js、Docker、Browser、SQLite、MCP 资源由框架准备、健康检查、注入和释放
-- **工程项目级配置** — 分层 YAML/TOML/JSON 配置文件、环境变量替换、`agently-devtools init` 快速脚手架
+当你关心这些问题时，Agently 会比较合适：
 
-**Agently 4.1.2 将重写后的 Action Runtime 与 Execution Environment v2 组合到一起**：覆盖规划、Action 循环、执行后端、托管资源、紧凑 Action recall 与可观测运行时事件。
+- **换模型不应重写业务逻辑** - Agently 把 provider setup、Prompt 槽位、响应解析、Action 执行和响应读取归一到同一套 request/runtime contract。阅读 [模型设置](docs/cn/start/model-setup.md)、[模型概览](docs/cn/models/overview.md) 和 [Requests 概览](docs/cn/requests/overview.md)。
+- **结构化输出应是框架保障，不只是 provider 能力** - `.output(...)` schema、必填字段提取、parser feedback、重试、`ensure_keys`、`ensure_all_keys` 和 validation handlers 在 Agently 内部协同工作。阅读 [Schema as Prompt](docs/cn/requests/schema-as-prompt.md)、[输出控制](docs/cn/requests/output-control.md) 和 [`examples/basic/`](examples/basic/)。
+- **流式输出应在最后一个 token 前暴露结构** - `instant` mode 允许消费者在模型仍在流式输出时响应结构化字段，适合 UI 更新、SSE routes 和 workflow signals。阅读 [模型响应](docs/cn/requests/model-response.md)、[FastAPI 服务封装](docs/cn/services/fastapi.md) 和 [`examples/fastapi/`](examples/fastapi/)。
+- **Actions 应该可观测且可跨模型迁移** - 本地函数、内置 actions、MCP servers、Shell/Python/Node/SQLite/workspace helpers 和自定义 executors 都会产生结构化记录，并共享同一套 Action Runtime。阅读 [Action Runtime](docs/cn/actions/action-runtime.md)、[MCP](docs/cn/actions/mcp.md) 和 [`examples/action_runtime/`](examples/action_runtime/)。
+- **执行依赖应该有生命周期所有者** - Execution Environment providers 管理 MCP 进程、浏览器会话、Shell/Python/Node runtimes、SQLite handles 和沙箱等可复用资源。阅读 [Execution Environment](docs/cn/actions/execution-environment.md) 和 [`examples/execution_environment/`](examples/execution_environment/)。
+- **工作流应是信号驱动，而不只是图结构** - TriggerFlow 支持 events、fan-out、runtime streams、pause/resume、save/load、sub-flows 和 close snapshots；`instant` 结构化输出可以不等完整响应结束就成为工作流输入。阅读 [TriggerFlow 概览](docs/cn/triggerflow/overview.md)、[事件与流](docs/cn/triggerflow/events-and-streams.md) 和 [`examples/trigger_flow/`](examples/trigger_flow/)。
+- **常见模型应用模式应该可组合** - router、To-Do/dependency execution、planning、reflection、evaluator/reviser 和多 Agent 协作，都可以由同一套 request/action/signal primitives 组合出来。阅读 [Playbooks](docs/cn/playbooks/overview.md)、[TriggerFlow 模型集成](docs/cn/triggerflow/model-integration.md) 和 [`examples/step_by_step/`](examples/step_by_step/)。
+- **服务应保持清晰项目边界** - async API、FastAPI helpers、settings 文件、prompt 文件、DevTools 观测和 companion coding-agent skills 适合非一次性项目。阅读 [项目结构](docs/cn/start/project-framework.md)、[FastAPI 服务封装](docs/cn/services/fastapi.md) 和 [观测概览](docs/cn/observability/overview.md)。
 
----
+当前框架版本：`4.1.2.2`。
 
-## 架构设计
+Python：`>=3.10`。
 
-### 分层模型
+## 框架定位
 
-Agently 将 AI 应用组织成四个清晰的层次，每层有稳定接口，可独立替换、扩展和测试。
+这不是说其他框架不对。它们只是重心不同。
 
-```mermaid
-graph TB
-    subgraph APP["你的应用"]
-        UserCode["应用 / 业务逻辑"]
-    end
+| 框架 | 主要强项 | Agently 有意不同的地方 |
+|---|---|---|
+| LangChain | 广泛集成、预置 agents 和应用构建块 | Agently 更窄也更系统：provider 适配、Prompt 槽位、结构化输出、响应解析、Action 执行、settings 和观测被归一到同一套 request/runtime 契约。见 [Requests](docs/cn/requests/overview.md)、[Action Runtime](docs/cn/actions/action-runtime.md) 和 [`examples/action_runtime/`](examples/action_runtime/)。 |
+| LangGraph | 面向长跑 stateful agents 的低层编排 runtime | TriggerFlow 是 Agently 模型应用栈里的编排层：workflow signals 可以直接组合结构化响应事件、actions、runtime streams、pause/resume、execution state 和 close snapshots。见 [TriggerFlow 事件与流](docs/cn/triggerflow/events-and-streams.md)、[持久化与 Blueprint](docs/cn/triggerflow/persistence-and-blueprint.md) 和 [`examples/trigger_flow/`](examples/trigger_flow/)。 |
+| CrewAI | 多 agent crew 和 flow 控制下的 agent team 协作 | Agently 把多 agent 协作视为建立在 request、action、signal、workflow 等底层原语之上的可开发模式，而不是唯一应用形态。见 [Playbooks](docs/cn/playbooks/overview.md) 和 [`examples/step_by_step/`](examples/step_by_step/)。 |
+| AutoGen | conversable agents 和多 agent 对话模式 | Agently 默认强调模型输出契约、显式 Action logs、信号驱动工作流、生命周期 snapshots 和服务侧 execution handles，而不是开放式 agent chat。 |
+| 直接调用 SDK | 最少抽象和最大控制 | Agently 在 SDK 调用之上补上输出解析、Action、Session、配置、观测和工作流契约，但不强迫你引入独立编排服务。 |
 
-    subgraph GLOBAL["Agently 全局层"]
-        Global["全局设置 · 插件管理器 · 默认模型配置"]
-    end
+当应用需要一层 AI 执行底座时使用 Agently。如果产品只有一两个简单 Prompt，直接 SDK 更轻。如果自然语言 agent 协作本身就是产品核心，可以选择更专门的多 agent 框架。
 
-    subgraph AGENT["Agent 层"]
-        direction TB
-        AgentInst["Agent 实例"]
-        subgraph AGENT_INNER["Agent 内部组件"]
-            Prompt["Prompt\ninput · instruct · info · output"]
-            Session["Session\n多轮记忆 · memo · 持久化"]
-            Action["Action\n规划 · 分发 · recall · 日志"]
-            Settings2["分层设置\n（继承自全局）"]
-        end
-    end
+实际差异主要体现在四层：
 
-    subgraph EXEC_ENV["Execution Environment"]
-        Env["托管资源\nMCP · Python · Bash · Node · Docker · Browser · SQLite"]
-    end
+- **相对 LangChain 的 integration-first 风格：** LangChain 适合需要广泛、灵活地组合模型、工具、检索和 agent 构建块的场景。Agently 的判断是：生产级模型应用需要更统一的 request contract，不同模型 provider 仍应进入同一套 Prompt 槽位、结构化 parser、retry/validation 路径、`ModelResponse` 读取方式和 Action Runtime。这样在替换基础模型或 provider 时，下游业务逻辑更不容易被输出形态或工具调用形态冲击。可从 [Requests 概览](docs/cn/requests/overview.md) 和 [Action Runtime](docs/cn/actions/action-runtime.md) 开始。
+- **相对只依赖 provider-native structured output：** Agently 可以使用模型 provider，但输出质量保障不只依赖 provider 侧 JSON schema 或 tool-calling 参数。框架内建 schema-as-prompt authoring、必填字段提取、parser feedback、重试、`ensure_keys`、`ensure_all_keys` 和 validation handlers。当目标模型没有和另一个 provider 完全一致的 structured-output 或 tool-calling 语义时，这一点尤其重要。见 [Schema as Prompt](docs/cn/requests/schema-as-prompt.md) 和 [输出控制](docs/cn/requests/output-control.md)。
+- **相对 graph-only orchestration：** LangGraph 很适合图式 stateful agents 和 durable execution。TriggerFlow 的核心是事件/信号驱动，Agently 的 `instant` response mode 可以在模型仍在流式输出时暴露结构化字段，因此 workflow signals 可以由局部结构化输出、Action 结果、人工输入或 sub-flow state 驱动，而不必等完整模型响应结束。见 [模型响应](docs/cn/requests/model-response.md)、[TriggerFlow 事件与流](docs/cn/triggerflow/events-and-streams.md) 和 [`examples/fastapi/`](examples/fastapi/) 中的流式/服务化模式。
+- **相对把多 Agent 当作框架根抽象：** 多 Agent 协作很有用，但在 Agently 里它是建立在 requests、Actions、TriggerFlow signals、sub-flows、Session 和 runtime resources 之上的可开发场景。Router、To-Do/dependency execution、planning、reflection、evaluator/reviser 和 agent-team patterns 都是同一套底层工程底座之上的组合。见 [Playbooks](docs/cn/playbooks/overview.md)、[TriggerFlow 模型集成](docs/cn/triggerflow/model-integration.md) 和 [`examples/step_by_step/`](examples/step_by_step/)。
 
-    subgraph MODEL["模型层"]
-        ModelReq["模型请求\n由 Prompt 槽 + 设置构建"]
-        ModelResp["模型响应\n结构化 · 流式 · Instant 事件"]
-    end
+## 快速开始
 
-    subgraph WORKFLOW["工作流编排"]
-        TF["TriggerFlow\nto · if/elif/else · match/case · batch · for_each · when · emit · 暂停/恢复 · 持久化"]
-    end
+安装：
 
-    subgraph LLMS["LLM API"]
-        LLMAPIs["OpenAI · DeepSeek · Claude · Qwen · Ollama · 任何 OpenAI 兼容端点"]
-    end
-
-    UserCode -->|"配置 & 创建"| Global
-    Global -->|"继承设置"| AgentInst
-    AgentInst --- AGENT_INNER
-    AgentInst -->|"构建 & 发送"| ModelReq
-    Action -->|"确保资源就绪"| Env
-    ModelReq -->|"HTTP"| LLMAPIs
-    LLMAPIs -->|"响应流"| ModelResp
-    UserCode -->|"编排"| TF
-    TF -->|"触发 Agent 步骤"| AgentInst
+```bash
+pip install -U agently
 ```
 
-### Action Runtime + Execution Environment（v4.1.2）
+使用 DeepSeek 或其他 OpenAI-compatible 托管端点：
 
-Action Runtime 决定调用什么、Action 循环如何运行。Execution Environment 负责 action 或 workflow step 所需托管资源的生命周期。
+```python
+from agently import Agently
 
-```mermaid
-graph LR
-    subgraph AGENT2["Agent"]
-        AExt["ActionExtension\n准备可见 Action 列表 & 日志"]
-    end
+Agently.set_settings(
+    "OpenAICompatible",
+    {
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "auth": "DEEPSEEK_API_KEY",
+        "model_type": "chat",
+        "request_options": {"temperature": 0.2},
+    },
+)
 
-    subgraph RUNTIME["Action Runtime（可替换）"]
-        AR["ActionRuntime 插件\nAgentlyActionRuntime\n\n规划协议 · 调用归一化 · 轮次控制"]
-        AF["ActionFlow 插件\nTriggerFlowActionFlow\n\nAction 循环 · 暂停/恢复 · 并发"]
-    end
+agent = Agently.create_agent()
 
-    subgraph ENV["Execution Environment"]
-        EM["ExecutionEnvironmentManager\n确保资源 · 健康检查 · 注入 · 释放"]
-        EP["Provider\nPython · Bash · Node · Docker · Browser · SQLite · MCP"]
-    end
+result = (
+    agent
+    .input("用一句话介绍 Python，并列出三个优势。")
+    .output({
+        "intro": (str, "一句话介绍", True),
+        "strengths": [(str, "一个优势")],
+    })
+    .start(ensure_all_keys=True)
+)
 
-    subgraph EXECUTORS["ActionExecutor（可替换）"]
-        E1["LocalFunctionExecutor\n@action_func"]
-        E2["Search / Browse / Cmd"]
-        E3["MCPExecutor\nstdio · http"]
-        E4["Sandbox / Node / SQLite / Docker"]
-        E5["自定义插件"]
-    end
-
-    AExt -->|"委托规划"| AR
-    AR -->|"运行 Action 循环"| AF
-    AF -->|"确保所需资源"| EM
-    EM --> EP
-    AF -->|"分发调用"| E1
-    AF -->|"分发调用"| E2
-    AF -->|"分发调用"| E3
-    AF -->|"分发调用"| E4
-    AF -->|"分发调用"| E5
+print(result)
 ```
 
----
+切到本地 Ollama 只需要换 provider 设置：
+
+```bash
+ollama pull qwen2.5:7b
+```
+
+```python
+Agently.set_settings(
+    "OpenAICompatible",
+    {
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "qwen2.5:7b",
+        "api_key": "ollama",
+        "model_type": "chat",
+    },
+)
+```
+
+文件化 settings 推荐这样加载：
+
+```python
+from agently import Agently
+
+Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
+```
 
 ## 核心能力
 
-### 1. 契约式输出控制
+### 1. 结构化请求
 
-一次定义结构，使用第三槽 `True` 标记必填叶子。`ensure_keys` 作为补充手段用于运行时依赖路径，`.validate()` / `validate_handler=` 用于值级业务规则；当你需要整棵结构严格保障时，使用 `ensure_all_keys=True`。
-
-```python
-result = (
-    agent
-    .input("分析这条用户评价：'产品很好，但物流太慢了。'")
-    .output({
-        "情感倾向": (str, "积极 / 中立 / 消极", True),
-        "关键问题": [(str, "问题摘要")],
-        "紧急程度": (int, "1–5，5 最紧急", True),
-    })
-    .start(ensure_keys=["关键问题[*]"])
-)
-# 始终是 dict，"情感倾向"和"紧急程度"由 schema 保证；"关键问题"另外做运行时检查。
-# 如果要对整体结构做严格保障，传 `ensure_all_keys=True`。
-```
-
-Prompt 模板也可以在外层设置 `ensure_all_keys`（YAML/JSON 里写成 `$ensure_all_keys`），让严格整棵结构保障成为默认值。
-
-### 2. 结构化流式 — Instant 事件
-
-每个输出字段独立流式传输。字段完成即可用，不用等完整响应，直接驱动 UI 更新或下游逻辑。
+Prompt 由命名槽位组成。这样应用意图、约束、上下文和输出契约都可以被审阅：
 
 ```python
 response = (
     agent
-    .input("解释递归，并给出 3 个示例")
+    .role("你是简洁的 release note 作者。")
+    .info({"version": "4.1.2.2", "audience": "framework users"})
+    .instruct("只基于输入事实作答。")
+    .input("为工程 changelog 总结这个发布线。")
     .output({
-        "definition": (str, "一句话定义"),
-        "examples": [(str, "带说明的代码示例")],
+        "headline": (str, "短标题", True),
+        "bullets": [(str, "一个稳定事实")],
+    })
+    .get_response()
+)
+
+data = response.result.get_data()
+text = response.result.get_text()
+meta = response.result.get_meta()
+```
+
+当同一次模型调用需要用多种方式读取时，使用 `get_response()`。
+
+### 2. 契约式输出控制
+
+固定必填字段直接在 `.output(...)` 的 tuple 第三项标 `True`：
+
+```python
+ticket = (
+    agent
+    .input("归档发票账户的账单导出失败。")
+    .output({
+        "category": (str, "billing / auth / data / unknown", True),
+        "severity": (int, "1-5", True),
+        "next_actions": [(str, "建议动作")],
+    })
+    .start()
+)
+```
+
+`ensure_keys=` 用于条件路径或运行时决定路径。值级业务规则用 `.validate(...)` 或 `validate_handler=`。需要整棵 schema 都存在时使用 `ensure_all_keys=True`。
+
+YAML 和 JSON prompt 文件也可以通过 `$ensure: true` 承载同样的契约，让团队脱离 Python 代码审阅 Prompt 与响应结构。
+
+### 3. 结构化流式
+
+Instant 事件允许 UI、服务或下游消费者在结构化字段变化时立刻响应：
+
+```python
+response = (
+    agent
+    .input("解释递归，并给两个示例。")
+    .output({
+        "definition": (str, "一句话定义", True),
+        "examples": [(str, "带解释的示例")],
     })
     .get_response()
 )
 
 for event in response.get_generator(type="instant"):
     if event.path == "definition" and event.delta:
-        ui.update_header(event.delta)             # 定义逐字流式展示
+        print(event.delta, end="", flush=True)
     if event.wildcard_path == "examples[*]" and event.is_complete:
-        ui.append_example(event.value)            # 每个示例完成后追加
+        print("\nEXAMPLE:", event.value)
 ```
 
-### 3. Action Runtime — 函数、内置能力、托管执行环境（v4.1.2）
+这适合 dashboard、chat UI、SSE response，以及需要在完整响应结束前消费局部结构化结果的工作流。
 
-任意组合挂载，运行时负责规划、执行、重试和完整结构化日志。
+### 4. Actions 与工具调用
+
+Actions 是模型可调用的能力。新代码从 `@agent.action_func` 和 `agent.use_actions(...)` 起步：
+
+```python
+from agently import Agently
+
+agent = Agently.create_agent()
+
+@agent.action_func
+def calculate_total(price: float, quantity: int) -> float:
+    """Calculate an order total."""
+    return price * quantity
+
+agent.use_actions(calculate_total)
+
+response = (
+    agent
+    .input("使用可用 action 计算 19.5 * 4，并解释结果。")
+    .get_response()
+)
+
+print(response.result.get_text())
+print(response.result.full_result_data["extra"].get("action_logs", []))
+```
+
+常用能力 helper：
+
+```python
+agent.enable_python()
+agent.enable_shell(root=".", commands=["pwd", "rg"])
+agent.enable_workspace(root=".", read=True, write=False)
+agent.enable_nodejs()
+agent.enable_sqlite(database="app.db")
+```
+
+内置 action package：
 
 ```python
 from agently.builtins.actions import Browse, Search
 
-@agent.action_func
-def search_docs(query: str) -> str:
-    """搜索内部文档。"""
-    return docs_db.search(query)
-
-agent.use_actions(search_docs)
 agent.use_actions(Search(timeout=15, backend="duckduckgo"))
 agent.use_actions(Browse())
-
-# 常见执行能力优先使用 capability helper。
-agent.enable_python()                                  # 托管 run_python action
-agent.enable_shell(root=".", commands=["pwd", "rg"])   # 托管 run_bash action
-agent.enable_workspace(root=".", read=True, write=False)
-
-response = agent.input("帮我找认证相关的文档，并给出登录示例代码。").get_response()
-
-# 每次调用：调用了什么、参数是什么、返回了什么，以及 artifact 引用
-for record in response.result.full_result_data["extra"]["action_logs"]:
-    print(record["action_id"], record["status"])
 ```
 
-当完整代码、shell 输出、页面正文、SQL 行或日志太长，不适合继续塞进下一轮模型上下文时，Agently 会把紧凑 digest 放进上下文，并把原始 payload 放到 artifact 引用里。应用需要被省略的细节时再显式读取：
+MCP server 使用 `agent.use_mcp(...)`。构建带显式托管资源的自定义后端时使用 `agent.register_action(..., executor=..., execution_environments=[...])`。
+
+指令较重的 actions 会把后续模型上下文保持紧凑，只放 execution digest 和 artifact refs。应用如果需要完整代码、shell 输出、网页内容、SQL 行、截图或日志，可以显式读取 raw artifact：
 
 ```python
 records = agent.get_action_result()
@@ -234,501 +268,336 @@ raw = agent.action.read_action_artifact(
 )
 ```
 
-能力来自 MCP server 时使用 `agent.use_mcp(...)`。你在开发自定义后端并需要显式托管资源时，使用 `agent.register_action(..., executor=..., execution_environments=[...])`。
+旧的 `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` family 仍然是兼容面，但新示例使用 actions。
 
-### 4. TriggerFlow — 正经的工作流编排
+### 5. TriggerFlow 编排
 
-TriggerFlow 远不止是函数链。它是一个完整的工作流引擎，支持并发、事件驱动分支、人工审批中断和执行状态持久化。
+TriggerFlow 是 Agently 的工作流层，用于显式阶段、分支、fan-out、事件输入、runtime stream、pause/resume、持久化和重启安全执行。
 
-**执行生命周期 — `open -> sealed -> closed`**
+```python
+import asyncio
+from agently import TriggerFlow, TriggerFlowRuntimeData
 
-Agently 4.1 线明确了 TriggerFlow execution 生命周期。这不只是返回值变化，而是在定义 workflow 何时还能接外部输入、何时只做 drain、何时结果已经冻结：
+flow = TriggerFlow(name="ticket-flow")
 
-```mermaid
-stateDiagram-v2
-    [*] --> open: create / start
-    open --> sealed: seal()
-    open --> closed: auto_close idle timeout
-    open --> closed: close()
-    sealed --> open: unseal()
-    sealed --> closed: close()
-    closed --> [*]
+async def classify(data: TriggerFlowRuntimeData):
+    text = data.input["text"]
+    category = "billing" if "invoice" in text.lower() else "unknown"
+    await data.async_set_state("category", category)
+    return category
+
+async def route(data: TriggerFlowRuntimeData):
+    category = data.input
+    await data.async_set_state("handler", f"{category}-team")
+
+flow.to(classify).to(route)
+
+async def main():
+    execution = flow.create_execution()
+    await execution.async_start({"text": "Invoice export failed."})
+    snapshot = await execution.async_close()
+    print(snapshot)
+
+asyncio.run(main())
 ```
 
-| 状态 | 外部输入 | 在途工作 | Runtime stream / 结果 |
-|---|---|---|---|
-| `open` | 接受 `emit()` / `continue_with()` | chunk、内部 emit、已注册 task 继续 | stream 存活；state 还能变化 |
-| `sealed` | 拒绝新的外部输入 | 已接受事件、内部 emit 链和 task 继续 drain | stream 仍存活；snapshot 未冻结 |
-| `closed` | 全部拒绝 | 不再接新工作 | stream 已停止；close snapshot 已冻结 |
-
-`close()` / `async_close()` 会先 seal，再 drain 待办工作，停止 runtime stream，最后返回 execution state snapshot。传给 close 的 `timeout=` 是在途工作的 drain timeout，不是 auto-close 计时器。
-
-这会影响入口 API 选择：
-
-| 场景 | 使用 | 返回 / 契约 |
-|---|---|---|
-| 输入都已知的快速脚本 | `flow.start(...)` / `flow.async_start(...)` | 隐式 execution 自动 close，返回 close snapshot |
-| 服务、worker、SSE/WebSocket、webhook、人工审批 | `flow.start_execution(...)` 或 `flow.create_execution(auto_close=False)` | 调用方持有 execution handle，并决定何时 close |
-| 预创建 execution 且 `auto_close=True` | `execution.async_start(...)` | 等 auto-close 后返回 close snapshot |
-| 预创建 execution 且 `auto_close=False` | `execution.async_start(...)` | 返回 execution 本身；调用方必须显式 close |
-| FastAPI Helper 使用 `TriggerFlow` provider | `FastAPIHelper(response_provider=flow)` | 响应 `data` 是 close snapshot，不再被强行压成旧的 `result` 字段 |
+服务、worker、webhook、人工审核或 SSE/WebSocket 路径应保留 execution handle 并显式 close：
 
 ```python
 execution = flow.create_execution(auto_close=False)
 await execution.async_start(initial_input)
-
-# emit 事件、从检查点恢复，或持续输出 runtime stream...
-
+await execution.async_emit("UserApproved", {"approved": True})
 snapshot = await execution.async_close()
 ```
 
-只有 execution state 会进入 close snapshot 和 `save()` / `load()` 检查点。client、callback、socket、文件句柄这类 runtime resources 需要在恢复后重新注入。新代码应使用 `set_state(...)` / `async_set_state(...)` 写执行数据，并把 close snapshot 作为完成契约。
+在 4.1 线，`close()` / `async_close()` 是规范完成路径，close snapshot 是 durable result contract。
 
-**并发 — `batch` 与 `for_each`**
+当你需要这些能力时，TriggerFlow 是合适的层：
 
-以可配置的并发上限并行运行步骤：
+| 需求 | TriggerFlow surface |
+|---|---|
+| 基于中间结果分支 | `if_condition`、`elif_condition`、`else_condition`、`match`、`case` |
+| 多个 item 并行处理 | `for_each(concurrency=...)`、`batch(...)` |
+| 外部事件或人工审核 | `when(...)`、`emit(...)`、`pause_for(...)`、`continue_with(...)` |
+| 实时 UI 或服务输出 | runtime stream APIs |
+| 重启安全 | `save(...)`、`load(...)`、close snapshot |
+| 可复用工作流拓扑 | blueprint export/import |
 
-```python
-# 并发处理 load_urls 输出的列表，最多 5 个 item 并行
-flow.to(load_urls).for_each(concurrency=5).to(fetch_page).to(summarize).end_for_each().to(store_summaries)
+### 6. Session 记忆
 
-# 同时展开 N 个固定分支
-flow.batch(
-    ("a", strategy_a),
-    ("b", strategy_b),
-    ("c", strategy_c),
-).to(store_strategy_outputs)
-```
-
-**事件驱动 — `when` 与 `emit`**
-
-基于信号、chunk 完成或数据变化触发分支，不局限于线性序列：
-
-```python
-flow.when("UserInput").to(process_input).to(plan_next_step)
-flow.when("ToolResult").to(evaluate_result)
-
-# 在 chunk 内部 emit 触发其他分支
-async def plan_next_step(data: TriggerFlowEventData):
-    if needs_tool:
-        await data.async_emit("ToolCall", tool_args)
-    else:
-        await data.async_emit("UserInput", final_reply)
-```
-
-**暂停、恢复与持久化**
-
-执行状态保存到磁盘，进程重启后从断点恢复——对长时间运行或需要人工审批的工作流至关重要：
-
-```python
-# 启动执行，立即保存检查点
-execution = flow.create_execution(auto_close=False)
-await execution.async_start(initial_input)
-execution.save("checkpoint.json")
-
-# 之后——新进程，恢复状态，从暂停处继续
-restored = flow.create_execution(auto_close=False)
-restored.load("checkpoint.json")
-await restored.async_emit("UserFeedback", {"approved": True, "note": "材料审核通过。"})
-state = await restored.async_close()
-```
-
-这让 Agently 工作流真正做到**进程重启安全**——适合审批门控、多天长流程和人工复核场景。
-
-**蓝图序列化**
-
-流程拓扑本身可以导出为 JSON/YAML 并重新加载，支持动态工作流定义和版本化流程配置：
-
-```python
-flow.get_yaml_flow(save_to="flows/main_flow.yaml")
-# 之后
-flow.load_flow_config("flows/main_flow.yaml")
-```
-
-### 5. Session — 多轮记忆管理
-
-按 ID 激活会话，自动维护对话历史、裁剪上下文窗口、支持自定义 Memo 策略，持久化到 JSON/YAML。
+当问题仍然是一个对话线程，而不是完整工作流时，Session 用于维护有边界的多轮状态：
 
 ```python
 agent.activate_session(session_id="user-42")
 agent.set_settings("session.max_length", 10000)
 
-session = agent.activated_session
-session.register_analysis_handler(decide_when_to_summarize)
-session.register_resize_handler("summarize_oldest", summarize_handler)
-
-reply1 = agent.input("我叫 Alice。").start()
-reply2 = agent.input("我叫什么名字？").start()   # 正确返回 "Alice"
+reply1 = agent.input("My name is Alice.").start()
+reply2 = agent.input("What is my name?").start()
 ```
 
-### 6. 工程项目级配置管理
+对于长跑流程、事件等待、fan-out 或人工审批，应在请求层之上使用 TriggerFlow，不要把 Session 拉伸成工作流存储。
 
-真实 AI 项目涉及多个 Agent、多套 Prompt 模板、多个运行环境。Agently 的分层设置系统支持在每一层加载 YAML/JSON/TOML 配置文件，内置 `${ENV.VAR}` 环境变量替换和分层继承。
+### 7. 知识、服务与观测
 
-**推荐的工程项目结构：**
+Agently 在请求层和工作流层周围提供集成面：
 
-```
-my_ai_project/
-├── .env                          # API Key 和密钥
-├── config/
-│   ├── global.yaml               # 全局模型 + 运行时默认配置
-│   └── agents/
-│       ├── researcher.yaml       # 单 Agent 模型覆盖配置
-│       └── writer.yaml
-├── prompts/
-│   ├── researcher_role.yaml      # 可复用的 Prompt 模板
-│   └── writer_role.yaml
-├── flows/
-│   ├── main_flow.py              # TriggerFlow 定义
-│   └── main_flow.yaml            # 序列化的流程蓝图（可选）
-├── agents/
-│   ├── researcher.py
-│   └── writer.py
-└── main.py
-```
-
-**配置分层继承——每层继承并覆盖上层：**
-
-```mermaid
-graph LR
-    A["global.yaml\n（模型、运行时默认配置）"]
-    B["agents/researcher.yaml\n（单 Agent 模型覆盖）"]
-    C["agent.set_settings(...)\n（单次请求临时覆盖）"]
-
-    A -->|"继承"| B
-    B -->|"继承"| C
-```
-
-```python
-# 启动时加载全局配置（支持 ${ENV.xxx} 占位符自动替换）
-Agently.load_settings("yaml", "config/global.yaml", auto_load_env=True)
-
-# 每个 Agent 加载自己的覆盖配置
-researcher = Agently.create_agent()
-researcher.load_settings("yaml", "config/agents/researcher.yaml")
-
-# 必要时做单次请求级别的覆盖
-researcher.set_settings("OpenAICompatible.request_options", {"temperature": 0.2})
-```
-
-**一行命令快速初始化工程脚手架：**
+- Knowledge base helpers 用于 retrieval-backed context。
+- `FastAPIHelper` 可把 agents、requests、generators、TriggerFlow definitions 和 TriggerFlow executions 暴露成 POST、SSE、WebSocket。
+- Observation events 覆盖 request、action、execution environment 和 TriggerFlow 内部事件。
+- 可选 `agently-devtools` 用于本地观测、评估、playground workflow 和项目脚手架。
 
 ```bash
 pip install agently-devtools
 agently-devtools init my_project
 ```
 
-参考真实项目示例：
-- [Agently-Daily-News-Collector](https://github.com/AgentEra/Agently-Daily-News-Collector) — 定时多源新闻采集与整理 Pipeline
-- [Agently-Talk-to-Control](https://github.com/AgentEra/Agently-Talk-to-Control) — 基于 TriggerFlow 的对话式控制流
+Agently 4.1.2.2 推荐 `agently-devtools >=0.1.4,<0.2.0`。
 
-### 7. 分层 Prompt 管理
+## 架构
 
-Prompt 不是字符串——它是结构化的槽，各司其职：`input`（任务）、`instruct`（约束）、`info`（上下文数据）、`output`（输出 schema）。Agent 级别的槽跨请求持久存在，请求级别的槽只对当次有效。
+### 分层模型
 
-```python
-agent.role("你是一位资深 Python 代码审查员。")   # 始终存在
+Agently 把 AI 应用代码组织成显式层次。这些层可以独立使用，也可以组合起来：
 
-result = (
-    agent
-    .input(user_code)
-    .instruct("重点关注安全性和性能问题。")
-    .info({"context": "对外的 API 处理器", "framework": "FastAPI"})
-    .output({"issues": [(str, "问题描述")], "score": (int, "0–100", True)})
-    .start()
-)
+```mermaid
+graph TB
+    App["应用与业务逻辑"]
+    Settings["Settings 文件与环境变量"]
+    Prompt["Prompt 槽位与输出 schema"]
+    Agent["Agent 请求层"]
+    Model["Model requester plugins"]
+    Response["ModelResponse: text, data, meta, stream"]
+    Action["Action Runtime: planning, dispatch, logs"]
+    Env["Execution Environment: MCP, Python, Bash, Node, Browser, SQLite"]
+    Flow["TriggerFlow: branch, fan-out, stream, pause/resume, persist"]
+    Observe["Observation events 与 DevTools"]
+
+    App --> Settings
+    App --> Agent
+    Settings --> Agent
+    Prompt --> Agent
+    Agent --> Model
+    Model --> Response
+    Agent --> Action
+    Action --> Env
+    App --> Flow
+    Flow --> Agent
+    Agent --> Observe
+    Action --> Observe
+    Env --> Observe
+    Flow --> Observe
 ```
 
-当你使用 `${...}` 占位符时，替换值必须显式通过 `mappings=...` 传入，例如 `agent.instruct("Hello ${name}", mappings={"name": "Alice"})`。
+### Action 栈
 
-Prompt 模板可通过 `configure_prompt` 扩展从 YAML/JSON 文件加载，支持团队级 Prompt 治理。
+Action Runtime 把 planning、loop orchestration、backend execution 和 managed resource lifecycle 拆开：
 
-### 8. 统一模型配置
+```mermaid
+graph LR
+    Agent["Agent"]
+    Facade["Action facade"]
+    Runtime["ActionRuntime plugin\nplanning and call normalization"]
+    Flow["ActionFlow plugin\naction loop and orchestration bridge"]
+    Executor["ActionExecutor plugin\nfunction, MCP, sandbox, Search/Browse, custom"]
+    Env["ExecutionEnvironmentProvider\nresource lifecycle"]
+    Logs["action_logs and artifacts"]
 
-一套配置，任意供应商，零锁定。
-
-```python
-Agently.set_settings(
-    "OpenAICompatible",
-    {
-        "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
-        "auth": "DEEPSEEK_API_KEY",   # 字符串匹配环境变量名时自动读取
-    },
-)
-# 只改 base_url 和 model 两个字段，即可切换到任何 OpenAI 兼容端点
+    Agent --> Facade
+    Facade --> Runtime
+    Runtime --> Flow
+    Flow --> Env
+    Flow --> Executor
+    Executor --> Logs
 ```
 
-支持：OpenAI · DeepSeek · Anthropic Claude（原生协议）· 通义千问 · Mistral · Llama · 本地 Ollama · OpenAI 兼容端点。
+主要扩展点：
 
----
+| 层 | 扩展点 |
+|---|---|
+| Agent | custom agent extension 与 lifecycle hooks |
+| Request | prompt generator、model requester、response parser |
+| Actions | `ActionRuntime`、`ActionFlow`、`ActionExecutor` |
+| 托管资源 | `ExecutionEnvironmentProvider` |
+| Workflow | TriggerFlow chunks、conditions、events、runtime stream、persistence |
+| 观测 | event hookers、sinks、DevTools bridge |
 
-## 快速开始
+## 项目形态
 
-```bash
-pip install -U agently
+只要超过一个小脚本，就建议把 settings、prompts、actions、flows 和 service code 拆开：
+
+```text
+my-agently-app/
+  pyproject.toml
+  .env
+  settings.yaml
+  prompts/
+    summarize.yaml
+    triage.yaml
+  app/
+    agents.py
+    actions.py
+    api.py
+    main.py
+  flows/
+    triage.py
+  tests/
+    test_triage_flow.py
 ```
 
-*需要 Python ≥ 3.10。*
+`settings.yaml`：
+
+```yaml
+plugins:
+  ModelRequester:
+    OpenAICompatible:
+      base_url: ${ENV.OPENAI_BASE_URL}
+      api_key: ${ENV.OPENAI_API_KEY}
+      model: ${ENV.OPENAI_MODEL}
+debug: false
+```
+
+启动时加载：
 
 ```python
 from agently import Agently
 
-Agently.set_settings("OpenAICompatible", {
-    "base_url": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
-    "auth": "DEEPSEEK_API_KEY",
-})
-
-agent = Agently.create_agent()
-
-result = (
-    agent.input("用一句话介绍 Python，并列出 3 个优点")
-    .output({
-        "intro": (str, "一句话介绍", True),
-        "strengths": [(str, "优点描述")],
-    })
-    .start(ensure_all_keys=True)
-)
-
-print(result)
-# {"intro": "Python 是...", "strengths": ["...", "...", "..."]}
+Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 ```
 
----
+Prompt 文件可以承载 Prompt 槽位和输出契约：
 
-## 生态工具
+```yaml
+.request:
+  instruct: |
+    You are a concise editor. Keep facts intact.
+  output:
+    title:
+      $type: str
+      $ensure: true
+    body:
+      $type: str
+      $ensure: true
+```
 
-### Agently Skills — Coding Agent 扩展
+## 示例
 
-官方 Agently Skills 让 AI 编程助手（Claude Code、Cursor 等）掌握正确的 Agently 使用模式，不用每次会话重新解释框架。
+推荐的 model-app 示例会通过 DeepSeek 或本地 Ollama 调真实模型，并包含 `Expected key output` 源码注释，记录一次真实运行中的稳定 key values。
 
-- **仓库：** https://github.com/AgentEra/Agently-Skills
-- **安装：** 先选择目标 agent，再按 Agently-Skills README 安装 `app` bundle。Codex 可以从 `export AGENT=codex` 开始。
+推荐入口：
 
-覆盖：通过 `app` bundle 开发新应用，通过 `migration` bundle 从 LangChain、LangGraph、LlamaIndex、CrewAI 迁移。
+| 目录 | 用途 |
+|---|---|
+| `examples/cookbook/` | 模型驱动应用模式 |
+| `examples/action_runtime/` | function、MCP、sandbox、plugin action 示例 |
+| `examples/execution_environment/` | 托管 Python、Shell、Node、SQLite、Browser 和 provider 生命周期示例 |
+| `examples/trigger_flow/` | TriggerFlow 机制示例 |
+| `examples/builtin_actions/` | Search/Browse package 示例 |
+| `examples/fastapi/` | 服务暴露示例 |
+| `examples/devtools/` | 可选 DevTools 观测示例 |
 
-### Agently DevTools — 运行时观测与脚手架
+`examples/archived/` 是兼容参考，不是新应用默认起点。
 
-`agently-devtools` 是可选配套包，提供运行时检查和工程脚手架能力。
+## 生态
+
+### Agently Skills
+
+Agently-Skills 为 coding agent 提供当前 Agently 实现指导。
+
+- Repository: https://github.com/AgentEra/Agently-Skills
+- 当前 catalog generation: `v2`
+- 推荐 bundle: `app`
+- Agently 4.1.2.2 compatibility: Skills authoring protocol `agently-skills.authoring.v1`
+
+当你让 Codex、Claude Code、Cursor 或其他 coding agent 实现 Agently 模式时，应使用它。
+
+### Agently DevTools
+
+`agently-devtools` 是可选 companion package，覆盖本地观测、评估、交互式 wrappers 和项目脚手架。
 
 ```bash
 pip install agently-devtools
-agently-devtools init my_project    # 快速初始化 Agently 工程
+agently-devtools init my_project
 ```
 
-- 运行时观测：`ObservationBridge`、`create_local_observation_app`
-- 示例：`examples/devtools/`
-- 兼容说明：Agently 4.1.2 静态发布元数据推荐 `agently-devtools >=0.1.4,<0.2.0`；包内框架代码保持 4.1.x runtime protocol 稳定。
+### Integrations
 
-### 集成
+| Integration | 能力 |
+|---|---|
+| `agently.integrations.chromadb` | `ChromaCollection` knowledge-base workflow |
+| `agently.integrations.fastapi` | POST、SSE 和 WebSocket 服务暴露 |
+| OpenAI-compatible requester | OpenAI、DeepSeek、Qwen、Ollama、Kimi、GLM、MiniMax、Doubao、SiliconFlow、Groq、ERNIE、Gemini-via-OpenAI |
+| Anthropic-compatible requester | 通过 Anthropic native API 调用 Claude |
 
-| 集成 | 功能 |
-|:--|:--|
-| `agently.integrations.chromadb` | `ChromaCollection` — 基于向量检索的知识库（RAG） |
-| `agently.integrations.fastapi` | SSE 流式、WebSocket 及标准 POST 接口模式 |
+## FAQ
 
----
+**Agently 和直接调用 SDK 有什么不同？**
 
-## 扩展性 — 在每一层自定义
+直接 SDK 调用适合只需要少量 Prompt 的应用。Agently 在模型调用周围补上契约：Prompt 槽位、输出解析、校验、重试、响应复用、Action logs、Session memory、配置、服务 helper 和 TriggerFlow。
 
-Agently 设计为可在多个独立层面进行扩展。你不需要 fork 框架才能改变它的行为——每个主要组件都是可替换的插件、钩子或注册处理器。
+**Agently 和 LangChain 有什么不同？**
 
-```mermaid
-graph TB
-    subgraph USER["你的应用"]
-        App["业务逻辑  ·  TriggerFlow 编排"]
-    end
+LangChain 提供广泛集成、预置 agents 和灵活构建块。Agently 更窄，也更强调模型请求边界：provider setup、Prompt 槽位、结构化输出、parser feedback、重试、校验、响应复用、Action 执行、settings 和观测被设计成同一个契约。目标是让团队更换底层模型或 provider 时，不需要让下游业务逻辑重新适配输出或工具调用形态。
 
-    subgraph AGENT_EXT["Agent 扩展层"]
-        AE["内置扩展\nSession · Action · AutoFunc · ConfigurePrompt · KeyWaiter · StreamingPrint"]
-        AEC["自定义 Agent 扩展\n注册自己的生命周期钩子\n和 Agent 级别能力"]
-    end
+**Agently 和 LangGraph 有什么不同？**
 
-    subgraph HOOKS["请求生命周期钩子"]
-        H1["request_prefixes\n在请求发送前修改 Prompt + Settings"]
-        H2["broadcast_prefixes\n响应开始时触发"]
-        H3["broadcast_suffixes\n每个流式事件触发"]
-        H4["finally\n响应完成后执行"]
-    end
+LangGraph 擅长图式 agent state 和 durable execution。TriggerFlow 是 Agently 的信号驱动工作流层：模型侧 `instant` 结构化事件、Action 结果、外部事件、pause/resume、runtime stream items、execution state 和 close snapshots 都能进入同一套编排语义。
 
-    subgraph CORE_PIPELINE["核心管道插件（可替换）"]
-        PG["PromptGenerator\n控制 Prompt 槽如何组装成最终 prompt"]
-        MR["ModelRequester\nOpenAICompatible（默认）· 自定义供应商"]
-        RP["ResponseParser\n控制模型原始输出如何解析为结构化数据"]
-    end
+**Agently 和 CrewAI / AutoGen 有什么不同？**
 
-    subgraph ACTION_STACK["Action 运行时插件（可替换）"]
-        AR["ActionRuntime\n规划协议 · 轮次控制"]
-        AF["ActionFlow\n循环形态 · 暂停/恢复 · 并发"]
-        AX["ActionExecutor\nLocalFunction · Search/Browse · MCP · Sandbox · 自定义"]
-    end
+CrewAI 和 AutoGen 在以 agent 协作为核心的设计里很强。Agently 是更底层的应用框架：多 Agent 协作可以作为一种模式，建立在结构化模型请求、Actions、TriggerFlow signals、sub-flows、Session、runtime resources 和服务侧 execution handles 之上。
 
-    subgraph ENV_STACK["Execution Environment"]
-        EE["ExecutionEnvironmentManager\n托管资源 · 健康检查 · 清理"]
-        EP["Provider\nPython · Bash · Node · Docker · Browser · SQLite · MCP"]
-    end
+**每个多步任务都需要 TriggerFlow 吗？**
 
-    subgraph TF_EXT["TriggerFlow 扩展"]
-        TC["自定义 Chunk Handler\n@flow.chunk 或 register_chunk_handler"]
-        TCC["自定义 Condition Handler\nregister_condition_handler"]
-    end
+不需要。简单线性任务可以用普通 Python 或 async functions。需要分支、fan-out、外部事件、pause/resume、runtime stream、持久化或重启安全时，再使用 TriggerFlow。
 
-    subgraph HOOKERS["运行时事件汇流（Hooker）"]
-        RH["ConsoleSink · StorageSink · ChannelSink · 自定义\n附加到任意运行时事件流"]
-    end
+**旧 tool API 还能继续用吗？**
 
-    App --> AGENT_EXT
-    AGENT_EXT --> HOOKS
-    HOOKS --> CORE_PIPELINE
-    CORE_PIPELINE --> ACTION_STACK
-    ACTION_STACK --> ENV_STACK
-    App --> TF_EXT
-    CORE_PIPELINE -.->|"发出运行时事件"| HOOKERS
-    ACTION_STACK -.->|"发出运行时事件"| HOOKERS
-    ENV_STACK -.->|"发出运行时事件"| HOOKERS
-```
+可以。旧 tool family 仍然是兼容面，并映射到当前 Action Runtime。新代码推荐 `@agent.action_func`、`agent.use_actions(...)` 和 `enable_*` helpers。
 
-### 扩展点一览
+**Agently 服务如何部署？**
 
-| 层级 | 扩展类型 | 可自定义的内容 |
-|:--|:--|:--|
-| **Agent 扩展** | 注册自定义扩展类 | 为每个 Agent 添加新能力：新 Prompt 槽、新响应钩子、新生命周期行为 |
-| **请求生命周期钩子** | `request_prefixes` / `broadcast_prefixes` / `broadcast_suffixes` / `finally` | 在请求发送前、响应开始时、每个流式事件时、响应完成后拦截并处理 |
-| **PromptGenerator**（插件） | 替换内置插件 | 精确控制各 Prompt 槽如何组装为最终发送给模型的消息列表 |
-| **ModelRequester**（插件） | 注册新供应商类 | 接入任意非 OpenAI 兼容的模型 API，接口契约保持不变 |
-| **ResponseParser**（插件） | 替换内置插件 | 改变原始模型输出解析为结构化数据和流式事件的方式 |
-| **ActionRuntime**（插件） | 替换 `AgentlyActionRuntime` | 更换规划协议、调用归一化逻辑或轮次控制方式 |
-| **ActionFlow**（插件） | 替换 `TriggerFlowActionFlow` | 更换 Action 循环的编排形态——不同的并发策略、暂停/恢复或分支逻辑 |
-| **ActionExecutor**（插件） | 在内置基础上追加或替换 | 添加新的执行后端：云函数、RPC、自定义沙箱 |
-| **ExecutionEnvironmentProvider**（插件） | 注册托管资源 Provider | 为新的资源类型添加生命周期、健康检查、注入和清理 |
-| **TriggerFlow Chunk** | `@flow.chunk` / `register_chunk_handler` | 任意 Python 函数或协程都可以成为可组合的流程步骤 |
-| **TriggerFlow Condition** | `register_condition_handler` | 自定义分支之间的路由判断逻辑 |
-| **运行时 Hooker** | 实现并注册一个 Hooker | 附加到运行时事件流，用于可观测性、存储或频道转发 |
+可以直接使用 async request APIs，也可以用 `FastAPIHelper` 包装 agents、requests、generators、TriggerFlow definitions 或 TriggerFlow executions。参考 FastAPI 文档和 `examples/fastapi/`。
 
-### 示例：注册自定义 ActionExecutor
+## 文档
 
-```python
-from agently.types.plugins import ActionExecutor, ActionRunContext, ActionExecutionRequest, ActionResult
+| Resource | Link |
+|---|---|
+| Documentation (EN) | https://agently.tech/docs |
+| Documentation (中文) | https://agently.cn/docs |
+| Quickstart | https://agently.tech/docs/en/start/quickstart.html |
+| Model Setup | https://agently.tech/docs/en/start/model-setup.html |
+| Project Framework | https://agently.tech/docs/en/start/project-framework.html |
+| Output Control | https://agently.tech/docs/en/requests/output-control.html |
+| Model Response and Streaming | https://agently.tech/docs/en/requests/model-response.html |
+| Session Memory | https://agently.tech/docs/en/requests/session-memory.html |
+| Actions | https://agently.tech/docs/en/actions/overview.html |
+| Execution Environment | https://agently.tech/docs/en/actions/execution-environment.html |
+| TriggerFlow | https://agently.tech/docs/en/triggerflow/overview.html |
+| FastAPI Helper | https://agently.tech/docs/en/services/fastapi.html |
+| Observability | https://agently.tech/docs/en/observability/overview.html |
+| Coding Agents | https://agently.tech/docs/en/development/coding-agents.html |
+| Agently Skills | https://github.com/AgentEra/Agently-Skills |
 
-class MyCloudExecutor:
-    name = "my-cloud-executor"
-    DEFAULT_SETTINGS = {}
+## 兼容说明
 
-    async def execute(
-        self,
-        context: ActionRunContext,
-        request: ActionExecutionRequest,
-    ) -> list[ActionResult]:
-        # 调用你的云函数 / RPC / 自定义后端
-        ...
+- 当前 package version 是 `4.1.2.2`。
+- 当前 release manifest 是 `compatibility/releases/4.1.2.2.json`。
+- 开发线计划写入 `compatibility/in-development.json`；不要把未来计划版本当作已发布版本。
+- README 示例使用当前 Action 和 TriggerFlow close-snapshot 路径。
+- deprecated API 默认每个 Python 进程只警告一次，除非关闭 `runtime.show_deprecation_warnings`。
 
-Agently.plugin_manager.register("ActionExecutor", MyCloudExecutor)
-```
+## 社区
 
-### 示例：添加请求生命周期钩子
+- Discussions: https://github.com/AgentEra/Agently/discussions
+- Issues: https://github.com/AgentEra/Agently/issues
+- 微信群: https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf
+- Twitter / X: https://x.com/AgentlyTech
 
-```python
-agent = Agently.create_agent()
+## License
 
-# 在该 Agent 的每次请求中注入上下文
-def inject_tenant_context(prompt, settings):
-    prompt.info({"tenant_id": get_current_tenant()})
+Agently 采用 open-core 模式：
 
-agent.extension_handlers.append("request_prefixes", inject_tenant_context)
-```
-
----
-
-## 关于"Harness"概念与 Agently 的关系
-
-业界近年出现了 **AI application harness** 这一概念——用来描述在 LLM 调用之上叠加工程控制：稳定的输出接口、可观测的内部状态、可替换的组件。它是一种架构属性，而不是某种产品类型。
-
-Agently 是一个 **AI 应用开发框架**，但在设计上天然满足这些属性：
-
-| Harness 属性 | Agently 的实现方式 |
-|:--|:--|
-| **输出接口稳定** | `output()` 的 `True` 必填标记 + `ensure_keys` 补充校验 + 自定义 `validate()` 校验 + `ensure_all_keys` 严格模式 |
-| **内部状态可观测** | `action_logs`、observation event、DevTools `ObservationBridge`、逐层结构化日志 |
-| **运行时层可替换** | ActionRuntime、ActionFlow、ActionExecutor、ExecutionEnvironmentProvider 均为独立插件槽 |
-| **关注点分离** | Prompt 槽、设置层级、Session、TriggerFlow 是独立且可组合的层 |
-| **可测试性** | TriggerFlow 每个 chunk 都是普通函数；结构化输出有固定 schema 可断言 |
-
-这些属性是 Agently 设计哲学的自然结果——按照 Agently 的方式正确组织 AI 应用，就能得到这些保障。
-
----
-
-## 谁在用 Agently 解决真实问题？
-
-> "Agently 帮助我们将评标细则转为可执行流程，模型评分关键项准确率稳定在 75%+，评标效率显著提升。" — 某能源央企项目负责人
-
-> "Agently 让问数系统形成从澄清到查询到呈现的闭环，业务问题首次回复准确率达 90%+，上线后稳定运行。" — 某大型能源集团数据负责人
-
-> "Agently 的工作流编排与会话能力，让教学助手在课程管理与答疑场景快速落地，并保持持续迭代。" — 某高校教学助手项目负责人
-
-📢 [来 GitHub Discussions 分享你的案例 →](https://github.com/AgentEra/Agently/discussions/categories/show-and-tell)
-
----
-
-## 常见问题
-
-**Q：Agently 和 LangChain 的主要区别是什么？**
-LangChain 在快速原型和生态广度上有优势。Agently 专注于 POC 之后的工程阶段：契约式输出防止接口漂移，TriggerFlow 分支可以独立单元测试，工程项目级配置系统支持真实的团队工作流。如果你用 LangChain 交付过项目并遇到了可维护性问题，Agently 正是为此而设计的。
-
-**Q：和 CrewAI 或 AutoGen 有什么不同？**
-CrewAI 和 AutoGen 围绕自然语言协调的 Agent 团队设计——适合探索，难以做到确定性。Agently 使用基于代码的显式编排（TriggerFlow），每个分支都是有明确输入输出的 Python 函数，每次 Action 调用都有日志，执行状态可暂停、序列化和恢复——这些正是面向用户交付时真正重要的属性。
-
-**Q：Action Runtime 是什么？为什么 v4.1 要重写？**
-旧版 Tool 系统是单层扁平结构，简单场景够用，但不可扩展。新的 Action Runtime 将"调用什么"（ActionRuntime 规划层）、"怎么循环"（ActionFlow 循环层）、"怎么执行"（ActionExecutor 执行层）和托管资源生命周期（Execution Environment）分开，每层都可替换。你可以只换执行后端而不动规划逻辑，也可以添加一个托管资源 Provider 而不改业务代码。
-
-**Q：如何将基于 Agently 的服务部署上线？**
-框架不绑定部署方式，提供完整异步接口。`examples/fastapi/` 中有 SSE、WebSocket 和普通 POST 的开箱即用示例。完整的部署案例参见 [Agently-Talk-to-Control](https://github.com/AgentEra/Agently-Talk-to-Control)。
-
-**Q：是否有企业版或商业支持？**
-有。本仓库核心框架继续采用 Apache 2.0 开源协议。企业扩展包、私有化部署支持、治理模块和 SLA 保障通过独立商业协议提供。欢迎通过[社区](https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf)联系我们。
-
----
-
-## 文档导航
-
-| 资源 | 链接 |
-|:--|:--|
-| 官方文档（中文） | https://agently.cn/docs |
-| 官方文档（英文） | https://agently.tech/docs |
-| 快速开始 | https://agently.cn/docs/start/quickstart.html |
-| 结构化输出控制 | https://agently.cn/docs/requests/output-control.html |
-| Model Response 与流式 | https://agently.cn/docs/requests/model-response.html |
-| Session & Memory | https://agently.cn/docs/requests/session-memory.html |
-| TriggerFlow 编排 | https://agently.cn/docs/triggerflow/overview.html |
-| Action 与 Execution Environment | https://agently.cn/docs/actions/overview.html |
-| Prompt 管理 | https://agently.cn/docs/requests/prompt-management.html |
-| 智能体系统 Playbook | https://agently.cn/docs/playbooks/overview.html |
-| 官方 Agently Skills | https://github.com/AgentEra/Agently-Skills |
-
----
-
-## 加入社区
-
-- 交流讨论：https://github.com/AgentEra/Agently/discussions
-- 报告问题：https://github.com/AgentEra/Agently/issues
-- 微信群：https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf
-
-## 开源协议
-
-Agently 采用"开源核心 + 商业扩展"模式：
-
-- 本仓库开源核心：[Apache 2.0](LICENSE)
-- 商标使用规范：[TRADEMARK.md](TRADEMARK.md)
-- 贡献者授权协议：[CLA.md](CLA.md)
-- 企业扩展与商业服务：通过独立商业协议提供
-
----
-
-<p align="center">
-  <b>立即开始构建真正能上线的 AI 应用 →</b><br>
-  <code>pip install -U agently</code>
-</p>
-
-<p align="center">
-  <sub>有问题？查看<a href="https://agently.cn/docs">完整文档</a>或加入<a href="https://doc.weixin.qq.com/forms/AIoA8gcHAFMAScAhgZQABIlW6tV3l7QQf">社区交流</a>。</sub>
-</p>
+- 开源核心：[Apache 2.0](LICENSE)
+- Trademark usage policy: [TRADEMARK.md](TRADEMARK.md)
+- Contributor rights agreement: [CLA.md](CLA.md)
+- Enterprise extensions and services: 独立商业协议

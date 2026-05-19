@@ -8,7 +8,9 @@ keywords: Agently, AI agent framework, documentation, quickstart, TriggerFlow
 
 > Languages: **English** · [中文](../cn/index.md)
 
-Agently is an AI application development framework focused on stable structured outputs, observable actions, service exposure, observability, and durable workflow orchestration.
+Agently is an AI application development framework for teams moving from model prototypes to maintainable applications. It focuses on normalized model requests, stable structured outputs, explicit prompt and response contracts, observable actions, service exposure, observability, and durable signal-driven workflow orchestration.
+
+Use Agently when application code needs to own the AI execution boundary: model requests should return inspectable data, tool calls should leave action records, workflows should expose lifecycle state, and project settings or prompts should be reviewable outside one-off scripts.
 
 This handbook is organized as a learning path. If you have not run a single request yet, start at [Quickstart](start/quickstart.md). If you are integrating Agently into a service, jump to [Async First](start/async-first.md). If you are designing event-driven or long-running flows, go to [TriggerFlow Overview](triggerflow/overview.md).
 
