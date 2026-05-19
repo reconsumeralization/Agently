@@ -86,3 +86,14 @@ def print_model_reply(response):
     action_logs = extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else []
     print("[ACTION_LOGS_FROM_RESPONSE_RESULT]")
     pprint(action_logs)
+
+# Helper module — no standalone terminal output.
+# Imported by cookbook examples to provide:
+#   configure_model(temperature=0.7) — reads DEEPSEEK_* or OLLAMA_* env vars and
+#     configures Agently.set_settings("OpenAICompatible", {...}); returns provider name
+#   print_model_provider(provider) — prints [MODEL_PROVIDER] deepseek or ollama
+#   print_response(response) — prints MODEL_REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
+#
+# How it works:
+# If DEEPSEEK_API_KEY is set, the model is configured for DeepSeek; otherwise Ollama.
+# This lets cookbook examples run unchanged against either backend by setting env vars.

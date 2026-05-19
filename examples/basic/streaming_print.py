@@ -133,3 +133,12 @@ def instant():
 
 
 instant()
+
+# Expected output (content is variable — requires local Ollama):
+# <speech text streamed token by token, followed by a newline>
+#
+# How it works:
+# get_generator() with no type argument defaults to "delta" mode, yielding raw
+# token strings as the model generates.  Printing each delta with end="" and
+# flush=True gives a live-streaming terminal experience without waiting for the
+# full response.

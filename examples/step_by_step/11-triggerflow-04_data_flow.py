@@ -35,3 +35,28 @@ async def triggerflow_state_flow():
 
 if __name__ == "__main__":
     asyncio.run(triggerflow_state_flow())
+
+# Expected output:
+# {'input': 'deploy', 'user': {'id': 'u-001', 'role': 'admin'}, 'env': {'name': 'prod'}}
+#
+# How it works:
+# State is a flat dict shared across the entire execution.  Any chunk can read values
+# written by earlier chunks via data.get_state("key").  prepare_user and prepare_env
+# each write one key, then summarize reads both and assembles a combined snapshot.
+# This pattern avoids threading intermediate results through return values when multiple
+# upstream chunks each contribute one piece of context.
+#
+# Flow:
+# async_start("deploy")
+#   |
+#   v
+# prepare_user  ->  state["user"] = {"id": "u-001", "role": "admin"}  (returns data.input)
+#   |
+#   v
+# prepare_env   ->  state["env"]  = {"name": "prod"}                  (returns data.input)
+#   |
+#   v
+# summarize     ->  reads state["user"] + state["env"] via data.get_state()
+#                   state["summary"] = {"input": "deploy", "user": {...}, "env": {...}}
+#   |
+# async_close() ->  prints state["summary"]

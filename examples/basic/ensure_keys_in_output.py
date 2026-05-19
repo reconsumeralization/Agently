@@ -49,3 +49,15 @@ print(ensured_data_object)
 print(ensured_data_object.final)  # type: ignore
 print(ensured_data_object.final.steps)  # type: ignore
 # use type: ignore since ensure_data_object is a runtime created data model
+
+# Expected output shape (content is variable — requires local Ollama):
+# <data_object with .control, .final.steps, .resources[*].title, .resources[*].link>
+# The model output must contain final.steps and each resource must have title+link.
+#
+# How it works:
+# get_data_object(ensure_keys=[...]) retries generation up to max_retries times
+# if any of the listed key paths are absent or null in the response.
+# Key paths use dot notation ("final.steps") or wildcard syntax ("resources[*].title").
+# raise_ensure_failure=False returns the last attempt's value instead of raising
+# if all retries fail.  Fixed required fields should use True in .output() schema
+# rather than ensure_keys; ensure_keys targets runtime-conditional paths.

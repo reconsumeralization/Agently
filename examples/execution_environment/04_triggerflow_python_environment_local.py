@@ -46,3 +46,23 @@ if __name__ == "__main__":
 # Expected key output:
 # [TRIGGERFLOW_RESULT] prints {"answer": 42}.
 # [EXECUTION_HANDLES_AFTER_RELEASE] prints [] after the execution-scoped Python resource is released.
+
+# How it works:
+# execution_environments=[{kind:"python", scope:"execution", resource_key:"managed_python",
+# config:{base_vars:{base:40}}}] declares a Python sandbox that persists across the entire
+# TriggerFlow execution (scope="execution"), not just one action call.
+# data.require_resource("managed_python") retrieves the sandbox handle inside a chunk.
+# sandbox.run(code)["result"] executes code with base=40 in scope; input_value=2 → answer=42.
+# After async_close(), execution-scoped handles are released automatically.
+#
+# Flow:
+# async_start(2, execution_environments=[...])
+#   | Python sandbox created with base_vars={base:40}, scope="execution"
+#   v
+# calculate: data.require_resource("managed_python")
+#   sandbox.run("input_value=2\nresult=base+input_value") -> 42
+#   data.state.set("answer", 42)
+#   |
+#   v
+# async_close() -> {"answer": 42}
+# handle released -> list(scope="execution") == []

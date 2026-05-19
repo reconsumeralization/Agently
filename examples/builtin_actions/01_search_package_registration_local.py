@@ -72,3 +72,10 @@ if __name__ == "__main__":
 # [REGISTERED_SEARCH_ACTIONS] lists search, search_news, search_wikipedia, and search_arxiv.
 # By default the script prints [SKIP_REAL_SEARCH] and does not call the network.
 # With RUN_REAL_SEARCH=1, [ACTION_RESULT] contains a real search ActionResult.
+
+# How it works:
+# SearchPack from agently.builtins.actions registers a family of search action IDs:
+# "search" (general web), "search_news", "search_wikipedia", "search_arxiv".
+# agent.use_actions(search_pack) mounts them in the agent's action registry.
+# The script inspects the registered specs to verify registration without any network
+# call.  Set RUN_REAL_SEARCH=1 to trigger a real search via execute_action().

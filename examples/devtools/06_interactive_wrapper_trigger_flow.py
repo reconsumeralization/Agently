@@ -72,3 +72,35 @@ if __name__ == "__main__":
         interactive.wait()
     finally:
         bridge.unregister(Agently)
+
+# Expected output when launched and given input "hello agently":
+# Interactive UI: http://localhost:<port>/?...
+# (browser receives streamed chunks):
+#   "Validated input: hello agently"
+#   "Transforming message to uppercase..."
+#   "Word count: 2"
+#   "Flow complete. Final structured result is ready."
+#
+# How it works:
+# InteractiveWrapper wraps a TriggerFlow.  When the browser sends a request, the wrapper
+# starts a flow execution and streams async_put_into_stream() messages to the UI as they
+# are emitted.  After async_close(), the final structured snapshot is also delivered.
+# Three chunks (validate_input, process_message, finalize) each write progress messages
+# via async_put_into_stream() and the final state via async_set_state().
+#
+# Flow:
+# browser request: "hello agently"
+#   |
+#   v
+# validate_input: stream "Validated input: hello agently\n"
+#   -> returns {"status":"validated","message":"hello agently","length":15}
+#   |
+#   v
+# process_message: sleep(0.2) -> stream "Transforming message to uppercase...\n"
+#                  sleep(0.2) -> stream "Word count: 2\n"
+#   -> returns {"uppercase":"HELLO AGENTLY","word_count":2,"status":"processing_complete"}
+#   |
+#   v
+# finalize: stream "Flow complete. Final structured result is ready.\n"
+#   -> state["result"]["final_status"] = "completed"
+# async_close() -> final snapshot delivered to browser

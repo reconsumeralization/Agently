@@ -53,3 +53,23 @@ if __name__ == "__main__":
 # [ACTION_RESULT] has status="success" and data["result"] equals
 # {"average": 20.0, "count": 5, "max_minus_min_gap": 34}.
 # [ACTION_CALL_HANDLES_AFTER_RELEASE] prints [].
+
+# How it works:
+# agent.enable_python(action_id=ACTION_ID, expose_to_model=False) registers a managed
+# Python sandbox action without exposing it to the model (direct execution only).
+# execute_action() calls the action directly with python_code as a list of code lines.
+# The sandbox runs the code, reads the `result` variable, and returns it.
+# After the call, Agently.execution_environment.list(scope="action_call") returns []
+# because action-call-scoped handles are released automatically when the call ends.
+#
+# Flow:
+# agent.enable_python(action_id=ACTION_ID, expose_to_model=False)
+#   |
+#   v
+# agent.action.execute_action(ACTION_ID, {"python_code": [...]})
+#   | (no model call)
+#   v
+# ManagedPythonEnvironment runs code -> result = {"average":20.0,"count":5,"max_minus_min_gap":34}
+#   |
+#   v
+# handle released (scope="action_call") -> list(scope="action_call") == []

@@ -31,3 +31,37 @@ async def loop_flow_demo():
 
 if __name__ == "__main__":
     asyncio.run(loop_flow_demo())
+
+# Expected output:
+# {'last': 3, 'count': 4}          (state["values"] == [0, 1, 2, 3])
+#
+# How it works:
+# emit_nowait("Loop", value) fires an event synchronously without yielding, so the "Loop"
+# handler is queued immediately.  loop_step reads state["values"], appends the current count,
+# and re-emits "Loop" with count+1 — until count reaches 3, at which point it stops and
+# writes state["done"].
+# async_set_state(..., emit=False) suppresses the built-in auto-emit that would otherwise
+# dispatch a state-change event for every write, which would double-trigger the "Loop" handler.
+# create_execution(auto_close=False) keeps the execution open until all Loop iterations finish.
+#
+# Flow:
+# async_start("start")
+#   |
+#   v
+# start_loop  ->  state["values"] = []
+#                 emit_nowait("Loop", 0)
+#   |                        |
+#   v                        v  [Loop, input=0]
+# (main done)           loop_step  ->  values=[0], emit_nowait("Loop", 1)
+#                            |
+#                            v  [Loop, input=1]
+#                       loop_step  ->  values=[0,1], emit_nowait("Loop", 2)
+#                            |
+#                            v  [Loop, input=2]
+#                       loop_step  ->  values=[0,1,2], emit_nowait("Loop", 3)
+#                            |
+#                            v  [Loop, input=3]
+#                       loop_step  ->  values=[0,1,2,3], input>=3: stop
+#                                      state["done"] = {"last": 3, "count": 4}
+#   |
+# async_close()  ->  prints state["done"]

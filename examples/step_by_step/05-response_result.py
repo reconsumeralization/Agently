@@ -102,3 +102,22 @@ async def main():
 
 
 asyncio.run(main())
+
+# All functions are commented out — uncomment one to run with a local Ollama model.
+# Model output is non-deterministic text; structure of meta is stable.
+#
+# How it works:
+# get_response() returns a lazy response handle; the model request does not start until
+# data is consumed.  Once consumed, all result types (text, data, data_object, meta)
+# are cached on the result instance and can be read multiple times without re-requesting.
+# Result accessor pairs:
+#   get_text()        / async_get_text()        — raw reply as a string
+#   get_data()        / async_get_data()        — parsed structured dict (requires .output())
+#   get_data_object() / async_get_data_object() — Pydantic model of the structured dict
+#   get_meta()        / async_get_meta()        — request metadata (model, tokens, timing, …)
+#   get_generator()   / get_async_generator()   — streaming iterator; type=
+#     "delta"          : raw token strings
+#     "instant"        : streaming_parse nodes with .path, .delta, .wildcard_path
+#     "specific"       : (event_name, data) tuples (delta, reasoning_delta, tool_calls)
+# concurrent_requests() shows that multiple async_get_text() calls on separate response
+# handles run in parallel via asyncio.gather(), each making its own independent request.

@@ -66,3 +66,43 @@ async def triggerflow_runtime_resources_demo():
 
 if __name__ == "__main__":
     asyncio.run(triggerflow_runtime_resources_demo())
+
+# Expected output:
+# [logger] prepared: AI chips
+# [logger] searched 2 items
+# {'request': {'query': 'AI chips'}, 'feedback': {'approved': True},
+#  'results': [{'title': 'AI chips - result 1'}, {'title': 'AI chips - result 2'}]}
+#
+# How it works:
+# Two scopes for injectable dependencies:
+#   flow.update_runtime_resources(name=obj)          — available to all executions of this flow
+#   flow.create_execution(runtime_resources={…})     — available only to that one execution
+# data.require_resource("name") retrieves by name and raises KeyError if absent (safe to cast).
+#
+# This example also shows a cross-session resource pattern: the original execution only has
+# "logger" (flow-level); after save() and restore, "search_tool" is injected at the restored
+# execution level.  Handlers on the restored execution see both resources.
+#
+# Flow:
+# flow.update_runtime_resources(logger=SimpleLogger())   <- flow-level
+#   |
+# async_start("AI chips")
+#   |
+#   v
+# prepare  ->  state["request"] = {"query": "AI chips"}
+#              logger.info("prepared: AI chips")
+#              async_pause_for(type="human_input", resume_to="next")   [PAUSED]
+#   |
+# execution.save()  ->  saved_state
+#   |
+# [--- restore with extra resource ---]
+# restored = flow.create_execution(runtime_resources={"search_tool": search_tool})
+# restored.load(saved_state)
+# async_continue_with(interrupt_id, {"approved": True})
+#   |
+#   v  (resumes at finalize because resume_to="next")
+# finalize  ->  logger.info("searched 2 items")
+#               results = search_tool("AI chips")  -> 2 items
+#               state["final"] = {request, feedback, results}
+#   |
+# async_close()  ->  prints state["final"]

@@ -143,3 +143,20 @@ if __name__ == "__main__":
 # [MODEL_PROVIDER] prints deepseek or ollama.
 # [ROUTE_RESULTS] contains model-generated intent objects and model-generated branch answers.
 # The route labels are weather, exchange, travel_plan, and general.
+
+# How it works:
+# classify_intent() asks the model to return a single route label for the input question.
+# TriggerFlow.when() branches to handle_weather, handle_exchange, handle_travel, or
+# handle_general based on the returned label; a fallback low_confidence branch fires when
+# the classification confidence is below 0.6.  Each handler calls model_answer() with a
+# role-specific instruction to generate a one-sentence answer.
+#
+# Flow:
+# for each question:
+#   classify_intent(question) -> {route, confidence, reason}
+#   if confidence < 0.6: TriggerFlow -> handle_low_confidence
+#   elif route == "weather": TriggerFlow -> handle_weather
+#   elif route == "exchange": TriggerFlow -> handle_exchange
+#   elif route == "travel_plan": TriggerFlow -> handle_travel
+#   else: TriggerFlow -> handle_general
+#   each handler: model_answer(question, role) -> one-sentence reply

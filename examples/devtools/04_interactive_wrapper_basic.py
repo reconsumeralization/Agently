@@ -57,3 +57,23 @@ if __name__ == "__main__":
         interactive.wait()
     finally:
         bridge.unregister(Agently)
+
+# Stable expected key output from the declared run:
+# launched example prints the local DevTools or Interactive UI URL and streams/records the declared demo events.
+#
+# How it works:
+# InteractiveWrapper wraps a streaming callable (a generator function here) in a local
+# HTTP server that the agently-devtools UI connects to.  When a request arrives, the
+# wrapper calls echo_handler(request_data), iterates the generator, and streams each
+# chunk to the browser UI incrementally.  ObservationBridge is also registered but
+# emits no runtime events because this example does not use an Agently agent.
+# Print the ui_url and open it in a browser to see the streaming echo demo.
+#
+# Flow:
+# InteractiveWrapper(echo_handler, title="...") -> starts local HTTP server
+# interactive.ui_url -> http://localhost:<port>/?...
+#   |  (browser sends request)
+#   v
+# echo_handler(request_data): yields 4 chunks with 0.2s sleep between each
+# chunks streamed to browser: "Analyzing input...", "Echo: ...", "Length: ...", "Words: ..."
+# interactive.wait() -> blocks until Ctrl-C

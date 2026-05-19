@@ -30,3 +30,25 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes a successful python_table_stats call.
 # The ActionResult has model_digest and artifact_refs for the Python code/output.
 # The calculated values are average=20.0 and max-minus-min gap=34.
+
+# How it works:
+# agent.action.register_python_sandbox_action() creates an action that accepts a Python
+# code string from the model, executes it inside a sandboxed Python interpreter,
+# and returns the value of the `result` variable as the action output.
+# The model writes the computation as Python code; the sandbox runs it deterministically
+# without network or filesystem access.
+#
+# Flow:
+# agent.input("compute average and gap for [15,23,42,8,12]")
+#   |
+#   v
+# model plans: python_table_stats(code="nums=[15,23,42,8,12]\nresult={'avg':...,'gap':...}")
+#   |
+#   v
+# PythonSandboxActionExecutor runs code -> average=20.0, gap=34
+#   |
+#   v
+# ActionResult(model_digest=..., artifact_refs=[...])
+#   |
+#   v
+# model reply: "average=20.0, max-minus-min gap=34" 

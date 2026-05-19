@@ -84,3 +84,21 @@ if __name__ == "__main__":
 # [FIRST_HANDLE] has handle_id "flaky:1".
 # [SECOND_HANDLE_AFTER_HEALTH_CHECK] has handle_id "flaky:2" because the first reusable handle is unhealthy.
 # [PROVIDER_COUNTS] prints {"ensure_count": 2, "release_count": 1}.
+
+# How it works:
+# A custom FlakyProvider simulates a reusable handle that becomes unhealthy after first use.
+# The first ensure() creates handle "flaky:1" with reuse_strategy="reuse_if_healthy".
+# The second ensure() calls the health_check(), which returns False → the handle is discarded
+# and a new one "flaky:2" is created.  The release_count stays at 1 because "flaky:1" was
+# released when the health check failed, not after second use.
+#
+# Flow:
+# ensure("health_check_demo") -> creates "flaky:1"  (ensure_count=1)
+#   |
+#   v
+# ensure("health_check_demo") -> health_check("flaky:1") returns False
+#   -> releases "flaky:1", creates "flaky:2"  (ensure_count=2, release_count=1)
+#   |
+#   v
+# list(scope="execution") -> []  (both released after second ensure)
+# provider_counts -> {"ensure_count": 2, "release_count": 1}

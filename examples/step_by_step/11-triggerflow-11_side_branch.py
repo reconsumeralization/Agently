@@ -27,3 +27,27 @@ async def triggerflow_side_branch_demo():
 
 if __name__ == "__main__":
     asyncio.run(triggerflow_side_branch_demo())
+
+# Expected output:
+# {'main': 'main: hello', 'side': 'side saw main: hello'}
+#
+# How it works:
+# side_branch(side_task) attaches a parallel observer to the output of main_task.
+# side_task receives main_task's return value ("main: hello") as data.input and runs
+# concurrently with the rest of the main chain.  The main chain continues to store_main
+# immediately, without waiting for side_task to finish.  side_task does not produce a
+# return value that feeds into the main chain — it is a fire-and-observe tap, not a fork.
+# Both chunks share the same execution state, so side writes are visible in the close snapshot.
+#
+# Flow:
+# async_start("hello")
+#   |
+#   v
+# main_task  ->  "main: hello"
+#   |                   |
+#   |           [side_branch]
+#   |                   v  (concurrent, does not block main chain)
+#   v           side_task  ->  state["side"] = "side saw main: hello"
+# store_main  ->  state["main"] = "main: hello"
+#   |
+# async_close()  ->  {'main': 'main: hello', 'side': 'side saw main: hello'}

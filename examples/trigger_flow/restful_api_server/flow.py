@@ -44,3 +44,20 @@ async def run_flow(value: int):
     await execution.async_close()
     result = execution.result
     return result.get_state("response")
+
+# Stable expected key output from the declared run:
+# run_flow(3) returns {"group_1": 3, "group_2": 15, "initial_number": 3}.
+#
+# How it works:
+# - dump_flow() builds a TriggerFlow with an init chunk, a three-way batch, and a summarize chunk.
+# - run_flow(value) starts and closes one execution, then returns response from execution state.
+# - This module is imported by restful_api_server/server.py for HTTP exposure.
+#
+# ASCII flow:
+# start/input
+#   |
+#   v
+# TriggerFlow chunks / branches
+#   |
+#   v
+# async_close() -> close snapshot / runtime stream assertions

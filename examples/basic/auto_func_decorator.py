@@ -83,3 +83,16 @@ def calculate(formula: str) -> int:
 
 result = calculate("3333+6666=?")
 print(result)
+
+# Expected output shape (content is variable — requires local Ollama):
+# 3333 + 6666 = 9999        (printed by the add action during execution)
+# 9999                      (final return value of calculate())
+#
+# How it works:
+# @agent.action_func registers a Python function as an Agently action — here both
+# add (an async integer adder with a 1-second sleep) and python_code_executor
+# (a sandboxed Python eval loop).
+# @agent.auto_func decorates a stub function whose docstring is used as the model
+# instruction.  Calling calculate("3333+6666=?") triggers an agent request that
+# uses the registered actions to compute the answer, then returns it as the
+# function's return value — the stub body (...) is never executed.

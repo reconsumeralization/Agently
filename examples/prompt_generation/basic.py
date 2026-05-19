@@ -37,3 +37,15 @@ welcome_words = {
 print(agent.prompt.to_messages()[0]["content"])
 print("==================")
 print(agent.prompt.to_text())
+
+# Expected output (deterministic — no model call):
+# agent.prompt.to_messages()[0]["content"] — the full system message text with all sections
+# ==================
+# agent.prompt.to_text() — the same prompt in human-readable text form
+#
+# How it works:
+# .input({"user_input": user_input}), .info(welcome_words), .instruct([...]),
+# .examples([...]), and .output({...}) each populate a named prompt slot.
+# {user_input}, {info} placeholders in instruct strings are resolved at render time.
+# to_messages() serializes to an OpenAI-style messages list (one system message here).
+# to_text() serializes to readable text for debugging.  No model call is made.

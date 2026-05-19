@@ -60,3 +60,24 @@ if __name__ == "__main__":
 # The local MCP HTTP server starts on 127.0.0.1.
 # [ACTION_RECORDS] includes MCP calculator action calls.
 # The final computed value for (100.25 + 55.5) * 1.08 is 168.21.
+
+# How it works:
+# find_open_port() picks a free TCP port; _calculator_mcp_server.py is launched as a
+# subprocess with MCP_TRANSPORT=http and MCP_PORT=<port>.  wait_for_port() blocks until
+# the server accepts connections, then agent.use_mcp("http://127.0.0.1:<port>/mcp")
+# registers its tools over HTTP instead of stdio.  The subprocess is killed in a
+# finally block after the request completes.
+#
+# Flow:
+# find_open_port() -> e.g. 51423
+# subprocess: _calculator_mcp_server.py (HTTP mode on port 51423)
+#   | wait_for_port()
+#   v
+# agent.use_mcp("http://127.0.0.1:51423/mcp")
+#   |
+#   v
+# model plans: add(100.25, 55.5) -> 155.75, then multiply(155.75, 1.08) -> 168.21
+#   |
+#   v
+# ActionResult records injected -> model reply: "The result is 168.21."
+# finally: process.kill() 

@@ -87,3 +87,67 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# Expected output:
+# [when]  {'flag': 'ready', 'when_payload': {'flag': 'ready'}}
+# [if]    {'grade': 'B'}
+# [match] {'route': 'priority: medium'}
+#
+# How it works:
+# Three independent branching mechanisms are shown:
+#
+# 1. when()  — event-based routing.  prepare emits "Prepared"; flow.when("Prepared").to(route)
+#    registers a handler that fires when that event is dispatched.  create_execution(auto_close=False)
+#    is needed because the execution has no pending main-chain work after prepare runs; without it
+#    the runtime would close before the event handler is picked up.
+#
+# 2. if_condition / elif_condition / else_condition / end_condition  — inline branching.
+#    score returns {"score": 82}, so the >= 80 arm runs and passes "B" to store_grade.
+#    end_condition() merges all arms back to a single continuation.
+#
+# 3. match / case / case_else / end_match  — value-dispatch branching.
+#    The upstream lambda returns "medium", so case("medium") fires; end_match() merges.
+#
+# Flow (when demo):
+# async_start(None)
+#   |
+#   v
+# prepare  ->  state["flag"] = "ready"
+#              async_emit("Prepared", {"flag": "ready"})
+#   |                         |
+#   v                         v  [event: Prepared]
+# (main done)             route  ->  state["when_payload"] = {"flag": "ready"}
+#   |
+# async_close()
+#
+# Flow (if_condition demo):
+# async_start(None)
+#   |
+#   v
+# score  ->  {"score": 82}
+#   |
+#   [>= 90?] No  -> [>= 80?] Yes
+#                        |
+#                        v
+#                   lambda "B"
+#                        |
+#                        v  (end_condition merges)
+#                   store_grade  ->  state["grade"] = "B"
+#   |
+# async_close()
+#
+# Flow (match demo):
+# async_start(None)
+#   |
+#   v
+# lambda "medium"
+#   |
+#   [case "low"] no  [case "medium"] yes  [case "high"] no
+#                            |
+#                            v
+#                     lambda "priority: medium"
+#                            |
+#                            v  (end_match merges)
+#                     store_result  ->  state["route"] = "priority: medium"
+#   |
+# async_close()

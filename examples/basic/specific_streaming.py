@@ -90,3 +90,23 @@ def streaming_with_reasoning_from_deepseek():
 
 
 streaming_with_reasoning_from_deepseek()
+
+# Expected output shape:
+# Example 1 (function calling, local Ollama):
+#   <tool_calls>
+#   [{'function': {'arguments': '{"latitude":40.71,"longitude":-74.01}', 'name': 'get_weather'}, ...}]
+#   </tool_calls>
+# Example 2 (DeepSeek reasoning, requires API key):
+#   [Thinking]: <chain-of-thought tokens>
+#   ----
+#   [Reply]: <answer about DeepSeek>
+#
+# How it works:
+# get_generator(type="specific") yields (event_name, data) tuples.
+# Recognized event names:
+#   "delta"           — text token from the model's answer
+#   "reasoning_delta" — token from the model's chain-of-thought (DeepSeek-R1 etc.)
+#   "tool_calls"      — complete tool_calls payload when the model calls a function
+# Example 1 passes OpenAI-style tools via .options({"tools": [...]}) and
+# captures the "tool_calls" event.  Example 2 uses a reasoning model and
+# separates thinking from answer by event type.

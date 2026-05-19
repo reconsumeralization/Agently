@@ -33,3 +33,17 @@ def chat_history_basic():
 
 
 # chat_history_basic()
+
+# chat_history_basic() is commented out — uncomment to run with a local Ollama model.
+# Expected output shape (content is variable):
+#   line 1: model answer that references "Hi, who are you?" (the seeded history)
+#   line 2: one-sentence summary of the model's own previous answer
+#
+# How it works:
+# set_chat_history([...]) replaces the current history with a list of {role, content} dicts.
+# The history is an agent-level prompt, so it persists across requests until reset.
+# add_chat_history({role, content}) appends one turn without clearing existing history —
+# useful for feeding the model's last reply back as a user message to continue the thread.
+# reset_chat_history() clears all history.
+# Chat history is injected into the prompt as a standard OpenAI-style messages list,
+# so model context and token limits apply in the normal way.

@@ -39,3 +39,23 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# with fastapi_server.py running, five concurrent requests print No.1..No.5 Start/Response/End lines and each response contains model text.
+#
+# How it works:
+# - The client schedules five httpx requests half a second apart.
+# - Each request calls the manual /chat route exposed by fastapi_server.py.
+# - Stable output is the concurrent request/response ordering, not exact model wording.
+#
+# ASCII flow:
+# asyncio tasks
+#   |
+#   v
+# httpx GET /chat
+#   |
+#   v
+# manual FastAPI server
+#   |
+#   v
+# printed responses

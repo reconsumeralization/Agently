@@ -111,3 +111,25 @@ def role_thinking_self_critique():
 
 
 # role_thinking_self_critique()
+
+# All functions are commented out — uncomment one to run with a local Ollama model.
+# Model output is non-deterministic text, but the returned dict keys are stable.
+#
+# How it works:
+# .output({...}) instructs Agently's output-control layer to enforce a typed schema
+# on the model's response.  This works independently of any model-side "response_format"
+# parameter — Agently parses and retries at the framework level (max_retries=3 by default).
+# Key features shown:
+#
+# 1. Nested schema  — values are Tuple[type, description, required?].
+#    required=True means the field is re-requested if missing (up to max_retries times).
+#    Nested lists and dicts are fully supported.
+#
+# 2. Output field ordering drives CoT  — .output() preserves insertion order.
+#    Putting "info_list" before "sure_info" forces the model to enumerate known facts
+#    first, then derive the final answer from them.  Swapping the order breaks the chain.
+#
+# 3. Self-critique pattern  — action -> can_do -> can_do_explain -> fixed_action
+#    routes the model through a propose → judge → explain → fix cycle in one request.
+#    The {action} placeholder in can_do's description references the output of the
+#    preceding field, which the model has already generated at that point in the stream.

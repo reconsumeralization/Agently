@@ -63,3 +63,20 @@ def knowledge_base_demo():
 
 
 # knowledge_base_demo()
+
+# knowledge_base_demo() is commented out — requires local Ollama with:
+#   embedding model: qwen3-embedding:0.6b  (for ChromaDB indexing)
+#   chat model:      qwen2.5:7b            (for answering)
+#
+# Expected output shape:
+#   [retrieval] [{'document': 'Book about cars', ...}, {'document': 'Book about vehicles', ...}, ...]
+#   [answer]    <model answer mentioning cars/vehicles as fast things>
+#
+# How it works:
+# ChromaCollection wraps a ChromaDB collection.  add([{document, metadata}, …]) embeds
+# each document using the embedding_agent and stores the vectors.  query(text) embeds
+# the query the same way and returns the closest documents by cosine similarity.
+# The retrieved documents are injected into the model request as .info({"retrieval_results":…})
+# so the chat model can ground its answer in the retrieved content.
+# This is a minimal RAG (Retrieval-Augmented Generation) pattern:
+#   embed corpus -> store vectors -> embed query -> retrieve top-k -> inject -> answer.

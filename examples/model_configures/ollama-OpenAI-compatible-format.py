@@ -39,3 +39,12 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the ollama-OpenAI-compatible-format.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# Ollama exposes an OpenAI-compatible endpoint at localhost:11434/v1 with no auth required.
+# Set model to any locally pulled Ollama model name (e.g., qwen2.5-coder:14b).
+# No auth key is needed — just base_url and model.  This is the standard pattern for
+# local LLM development and testing with any Ollama-served model.

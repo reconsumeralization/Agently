@@ -34,3 +34,28 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# state["values"] == [1, 2, 3] and state["summary"] == {"count": 3, "last": 3}.
+#
+# How it works:
+# start_loop fires "TICK" with value 1 via emit_nowait.  on_tick appends the value and
+# re-emits "TICK" with value+1 until value >= 3, at which point it writes state["summary"].
+# async_set_state(..., emit=False) suppresses the built-in auto-emit that would otherwise
+# double-fire the "TICK" handler on every state write.
+#
+# Flow:
+# async_start(None)
+#   |
+#   v
+# start_loop  ->  state["values"] = [],  emit_nowait("TICK", 1)
+#   |                          |
+#   v                          v  [TICK, 1]
+# (main done)            on_tick  ->  values=[1],  emit_nowait("TICK", 2)
+#                              |
+#                              v  [TICK, 2]
+#                        on_tick  ->  values=[1,2],  emit_nowait("TICK", 3)
+#                              |
+#                              v  [TICK, 3]
+#                        on_tick  ->  values=[1,2,3],  input>=3: stop
+#                                     state["summary"] = {"count":3, "last":3}

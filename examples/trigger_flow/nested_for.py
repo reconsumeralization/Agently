@@ -45,3 +45,31 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# nested groups contain demo-a, demo-b, and demo-c items, each with ready=True.
+#
+# How it works:
+# make_groups produces a 2-D list: [["demo-a","demo-b"], ["demo-c"]].
+# The outer for_each iterates over groups (2 groups); expand_group passes each group
+# through unchanged.  The inner for_each iterates over the items in each group and
+# applies mark_item.  end_for_each() pair nests the collection: results are
+# [[{item:"demo-a",...}, {item:"demo-b",...}], [{item:"demo-c",...}]].
+#
+# Flow:
+# async_start("demo")
+#   |
+#   v
+# make_groups  ->  [["demo-a","demo-b"], ["demo-c"]]
+#   |
+#   v
+# for_each (outer, concurrency=2)  -- iterates over groups
+#   ├── ["demo-a","demo-b"]  ->  expand_group  ->  ["demo-a","demo-b"]
+#   │     for_each (inner, concurrency=2)
+#   │       ├── "demo-a"  ->  mark_item  ->  {"item":"demo-a","ready":True}
+#   │       └── "demo-b"  ->  mark_item  ->  {"item":"demo-b","ready":True}
+#   └── ["demo-c"]          ->  expand_group  ->  ["demo-c"]
+#         for_each (inner)
+#           └── "demo-c"  ->  mark_item  ->  {"item":"demo-c","ready":True}
+#   |
+# store_nested  ->  state["nested"] = [[{...},{...}],[{...}]]

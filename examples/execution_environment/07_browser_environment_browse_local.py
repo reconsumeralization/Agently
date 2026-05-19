@@ -82,3 +82,19 @@ if __name__ == "__main__":
 # [ACTION_RESULT] has status="success".
 # The extracted content contains "Managed Browser Browse".
 # Action-call browser environment handles are released after the call.
+
+# How it works:
+# agent.enable_browser(action_id=ACTION_ID) registers a managed browser action.
+# serve_directory() starts a local HTTP server in a temp dir with an index.html file
+# containing "Managed Browser Browse" in the body.  execute_action() browses the URL,
+# extracts clean text, and returns it.  Assertions check the content and that handles
+# are released after the action-call scope ends.
+#
+# Flow:
+# serve_directory(root) -> http://127.0.0.1:<port>
+# agent.enable_browser(action_id=ACTION_ID)
+# execute_action(ACTION_ID, {"url": "http://127.0.0.1:<port>/index.html"})
+#   |
+#   v
+# BrowserEnvironment fetches + extracts -> {"status":"success","data":"...Managed Browser Browse..."}
+# handle released -> list(scope="action_call") == []

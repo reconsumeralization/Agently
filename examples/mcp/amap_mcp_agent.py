@@ -29,3 +29,14 @@ async def main():
 
 
 asyncio.run(main())
+
+# Expected output (requires AMAP_API_KEY and local Ollama):
+# <model reply about Shanghai's current weather, referencing AMap tool output>
+#
+# How it works:
+# await agent.use_mcp("https://mcp.amap.com/mcp?key=...") connects to the remote AMap
+# MCP server and registers its tools (weather, geocode, directions, etc.) into the
+# agent's Action runtime via the Model Context Protocol over HTTPS.
+# The registered tools are exposed to the model in the same way as native actions.
+# .input("...").async_start() sends the question; the model calls the weather tool,
+# receives the result, and incorporates it into the final reply.

@@ -74,3 +74,30 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# Expected output:
+# Demo 1 (close snapshot):
+#   {'output': 'work(task)'}
+#
+# Demo 2 (manual result compat):
+#   {'snapshot': {'state_output': 'kept in state',
+#                 '$final_result': {'manual_result': 'compatibility override'}},
+#    'final_result': {'manual_result': 'compatibility override'}}
+#
+# Demo 3 (event branch close):
+#   {'state': {'ping': 'pong'}, 'meta': {'lifecycle_state': 'closed', ...}}
+#
+# How it works:
+# Three mechanics around close and result are shown:
+#
+# 1. async_close() returns the raw state dict snapshot.
+#    execution.result provides the same data through typed accessors:
+#    result.get_state("key") and result.get_meta() (lifecycle_state, flow_name, …).
+#
+# 2. data.set_result(obj) writes obj under "$final_result" in the snapshot alongside normal
+#    state keys.  result.async_get_final_result() reads only that key, ignoring the rest.
+#    Useful when downstream code expects a single result object rather than the full state dict.
+#
+# 3. async_close() waits for ALL branches — including event-triggered when() handlers — before
+#    returning.  result.get_meta()["lifecycle_state"] == "closed" confirms that every pending
+#    handler finished cleanly before the snapshot was taken.

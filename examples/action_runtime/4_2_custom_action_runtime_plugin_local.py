@@ -202,3 +202,28 @@ if __name__ == "__main__":
 # The custom ActionRuntime plans normalize_title first, then count_words.
 # The normalized title is "action runtime plugin refactor".
 # The exact word count is 4.
+
+# How it works:
+# TitlePlanningActionRuntime replaces the built-in model-driven planning with a
+# deterministic Python handler: round 0 → normalize_title, round 1 → count_words,
+# round 2 → respond.  It wraps AgentlyActionRuntime for execution but overrides
+# async_generate_action_call() to return hardcoded action_calls lists, bypassing
+# the LLM for the planning phase entirely.  The model is still invoked for the
+# final reply after the records are injected.
+#
+# Flow:
+# PluginManager.register("ActionRuntime", TitlePlanningActionRuntime)
+#   |
+#   v
+# round 0: _default_planning_handler
+#   -> normalize_title(text="  Action   Runtime   Plugin   Refactor  ")
+#   -> FunctionActionExecutor -> "action runtime plugin refactor"
+#   |
+#   v
+# round 1: _default_planning_handler
+#   -> count_words(text="action runtime plugin refactor")
+#   -> FunctionActionExecutor -> 4
+#   |
+#   v
+# round 2: _default_planning_handler -> next_action="response"
+# model reply: "Normalized: 'action runtime plugin refactor'. Word count: 4." 

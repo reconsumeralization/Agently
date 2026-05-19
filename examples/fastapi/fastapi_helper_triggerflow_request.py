@@ -167,3 +167,12 @@ if __name__ == "__main__":
 # SSE {"status": 200, "data": {"event": "delta", "content": " indent"}, "msg": null}
 # SSE {"status": 200, "data": {"event": "delta", "content": "."}, "msg": null}
 # SSE {"status": 200, "data": {"event": "final", "content": "Sure! Here are three short suggestions for writing Python code:\n\n1. **Use Meaningful Variable Names**: Choose names that clearly describe what the variable holds. This makes your code easier to understand and maintain.\n\n2. **Leverage List Comprehensions and Built-in Functions**: These can make your code more concise and readable. For example, use `map()`, `filter()`, or list comprehensions instead of explicit loops where appropriate.\n\n3. **Indent Properly and Be Consistent**: Python relies on indentation to define blocks of code. Ensure you are consistent with 4 spaces (or however your team uses) for each level of indent."}, "msg": null}
+
+# Stable expected key output from the declared run:
+# GET /health returns provider="triggerflow"; POST/GET/SSE flow routes return status 200 and data.response.
+#
+# How it works:
+# Test client for fastapi_helper_triggerflow_ollama.py (must be running on port 8001).
+# Tests all route types: GET /health, POST, GET, SSE, WebSocket.
+# TriggerFlow responses include response.data.response (the close snapshot), not just text.
+# SSE items from async_put_into_stream() arrive before the final snapshot item.

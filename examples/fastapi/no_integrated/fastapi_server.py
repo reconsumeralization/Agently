@@ -25,3 +25,23 @@ app = FastAPI()
 @app.get("/chat")
 async def chat(user_input: str):
     return await agent.input(user_input).async_start()
+
+# Stable expected key output from the declared run:
+# GET /chat?user_input=Hello returns HTTP 200 with a model-generated text body when Qianfan settings are configured.
+#
+# How it works:
+# - The FastAPI route calls agent.input(user_input).async_start() directly.
+# - Provider credentials come from QIANFAN_BASE_URL and QIANFAN_API_KEY.
+# - This is a manual FastAPI integration reference, separate from FastAPIHelper examples.
+#
+# ASCII flow:
+# HTTP GET /chat
+#   |
+#   v
+# FastAPI route function
+#   |
+#   v
+# Agently Agent async_start()
+#   |
+#   v
+# model text response

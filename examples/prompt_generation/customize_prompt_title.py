@@ -48,3 +48,13 @@ welcome_words = {
 print(agent.prompt.to_messages()[0]["content"])
 print("==================")
 print(agent.prompt.to_text())
+
+# Expected output (deterministic — no model call):
+# The serialized system message and prompt text with Chinese section headers instead
+# of the default English ones (通用提示, 相关信息, 处理规则, 举例, 输入, 输出, etc.)
+#
+# How it works:
+# set_settings("prompt.prompt_title_mapping", {...}) remaps the default English section
+# headers to custom strings globally for this agent.  The mapping covers all prompt
+# slots: system, developer, info, instruct, examples, input, output, etc.
+# Useful for non-English user interfaces or custom prompt labeling conventions.

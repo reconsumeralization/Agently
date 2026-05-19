@@ -44,3 +44,21 @@ if __name__ == "__main__":
 # [ACTION_RESULT] has status="success".
 # stdout contains {"count":6,"sum":108}.
 # Action-call execution environment handles are released after the call.
+
+# How it works:
+# agent.enable_nodejs(action_id=ACTION_ID, expose_to_model=False) registers a managed
+# Node.js sandbox action (direct execution only, no model planning).
+# The action accepts js_code as a list of JS lines, runs them in a Node.js subprocess,
+# and captures stdout.  The test asserts sum=108 for [4,8,15,16,23,42].
+# If node is not on PATH, the example prints [SKIP] and exits early.
+#
+# Flow:
+# shutil.which("node") check -> skip if None
+#   |
+#   v
+# agent.enable_nodejs(action_id=ACTION_ID, expose_to_model=False)
+# execute_action(ACTION_ID, {"js_code": [...]})
+#   |
+#   v
+# Node.js subprocess -> stdout = '{"count":6,"sum":108}'
+# handle released -> list(scope="action_call") == []

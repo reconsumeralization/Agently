@@ -79,3 +79,13 @@ if __name__ == "__main__":
     print("POST payload format: {'data': {'input': 'hello'}, 'options': {}}")
     print("Error demo payload: {'data': {'input': 'hello', 'raise_error': True}, 'options': {}}")
     uvicorn.run(app, host="127.0.0.1", port=8001)
+
+# Stable expected key output from the declared run:
+# GET /health returns ok=True, provider="triggerflow", model="qwen2.5:7b" after the server starts.
+#
+# How it works:
+# FastAPIHelper(response_provider=flow_factory) wraps a TriggerFlow factory in a FastAPI app.
+# The factory function is called per request to create a fresh execution.
+# TriggerFlow routes return close snapshots (the final state dict) in response.data.response.
+# SSE routes stream runtime stream items (async_put_into_stream() calls) as events before
+# the final snapshot.  Run alongside fastapi_helper_triggerflow_request.py to test all routes.

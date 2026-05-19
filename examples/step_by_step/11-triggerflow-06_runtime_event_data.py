@@ -35,3 +35,36 @@ async def runtime_event_data_demo():
 
 if __name__ == "__main__":
     asyncio.run(runtime_event_data_demo())
+
+# Expected output (keys and structure; exact trigger_type / layer_mark values are internal):
+# {
+#   'seen_event': 'START',
+#   'custom_event': {
+#     'event': 'CustomEvent',
+#     'type': <trigger_type>,
+#     'payload': {'from': 'START', 'value': 'hello'},
+#     'layer': <layer_mark>
+#   }
+# }
+#
+# How it works:
+# TriggerFlowRuntimeData carries read-only dispatch metadata on every invocation:
+#   data.event        — name of the event that triggered this chunk ("START", "CustomEvent", …)
+#   data.trigger_type — how the chunk was dispatched (e.g. "main", "when", "batch", …)
+#   data.layer_mark   — nesting depth marker, non-zero inside sub-flows or for_each
+# These are injected by the runtime, not written by user code.
+# inspect_event captures data.event (== "START") then re-emits "CustomEvent"; the when()
+# handler captures the same fields for that second invocation.
+#
+# Flow:
+# async_start("hello")   [event: START]
+#   |
+#   v
+# inspect_event  ->  state["seen_event"] = "START"
+#                    async_emit("CustomEvent", {"from": "START", "value": "hello"})
+#   |                                  |
+#   v                                  v  [event: CustomEvent]
+# (main chain done)          store_custom_event
+#                            ->  state["custom_event"] = {event, type, payload, layer}
+#   |
+# async_close()

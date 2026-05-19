@@ -68,3 +68,33 @@ async def triggerflow_flow_config_and_mermaid_demo():
 
 if __name__ == "__main__":
     asyncio.run(triggerflow_flow_config_and_mermaid_demo())
+
+# Expected output:
+# Exported: .../review_flow.json  .../review_flow.yaml  .../review_flow.mmd
+# {'source': {'normalized': 'agently'}, 'json': {'normalized': 'json'}, 'yaml': {'normalized': 'yaml'}}
+#
+# How it works:
+# Three serialization formats are shown:
+#   get_json_flow(path)  — writes routing topology as JSON to disk
+#   get_yaml_flow(path)  — same topology as YAML
+#   to_mermaid(mode="detailed")  — returns a Mermaid diagram string; "detailed" includes event labels
+# None of them embed function bodies — they encode only graph structure (nodes and edges).
+# When loading back, handlers must be re-registered by name with register_chunk_handler()
+# before calling load_json_flow() / load_yaml_flow(); otherwise the routing graph cannot
+# resolve the function references.
+# Asset files are written to 11-triggerflow-16_assets/ next to this script.
+#
+# Flow:
+# build_flow()  ->  source_flow.to(normalize).to(store)
+#   |
+# get_json_flow(json_path)   ->  review_flow.json
+# get_yaml_flow(yaml_path)   ->  review_flow.yaml
+# to_mermaid()               ->  review_flow.mmd
+#   |
+# json_flow.register_chunk_handler(normalize, store)
+# json_flow.load_json_flow(json_path)
+# async_start("  JSON  ")  ->  normalize("  JSON  ") = "json"  ->  store -> state["normalized"]="json"
+#   |
+# yaml_flow.register_chunk_handler(normalize, store)
+# yaml_flow.load_yaml_flow(yaml_path)
+# async_start("  YAML  ")  ->  normalize("  YAML  ") = "yaml"  ->  store -> state["normalized"]="yaml"

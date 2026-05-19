@@ -134,3 +134,20 @@ if __name__ == "__main__":
 # [MODEL_PROVIDER] prints deepseek or ollama.
 # [REFLECTION_RESULT] contains model-generated critique history.
 # final_result is generated or revised by the model, not by a hand-written fallback.
+
+# How it works:
+# A reflection loop where the model generates an initial draft, then critiques it,
+# then revises based on the critique.  Each round produces a {type, draft, critique}
+# or {type:"final", result} decision.  The loop ends when the model returns type="final"
+# or max_rounds is reached.  Assertions check that critique history is non-empty and
+# that final_result is model-generated (not a hardcoded fallback).
+#
+# Flow:
+# round 1: model draft -> initial response to the task
+#   |
+#   v
+# round 2: model critique -> identifies weaknesses in draft
+#   |
+#   v
+# round 3 (or earlier): model returns type="final" with revised result
+# assertions: critique_history non-empty, final_result is from model
