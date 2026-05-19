@@ -39,3 +39,32 @@ async def emit_when_demo():
 
 if __name__ == "__main__":
     asyncio.run(emit_when_demo())
+
+# Expected output:
+# {'read_result': 'read: read', 'write_result': 'write: write',
+#  'summary': {'read': 'read: read', 'write': 'write: write'}}
+#
+# How it works:
+# planner emits two different events in one handler call, each dispatching an independent
+# when() branch concurrently.  The main chain (planner -> summarize) runs sequentially, but
+# summarize calls data.get_state() so it sees writes made by reader and writer even though
+# those branches run concurrently alongside it — all three share the same execution state.
+# create_execution(auto_close=False) is required because the execution must stay open until
+# both when() branches have written their state keys before async_close() is called.
+#
+# Flow:
+# async_start("go")
+#   |
+#   v
+# planner  ->  async_emit("Plan.Read",  {"task": "read"})
+#              async_emit("Plan.Write", {"task": "write"})
+#   |                  |                        |
+#   v                  v  [Plan.Read]           v  [Plan.Write]
+# summarize         reader                   writer
+# (waits for     ->  state["read_result"]  ->  state["write_result"]
+#  branches)         = "read: read"            = "write: write"
+#   |
+#   v
+# state["summary"] = {"read": "read: read", "write": "write: write"}
+#   |
+# async_close()

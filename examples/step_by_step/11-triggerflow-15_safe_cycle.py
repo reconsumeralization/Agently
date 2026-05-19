@@ -98,3 +98,42 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# Expected output:
+# {'mode': 'bounded', 'seen': [0, 1, 2, 3]}
+# {'mode': 'pause_resume', 'turns': [0, 1, 2]}
+# {'mode': 'external_reentry', 'total': 3}
+#
+# How it works:
+# Three ways to drive repetitive or multi-turn execution:
+#
+# 1. Bounded self-loop  — loop_step self-emits "Loop" until count >= 3.
+#    No suspend/resume; the execution stays running throughout.  This is the pattern
+#    from 11-triggerflow-08 but made explicit as a named pattern.
+#
+# 2. Pause-between-turns  — async_pause_for(type="human_input", resume_to={"event":"ResumeLoop"})
+#    suspends the handler mid-execution.  get_pending_interrupts() returns a dict of
+#    {interrupt_id: interrupt_info} for all paused points.  async_continue_with(id, answer)
+#    injects the answer and fires the resume event.  This simulates a multi-turn human
+#    conversation where the flow "parks" between turns.
+#
+# 3. External re-entry  — execution.async_emit("Tick", delta) is called from outside the
+#    flow (not from a handler).  Each call drives one iteration.  The flow itself does not
+#    self-loop; the caller drives the cadence.
+#
+# Flow (pause-between-turns):
+# async_start("start")
+#   |
+#   v
+# step (turn 0)  ->  async_pause_for(…, resume_to={"event":"ResumeLoop"})  [PAUSED]
+#   |
+# async_continue_with(id, {"continue": True})
+#   |
+#   v  [event: ResumeLoop]
+# resume_loop  ->  async_emit("Loop", 1)
+#   |
+#   v  [event: Loop]
+# step (turn 1)  ->  async_pause_for(…)  [PAUSED]
+#   |
+# async_continue_with(id, {"continue": True})
+#   …  (same pattern for turn 2, then step sets state["final"])

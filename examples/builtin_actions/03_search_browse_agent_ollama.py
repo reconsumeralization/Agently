@@ -88,3 +88,10 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes Search actions and may include Browse if the model needs page content.
 # Search/Browse instruction-heavy records include model_digest and artifact_refs.
 # [MODEL_REPLY] summarizes the discovered source and quotes source URLs when available.
+
+# How it works:
+# Both SearchPack and BrowsePack are registered and the model decides which to call.
+# Typically the model calls search first to find relevant URLs, then calls browse on
+# the most relevant page to extract deeper content.  get_action_result() drives the
+# full multi-round action loop; get_response() asks the model to summarize with the
+# action results injected.  The model's "extra.action_logs" captures the full trace.

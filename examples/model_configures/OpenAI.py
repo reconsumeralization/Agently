@@ -42,3 +42,12 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the OpenAI.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# OpenAI uses the OpenAI-compatible endpoint at api.openai.com/v1.
+# Set auth="<OpenAI-API-Key>" and model="gpt-5" (or any available model).
+# proxy= accepts an HTTP/HTTPS proxy URL string for environments that require one;
+# omit it when connecting directly.

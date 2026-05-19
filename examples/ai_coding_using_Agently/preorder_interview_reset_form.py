@@ -323,3 +323,25 @@ def interview_with_reset_demo():
 
 
 interview_with_reset_demo()
+
+# Expected output: interactive CLI session (content varies with user input):
+# [assistant] <friendly welcome message>
+# Type 'reset' anytime to start over.
+# [assistant] <question for full_name field>
+# [user] ...
+# ... (one question per form field, with skip/reset/exit handling)
+# [assistant] Thanks! Here is the pre-order info collected:
+# - full_name: ...
+# - email: ...
+# - product: ...
+# - quantity: ...
+# - delivery_city: ...
+#
+# How it works:
+# Each form turn makes three Agently calls: generate_question() (LLM-crafted question),
+# classify_intent() (intent: answer/unknown/refuse/exit/ask_suggestion), and parse_answer()
+# (structured extraction).  Typing "reset" calls reset_form() which clears form_data,
+# skipped_fields, attempts, and chat history before restarting the loop from the top.
+# Fields that fail validation or exceed the retry limit are added to skipped_fields and
+# revisited at the end.  The model has a persistent system role (set with agent.role)
+# and chat history is appended after each confirmed answer.

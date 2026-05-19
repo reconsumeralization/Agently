@@ -54,3 +54,21 @@ if __name__ == "__main__":
 # [MODEL_PROVIDER] prints deepseek or ollama.
 # [ACTION_RECORDS] includes a successful pwd call and an approval_required ls call.
 # The blocked ls record has error "cmd_not_allowed"; the command is not executed.
+
+# How it works:
+# A bash sandbox action is registered with two policies: "pwd" is allowed (side_effect_level
+# = "read") and "ls" requires approval (side_effect_level = "exec", approval_required=True).
+# The model plans both commands; the sandbox allows pwd but blocks ls with an error.
+# The shell is never executed for the blocked command — only the policy check runs.
+#
+# Flow:
+# agent.enable_shell(allowed_commands=["pwd","ls"], policies={...})
+#   |
+#   v
+# model plans: bash_exec(cmd="pwd") -> BashEnvironment runs -> stdout = <repo_root>
+# model plans: bash_exec(cmd="ls")  -> policy check: approval_required
+#   -> error="cmd_not_allowed" returned, no shell execution
+#   |
+#   v
+# [ACTION_RECORDS]: [{"cmd":"pwd","status":"success"}, {"cmd":"ls","status":"error",...}]
+# assertion: pwd record has status="success", ls record has error="cmd_not_allowed" 

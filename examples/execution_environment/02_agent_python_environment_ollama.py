@@ -39,3 +39,24 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes a successful run_python call with model_digest and artifact_refs.
 # [ACTION_RESULTS_INJECTED_TO_REPLY] contains average=20.0, count=5, and max_minus_min_gap=34.
 # [ACTION_CALL_HANDLES_AFTER_RELEASE] prints [].
+
+# How it works:
+# agent.enable_python(expose_to_model=True) registers a Python sandbox action that the
+# model can plan and call.  get_action_result() asks Ollama to generate the Python code
+# for the statistics task, runs it in the sandbox, and returns ActionResult records.
+# get_response() injects the records so the model can reference the exact numeric results
+# in its final reply.  Action-call-scoped handles are released after get_action_result().
+#
+# Flow:
+# agent.enable_python(expose_to_model=True)
+#   |
+#   v
+# model plans: run_python(python_code="nums=[15,23,42,8,12]\nresult={...}")
+#   |
+#   v
+# ManagedPythonEnvironment runs code -> average=20.0, count=5, max_minus_min_gap=34
+# ActionResult(model_digest=..., artifact_refs=[...])
+#   |
+#   v
+# model reply: "average=20.0, count=5, max-minus-min gap=34"
+# handle released -> list(scope="action_call") == []

@@ -70,3 +70,20 @@ async def run():
 
 
 asyncio.run(run())
+
+# Expected output shape (content is variable — requires DeepSeek API key):
+# [Think]:
+# <thinking tokens streamed token by token>
+# [Actions]:
+# - <action item 1>
+# - <action item 2>
+# [Say]:
+# <cat-character reply>
+#
+# How it works:
+# get_async_generator("instant") yields streaming_parse nodes as the model generates.
+# Each node has a .path (e.g. "thinking", "actions[0]", "say") and a .delta token.
+# The loop dispatches on data.path to print section headers once and then stream
+# tokens inline.  actions[*] elements are separated by detecting index changes in
+# data.path[8:-1].  The entire three-field structured output renders progressively
+# before the model finishes.

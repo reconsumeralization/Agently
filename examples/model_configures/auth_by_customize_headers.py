@@ -44,3 +44,11 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the auth_by_customize_headers.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# When a provider requires authentication via custom HTTP headers (e.g., "Authorization: Customize ..."),
+# pass auth={"headers": {"Authorization": "Customize <token>"}} instead of a plain string.
+# Agently merges these into the outgoing HTTP headers before sending the request.

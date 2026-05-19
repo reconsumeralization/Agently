@@ -30,3 +30,22 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# state["greeting"] == "Hello, Agently" and state["farewell"] == "Bye, Agently".
+#
+# How it works:
+# The simplest two-chunk linear chain.  say_hello and say_bye both receive "Agently"
+# because each returns data.input unchanged.  async_set_state writes to the shared
+# execution state dict; async_close() returns the final snapshot.
+#
+# Flow:
+# async_start("Agently")
+#   |
+#   v
+# say_hello  ->  state["greeting"] = "Hello, Agently"  (returns "Agently")
+#   |
+#   v
+# say_bye    ->  state["farewell"] = "Bye, Agently"
+#   |
+# async_close()  ->  {"greeting": "Hello, Agently", "farewell": "Bye, Agently"}

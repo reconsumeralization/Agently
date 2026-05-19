@@ -152,3 +152,41 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# child_report.mode == "multi", final.summary includes "overview", and stream emits child sections.
+#
+# How it works:
+# to_sub_flow(child, capture={...}, write_back={...}) bridges two flows:
+#   capture: maps parent data.input -> child start value; copies parent "logger" resource
+#   write_back: after child closes, copies child state["report"] -> parent data.input
+# The child flow branches on section count (multi/single), fans out per section via
+# for_each, and emits stream items per section.  Those child stream items bubble up
+# to the parent execution's stream channel and are visible in get_async_runtime_stream().
+#
+# Flow:
+# async_start("AI infra weekly")
+#   |
+#   v
+# prepare_request  ->  sections=["overview","risks","actions"] (3 > 1)
+#   |
+# to_sub_flow(child_flow, capture={input:"value", resources:{logger}}, write_back={value:"result.report"})
+#   |  [child receives request_context as input + logger resource]
+#   |    v
+#   |    if_condition (has_multiple_sections=True)  ->  use_multi_section_mode  (mode="multi")
+#   |      |
+#   |      v
+#   |    list_sections  ->  [{"section":"overview",...}, {"section":"risks",...}, {"section":"actions",...}]
+#   |      |
+#   |      v
+#   |    for_each  ->  draft_section x3  (each emits child scope stream item)
+#   |      |
+#   |      v
+#   |    summarize_child_report  ->  child state["report"] = {mode:"multi", sections:[...], summary}
+#   |  [child closes; write_back: parent data.input = child state["report"]]
+#   |
+#   v
+# finalize_request  ->  emits parent scope stream item
+#                        state["child_report"] + state["final"]
+#   |
+# async_close()

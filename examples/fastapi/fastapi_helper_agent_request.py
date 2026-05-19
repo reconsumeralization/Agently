@@ -146,3 +146,12 @@ if __name__ == "__main__":
 # SSE {"status": 200, "data": " you", "msg": null}
 # SSE {"status": 200, "data": " today", "msg": null}
 # SSE {"status": 200, "data": "?", "msg": null}
+
+# Stable expected key output from the declared run:
+# GET /health returns provider="agent"; POST/GET/SSE chat routes return status 200 with data chunks.
+#
+# How it works:
+# Test client for fastapi_helper_agent_ollama.py (must be running on port 8000).
+# Sends requests to all four route types (GET /health, POST, GET chat, SSE, WebSocket)
+# and prints each response.  SSE responses are parsed line by line; WebSocket streams
+# the same delta tokens then closes.  All routes share the same {data:{input:"..."}} payload.

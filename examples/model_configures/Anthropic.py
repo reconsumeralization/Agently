@@ -51,3 +51,13 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the Anthropic.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# Anthropic's API requires the "AnthropicCompatible" plugin instead of "OpenAICompatible".
+# Activate it with set_settings("plugins.ModelRequester.activate", "AnthropicCompatible"),
+# then configure the "AnthropicCompatible" namespace with base_url, model, and auth.
+# auth={"api_key": api_key} maps to the x-api-key header expected by the Anthropic API.
+# The request and output API are identical to OpenAICompatible after activation.

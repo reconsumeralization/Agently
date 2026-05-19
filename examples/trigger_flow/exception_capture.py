@@ -26,3 +26,24 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# state["started"] is True and state["error"] == "demo failure" after the chunk exception is captured.
+#
+# How it works:
+# fail() raises RuntimeError after writing state["started"]=True.  The caller wraps
+# async_start() in a try/except and writes state["error"] via execution.async_set_state()
+# (the external form of the same API).  async_close() then returns the complete snapshot
+# including both keys set before and after the exception.
+#
+# Flow:
+# async_start("demo")
+#   |
+#   v
+# fail  ->  state["started"] = True
+#            raise RuntimeError("demo failure")   <- caught by caller
+#   |
+# [except RuntimeError]
+# execution.async_set_state("error", "demo failure")
+#   |
+# async_close()  ->  {"started": True, "error": "demo failure"}

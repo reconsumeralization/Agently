@@ -27,3 +27,14 @@ request.set_prompt(
 
 result = request.get_data_object()
 Agently.print(result)
+
+# Expected output shape (content is variable — requires DeepSeek API key):
+# <Pydantic-like object with .thinking (list[str]) and .reply (str) attributes>
+#
+# How it works:
+# Agently.create_request() creates a low-level request handle outside an agent.
+# SettingsNamespace targets the OpenAICompatible model requester directly by its
+# plugin settings path, bypassing the agent layer.
+# request.set_prompt("output", {...}) defines the structured output schema.
+# get_data_object() blocks, parses the response, and returns a Pydantic model
+# instance with attribute access (result.thinking, result.reply).

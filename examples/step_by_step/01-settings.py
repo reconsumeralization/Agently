@@ -36,3 +36,16 @@ print(agent_model_requester_settings.get("model"))  # qwen3:latest
 # Default Plugin Settings can be defined in attribution "DEFAULT_SETTINGS" in Plugin Class
 # Core Plugins with Settings:
 # Model Requester: agently/builtins/plugins/ModelRequester/OpenAICompatible.py
+
+# Expected output (deterministic — no model call is made):
+# http://127.0.0.1:11434/v1
+# qwen3:latest
+#
+# How it works:
+# Agently.set_settings() writes to the global settings store shared by all agents.
+# agent.set_settings() writes to the agent instance's own store, which overlays the global one.
+# When a key exists in both, the instance value wins (model = "qwen3:latest" overrides
+# the global "qwen2.5:7b"); keys absent from the instance fall back to global
+# (base_url = "http://127.0.0.1:11434/v1" is inherited).
+# settings.get("plugins.ModelRequester.OpenAICompatible") reads the merged result —
+# this assertion confirms the overlay logic without making a model call.

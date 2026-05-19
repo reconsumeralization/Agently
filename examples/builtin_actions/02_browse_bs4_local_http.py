@@ -83,3 +83,11 @@ if __name__ == "__main__":
 # [ACTION_RESULT] has status="success".
 # The extracted content contains "Agently Browse Example".
 # Navigation text such as "Home Docs Pricing" is not included in the readable body.
+
+# How it works:
+# BrowsePack registers a "browse" action that fetches and extracts readable text from
+# a URL.  fallback_order=("bs4",) restricts the extractor to Beautiful Soup (no
+# Playwright or PyAutoGUI required).  serve_directory() starts a Python HTTP server
+# in a temp dir containing a hand-crafted index.html.  The action browses localhost,
+# strips nav/header noise, and returns clean body text.  The assertions verify that
+# "Agently Browse Example" is present and "Home Docs Pricing" (nav text) is absent.

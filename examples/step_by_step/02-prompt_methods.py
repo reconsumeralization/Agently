@@ -215,3 +215,18 @@ def quick_prompt_methods():
 
 
 # quick_prompt_methods()
+
+# All functions are commented out — this file is a reference for prompt construction APIs.
+# Uncomment any function call to run it with a local Ollama model.
+#
+# How it works:
+# Two storage levels exist for prompts:
+#   set_agent_prompt(slot, value)   — persisted across all future requests on this agent
+#   set_request_prompt(slot, value) — consumed for the next request only, then cleared
+# Quick methods like .role(), .input(), .output() are shorthand for the above.
+# Recognized slot names ("system", "input", "output", "instruct", …) are given special
+# treatment in prompt assembly; custom names are included as labelled info blocks.
+# Placeholder syntax ${name} is resolved at request time when mappings={} is passed.
+# The response instance (get_response()) is a lazy handle: the actual model call
+# starts only when you consume data (get_data(), get_text(), get_generator(), …).
+# Consuming the same response multiple times reuses the cached result without re-requesting.

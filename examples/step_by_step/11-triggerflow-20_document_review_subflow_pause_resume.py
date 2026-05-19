@@ -140,3 +140,47 @@ if __name__ == "__main__":
 # [PROJECTED_CHILD_INTERRUPT] shows local_interrupt_id: scheduled-legal-approval
 # and resume_to: {'event': 'LegalApprovalSubmitted'}.
 # [FINAL_REPORT] shows approval_status: approved.
+
+# How it works:
+# The child sub-flow contains a pause: pause_for_legal_approval calls async_pause_for with
+# resume_to={"event": "LegalApprovalSubmitted"}, which means the child waits for that event
+# to be fired before continuing to apply_legal_approval.
+# to_sub_flow() projects this child-level interrupt up to the parent execution namespace.
+# The root interrupt dict (from execution.get_pending_interrupts()) contains three extra fields
+# that describe the child context:
+#   local_interrupt_id   — the interrupt_id declared inside the child flow
+#   resume_to            — the resume target declared inside the child ("LegalApprovalSubmitted")
+#   sub_flow_frame_id    — internal ID of the child execution frame
+# Calling async_continue_with(root_interrupt_id, approval) on the parent routes the payload
+# into the correct child frame and fires "LegalApprovalSubmitted" there, unblocking the child.
+# write_back copies child state["approval_summary"] back to the parent, where draft_final_report
+# uses it to build the final report.
+#
+# Flow:
+# async_start(REVIEW_PACKAGE)
+#   |
+#   v
+# package_review (parent)  ->  state["doc_id"], state["finding_count"]
+#   |
+#   v
+# to_sub_flow(child_flow, capture={input:"value"}, write_back={runtime_data:{…}})
+#   |  [child starts]
+#   |    v
+#   |    pause_for_legal_approval  ->  async_pause_for(interrupt_id="scheduled-legal-approval",
+#   |                                                  resume_to={"event":"LegalApprovalSubmitted"})
+#   |    [PAUSED — interrupt surfaced as root-level interrupt in parent]
+#   |
+# execution.save() -> saved_state
+# [--- cross-session boundary ---]
+# restored.load(saved_state)
+# restored.async_continue_with(root_interrupt_id, {approved:True, reviewer:…})
+#   |
+#   v  (child fires LegalApprovalSubmitted)
+#   |    v
+#   |    apply_legal_approval  ->  child state["approval_summary"] = {status:"approved", …}
+#   |  [child closes; write_back copies approval_summary to parent state]
+#   |
+#   v
+# draft_final_report (parent)  ->  state["final_report"] = {approval_status:"approved", …}
+#   |
+# async_close()

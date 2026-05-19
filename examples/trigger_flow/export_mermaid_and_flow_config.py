@@ -193,3 +193,25 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# source_state["final"]["mode"] == "multi" and json_state["final"]["mode"] == "single"; flow assets are exported under exported_sub_flow_assets/.
+#
+# How it works:
+# flow.to_mermaid(mode="simplified") and mode="detailed" produce Mermaid diagram strings;
+# get_json_flow(path) and get_yaml_flow(path) write the routing topology to files.
+# Handlers must be re-registered before loading (register_handlers(json_flow)) because
+# the config files store only graph structure, not function bodies.
+# The same flow is then run with two different inputs:
+#   "AI infra weekly" -> 3 sections -> mode="multi"
+#   "Brief release note" -> "brief" triggers single section -> mode="single"
+#
+# Flow:
+# build_flow()  ->  exports 4 asset files under exported_sub_flow_assets/
+#   |
+# run_flow(flow, "AI infra weekly")
+#   -> collect_request -> to_sub_flow(child) -> finalize -> state["final"]["mode"]=="multi"
+#   |
+# json_flow.load_json_flow(json_path)
+# run_flow(json_flow, "Brief release note")
+#   -> collect_request -> to_sub_flow(child) -> finalize -> state["final"]["mode"]=="single" 

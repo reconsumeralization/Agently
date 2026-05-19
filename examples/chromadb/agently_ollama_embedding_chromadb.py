@@ -55,3 +55,14 @@ print("[ADD]:\n", chroma_data.get_original_data())
 
 result = collection.query(query_texts=["Book about traffic"])
 print(result)
+
+# Expected output (requires local Ollama with qwen3-embedding:0.6b):
+# [ADD]: [{'document': 'Book about Dogs', ...}, {'document': 'Book about cars', ...}, ...]
+# <chromadb query result with car and vehicle entries ranked first for "Book about traffic">
+#
+# How it works:
+# ChromaEmbeddingFunction wraps an Agently embedding agent as a chromadb EmbeddingFunction,
+# letting you use the native chromadb client API directly (chromadb.Client) without going
+# through ChromaCollection.  ChromaData converts [{document, metadata}] dicts into the
+# kwargs format expected by chromadb's collection.add() (documents=, metadatas=, ids=).
+# collection.query(query_texts=[...]) delegates embedding to ChromaEmbeddingFunction.

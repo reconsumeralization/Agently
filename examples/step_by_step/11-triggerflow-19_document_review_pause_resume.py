@@ -198,3 +198,38 @@ if __name__ == "__main__":
 # [MODEL_DECISION] shows should_pause: True and risk_level: high.
 # [PENDING_INTERRUPT] contains model-decided-legal-review.
 # [FINAL_REPORT] shows approved_after_human_review and human_approval_required: True.
+
+# How it works:
+# The LLM acts as a policy engine: model_assess_document asks the model whether the contract
+# warrants human review.  The model returns should_pause=True for high-risk issues.
+# autonomous_pause_gate checks this flag and calls async_pause_for(resume_to="self") —
+# "self" means the same chunk handles both the initial pause decision and the resume branch,
+# distinguished by data.is_resume.  On resume, data.resume.value carries the approval dict
+# and data.resume.origin_signal carries the original interrupt metadata.
+# The execution is serialized with execution.save() and resumed on a separate execution object
+# to simulate the cross-session (e.g. web-request) boundary.
+#
+# Flow:
+# async_start(DOCUMENT_FOR_REVIEW)
+#   |
+#   v
+# model_assess_document  ->  calls LLM, state["model_decision"] = {should_pause:True, risk:"high", …}
+#   |
+#   v
+# autonomous_pause_gate  ->  decision.should_pause is True
+#                             async_pause_for(type="model_decided_legal_review",
+#                                             interrupt_id="model-decided-legal-review",
+#                                             resume_to="self")  [PAUSED]
+#   |
+# execution.save()  ->  saved_state
+# [--- cross-session boundary ---]
+# restored.load(saved_state)
+# restored.async_continue_with("model-decided-legal-review", {approved:True, reviewer:…})
+#   |
+#   v  (same autonomous_pause_gate chunk, data.is_resume=True)
+# autonomous_pause_gate  ->  state["reviewed"] = {status:"approved_after_human_review", …}
+#   |
+#   v
+# finalize  ->  state["final_report"] = {status, risk, human_approval_required:True}
+#   |
+# async_close()

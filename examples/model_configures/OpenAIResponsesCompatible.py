@@ -92,3 +92,14 @@ def streaming_tool_calls():
 if __name__ == "__main__":
     basic_streaming()
     streaming_tool_calls()
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the OpenAIResponsesCompatible.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# The OpenAI Responses API uses a different schema from the Chat Completions API.
+# Activate it with set_settings("plugins.ModelRequester.activate", "OpenAIResponsesCompatible"),
+# then configure the "OpenAIResponsesCompatible" namespace.
+# Two examples are shown: basic streaming with options.instructions=, and streaming tool
+# calls via .options({"tools":[...]}) using the same (event, data) pattern as the Chat plugin.
+# The "tool_calls" event carries the normalized call payload when the model selects a tool.

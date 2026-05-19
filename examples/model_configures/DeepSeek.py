@@ -40,3 +40,12 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the DeepSeek.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# DeepSeek exposes an OpenAI-compatible endpoint at api.deepseek.com/v1.
+# Set auth="<DeepSeek API Key>" and model="deepseek-chat" (or "deepseek-reasoner" for R1).
+# For the reasoning model, use get_generator(type="specific") and handle "reasoning_delta"
+# events to separate chain-of-thought tokens from the final answer.

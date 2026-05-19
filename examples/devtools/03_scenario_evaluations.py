@@ -73,3 +73,24 @@ print(
         "total_rounds": report.total_rounds,
     }
 )
+
+# Stable expected key output from the declared run:
+# suite_id == "support-routing", passed_rounds == 6, and total_rounds == 6.
+#
+# How it works:
+# EvaluationRunner.run() executes each EvaluationCase through the bound executor (the
+# support-triage TriggerFlow) for the requested number of rounds, applies each rule
+# function to the resulting EvaluationRecord, and accumulates pass/fail counts.
+# The flow classifies input text into "billing", "logistics", or "general" by keyword.
+# 3 cases × 2 rounds = 6 total, all passing because the routing is deterministic.
+#
+# Flow:
+# runner.run(binding, cases=[refund, shipping, other], rules=[...], rounds=2)
+#   |  3 cases × 2 rounds
+#   v
+# for each case: run_flow(input) -> route label (billing/logistics/general)
+# rule_1: route in {"billing","logistics","general"}  -> True
+# rule_2: error is None                               -> True
+#   |
+#   v
+# report: suite_id="support-routing", passed_rounds=6, total_rounds=6

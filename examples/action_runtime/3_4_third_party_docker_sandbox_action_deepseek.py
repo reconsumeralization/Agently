@@ -266,3 +266,25 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes a successful docker_sandbox_exec call.
 # The container stdout contains "hello from docker sandbox".
 # If Docker is unavailable, the example prints [SKIPPED].
+
+# How it works:
+# DockerSandboxActionExecutor runs each action call inside an ephemeral alpine:3.20
+# container via the Docker CLI: no network (--network none), read-only root filesystem,
+# writable /tmp, capped CPU/RAM/pids.  docker_unavailable_reason() pre-checks that
+# Docker is installed and the daemon is running, pulling the image if needed.
+# If Docker is missing, the example prints [SKIPPED] rather than failing at runtime.
+#
+# Flow:
+# docker_unavailable_reason() -> None (available) or reason string
+#   | unavailable -> print [SKIPPED]
+#   | available
+#   v
+# register DockerSandboxActionExecutor plugin
+# model plans: docker_sandbox_exec(cmd="printf 'hello from docker sandbox\n'")
+#   |
+#   v
+# DockerSandboxActionExecutor._run_docker_cli(["run","--rm","--network","none",...,cmd])
+# stdout = "hello from docker sandbox"
+#   |
+#   v
+# ActionResult -> model reply: "The container printed: hello from docker sandbox" 

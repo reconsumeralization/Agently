@@ -59,3 +59,22 @@ if __name__ == "__main__":
 # data["rows"] contains "Execution environment health check" priority 1 and
 # "Action package examples" priority 2.
 # Action-call execution environment handles are released after the call.
+
+# How it works:
+# agent.enable_sqlite(database=str(db_path), action_id=ACTION_ID) registers a SQLite
+# query action backed by a temp-dir database.  execute_action() runs a parameterized
+# SELECT with params=[2], returning rows as a list of dicts.  The temp dir is cleaned
+# up by the context manager after the assertions run.
+#
+# Flow:
+# prepare_database(db_path): INSERT 3 issues into a temp SQLite file
+#   |
+#   v
+# agent.enable_sqlite(database=str(db_path), action_id=ACTION_ID)
+# execute_action(ACTION_ID, {"query":"SELECT... WHERE priority<=?","params":[2]})
+#   |
+#   v
+# SQLiteEnvironment runs query -> rows = [
+#   {"title":"Execution environment health check","priority":1},
+#   {"title":"Action package examples","priority":2}]
+# handle released -> list(scope="action_call") == []

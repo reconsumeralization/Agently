@@ -46,3 +46,14 @@ if __name__ == "__main__":
     print("Start FastAPIHelper Agent server on http://127.0.0.1:8000")
     print("POST payload format: {'data': {'input': 'hello'}, 'options': {}}")
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
+# Stable expected key output from the declared run:
+# GET /health returns ok=True, provider="agent", model="qwen2.5:7b" after the server starts.
+#
+# How it works:
+# FastAPIHelper(response_provider=agent) wraps an Agently agent in a FastAPI app.
+# use_post/use_get/use_sse/use_websocket() mount routes at the specified paths.
+# POST and GET routes block until the agent finishes and return the full response.
+# SSE routes stream delta tokens as server-sent events, then return the final response.
+# The server reads {data: {input: "..."}, options: {}} as the request payload.
+# Run alongside fastapi_helper_agent_request.py to see all route types in action.

@@ -40,3 +40,11 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the BaiduErnie.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# Baidu's QianFan platform exposes an OpenAI-compatible endpoint at qianfan.baidubce.com/v2.
+# Set auth="<QianFan API Key>" and model="ernie-4.5-turbo-128k" (or any ERNIE model).
+# Structured output, streaming, and tool use work the same as with OpenAI-compatible models.

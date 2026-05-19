@@ -52,3 +52,26 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# Expected output:
+# Demo 1 (close snapshot + result object):
+#   {'snapshot': {'output': 'work(task-1)'},
+#    'meta': {'flow_name': 'step-09-execution-result', 'execution_id': ..., ...}}
+#
+# Demo 2 (set_result compat override):
+#   {'snapshot': {'output': 'work(task-2)',
+#                 '$final_result': {'compat_result': 'explicit result still overrides close snapshot'}},
+#    'final_result': {'compat_result': 'explicit result still overrides close snapshot'}}
+#
+# How it works:
+# Two result-access paths exist side by side:
+#
+# 1. Close snapshot  — async_close() returns the raw state dict (all async_set_state() writes).
+#    execution.result is an ExecutionResult object giving typed access to the same data:
+#    result.get_state("key") and result.get_meta() (flow_name, execution_id, lifecycle_state, …).
+#
+# 2. set_result() compat API  — data.set_result(obj) writes obj under the special key
+#    "$final_result" in the snapshot.  result.async_get_final_result() extracts it.
+#    Regular state keys are preserved alongside "$final_result" in the snapshot.
+#    This API exists for compatibility with older consumers that expect a single top-level result
+#    rather than the full state dict.

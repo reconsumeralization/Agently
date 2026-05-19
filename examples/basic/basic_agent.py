@@ -45,3 +45,15 @@ async def main():
 
 
 asyncio.run(main())
+
+# Expected output shape (content is variable — requires local Ollama):
+# Thinking  <model's internal reasoning about recursion>
+# Example Codes  ['def factorial(n):...', 'def fib(n):...']
+# Practices  [{'question': '...', 'answer': '...'}, ...]
+#
+# How it works:
+# .output({...}) defines a nested schema with lists and nested objects.
+# The model must reply in that structure; Agently parses the stream into a dict.
+# List elements like example_codes use [(str, "hint")] syntax to declare
+# a list of strings; nested dicts like practices use [{...}] for a list of objects.
+# .start() blocks until the full structured result is parsed and returns it.

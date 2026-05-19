@@ -40,3 +40,32 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# restored blueprint run closes with state["normalized"] == "agently".
+#
+# How it works:
+# source_flow.save_blueprint() serializes the routing graph to a plain dict.
+# restored_flow.register_chunk_handler(normalize) / register_chunk_handler(store)
+# re-links function objects by name before load_blueprint() reconstructs the graph.
+# The restored flow runs identically to the source.
+# Compare with 11-triggerflow-05_blueprint.py in step_by_step which covers the same
+# concept; this version shows the standalone module pattern (build_flow / run helpers).
+#
+# Flow:
+# build_flow()  ->  source_flow.to(normalize).to(store)
+#   |
+# source_flow.save_blueprint()  ->  blueprint dict  (topology, no function bodies)
+#   |
+# restored_flow.register_chunk_handler(normalize, store)
+# restored_flow.load_blueprint(blueprint)
+#   |
+# async_start("  Agently  ")
+#   |
+#   v
+# normalize  ->  "agently"
+#   |
+#   v
+# store  ->  state["normalized"] = "agently"
+#   |
+# async_close()  ->  {"normalized": "agently"}

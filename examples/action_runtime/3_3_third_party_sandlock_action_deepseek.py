@@ -159,3 +159,27 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes a successful sandlock_exec call.
 # The sandbox stdout contains "hello from third-party sandlock".
 # If the platform or package is unavailable, the example prints [SKIPPED].
+
+# How it works:
+# SandLockActionExecutor is a custom ActionExecutor wrapping the third-party `sandlock`
+# library (requires Linux 6.7+).  It registers with PluginManager so the action system
+# can dispatch to it by name.  On non-Linux or without sandlock installed, the example
+# detects the condition early and prints [SKIPPED] rather than failing at runtime.
+#
+# Flow:
+# platform check: Linux + sandlock installed?
+#   | no  -> print [SKIPPED]
+#   | yes
+#   v
+# plugin_manager.register("ActionExecutor", SandLockActionExecutor)
+# agent.action.create_action_executor("SandLockActionExecutor")
+#   |
+#   v
+# model plans: sandlock_exec(argv=["echo", "hello from third-party sandlock"])
+#   |
+#   v
+# SandLockActionExecutor.execute() -> Sandbox(policy).run(argv) -> stdout
+# stdout = "hello from third-party sandlock"
+#   |
+#   v
+# model reply: "The sandbox printed: hello from third-party sandlock" 

@@ -40,3 +40,11 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the Gemini.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# Google AI Studio exposes an OpenAI-compatible endpoint at generativelanguage.googleapis.com.
+# Set auth="<Google-AIStudio-API-Key>" and model="gemini-2.5-flash" (or another Gemini model).
+# The /openai/ suffix in the base_url is required for the OpenAI-compatible route.

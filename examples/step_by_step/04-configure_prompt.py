@@ -206,3 +206,21 @@ def roundtrip_configure_prompt():
 
 # roundtrip_configure_prompt()
 # load_from_string()
+
+# All functions are commented out — uncomment one to run with a local Ollama model.
+# roundtrip_configure_prompt() and load_from_string() print prompt text (no model call needed).
+#
+# How it works:
+# YAML and JSON prompt files are a declarative form of the same prompt structure used in code.
+# Key rules in the file schema:
+#   .agent.*   keys  -> agent-level prompts (persistent across requests)
+#   .request.* keys  -> request-level prompts (single request only)
+#   top-level keys without dots -> also request-level
+#   $ensure_all_keys: true -> require all output keys to be present
+#   .alias.set_request_prompt -> shorthand to call set_request_prompt() via config
+#
+# get_yaml_prompt() / get_json_prompt() serialize the current agent prompt config back to
+# string; load_yaml_prompt(string) / load_json_prompt(string) accept both file paths and
+# raw content strings (detected automatically).
+# roundtrip_configure_prompt() shows that prompt configs built in code can be exported and
+# re-loaded on a new agent instance, producing the same merged prompt text.

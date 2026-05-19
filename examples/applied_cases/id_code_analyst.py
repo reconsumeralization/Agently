@@ -73,3 +73,21 @@ print("\nRESULT:\n", results)
 
 # RESULT:
 #  {'The length of the provided code string': 24, 'Characters from position 6 to 9 in the code string': '2700', 'First character of the code string': '2', 'Whether the code contains an underscore (boolean)': True}
+
+# Expected output (content is variable — requires local Ollama; eval results are deterministic):
+# PLAN:
+#  {'output_keys': {'code_length': '...', 'chars_6_to_9': '...', 'first_char': '...', 'contains_underscore': '...'},
+#   'output_method_dict': {'code_length': 'len(code_string)', 'chars_6_to_9': 'code_string[5:9]', ...}}
+# RESULT:
+#  {'The length of the provided code string': 24,
+#   'Characters from position 6 to 9 in the code string': '2700',
+#   'First character of the code string': '2',
+#   'Whether the code contains an underscore (boolean)': True}
+#
+# How it works:
+# The model receives the code string, the extraction rules in plain language, and is asked
+# to output two things: output_keys (human-readable descriptions) and output_method_dict
+# (Python expressions using code_string as input).  The Python expressions are then
+# eval()-ed locally with {"code_string": code_string} as the namespace, yielding exact
+# deterministic values.  This lets business teams write extraction rules in natural language
+# while the model bridges them to runnable Python code.

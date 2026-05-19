@@ -48,3 +48,49 @@ async def triggerflow_concurrency():
 
 if __name__ == "__main__":
     asyncio.run(triggerflow_concurrency())
+
+# Expected output:
+# {'batch': {'a', 'b', 'c'}, 'elapsed': 0.1xx}   (all three keys present; elapsed >= 0.1 s)
+# {'items': [2, 4, 6, 8]}
+#
+# How it works:
+# Two concurrency primitives are shown:
+#
+# 1. batch()  — runs named sibling tasks concurrently.
+#    flow.batch(("a", echo), ("b", echo), ("c", echo)) launches three independent echo handlers.
+#    Each gets the same input ("hello").  create_execution(concurrency=2) caps parallelism to 2,
+#    so "a"+"b" start first, "c" waits, giving elapsed >= 0.1 s (two 50 ms rounds).
+#    The result dict keyed by label is forwarded as data.input to store_batch.
+#
+# 2. for_each()  — maps a handler over each element of a list input.
+#    for_each(concurrency=2).to(double).end_for_each() distributes [1,2,3,4] item by item to
+#    double, running two at a time.  Results are collected in the original order.
+#
+# Flow (batch demo):
+# async_start("hello")
+#   |
+#   v
+# batch (concurrency=2)
+#   ├── "a": echo  ->  "echo: hello"  ┐ run in parallel
+#   ├── "b": echo  ->  "echo: hello"  ┘
+#   └── "c": echo  ->  "echo: hello"    (waits for a slot)
+#   |
+#   v  (merge: {"a":..., "b":..., "c":...})
+# store_batch  ->  state["batch"] = {"a", "b", "c"}
+#   |
+# async_close()
+#
+# Flow (for_each demo):
+# async_start([1, 2, 3, 4])
+#   |
+#   v
+# for_each (concurrency=2)
+#   ├── 1 -> double -> 2  ┐ parallel pair
+#   ├── 2 -> double -> 4  ┘
+#   ├── 3 -> double -> 6  ┐ next pair
+#   └── 4 -> double -> 8  ┘
+#   |
+#   v  (collect in order: [2, 4, 6, 8])
+# store_items  ->  state["items"] = [2, 4, 6, 8]
+#   |
+# async_close()

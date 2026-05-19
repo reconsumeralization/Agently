@@ -68,3 +68,24 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes a successful reverse_text call.
 # The custom executor returns reversed_text="emitnuR noitcA" and length=14.
 # [MODEL_REPLY] reports the reversed text and length.
+
+# How it works:
+# ReverseTextActionExecutor is a custom ActionExecutor class registered via a scoped
+# PluginManager (not Agently.plugin_manager) so it does not pollute global state.
+# agent.action.create_action_executor("ReverseTextActionExecutor") instantiates it by
+# name; register_action() attaches it to the "reverse_text" action.
+# When the model plans a reverse_text call, the custom executor's async execute() runs
+# Python string reversal and returns {reversed_text, length}.
+#
+# Flow:
+# PluginManager.register("ActionExecutor", ReverseTextActionExecutor, activate=False)
+# agent.action.create_action_executor("ReverseTextActionExecutor")
+#   |
+#   v
+# model plans: reverse_text(text="Action Runtime")
+#   |
+#   v
+# ReverseTextActionExecutor.execute() -> {"reversed_text":"emitnuR noitcA","length":14}
+#   |
+#   v
+# ActionResult -> model reply: "Reversed: 'emitnuR noitcA', length 14." 

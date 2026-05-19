@@ -27,3 +27,17 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# first execution keeps last_ping "one" and second execution keeps last_ping "two".
+#
+# How it works:
+# TriggerFlowBlueprint defines a reusable event handler graph without being tied to
+# a specific flow instance.  TriggerFlow(blueprint=...) instantiates a flow from it.
+# Each create_execution() call produces an isolated execution with its own state —
+# "one" and "two" stay in separate state dicts even though they run concurrently.
+#
+# Flow (two concurrent executions):
+# Execution A: emit_nowait("PING", "one")  ->  on_ping  ->  state["last_ping"] = "one"
+# Execution B: emit_nowait("PING", "two")  ->  on_ping  ->  state["last_ping"] = "two"
+# asyncio.gather() runs both; first.last_ping=="one", second.last_ping=="two" 

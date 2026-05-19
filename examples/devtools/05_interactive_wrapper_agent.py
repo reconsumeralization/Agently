@@ -38,3 +38,23 @@ if __name__ == "__main__":
         interactive.wait()
     finally:
         bridge.unregister(Agently)
+
+# Stable expected key output from the declared run:
+# launched example prints the local DevTools or Interactive UI URL and streams/records the declared demo events.
+#
+# How it works:
+# InteractiveWrapper wraps an Agently Agent directly.  When the browser sends a request,
+# the wrapper calls agent.input(request_data["input"]).streaming_print()-style internally
+# and streams delta tokens to the browser UI as they arrive from the model.
+# ObservationBridge is registered so agent runs appear in the devtools console as well.
+# The agent has a persistent system prompt (always=True) that applies to every request.
+#
+# Flow:
+# bridge.register(Agently) -> devtools event hooks installed
+# InteractiveWrapper(agent, ...) -> starts local HTTP server
+# interactive.ui_url -> http://localhost:<port>/?...
+#   |  (browser sends request: "hello")
+#   v
+# agent.system("You are a helpful assistant...", always=True).input("hello")
+# delta tokens streamed to browser UI
+# interactive.wait() -> blocks until Ctrl-C

@@ -141,3 +141,53 @@ async def triggerflow_sub_flow_capture_write_back_demo():
 
 if __name__ == "__main__":
     asyncio.run(triggerflow_sub_flow_capture_write_back_demo())
+
+# Expected output (abridged; exact section text depends on topic):
+# stream: [{"scope":"child","section":"overview"}, {"scope":"child","section":"risks"},
+#          {"scope":"child","section":"actions"}, {"scope":"parent","summary":"..."}]
+# state["child_report"]["mode"] == "multi"
+#
+# How it works:
+# to_sub_flow() runs a child TriggerFlow as a nested execution and bridges data in both
+# directions:
+#   capture={"input": "value", "resources": {"logger": "resources.logger"}}
+#     — maps parent data.input into the child's start value, and copies the parent's "logger"
+#       resource into the child so child handlers can call data.require_resource("logger").
+#   write_back={"value": "result.report"}
+#     — after the child closes, copies child state["report"] into the parent's data.input,
+#       which becomes the input to finalize_request.
+# Stream items emitted inside the child (async_put_into_stream) bubble up to the parent
+# execution's stream channel, interleaved with any parent-level stream items.
+# The child flow itself branches (if_condition on section count) and fans out
+# (for_each over sections), producing "multi" mode for multi-section topics.
+#
+# Flow:
+# async_start("AI infra weekly")
+#   |
+#   v
+# prepare_request  ->  sections=["overview","risks","actions"], state["request_context"]=...
+#   |
+#   v
+# to_sub_flow(child_flow, capture={input, resources}, write_back={value: result.report})
+#   |  [child starts with request_context as input]
+#   |    v
+#   |    if_condition(has_multiple_sections)  ->  True (3 sections)
+#   |      |
+#   |      v
+#   |    use_multi_section_mode  ->  mode="multi"
+#   |      |
+#   |      v
+#   |    list_sections  ->  [{"section":"overview",...}, {"section":"risks",...}, ...]
+#   |      |
+#   |      v
+#   |    for_each -> draft_section (x3, each async_put_into_stream child scope item)
+#   |      |
+#   |      v
+#   |    summarize_child_report  ->  child state["report"] = {mode, sections, summary}
+#   |  [child closes; write_back copies report into parent data.input]
+#   |
+#   v
+# finalize_request  ->  async_put_into_stream(parent scope summary)
+#                        state["final"] = {summary, child_report}
+#   |
+# async_close()

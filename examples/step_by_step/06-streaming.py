@@ -102,3 +102,25 @@ async def async_streaming():
 
 # async def main():
 #     await async_streaming()
+
+# specific_event_streaming() runs on import (not commented out); it streams a story.
+# Expected output shape (content is variable):
+#   [reasoning]  <thinking tokens if the model supports it, otherwise absent>
+#   [answer]  <story text tokens streamed live>
+#
+# How it works:
+# Three streaming modes are demonstrated:
+#
+# 1. type="delta"   — yields raw token strings; simplest for chat UIs that just need text.
+#
+# 2. type="instant" — yields structured streaming_parse nodes, each with:
+#      .path          : dotted key path of the currently streaming field ("definition", "tips[0]", …)
+#      .wildcard_path : path with array indices replaced by * ("tips[*]")
+#      .delta         : the latest token fragment at this path
+#    Use wildcard_path to dispatch rendering per field type without hard-coding indices.
+#
+# 3. type="specific" — yields (event, data) tuples; recognized event names:
+#      "delta"           : text token
+#      "reasoning_delta" : thinking/reasoning token (models that expose chain-of-thought)
+#      "tool_calls"      : tool-call payload
+#    Only events you actually handle need to be wired up; others can be skipped.

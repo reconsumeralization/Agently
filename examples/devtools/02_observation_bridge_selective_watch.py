@@ -49,3 +49,25 @@ try:
     asyncio.run(main())
 finally:
     bridge.unregister(Agently)
+
+# Stable expected key output from the declared run:
+# watched flow result.input == "keep this run" and ignored flow result.input == "do not upload this run".
+#
+# How it works:
+# ObservationBridge with auto_watch=False does not attach to all flows automatically.
+# bridge.watch(watched_flow) selectively enables event forwarding for only that flow.
+# ignored_flow runs without any bridge events being emitted.  Both flows produce local
+# output normally; the difference is only in which events reach the devtools server.
+#
+# Flow:
+# bridge = ObservationBridge(auto_watch=False)
+# bridge.watch(watched_flow)     <- only this flow emits events
+# bridge.register(Agently)
+#   |
+#   v
+# watched_flow("keep this run")  -> state["result"]["flow"] = "watched"
+# ignored_flow("do not upload this run") -> state["result"]["flow"] = "ignored"
+#   (no bridge events for ignored_flow)
+#   |
+#   v
+# bridge.unregister(Agently)

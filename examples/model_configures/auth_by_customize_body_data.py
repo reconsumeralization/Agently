@@ -47,3 +47,12 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the auth_by_customize_body_data.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# When a provider requires authentication via a non-standard request body field, pass
+# auth={"body": {"<field-name>": "<token>"}} instead of a plain string.
+# Agently merges these fields into the JSON request body before sending.
+# Alternatively, include extra keys directly in request_options (commented example).

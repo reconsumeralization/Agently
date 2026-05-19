@@ -86,3 +86,23 @@ if __name__ == "__main__":
     print("Start WebSocket Server on http://127.0.0.1:15596")
     print(f"Using local Ollama model: {OLLAMA_MODEL} ({OLLAMA_BASE_URL})")
     uvicorn.run(app, host="0.0.0.0", port=15596)
+
+# Stable expected key output from the declared run:
+# server startup prints the local Ollama model/base_url; a WebSocket client first receives {"status": "ready", "stop": False}, then delta events and one final done event.
+#
+# How it works:
+# - The file starts a service/demo wrapper around an Agently provider.
+# - Requests are converted into Agent or TriggerFlow calls and streamed or returned through the service route.
+# - Stable behavior is the route/UI startup and the response shape, not exact model prose.
+#
+# ASCII flow:
+# WebSocket message
+#   |
+#   v
+# TriggerFlow execution
+#   |
+#   v
+# model delta -> runtime stream
+#   |
+#   v
+# WebSocket received/done messages

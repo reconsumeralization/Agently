@@ -56,3 +56,16 @@ def print_response(response):
 
     print("[ACTION_LOGS_FROM_RESPONSE_RESULT]")
     pprint(action_logs)
+
+# Helper module — no standalone terminal output.
+# Imported by action_runtime examples to provide:
+#   create_deepseek_agent(system_prompt) — configures DeepSeek via env vars and returns an agent
+#   configure_deepseek(temperature=0.1) — configures DeepSeek settings globally
+#   print_action_results(records) — prints INTERMEDIATE_ACTION_RESULTS and INTERMEDIATE_ACTION_RESULTS_FOR_REPLY
+#   print_response(response) — prints REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
+#
+# How it works:
+# configure_deepseek() reads DEEPSEEK_API_KEY and DEEPSEEK_BASE_URL from the environment
+# (or .env file via python-dotenv) and writes them to Agently.set_settings("OpenAICompatible").
+# create_deepseek_agent() calls configure_deepseek() then creates an agent with the given
+# system prompt and sets max action loop rounds to 4.

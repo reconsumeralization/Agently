@@ -80,3 +80,37 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# Expected output (demo 1, no LLM needed):
+# {'events': [{'step': 1, 'status': 'working'},
+#             {'step': 2, 'status': 'working'},
+#             {'step': 3, 'status': 'working'}],
+#  'meta': {'flow_name': 'step-10-runtime-stream', 'execution_id': ..., ...}}
+#
+# Expected output (demo 2, requires local Ollama or set OLLAMA_* env vars):
+# {'last_event': {'event': 'final', 'content': '<model reply>'}, 'execution_id': ...}
+#
+# How it works:
+# data.async_put_into_stream(item) enqueues an item into the execution's internal stream channel.
+# execution.get_async_runtime_stream(timeout=None) is an async generator that yields items as
+# they arrive and exits automatically when the execution closes (no sentinel needed).
+# async_close() must run concurrently — it is launched with asyncio.create_task() so the
+# stream consumer is not blocked waiting for close; both run in the same event loop turn.
+#
+# Demo 2 layers a real Agently agent on top: each streaming delta from the model is forwarded
+# with async_put_into_stream, so callers can consume LLM token deltas through the same channel.
+#
+# Flow (demo 1):
+# async_start("start")
+#   |
+#   v
+# stream_steps  ->  async_put_into_stream({"step":1, …})
+#                   async_put_into_stream({"step":2, …})
+#                   async_put_into_stream({"step":3, …})
+#                   state["done"] = True
+#   |
+# asyncio.create_task(execution.async_close())   ← runs concurrently
+#   |
+# [async for event in get_async_runtime_stream()] consumes 3 items, then generator exits
+#   |
+# await close_task  ->  asserts state["done"] is True

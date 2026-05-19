@@ -64,3 +64,23 @@ if __name__ == "__main__":
 # The metrics include label_count=3, comment_count=3, triggerflow_involved=True,
 # devtools_involved=True, and severity_score=6.
 # [ACTION_CALL_HANDLES_AFTER_RELEASE] prints [].
+
+# How it works:
+# Same pattern as 02 but uses DeepSeek and a GitHub issue payload as input.
+# The model writes Python code to compute deterministic metrics from the issue dict
+# (label_count, comment_count, severity_score) then summarizes the issue for triage.
+# temperature=0.1 minimizes variation in the scoring code the model generates.
+#
+# Flow:
+# agent.enable_python(expose_to_model=True)
+#   |
+#   v
+# model plans: run_python(python_code="issue=...\nresult={label_count:3,...,severity_score:6}")
+#   |
+#   v
+# ManagedPythonEnvironment -> {label_count:3, comment_count:3, triggerflow_involved:True,
+#                               devtools_involved:True, severity_score:6}
+#   |
+#   v
+# model reply: triage summary with suggested owner and next debugging step
+# handle released -> list(scope="action_call") == []

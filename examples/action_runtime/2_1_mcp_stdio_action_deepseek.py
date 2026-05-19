@@ -24,3 +24,23 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes MCP calculator action calls.
 # The final computed value for (12.5 + 7.25) * 3 is 59.25.
 # [MODEL_REPLY] reports 59.25.
+
+# How it works:
+# agent.use_mcp(script_path) spawns _calculator_mcp_server.py as a subprocess and
+# communicates over stdin/stdout using the Model Context Protocol.
+# The MCP server exposes add and multiply tools that the model can plan and call
+# just like native Agently actions.  get_action_result() drives the full MCP call
+# cycle; the subprocess is managed by Agently and torn down after the request.
+#
+# Flow:
+# agent.use_mcp("_calculator_mcp_server.py")
+#   | subprocess launched over stdio
+#   v
+# model plans: add(12.5, 7.25) -> 19.75
+#              multiply(19.75, 3) -> 59.25
+#   |
+#   v
+# ActionResult records returned
+#   |
+#   v
+# model reply: "The result is 59.25." 

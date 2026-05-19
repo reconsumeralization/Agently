@@ -101,3 +101,20 @@ if __name__ == "__main__":
 # [MODEL_DECISION_ROUND_*] prints real model planner decisions.
 # One action result is 19 and one action result is 57.
 # [FINAL_ANSWER] states the final result is 57.
+
+# How it works:
+# A plan-action-observe loop where the model acts as planner: each round it inspects
+# history and returns {type, action_id, action_input} or {type:"final", answer}.
+# Local add() and multiply() are registered as @agent.action_func.
+# execute_action() runs each planned action directly (no model planning of the call).
+# The loop asserts that intermediate results 19 and 57 appear and the final answer is 57.
+#
+# Flow:
+# round 1: model plans add(12,7) -> 19; execute_action("add",{a:12,b:7}) -> 19
+#   |
+#   v
+# round 2: model plans multiply(19,3) -> 57; execute_action("multiply",{a:19,b:3}) -> 57
+#   |
+#   v
+# round 3: model returns type="final", answer="(12 + 7) * 3 = 57"
+# assertions: 19 in results, 57 in results, "57" in answer

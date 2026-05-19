@@ -46,3 +46,12 @@ async def main():
 
 
 asyncio.run(main())
+
+# Stable expected key output from the declared run:
+# after provider credentials are configured, the full_url_instead_of_base_url.py snippet sends a request through that provider and prints the model response.
+#
+# How it works:
+# full_url= replaces base_url= when you want to point at a specific endpoint path rather
+# than letting Agently append "/chat/completions".  stream=False disables streaming and
+# requests the full response in one shot.  content_mapping= (commented out) lets you remap
+# non-standard response fields to Agently's expected keys for custom API wrappers.

@@ -63,3 +63,25 @@ if __name__ == "__main__":
         settings = yaml.safe_load(file)
 
     uvicorn.run(app, host=settings["service_settings"]["host"], port=settings["service_settings"]["port"])
+
+# Stable expected key output from the declared run:
+# POST /request_model returns {"ok": True, "data": ..., "text": ...} when
+# settings.yaml points to a reachable provider; parse failures return ok=False
+# with the error text.
+#
+# How it works:
+# - The route chooses a configured model alias from settings.yaml.
+# - The request prompt can be plain text, YAML prompt config, or JSON prompt config.
+# - One Agently response is reused as structured data and text before returning.
+#
+# ASCII flow:
+# HTTP POST /request_model
+#   |
+#   v
+# select model settings + prompt style
+#   |
+#   v
+# Agently get_response()
+#   |
+#   v
+# JSON response with data/text

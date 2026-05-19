@@ -45,3 +45,27 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes successful normalize_title and count_words calls.
 # The normalized title is "action runtime plugin refactor".
 # The exact word count is 4.
+
+# How it works:
+# agent.action.register_action() registers actions with an explicit action_id, desc,
+# and kwargs schema rather than inferring them from a decorated function.
+# Two actions are registered: normalize_title (strips whitespace, lowercases) and
+# count_words.  The model plans both calls in sequence; each runs via
+# FunctionActionExecutor and returns an ActionResult record that is injected before
+# the final model reply.
+#
+# Flow:
+# agent.input("normalize and count `  Action   Runtime   Plugin   Refactor  `")
+#   |
+#   v
+# model plans: normalize_title(text="  Action   Runtime   Plugin   Refactor  ")
+#              count_words(text="action runtime plugin refactor")
+#   |
+#   v
+# FunctionActionExecutor -> "action runtime plugin refactor", 4
+#   |
+#   v
+# ActionResult records injected
+#   |
+#   v
+# model reply: "Normalized: 'action runtime plugin refactor'. Word count: 4." 

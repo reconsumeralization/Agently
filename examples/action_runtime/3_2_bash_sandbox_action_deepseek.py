@@ -42,3 +42,26 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes successful repo_bash_inspector calls.
 # Each shell ActionResult includes model_digest and artifact_refs.
 # The reply mentions the repository root and files under examples/action_runtime.
+
+# How it works:
+# agent.action.register_bash_sandbox_action() registers a shell executor with an
+# allowlist of permitted command prefixes (pwd, ls, echo) and a workspace root
+# constraint.  The model plans which shell commands to run; the sandbox validates
+# each command against the allowlist before executing and caps wall-clock time at
+# timeout_seconds.  Disallowed commands raise an error without executing.
+#
+# Flow:
+# agent.input("run pwd, then list examples/action_runtime")
+#   |
+#   v
+# model plans: repo_bash_inspector(cmd="pwd", workdir=<repo_root>)
+#              repo_bash_inspector(cmd="ls examples/action_runtime", workdir=<repo_root>)
+#   |
+#   v
+# BashSandboxActionExecutor checks allowlist -> runs shell commands -> captures stdout
+#   |
+#   v
+# ActionResult records with model_digest + artifact_refs
+#   |
+#   v
+# model reply: "Working directory: <repo_root>. Files: 1_1_..., 1_2_..., ..." 

@@ -144,3 +144,24 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes one successful multiply call from SingleRoundActionFlow.
 # The product of 12.5 and 4 is 50.0.
 # [MODEL_REPLY] reports 50.0.
+
+# How it works:
+# SingleRoundActionFlow replaces the default multi-round ActionFlow with a single-pass
+# execution: it calls the planning handler once, executes the resulting action_calls,
+# and returns records without looping.  The planning_handler is hardcoded to call
+# multiply(12.5, 4) regardless of model input, demonstrating full flow control from
+# Python code rather than from the model.
+#
+# Flow:
+# PluginManager.register("ActionFlow", SingleRoundActionFlow)
+# agent.register_action_planning_handler(planning_handler)
+#   |
+#   v
+# SingleRoundActionFlow.async_run():
+#   planning_handler(context, request)
+#     -> {action_calls: [{action_id:"multiply", a=12.5, b=4}]}
+#   execution_handler -> FunctionActionExecutor.execute() -> 50.0
+#   return [ActionResult(action_id="multiply", result=50.0)]
+#   | (no further rounds — single-pass by design)
+#   v
+# model reply: "The product is 50.0." 

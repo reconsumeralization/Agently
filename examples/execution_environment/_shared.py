@@ -80,3 +80,14 @@ def print_response(response):
     action_logs = extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else []
 
     print_section("ACTION_LOGS_FROM_RESPONSE_RESULT", action_logs)
+
+# Helper module — no standalone terminal output.
+# Imported by execution_environment examples to provide:
+#   create_agent(provider, system_prompt, temperature=0.7) — configures Ollama or DeepSeek
+#   print_action_results(records) — prints ACTION_RECORDS and ACTION_RESULTS_INJECTED_TO_REPLY
+#   print_response(response) — prints MODEL_REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
+#
+# How it works:
+# Callers supply provider name ("ollama" or "deepseek"); create_agent() reads the matching
+# env vars (OLLAMA_BASE_URL or DEEPSEEK_BASE_URL + DEEPSEEK_API_KEY) and configures the
+# OpenAICompatible settings before returning a new agent instance.

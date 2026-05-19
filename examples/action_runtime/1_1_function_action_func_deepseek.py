@@ -27,3 +27,27 @@ if __name__ == "__main__":
 # [ACTION_RECORDS] includes a successful add_invoice_amounts call with result 60525.
 # [ACTION_RESULTS_INJECTED_TO_REPLY] contains {"Add two invoice amounts...": 60525}.
 # [MODEL_REPLY] mentions the total 60525.
+
+# How it works:
+# @agent.action_func decorates a plain Python function and registers it as an action
+# with an auto-generated id and schema derived from type annotations and the docstring.
+# agent.use_actions() activates it for the current request.
+# get_action_result() asks the model to plan calls, executes them with the default
+# FunctionActionExecutor, and returns ActionResult records.
+# get_response() re-sends those records so the model can reference the exact result
+# in its final reply.
+#
+# Flow:
+# agent.input("...17850 + 42675...")
+#   |
+#   v
+# model plans: add_invoice_amounts(first_amount=17850, second_amount=42675)
+#   |
+#   v
+# FunctionActionExecutor calls Python function -> 60525
+#   |
+#   v
+# ActionResult(action_id="add_invoice_amounts", result=60525) injected
+#   |
+#   v
+# model reply: "The total is 60525." 

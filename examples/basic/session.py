@@ -250,3 +250,22 @@ def session_custom_handlers_with_memo_in_real_request():
 
 
 session_custom_handlers_with_memo_in_real_request()
+
+# Expected output shape (content is variable — requires local Ollama):
+# The final active example (session_custom_handlers_with_memo_in_real_request)
+# prints turn-by-turn replies and session state:
+#   full_context: 6  (all turns stored)
+#   context_window: 4  (kept last 4 after resize)
+#   memo: {'key_points': {...}}  (LLM-generated summary of dropped turns)
+#
+# How it works:
+# Session stores conversation turns and passes a context_window to the model.
+# activate_session(session_id=...) attaches a named session; deactivate_session()
+# detaches it.  session_id isolation means different IDs never share history.
+# input_keys / reply_keys filter which prompt fields and output keys are recorded.
+# get_json_session() / load_json_session() export and restore the full turn list.
+# Custom handlers: register_analysis_handler() decides whether to resize the window
+# (returns a resize strategy name or None); register_resize_handler(name, fn)
+# implements that strategy — receives (full_context, context_window, memo, settings)
+# and returns (new_full_context, new_window, new_memo).  Async handlers may call
+# agent.create_temp_request() to run a summarization step during compression.
