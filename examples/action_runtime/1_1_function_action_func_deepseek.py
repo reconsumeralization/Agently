@@ -50,4 +50,4 @@ if __name__ == "__main__":
 # ActionResult(action_id="add_invoice_amounts", result=60525) injected
 #   |
 #   v
-# model reply: "The total is 60525." 
+# model reply: "The total is 60525."

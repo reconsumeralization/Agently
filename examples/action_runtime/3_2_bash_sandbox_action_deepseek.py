@@ -64,4 +64,4 @@ if __name__ == "__main__":
 # ActionResult records with model_digest + artifact_refs
 #   |
 #   v
-# model reply: "Working directory: <repo_root>. Files: 1_1_..., 1_2_..., ..." 
+# model reply: "Working directory: <repo_root>. Files: 1_1_..., 1_2_..., ..."

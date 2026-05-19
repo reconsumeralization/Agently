@@ -164,4 +164,4 @@ if __name__ == "__main__":
 #   return [ActionResult(action_id="multiply", result=50.0)]
 #   | (no further rounds — single-pass by design)
 #   v
-# model reply: "The product is 50.0." 
+# model reply: "The product is 50.0."
