@@ -8,7 +8,9 @@ keywords: Agently, AI agent 框架, 文档, 快速开始, TriggerFlow
 
 > 语言：[English](../en/index.md) · **中文**
 
-Agently 是一个面向 AI 应用开发的框架，关注稳定的结构化输出、可观测的 Action 调用、服务化暴露、运行时观测，以及可持久化的流程编排。
+Agently 是一个面向 AI 应用开发的框架，服务于团队从模型原型走向可维护应用的阶段。它关注归一化模型请求、稳定的结构化输出、Prompt 与响应契约、可观测的 Action 调用、服务化暴露、运行时观测，以及可持久化的信号驱动流程编排。
+
+当应用代码需要清晰拥有 AI 执行边界时，适合使用 Agently：模型请求应返回可检查的数据，工具调用应留下 Action 记录，工作流应暴露生命周期状态，项目设置与 Prompt 应能脱离一次性脚本被审阅和复用。
 
 本手册按学习路径组织。如果你还没有跑过一次最小请求，请从 [快速开始](start/quickstart.md) 开始。如果你正在把 Agently 做成服务，请直接看 [Async First](start/async-first.md)。如果你要设计事件驱动或长跑流程，请去 [TriggerFlow 概览](triggerflow/overview.md)。
 
