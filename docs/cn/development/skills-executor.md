@@ -27,7 +27,12 @@ planner-selected behavior loop 使用。
 - 对被选为候选的 SKILL.md package，按字符上限披露 primary guidance
 - `agent.resolve_skill_plan(...)`：生成 `SkillExecutionPlan`
 - `agent.run_skill_task(...)`：显式执行 skill task
+- SkillCard 组合元数据，例如 `stage_roles`、`consumes`、`produces`、
+  `artifact_types`、`side_effects`、`required_capabilities`、`complements`、
+  `failure_modes`
 - declarative `action`、`model`、`validate`、`emit` stage 处理
+- `run_skill_task(...)` 底层使用 Dynamic Task DAG 执行，
+  `SkillExecution.close_snapshot` 会保留编译后的 task graph 结果以及 skill/action logs
 
 第一版把 model-owned planning 留在 plan/decision 边界后面。当前实现先使用确定性过滤，
 并允许应用通过 decision handler 调整 plan。完整模型 Planner 后续应落在同一个
@@ -41,6 +46,7 @@ Skill 不是 `skill.run()` 函数，也不是 `ActionExecutor`。
 Agent API
   -> skill cards and policy filtering
   -> SkillExecutionPlan
+  -> Dynamic Task DAG
   -> SkillExecution
   -> Actions for atomic work
 ```
@@ -111,6 +117,29 @@ stages:
     kind: validate
     validation:
       required_state: [record_note]
+```
+
+## 组合元数据
+
+真实 Skill Pack 应说明它和其他 Skills 如何组合。这些字段会保存在 `SkillCard`
+里，并披露给 planner。
+
+```yaml
+card:
+  stage_roles: [intake, action, validation]
+  consumes:
+    - role: task_request
+      type: text
+  produces:
+    - role: release_note
+      type: json
+  artifact_types: [json]
+  side_effects:
+    - kind: local_record
+      policy: allowed
+  required_capabilities: [record_release_note]
+  complements: [repo-review]
+  failure_modes: [missing_action]
 ```
 
 ## 边界

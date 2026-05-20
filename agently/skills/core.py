@@ -27,6 +27,7 @@ from typing import Any, Callable, cast
 
 import yaml
 
+from agently.core import DynamicTaskContext, TaskDAGExecutor
 from agently.types.data import (
     ActionResult,
     SkillCard,
@@ -85,6 +86,10 @@ def _ensure_list(value: Any) -> list[Any]:
     if isinstance(value, set):
         return list(value)
     return [value]
+
+
+def _ensure_dict_list(value: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in _ensure_list(value) if isinstance(item, dict)]
 
 
 def _read_text(path: Path) -> str:
@@ -339,10 +344,12 @@ class SkillRegistry:
             "source": {"source": source.source, "source_type": source.source_type},
             "trust_level": str(manifest.get("trust_level") or trust_level or source.source_type),
             "card": card,
+            "kind": str(manifest.get("kind") or "guidance"),
             "declared_permissions": declared_permissions,
             "dependencies": [str(item) for item in _ensure_list(manifest.get("dependencies"))],
             "assets": assets,
             "declarative_stages": stages,
+            "semantic_outputs": _ensure_dict(manifest.get("semantic_outputs") or manifest.get("outputs")),
             "action_requirements": action_requirements,
             "execution_environment_requirements": _ensure_list(
                 manifest.get("execution_environment_requirements")
@@ -384,6 +391,25 @@ class SkillRegistry:
                     if str(item).strip()
                 ],
             },
+            "stage_roles": [
+                str(item)
+                for item in _ensure_list(raw_card.get("stage_roles") or manifest.get("stage_roles"))
+            ],
+            "consumes": _ensure_dict_list(raw_card.get("consumes") or manifest.get("consumes")),
+            "produces": _ensure_dict_list(raw_card.get("produces") or manifest.get("produces")),
+            "artifact_types": [
+                str(item)
+                for item in _ensure_list(raw_card.get("artifact_types") or manifest.get("artifact_types"))
+            ],
+            "side_effects": _ensure_dict_list(raw_card.get("side_effects") or manifest.get("side_effects")),
+            "required_capabilities": [
+                str(item)
+                for item in _ensure_list(raw_card.get("required_capabilities") or manifest.get("required_capabilities"))
+            ] or action_requirements,
+            "complements": [
+                str(item)
+                for item in _ensure_list(raw_card.get("complements") or manifest.get("complements"))
+            ],
             "task_fit_examples": [str(item) for item in _ensure_list(raw_card.get("task_fit_examples"))],
             "input_expectations": str(raw_card.get("input_expectations") or ""),
             "output_expectations": str(raw_card.get("output_expectations") or ""),
@@ -391,6 +417,10 @@ class SkillRegistry:
             "required_permissions": _ensure_dict(raw_card.get("required_permissions")),
             "risk_profile": str(raw_card.get("risk_profile") or ""),
             "composition_hints": [str(item) for item in _ensure_list(raw_card.get("composition_hints"))],
+            "failure_modes": [
+                str(item)
+                for item in _ensure_list(raw_card.get("failure_modes") or manifest.get("failure_modes"))
+            ],
             "content_refs": [
                 str(item)
                 for item in _ensure_list(
@@ -436,6 +466,7 @@ class SkillPlanner:
         rejected: list[SkillPlanRejection] = []
         requirements: list[Any] = []
         stage_graph: list[dict[str, Any]] = []
+        semantic_outputs: dict[str, Any] = {}
 
         for contract in installed:
             matched_selector = any(_matches_selector(contract, selector) for selector in selectors) if selectors else False
@@ -453,13 +484,19 @@ class SkillPlanner:
             for requirement in _ensure_list(contract.get("execution_environment_requirements")):
                 requirements.append(_copy_public(requirement))
             for stage in _ensure_list(selection.get("stages")):
+                stage_key = str(stage.get("stage_id") or stage.get("id") or "")
                 stage_graph.append(
                     {
                         "skill_id": str(selection.get("skill_id", "")),
-                        "stage_id": stage.get("stage_id") or stage.get("id"),
+                        "stage_id": stage_key,
                         "kind": stage.get("kind", "model"),
                     }
                 )
+                if stage_key:
+                    semantic_outputs[stage_key] = {
+                        "role": stage_key,
+                        "type": str(stage.get("kind", "model")),
+                    }
 
         if mode == "required":
             required_ids = {str(selector) for selector in selectors if isinstance(selector, str)}
@@ -485,6 +522,7 @@ class SkillPlanner:
             "selected_skills": selected,
             "rejected_skills": rejected,
             "composed_stage_graph": stage_graph,
+            "dynamic_task_graph": {},
             "prompt_bindings": [],
             "action_bindings": [
                 {"skill_id": str(item.get("skill_id", "")), "actions": item.get("card", {}).get("available_action_summary", [])}
@@ -494,6 +532,8 @@ class SkillPlanner:
             "execution_environment_requirements": requirements,
             "approval_requests": [],
             "state_keys": [str(stage.get("stage_id")) for item in selected for stage in _ensure_list(item.get("stages"))],
+            "semantic_outputs": semantic_outputs,
+            "artifact_bindings": [],
             "expected_result_shape": {},
             "stream_policy": {},
             "fallback_policy": {"normal_agent_response_allowed": mode == "model_decision"},
@@ -647,42 +687,151 @@ class SkillExecutor:
                 output=None,
             )
 
-        status = "success"
-        for selection in _ensure_list(plan.get("selected_skills")):
-            for stage in _ensure_list(_ensure_dict(selection).get("stages")):
-                stage_log = await self._execute_stage(
-                    agent=agent,
-                    task=task,
-                    selection=_ensure_dict(selection),
-                    stage=_ensure_dict(stage),
-                    state=state,
-                    action_logs=action_logs,
-                    runtime_stream=runtime_stream,
-                )
-                skill_logs.append(stage_log)
-                if stage_log.get("status") in {"error", "approval_required", "blocked"}:
-                    status = str(stage_log["status"])
-                    return self._build_execution(
-                        execution_id=execution_id,
-                        status=status,
-                        plan=plan,
-                        state=state,
-                        skill_logs=skill_logs,
-                        action_logs=action_logs,
-                        runtime_stream=runtime_stream,
-                        output={"error": stage_log.get("error", ""), "state": _copy_public(state)},
-                    )
+        graph = self._build_dynamic_task_graph(plan)
+        plan["dynamic_task_graph"] = graph
+        if not graph.get("tasks"):
+            return self._build_execution(
+                execution_id=execution_id,
+                status="success",
+                plan=plan,
+                state=state,
+                skill_logs=skill_logs,
+                action_logs=action_logs,
+                runtime_stream=runtime_stream,
+                output=_copy_public(state),
+                task_dag_close_snapshot={},
+            )
+
+        try:
+            close_snapshot, dag_stream = await self._run_dynamic_task_graph(
+                graph=graph,
+                agent=agent,
+                task=task,
+                state=state,
+                skill_logs=skill_logs,
+                action_logs=action_logs,
+                runtime_stream=runtime_stream,
+            )
+        except Exception as error:
+            return self._build_execution(
+                execution_id=execution_id,
+                status="error",
+                plan=plan,
+                state=state,
+                skill_logs=skill_logs,
+                action_logs=action_logs,
+                runtime_stream=runtime_stream,
+                output={"error": str(error), "state": _copy_public(state)},
+                task_dag_close_snapshot={"error": str(error)},
+            )
+
+        runtime_stream.extend(dag_stream)
 
         return self._build_execution(
             execution_id=execution_id,
-            status=status,
+            status="success",
             plan=plan,
             state=state,
             skill_logs=skill_logs,
             action_logs=action_logs,
             runtime_stream=runtime_stream,
             output=_copy_public(state),
+            task_dag_close_snapshot=close_snapshot,
         )
+
+    def _build_dynamic_task_graph(self, plan: SkillExecutionPlan) -> dict[str, Any]:
+        tasks: list[dict[str, Any]] = []
+        semantic_outputs: dict[str, Any] = {}
+        previous_task_id = ""
+        index = 0
+        for selection in _ensure_list(plan.get("selected_skills")):
+            selection_data = _ensure_dict(selection)
+            skill_id = str(selection_data.get("skill_id", "skill"))
+            for stage in _ensure_list(selection_data.get("stages")):
+                stage_data = _ensure_dict(stage)
+                if not stage_data:
+                    continue
+                index += 1
+                stage_id = str(stage_data.get("stage_id") or stage_data.get("id") or f"stage_{ index }")
+                task_id = self._task_id_for_stage(index=index, skill_id=skill_id, stage_id=stage_id)
+                task_entry = {
+                    "id": task_id,
+                    "kind": "skill_stage_handler",
+                    "title": f"{ skill_id }:{ stage_id }",
+                    "purpose": f"Execute Skill '{ skill_id }' stage '{ stage_id }'.",
+                    "depends_on": [previous_task_id] if previous_task_id else [],
+                    "inputs": {
+                        "selection": selection_data,
+                        "stage": stage_data,
+                        "stage_id": stage_id,
+                    },
+                    "produces": [{"role": stage_id, "type": str(stage_data.get("kind", "model"))}],
+                }
+                tasks.append(task_entry)
+                semantic_outputs[stage_id] = {"task_id": task_id}
+                previous_task_id = task_id
+        return {
+            "graph_id": f"skill-execution-{ uuid.uuid4().hex[:12] }",
+            "task_schema_version": "task_dag/v1",
+            "tasks": tasks,
+            "semantic_outputs": semantic_outputs,
+            "policies": {"source": "skills_executor"},
+            "diagnostics": [],
+        }
+
+    def _task_id_for_stage(self, *, index: int, skill_id: str, stage_id: str) -> str:
+        raw = f"s{ index }_{ skill_id }_{ stage_id }"
+        normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("_.-")
+        if not normalized or not re.match(r"^[A-Za-z_]", normalized):
+            normalized = f"s{ index }"
+        return normalized
+
+    async def _run_dynamic_task_graph(
+        self,
+        *,
+        graph: dict[str, Any],
+        agent: Any,
+        task: str,
+        state: dict[str, Any],
+        skill_logs: list[dict[str, Any]],
+        action_logs: list[ActionResult],
+        runtime_stream: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        async def run_skill_stage(context: DynamicTaskContext):
+            inputs = _ensure_dict(context.task.inputs)
+            selection = _ensure_dict(inputs.get("selection"))
+            stage = _ensure_dict(inputs.get("stage"))
+            stage_log = await self._execute_stage(
+                agent=agent,
+                task=task,
+                selection=selection,
+                stage=stage,
+                state=state,
+                action_logs=action_logs,
+                runtime_stream=runtime_stream,
+            )
+            skill_logs.append(stage_log)
+            if stage_log.get("status") in {"error", "approval_required", "blocked"}:
+                raise SkillExecutionError(str(stage_log.get("error") or stage_log.get("status")))
+            stage_id = str(stage_log.get("stage_id") or inputs.get("stage_id") or context.task.id)
+            return {
+                "skill_id": stage_log.get("skill_id"),
+                "stage_id": stage_id,
+                "kind": stage_log.get("kind"),
+                "status": stage_log.get("status"),
+                "value": _copy_public(state.get(stage_id)),
+            }
+
+        executor = TaskDAGExecutor({"skill_stage_handler": run_skill_stage}, name="skill-execution")
+        compiled = executor.compile(graph)
+        execution = compiled.create_execution(auto_close=False)
+        stream = execution.get_async_runtime_stream(timeout=0.1)
+        await execution.async_start({"task": task, "plan": _copy_public(graph)})
+        close_snapshot = await execution.async_close(timeout=30)
+        dag_stream = []
+        async for item in stream:
+            dag_stream.append(item)
+        return close_snapshot, dag_stream
 
     async def _execute_stage(
         self,
@@ -784,6 +933,7 @@ class SkillExecutor:
         action_logs: list[ActionResult],
         runtime_stream: list[dict[str, Any]],
         output: Any,
+        task_dag_close_snapshot: dict[str, Any] | None = None,
     ) -> SkillExecution:
         data = cast(SkillExecutionDict, {
             "execution_id": execution_id,
@@ -797,7 +947,11 @@ class SkillExecutor:
             "action_logs": _copy_public(action_logs),
             "approval_records": _copy_public(plan.get("approval_requests", [])),
             "intervention_records": [],
-            "close_snapshot": {"state": _copy_public(state), "status": status},
+            "close_snapshot": {
+                "state": _copy_public(state),
+                "status": status,
+                "task_dag": _copy_public(task_dag_close_snapshot or {}),
+            },
         })
         return SkillExecution(data)
 

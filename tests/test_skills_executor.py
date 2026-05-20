@@ -24,6 +24,26 @@ purpose: Check release readiness and record a release note.
 trust_level: local
 activation:
   keywords: [release, rollback]
+kind: workflow
+card:
+  stage_roles: [record, validate]
+  consumes:
+    - role: task_request
+      type: text
+  produces:
+    - role: release_note
+      type: json
+  artifact_types: [json]
+  side_effects:
+    - kind: local_record
+      policy: allowed
+  required_capabilities: [{ action }]
+  complements: [repo-review]
+  failure_modes: [missing_action]
+  composition_hints: [run before release summary]
+semantic_outputs:
+  release_note:
+    type: json
 requires:
   actions: [{ action }]
 stages:
@@ -70,6 +90,17 @@ def test_global_skills_install_list_inspect_remove(tmp_path):
     assert installed.get("card", {}).get("display_name") == "Release Checklist"
     assert installed.get("action_requirements") == ["record_release_note"]
     assert installed.get("declarative_stages", [])[0].get("stage_id") == "record_note"
+    assert installed.get("kind") == "workflow"
+    assert installed.get("semantic_outputs", {}).get("release_note", {}).get("type") == "json"
+    card = installed.get("card", {})
+    assert card.get("stage_roles") == ["record", "validate"]
+    assert card.get("consumes") == [{"role": "task_request", "type": "text"}]
+    assert card.get("produces") == [{"role": "release_note", "type": "json"}]
+    assert card.get("artifact_types") == ["json"]
+    assert card.get("side_effects") == [{"kind": "local_record", "policy": "allowed"}]
+    assert card.get("required_capabilities") == ["record_release_note"]
+    assert card.get("complements") == ["repo-review"]
+    assert card.get("failure_modes") == ["missing_action"]
 
     listed = Agently.skills.list()
     assert [item["skill_id"] for item in listed] == ["release-checklist"]
@@ -177,3 +208,8 @@ def test_run_skill_task_executes_action_stage_and_preserves_logs(tmp_path):
     assert execution.action_logs[0].get("action_id") == "record_release_note"
     assert execution.skill_logs[0]["kind"] == "action"
     assert execution.close_snapshot["status"] == "success"
+    assert execution.plan.get("dynamic_task_graph", {}).get("tasks")
+    task_dag = execution.close_snapshot["task_dag"]
+    assert task_dag["task_results"]
+    assert task_dag["semantic_outputs"]["record_note"]["task_id"]
+    assert any(item.get("type") == "task_dag.task" for item in execution.runtime_stream)

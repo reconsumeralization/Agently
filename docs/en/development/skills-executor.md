@@ -28,7 +28,13 @@ The current implementation provides:
 - bounded primary `SKILL.md` guidance disclosure for selected candidate skills
 - `agent.resolve_skill_plan(...)` for producing a `SkillExecutionPlan`
 - `agent.run_skill_task(...)` for explicit skill task execution
+- SkillCard composition metadata such as `stage_roles`, `consumes`,
+  `produces`, `artifact_types`, `side_effects`, `required_capabilities`,
+  `complements`, and `failure_modes`
 - declarative `action`, `model`, `validate`, and `emit` stage handling
+- Dynamic Task DAG execution underneath `run_skill_task(...)`, so
+  `SkillExecution.close_snapshot` preserves the compiled task graph result
+  alongside skill/action logs
 
 The first implementation keeps model-owned planning behind the plan/decision
 boundary. It uses deterministic filtering and allows an app decision handler to
@@ -43,6 +49,7 @@ A Skill is not a `skill.run()` function and it is not an `ActionExecutor`.
 Agent API
   -> skill cards and policy filtering
   -> SkillExecutionPlan
+  -> Dynamic Task DAG
   -> SkillExecution
   -> Actions for atomic work
 ```
@@ -116,6 +123,29 @@ stages:
     kind: validate
     validation:
       required_state: [record_note]
+```
+
+## Composition Metadata
+
+Real Skill Packs should describe how they compose with other Skills. These
+fields are preserved in `SkillCard` and disclosed to the planner.
+
+```yaml
+card:
+  stage_roles: [intake, action, validation]
+  consumes:
+    - role: task_request
+      type: text
+  produces:
+    - role: release_note
+      type: json
+  artifact_types: [json]
+  side_effects:
+    - kind: local_record
+      policy: allowed
+  required_capabilities: [record_release_note]
+  complements: [repo-review]
+  failure_modes: [missing_action]
 ```
 
 ## Boundaries

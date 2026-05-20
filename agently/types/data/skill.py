@@ -42,6 +42,13 @@ class SkillCard(TypedDict, total=False):
     display_name: str
     purpose: str
     activation_hints: dict[str, Any]
+    stage_roles: list[str]
+    consumes: list[dict[str, Any]]
+    produces: list[dict[str, Any]]
+    artifact_types: list[str]
+    side_effects: list[dict[str, Any]]
+    required_capabilities: list[str]
+    complements: list[str]
     task_fit_examples: list[str]
     input_expectations: str
     output_expectations: str
@@ -49,6 +56,7 @@ class SkillCard(TypedDict, total=False):
     required_permissions: dict[str, Any]
     risk_profile: str
     composition_hints: list[str]
+    failure_modes: list[str]
     content_refs: list[str]
 
 
@@ -70,10 +78,12 @@ class SkillContract(TypedDict, total=False):
     source: dict[str, Any]
     trust_level: str
     card: SkillCard
+    kind: str
     declared_permissions: dict[str, Any]
     dependencies: list[str]
     assets: dict[str, Any]
     declarative_stages: list[SkillStage]
+    semantic_outputs: dict[str, Any]
     action_requirements: list[str]
     execution_environment_requirements: list[ExecutionEnvironmentRequirement]
     validation_rules: list[dict[str, Any]]
@@ -108,12 +118,15 @@ class SkillExecutionPlan(TypedDict, total=False):
     selected_skills: list[SkillPlanSelection]
     rejected_skills: list[SkillPlanRejection]
     composed_stage_graph: list[dict[str, Any]]
+    dynamic_task_graph: dict[str, Any]
     prompt_bindings: list[dict[str, Any]]
     action_bindings: list[dict[str, Any]]
     resource_bindings: list[dict[str, Any]]
     execution_environment_requirements: list[ExecutionEnvironmentRequirement]
     approval_requests: list[dict[str, Any]]
     state_keys: list[str]
+    semantic_outputs: dict[str, Any]
+    artifact_bindings: list[dict[str, Any]]
     expected_result_shape: dict[str, Any]
     stream_policy: dict[str, Any]
     fallback_policy: dict[str, Any]
