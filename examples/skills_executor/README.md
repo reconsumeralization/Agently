@@ -38,3 +38,19 @@ intermediate artifacts, approval boundaries, fallbacks, external API boundaries,
 and expected output coverage. It does not execute SaaS writes or generate fake
 artifact files; its report is written to
 `.example_runtime/skills_executor/combo_skillpacks/combo_skillpack_diagnostics.json`.
+
+The same five combo cases are registered as benchmark tests in
+`tests/test_skills_executor_combo_benchmarks.py`.
+
+Fast source/install benchmark, no model call:
+
+```bash
+PYTHONPATH=. python -m pytest -q tests/test_skills_executor_combo_benchmarks.py
+```
+
+Full DeepSeek benchmark, all five cases:
+
+```bash
+AGENTLY_RUN_SKILLS_BENCHMARKS=1 \
+PYTHONPATH=. python -m pytest -q tests/test_skills_executor_combo_benchmarks.py -m skills_benchmark
+```

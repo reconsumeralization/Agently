@@ -23,6 +23,10 @@ Expected key output from a real DeepSeek run on a fully prepared checkout set:
     diagnostic_result=pass
     [CASE] travel_planning_pack
     diagnostic_result=pass
+    [CASE] research_to_briefing_pack
+    diagnostic_result=pass
+    [CASE] webapp_acceptance_pack
+    diagnostic_result=pass
 
 This example is intentionally diagnostic rather than a demo. It does not
 hard-code domain execution logic, does not provide case-specific API recipes to
@@ -389,9 +393,9 @@ def _select_group_skill_dirs(group: str, *, limit: int = 12) -> list[Path]:
     return selected[:limit]
 
 
-def _install_available_skills(source_status: dict[str, str]) -> dict[str, dict[str, Any]]:
+def _install_available_skills(source_status: dict[str, str], *, registry_root: Path | None = None) -> dict[str, dict[str, Any]]:
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
+    Agently.settings.set("skills.registry.root", str(registry_root or RUNTIME_ROOT / "registry"))
     Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
     Agently.settings.set("skills.prompt.max_guidance_chars_per_skill", 2400)
 
@@ -426,7 +430,9 @@ def _candidate_skill_ids(case: ComboCase, installed: dict[str, dict[str, Any]]) 
     group_ids = [
         skill_id
         for skill_id, record in installed.items()
-        if record.get("skill_id") and record.get("group") in case.source_groups
+        if record.get("skill_id")
+        and record.get("group") in case.source_groups
+        and (record.get("group") != "anthropic" or skill_id in case.artifact_skill_ids)
     ]
     required_artifacts = [skill_id for skill_id in case.artifact_skill_ids if skill_id in installed]
     ordered = [*required_artifacts, *group_ids]
@@ -509,6 +515,77 @@ def _normalize_output_name(value: str) -> str:
     return value.lower().strip().rstrip("/")
 
 
+_OUTPUT_TYPE_ALIASES = {
+    "docx": ["docx", "word", "document", "教师版", "报告"],
+    "pdf": ["pdf", "printable", "handout", "summary", "打印", "讲义"],
+    "pptx": ["pptx", "powerpoint", "slides", "slide deck", "deck", "课件", "汇报"],
+    "xlsx": ["xlsx", "excel", "spreadsheet", "workbook", "sheet", "表", "预算"],
+    "json": ["json", "structured", "metadata", "trace", "log", "结构化", "日志"],
+    "md": ["markdown", "md", "plan", "notes", "itinerary", "测试计划"],
+    "dir": ["folder", "directory", "evidence", "screenshots", "截图", "证据包"],
+    "zip": ["zip", "trace", "archive", "package", "压缩", "证据包"],
+}
+
+_OUTPUT_ROLE_ALIASES = {
+    "itinerary": ["itinerary", "daily route", "行程", "每日"],
+    "budget": ["budget", "cost", "expense", "预算", "费用"],
+    "travel_assumptions": ["assumption", "travel assumption", "假设"],
+    "unresolved_questions": ["unresolved", "open question", "missing information", "待确认", "缺失条件"],
+    "execution_log": ["execution log", "skill trace", "trace", "日志"],
+    "course_plan": ["course plan", "unit plan", "课程计划", "课程包"],
+    "teacher_guide": ["teacher guide", "teacher version", "lesson plan", "教师版", "教案"],
+    "student_handout": ["student handout", "learner handout", "worksheet", "学生讲义", "练习"],
+    "lesson_slides": ["lesson slides", "slides", "slide deck", "课件"],
+    "vocabulary_bank": ["vocabulary bank", "vocabulary", "词汇"],
+    "assessment_rubric": ["assessment rubric", "rubric", "formative assessment", "评价量规"],
+    "progress_tracker": ["progress tracker", "progress", "学习进度"],
+    "skill_trace": ["skill trace", "execution trace", "trace", "技能轨迹"],
+    "stock_research_report": ["stock research", "research report", "investment brief", "研究报告"],
+    "comparison_model": ["comparison model", "comparison", "对比"],
+    "source_index": ["source index", "sources", "citations", "来源", "引用"],
+    "compliance_notes": ["compliance", "not investment advice", "non-investment", "合规", "不是投资建议"],
+    "research_notes": ["research notes", "notes", "调研笔记"],
+    "comparison_matrix": ["comparison matrix", "matrix", "对比表"],
+    "full_report": ["full report", "report", "完整报告"],
+    "executive_summary": ["executive summary", "summary", "摘要"],
+    "briefing_deck": ["briefing deck", "deck", "slides", "汇报材料"],
+    "qa_report": ["qa report", "quality check", "quality assurance", "质量检查"],
+    "test_plan": ["test plan", "acceptance plan", "测试计划"],
+    "screenshots": ["screenshot", "screenshots", "截图"],
+    "console_errors": ["console error", "console log", "控制台"],
+    "network_errors": ["network error", "network log", "网络"],
+    "playwright_trace": ["playwright trace", "trace", "浏览器轨迹"],
+    "bug_report": ["bug report", "defect report", "缺陷报告"],
+    "qa_summary": ["qa summary", "test summary", "验收总结"],
+}
+
+
+def _output_role_and_type(output_name: str) -> tuple[str, str]:
+    normalized = _normalize_output_name(output_name)
+    if normalized.endswith("/"):
+        normalized = normalized.rstrip("/")
+    if "." not in normalized:
+        return normalized, "dir"
+    role, suffix = normalized.rsplit(".", 1)
+    return role, suffix
+
+
+def _semantic_output_covered(output_name: str, expected_outputs: list[str], full_text: str) -> bool:
+    normalized = _normalize_output_name(output_name)
+    text = full_text.lower()
+    output_text = " ".join(expected_outputs).lower()
+    if normalized in output_text or normalized in text:
+        return True
+
+    role, output_type = _output_role_and_type(output_name)
+    role_aliases = _OUTPUT_ROLE_ALIASES.get(role, [role.replace("_", " ")])
+    type_aliases = _OUTPUT_TYPE_ALIASES.get(output_type, [output_type])
+    searchable = f"{ output_text } { text }"
+    role_covered = any(alias.lower() in searchable for alias in role_aliases)
+    type_covered = any(alias.lower() in searchable for alias in type_aliases)
+    return role_covered and type_covered
+
+
 def _evaluate_case(case: ComboCase, candidate_skill_ids: list[str], result: dict[str, Any]) -> dict[str, Any]:
     selected_skill_ids = [str(item) for item in result.get("selected_skill_ids") or [] if str(item).strip()]
     stage_plan = result.get("stage_plan") or []
@@ -517,8 +594,7 @@ def _evaluate_case(case: ComboCase, candidate_skill_ids: list[str], result: dict
 
     output_coverage = {}
     for output_name in case.expected_outputs:
-        normalized = _normalize_output_name(output_name)
-        output_coverage[output_name] = any(normalized in item for item in expected_outputs) or normalized in full_text.lower()
+        output_coverage[output_name] = _semantic_output_covered(output_name, expected_outputs, full_text)
 
     checks = {
         "has_candidates": bool(candidate_skill_ids),

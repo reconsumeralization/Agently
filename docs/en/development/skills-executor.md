@@ -194,6 +194,19 @@ only optional SkillCards plus bounded primary guidance; the host evaluator
 checks skill selection, stage switching, intermediate artifacts, side-effect
 boundaries, approval gates, fallbacks, and output coverage.
 
+The same five combo cases are also pytest benchmarks:
+
+```bash
+PYTHONPATH=. python -m pytest -q tests/test_skills_executor_combo_benchmarks.py
+
+AGENTLY_RUN_SKILLS_BENCHMARKS=1 \
+PYTHONPATH=. python -m pytest -q tests/test_skills_executor_combo_benchmarks.py -m skills_benchmark
+```
+
+The first command validates source discovery and installability without model
+calls. The second command is the full DeepSeek-backed benchmark and should be
+treated as an acceptance gate for realcase skill orchestration.
+
 ## See Also
 
 - [Coding Agents](coding-agents.md)

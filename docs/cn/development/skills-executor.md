@@ -180,6 +180,18 @@ host 脚本只评估模型生成模块是否用了真实 Agently API，以及能
 模型只会看到可选 SkillCards 和受限长度的主 guidance；host 评估器检查 skill 选择、
 阶段切换、中间产物、side effect 边界、approval gate、fallback 和输出覆盖率。
 
+同样的五个组合 case 也已经注册为 pytest benchmark：
+
+```bash
+PYTHONPATH=. python -m pytest -q tests/test_skills_executor_combo_benchmarks.py
+
+AGENTLY_RUN_SKILLS_BENCHMARKS=1 \
+PYTHONPATH=. python -m pytest -q tests/test_skills_executor_combo_benchmarks.py -m skills_benchmark
+```
+
+第一条命令只验证 source discovery 和安装，不调用模型。第二条命令会运行完整
+DeepSeek benchmark，应作为 realcase skill orchestration 的验收门槛。
+
 ## 相关文档
 
 - [Coding Agents](coding-agents.md)
