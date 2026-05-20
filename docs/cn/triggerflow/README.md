@@ -14,3 +14,7 @@
 10. [模型集成](model-integration.md)：在 chunk 内调用 agent / request。
 11. [Execution Result](execution-result.md)：读取 snapshot、state、兼容 result、intervention 和 metadata。
 12. [兼容](compatibility.md)：迁移旧 `.end()`、`set_result()`、`runtime_data`。
+
+Dynamic Task 作为应用层 facade 单独成章：[Dynamic Task](../dynamic-task/)。
+它使用 TriggerFlow 作为执行基座，但普通用户应从
+`Agently.create_dynamic_task(...)` 开始。
