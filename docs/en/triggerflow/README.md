@@ -14,3 +14,7 @@ Suggested reading order:
 10. [Model Integration](model-integration.md): calling agents / requests inside chunks.
 11. [Execution Result](execution-result.md): reading snapshots, state, compatibility results, interventions, and metadata.
 12. [Compatibility](compatibility.md): migrating old `.end()`, `set_result()`, and `runtime_data`.
+
+Dynamic Task is documented separately as an application-level facade:
+[Dynamic Task](../dynamic-task/). It uses TriggerFlow as the execution
+substrate, but ordinary users should start from `Agently.create_dynamic_task(...)`.

@@ -70,6 +70,12 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
 
     plugin_manager.register("PromptGenerator", AgentlyPromptGenerator)
 
+    from agently.builtins.plugins.TaskDAGPlanner import (
+        AgentlyTaskDAGPlanner,
+    )
+
+    plugin_manager.register("TaskDAGPlanner", AgentlyTaskDAGPlanner)
+
     from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
         OpenAICompatible,
     )
