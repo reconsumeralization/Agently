@@ -14,10 +14,12 @@
 
 import uuid
 
+from collections.abc import Mapping
 from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
 
 from agently.core.Prompt import Prompt
 from agently.core.ExtensionHandlers import ExtensionHandlers
+from agently.core.DynamicTask import DynamicTask
 from agently.core.ModelRequest import ModelRequest, _resolve_quick_prompt_input, _UNSET
 from agently.core.RuntimeContext import resolve_parent_run_context
 from agently.utils import Settings
@@ -104,6 +106,37 @@ class BaseAgent:
             name=f"{ self.name }-Temp-{ uuid.uuid4().hex }",
             inherit_agent_prompt=False,
             inherit_extension_handlers=False,
+        )
+
+    def create_dynamic_task(
+        self,
+        target: str,
+        *,
+        plan: Mapping[str, Any] | None = None,
+        planner: Any = None,
+        model: Any = None,
+        actions: Any = None,
+        skills: Any = None,
+        handlers: Mapping[str, Any] | None = None,
+        name: str | None = None,
+        max_tasks: int | None = None,
+        output_schema: Any = None,
+        ensure_keys: Any = None,
+    ) -> DynamicTask:
+        return DynamicTask(
+            self.plugin_manager,
+            target,
+            plan=plan,
+            planner=self if planner is None else planner,
+            model=self if model is None else model,
+            actions=actions,
+            skills=skills,
+            handlers=handlers,
+            parent_settings=self.settings,
+            name=name if name is not None else f"{ self.name }-DynamicTask",
+            max_tasks=max_tasks,
+            output_schema=output_schema,
+            ensure_keys=ensure_keys,
         )
 
     def _create_agent_turn_run_context(
