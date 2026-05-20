@@ -12,11 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .StreamingPrintExtension import StreamingPrintExtension
-from .ActionExtension import ActionExtension
-from .KeyWaiterExtension import KeyWaiterExtension
-from .AutoFuncExtension import AutoFuncExtension
-from .ConfigurePromptExtension import ConfigurePromptExtension
-from .SessionExtension import SessionExtension
-from .ChatSessionExtension import ChatSessionExtension
-from .SkillsExtension import SkillsExtension
+from .core import (
+    GlobalSkillsFacade,
+    SkillError,
+    SkillExecution,
+    SkillExecutionError,
+    SkillInstallError,
+    SkillNormalizationError,
+    SkillPlanner,
+    SkillRegistry,
+)
+
+__all__ = [
+    "GlobalSkillsFacade",
+    "SkillError",
+    "SkillExecution",
+    "SkillExecutionError",
+    "SkillInstallError",
+    "SkillNormalizationError",
+    "SkillPlanner",
+    "SkillRegistry",
+]
