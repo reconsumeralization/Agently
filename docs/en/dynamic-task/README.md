@@ -1,8 +1,9 @@
 # Dynamic Task
 
-Dynamic Task executes model-generated or app-generated DAGs with a compact
-app-facing API. Internally it validates a `TaskDAG`, resolves task handlers,
-and compiles the graph to ordinary TriggerFlow execution.
+Dynamic Task is a first-class Agently task surface for model-generated or
+app-generated DAGs. It exposes a compact app-facing API, validates a `TaskDAG`,
+resolves task handlers, and compiles the graph to ordinary TriggerFlow
+execution as an implementation substrate.
 
 ```python
 task = Agently.create_dynamic_task(target="review policy")
@@ -125,7 +126,8 @@ snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(graph)
 ```
 
 The executor does not depend on Agent. Model and action access belong to the
-facade or resolver adapters, while TriggerFlow remains the execution substrate.
+facade or resolver adapters, while TriggerFlow remains the execution substrate
+under Dynamic Task rather than the owner API.
 
 ## Examples
 

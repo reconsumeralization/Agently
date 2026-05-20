@@ -34,6 +34,11 @@ TriggerFlow 是 Agently 的编排层，负责：
 
 右栏都不沾就留在 request 层。
 
+Dynamic Task 是 Agently 独立的一等能力面，面向模型生成或应用提交的 DAG
+数据。当计划本身需要规划、校验、裁剪和执行时，使用
+`Agently.create_dynamic_task(...)`。Dynamic Task 内部以 TriggerFlow 作为执行
+基座，但它不是 TriggerFlow 子 API。见 [Dynamic Task](../dynamic-task/README.md)。
+
 ## 心智模型
 
 ```text
