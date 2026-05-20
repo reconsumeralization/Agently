@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
 from agently.utils import DeprecationWarnings, Settings, create_logger
 from agently.core import (
     Action,
+    DynamicTask,
     ExecutionEnvironmentManager,
     PluginManager,
     EventCenter,
@@ -286,6 +288,37 @@ class AgentlyMain(Generic[A]):
             self.plugin_manager,
             parent_settings=self.settings,
             agent_name=name,
+        )
+
+    def create_dynamic_task(
+        self,
+        target: str,
+        *,
+        plan: Mapping[str, Any] | None = None,
+        planner: Any = None,
+        model: Any = None,
+        actions: Any = None,
+        skills: Any = None,
+        handlers: Mapping[str, Any] | None = None,
+        name: str | None = None,
+        max_tasks: int | None = None,
+        output_schema: Any = None,
+        ensure_keys: Any = None,
+    ) -> DynamicTask:
+        return DynamicTask(
+            self.plugin_manager,
+            target,
+            plan=plan,
+            planner=planner,
+            model=model,
+            actions=actions,
+            skills=skills,
+            handlers=handlers,
+            parent_settings=self.settings,
+            name=name,
+            max_tasks=max_tasks,
+            output_schema=output_schema,
+            ensure_keys=ensure_keys,
         )
 
     def create_agent(self, name: str | None = None) -> A:

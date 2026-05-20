@@ -71,6 +71,126 @@ def test_action_runtime_and_flow_plugins_registered():
     assert "ToolManager" not in plugin_map
 
 
+def test_dynamic_task_plugin_registered():
+    planner_plugins = Agently.plugin_manager.get_plugin_list("TaskDAGPlanner")
+    task = Agently.create_dynamic_task(
+        "demo",
+        plan={
+            "graph_id": "registered",
+            "tasks": [{"id": "a", "kind": "local", "binding": "local_handler"}],
+        },
+        handlers={"local_handler": lambda context: context.task.id},
+    )
+
+    assert "AgentlyTaskDAGPlanner" in planner_plugins
+    assert task.planner.name == "AgentlyTaskDAGPlanner"
+    assert "local_handler" in task.resolver.keys()
+
+
+def test_agent_can_create_dynamic_task():
+    agent = Agently.create_agent("graph-agent")
+    task = agent.create_dynamic_task(
+        "demo",
+        plan={
+            "graph_id": "agent-task",
+            "tasks": [{"id": "a", "kind": "local", "binding": "local_handler"}],
+        },
+        handlers={"local_handler": lambda context: context.task.id},
+    )
+
+    assert task.name == "graph-agent-DynamicTask"
+    assert task.settings.parent is agent.settings
+
+
+@pytest.mark.asyncio
+async def test_dynamic_task_runs_submitted_plan():
+    async def run_task(context):
+        if context.dependency_results:
+            return f"{ context.task.id }:{ context.dependency_results['a'] }"
+        return f"{ context.task.id }:{ context.graph_input['value'] }"
+
+    graph = {
+        "graph_id": "main-package-workflow",
+        "tasks": [
+            {"id": "a", "kind": "local", "binding": "local_handler"},
+            {"id": "b", "kind": "local", "binding": "local_handler", "depends_on": ["a"]},
+        ],
+        "semantic_outputs": {"final": "b"},
+    }
+    task = Agently.create_dynamic_task(
+        "run planned graph",
+        plan=graph,
+        handlers={"local_handler": run_task},
+    )
+
+    snapshot = await task.async_run(graph_input={"value": "ok"}, timeout=1)
+
+    assert snapshot["task_results"] == {"a": "a:ok", "b": "b:a:ok"}
+    assert snapshot["semantic_outputs"]["final"]["task_id"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_task_model_output_schema_uses_agently_request_pipeline():
+    schema = {
+        "brief": (str, "customer-facing briefing", True),
+        "next_update": (str, "next update timing", True),
+    }
+
+    class FakeModelRequest:
+        def __init__(self):
+            self.output_schema = None
+            self.start_kwargs = None
+
+        def input(self, value):
+            return self
+
+        def instruct(self, value):
+            return self
+
+        def output(self, value):
+            self.output_schema = value
+            return self
+
+        async def async_start(self, **kwargs):
+            self.start_kwargs = kwargs
+            return {"brief": "Latency is resolved.", "next_update": "After duplicate checks finish."}
+
+    request = FakeModelRequest()
+    task = Agently.create_dynamic_task(
+        "brief an incident",
+        plan={
+            "graph_id": "model-output-contract",
+            "task_schema_version": "task_dag/v1",
+            "tasks": [{"id": "write_brief", "kind": "model"}],
+            "semantic_outputs": {"frontstage": "write_brief"},
+        },
+        model=request,
+        output_schema=schema,
+        ensure_keys=["brief", "next_update"],
+    )
+
+    snapshot = await task.async_run(timeout=1)
+
+    assert request.output_schema == schema
+    assert request.start_kwargs == {"ensure_keys": ["brief", "next_update"]}
+    assert snapshot["semantic_outputs"]["frontstage"]["result"]["brief"] == "Latency is resolved."
+
+
+def test_dynamic_task_can_be_created_without_explicit_model_source():
+    task = Agently.create_dynamic_task("needs planning")
+
+    assert "model" in task.resolver.keys()
+    assert "action" not in task.resolver.keys()
+    assert task.planner.available_bindings == ("model",)
+
+
+def test_dynamic_task_exposes_actions_only_when_explicit():
+    task = Agently.create_dynamic_task("needs action", actions=Agently.action)
+
+    assert "action" in task.resolver.keys()
+    assert task.planner.available_bindings == ("model", "action")
+
+
 def test_deprecated_action_manager_aliases_warn():
     with pytest.warns(DeprecationWarning):
         assert Agently.action.tool_manager is not None
