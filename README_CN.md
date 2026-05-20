@@ -43,6 +43,7 @@ Agently 面向的是正在从“模型偶尔能做对”走向“应用必须稳
 - **流式输出应在最后一个 token 前暴露结构** - `instant` mode 允许消费者在模型仍在流式输出时响应结构化字段，适合 UI 更新、SSE routes 和 workflow signals。阅读 [模型响应](docs/cn/requests/model-response.md)、[FastAPI 服务封装](docs/cn/services/fastapi.md) 和 [`examples/fastapi/`](examples/fastapi/)。
 - **Actions 应该可观测且可跨模型迁移** - 本地函数、内置 actions、MCP servers、Shell/Python/Node/SQLite/workspace helpers 和自定义 executors 都会产生结构化记录，并共享同一套 Action Runtime。阅读 [Action Runtime](docs/cn/actions/action-runtime.md)、[MCP](docs/cn/actions/mcp.md) 和 [`examples/action_runtime/`](examples/action_runtime/)。
 - **执行依赖应该有生命周期所有者** - Execution Environment providers 管理 MCP 进程、浏览器会话、Shell/Python/Node runtimes、SQLite handles 和沙箱等可复用资源。阅读 [Execution Environment](docs/cn/actions/execution-environment.md) 和 [`examples/execution_environment/`](examples/execution_environment/)。
+- **生成式计划应落成可校验任务图** - Dynamic Task 通过 `Agently.create_dynamic_task(...)` 把模型生成或应用提交的 DAG 数据变成可校验、可观测的任务执行。阅读 [Dynamic Task](docs/cn/dynamic-task/README.md) 和 [`examples/dynamic_task/`](examples/dynamic_task/)。
 - **工作流应是信号驱动，而不只是图结构** - TriggerFlow 支持 events、fan-out、runtime streams、pause/resume、save/load、sub-flows 和 close snapshots；`instant` 结构化输出可以不等完整响应结束就成为工作流输入。阅读 [TriggerFlow 概览](docs/cn/triggerflow/overview.md)、[事件与流](docs/cn/triggerflow/events-and-streams.md) 和 [`examples/trigger_flow/`](examples/trigger_flow/)。
 - **常见模型应用模式应该可组合** - router、To-Do/dependency execution、planning、reflection、evaluator/reviser 和多 Agent 协作，都可以由同一套 request/action/signal primitives 组合出来。阅读 [Playbooks](docs/cn/playbooks/overview.md)、[TriggerFlow 模型集成](docs/cn/triggerflow/model-integration.md) 和 [`examples/step_by_step/`](examples/step_by_step/)。
 - **服务应保持清晰项目边界** - async API、FastAPI helpers、settings 文件、prompt 文件、DevTools 观测和 companion coding-agent skills 适合非一次性项目。阅读 [项目结构](docs/cn/start/project-framework.md)、[FastAPI 服务封装](docs/cn/services/fastapi.md) 和 [观测概览](docs/cn/observability/overview.md)。
@@ -323,7 +324,35 @@ snapshot = await execution.async_close()
 | 重启安全 | `save(...)`、`load(...)`、close snapshot |
 | 可复用工作流拓扑 | blueprint export/import |
 
-### 6. Session 记忆
+### 6. Dynamic Task
+
+Dynamic Task 是 Agently 的框架级动态任务面，用来执行模型生成或应用提交的 DAG。它是应用 API，不是 TriggerFlow 子 API；内部 executor 会把通过校验的任务图编译到 TriggerFlow，从而复用 lifecycle、stream、pause/resume 和 runtime resource 机制。
+
+```python
+from agently import Agently
+
+async def local_handler(context):
+    return {"task_id": context.task.id, "deps": dict(context.dependency_results)}
+
+task = Agently.create_dynamic_task(
+    target="review policy",
+    plan={
+        "graph_id": "review",
+        "task_schema_version": "task_dag/v1",
+        "tasks": [
+            {"id": "extract", "kind": "local", "binding": "local_handler"},
+            {"id": "final", "kind": "local", "binding": "local_handler", "depends_on": ["extract"]},
+        ],
+        "semantic_outputs": {"final": "final"},
+    },
+    handlers={"local_handler": local_handler},
+)
+snapshot = await task.async_start(timeout=10)
+```
+
+当任务计划本身是需要规划、校验、裁剪和执行的数据时，用 Dynamic Task。你自己掌握稳定工作流拓扑时，直接用 TriggerFlow。
+
+### 7. Session 记忆
 
 当问题仍然是一个对话线程，而不是完整工作流时，Session 用于维护有边界的多轮状态：
 
@@ -490,6 +519,7 @@ Prompt 文件可以承载 Prompt 槽位和输出契约：
 | `examples/cookbook/` | 模型驱动应用模式 |
 | `examples/action_runtime/` | function、MCP、sandbox、plugin action 示例 |
 | `examples/execution_environment/` | 托管 Python、Shell、Node、SQLite、Browser 和 provider 生命周期示例 |
+| `examples/dynamic_task/` | Dynamic Task DAG 规划、校验和执行示例 |
 | `examples/trigger_flow/` | TriggerFlow 机制示例 |
 | `examples/builtin_actions/` | Search/Browse package 示例 |
 | `examples/fastapi/` | 服务暴露示例 |

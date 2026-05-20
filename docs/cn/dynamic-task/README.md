@@ -1,7 +1,8 @@
 # Dynamic Task
 
-Dynamic Task 用简洁的应用层 API 执行模型或应用生成的 DAG。内部会校验
-`TaskDAG`、解析任务 handler，并把图编译成普通 TriggerFlow execution。
+Dynamic Task 是 Agently 的一等动态任务面，用简洁的应用层 API 执行模型或
+应用生成的 DAG。内部会校验 `TaskDAG`、解析任务 handler，并把图编译成普通
+TriggerFlow execution 作为实现基座。
 
 ```python
 task = Agently.create_dynamic_task(target="review policy")
@@ -110,7 +111,8 @@ validation = validator.validate(graph, strict_schema_version=True)
 snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(graph)
 ```
 
-Executor 不依赖 Agent。模型和 Action 访问由 facade 或 resolver adapter 承接，TriggerFlow 仍是执行基座。
+Executor 不依赖 Agent。模型和 Action 访问由 facade 或 resolver adapter 承接；
+TriggerFlow 是 Dynamic Task 之下的执行基座，不是 owner API。
 
 ## 示例
 

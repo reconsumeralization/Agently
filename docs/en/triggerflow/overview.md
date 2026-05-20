@@ -34,6 +34,12 @@ It sits **above** the action runtime — your flow can call agents, tools, MCP s
 
 If none of the right column applies, stay in the request layer.
 
+Dynamic Task is a separate first-class Agently surface for model-generated or
+app-generated DAG data. Use `Agently.create_dynamic_task(...)` when the plan
+itself must be planned, validated, pruned, and executed. Dynamic Task uses
+TriggerFlow as its execution substrate, but it is not a TriggerFlow sub-API.
+See [Dynamic Task](../dynamic-task/README.md).
+
 ## Mental model
 
 ```text

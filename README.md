@@ -43,6 +43,7 @@ Agently is a good fit when you care about:
 - **Streaming should expose structure before the final token** - `instant` mode lets consumers react to structured fields while the model is still streaming, which is useful for UI updates, SSE routes, and workflow signals. Read [Model Response](docs/en/requests/model-response.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [`examples/fastapi/`](examples/fastapi/).
 - **Actions should be observable and model-portable** - local functions, built-in actions, MCP servers, shell/Python/Node/SQLite/workspace helpers, and custom executors produce structured records and can share one Action Runtime. Read [Action Runtime](docs/en/actions/action-runtime.md), [MCP](docs/en/actions/mcp.md), and [`examples/action_runtime/`](examples/action_runtime/).
 - **Execution dependencies should have lifecycle owners** - Execution Environment providers manage reusable resources such as MCP processes, browser sessions, shell/Python/Node runtimes, SQLite handles, and sandboxes. Read [Execution Environment](docs/en/actions/execution-environment.md) and [`examples/execution_environment/`](examples/execution_environment/).
+- **Generated plans should become validated task graphs** - Dynamic Task turns model-generated or app-generated DAG data into validated, observable task execution through `Agently.create_dynamic_task(...)`. Read [Dynamic Task](docs/en/dynamic-task/README.md) and [`examples/dynamic_task/`](examples/dynamic_task/).
 - **Workflows should be signal-driven, not just graph-shaped** - TriggerFlow supports events, fan-out, runtime streams, pause/resume, save/load, sub-flows, and close snapshots; `instant` structured output can become workflow input without waiting for the whole response. Read [TriggerFlow Overview](docs/en/triggerflow/overview.md), [Events and Streams](docs/en/triggerflow/events-and-streams.md), and [`examples/trigger_flow/`](examples/trigger_flow/).
 - **Common model-app patterns should be composable** - router, To-Do/dependency execution, planning, reflection, evaluator/reviser, and multi-agent collaboration can be built from the same request/action/signal primitives. Read [Playbooks](docs/en/playbooks/overview.md), [TriggerFlow Model Integration](docs/en/triggerflow/model-integration.md), and [`examples/step_by_step/`](examples/step_by_step/).
 - **Services should keep clean project boundaries** - async APIs, FastAPI helpers, settings files, prompt files, DevTools observation, and companion coding-agent skills fit non-trivial projects. Read [Project Framework](docs/en/start/project-framework.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [Observability](docs/en/observability/overview.md).
@@ -323,7 +324,35 @@ TriggerFlow is the right tool when you need:
 | Restart safety | `save(...)`, `load(...)`, close snapshots |
 | Reusable workflow topology | blueprint export/import |
 
-### 6. Session Memory
+### 6. Dynamic Task
+
+Dynamic Task is Agently's framework-level surface for executing model-generated or app-generated DAGs. It is an application API, not a TriggerFlow sub-API; internally the executor compiles validated task graphs to TriggerFlow so it can reuse lifecycle, stream, pause/resume, and runtime resource mechanics.
+
+```python
+from agently import Agently
+
+async def local_handler(context):
+    return {"task_id": context.task.id, "deps": dict(context.dependency_results)}
+
+task = Agently.create_dynamic_task(
+    target="review policy",
+    plan={
+        "graph_id": "review",
+        "task_schema_version": "task_dag/v1",
+        "tasks": [
+            {"id": "extract", "kind": "local", "binding": "local_handler"},
+            {"id": "final", "kind": "local", "binding": "local_handler", "depends_on": ["extract"]},
+        ],
+        "semantic_outputs": {"final": "final"},
+    },
+    handlers={"local_handler": local_handler},
+)
+snapshot = await task.async_start(timeout=10)
+```
+
+Use Dynamic Task when the task plan itself is data that needs planning, validation, pruning, and execution. Use TriggerFlow directly when you own a stable workflow topology in code.
+
+### 7. Session Memory
 
 Session keeps bounded multi-turn state when the problem is still one conversational thread, not a full workflow:
 
@@ -490,6 +519,7 @@ Useful entry points:
 | `examples/cookbook/` | model-backed application patterns |
 | `examples/action_runtime/` | function, MCP, sandbox, and plugin action examples |
 | `examples/execution_environment/` | managed Python, shell, Node, SQLite, Browser, and provider lifecycle examples |
+| `examples/dynamic_task/` | validated Dynamic Task DAG planning and execution examples |
 | `examples/trigger_flow/` | focused TriggerFlow mechanics |
 | `examples/builtin_actions/` | Search/Browse package examples |
 | `examples/fastapi/` | service exposure examples |
