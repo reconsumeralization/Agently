@@ -87,6 +87,14 @@ class AgentlySkillsExecutor(GlobalSkillsFacade):
     name = "AgentlySkillsExecutor"
     DEFAULT_SETTINGS = {}
 
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
     def __init__(self, *, plugin_manager: Any = None, settings: Settings):
         super().__init__(settings)
         self.plugin_manager = plugin_manager

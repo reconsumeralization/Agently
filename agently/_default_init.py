@@ -76,7 +76,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
 
     plugin_manager.register("TaskDAGPlanner", AgentlyTaskDAGPlanner)
 
-    from agently.builtins.plugins.SkillsExecutor import AgentlySkillsExecutor
+    from agently.builtins.plugins.SkillsExecutor.facade import AgentlySkillsExecutor
 
     plugin_manager.register("SkillsExecutor", AgentlySkillsExecutor)
 
