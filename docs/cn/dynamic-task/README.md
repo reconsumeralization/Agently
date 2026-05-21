@@ -39,6 +39,25 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=10)
 ```
 
+提交式计划也可以保存成 YAML 或 JSON 配置。先把配置加载成 `TaskDAG`，再走同一个
+facade：
+
+```python
+from agently.core import TaskDAG
+
+graph = TaskDAG.from_yaml("examples/dynamic_task/config_policy_review.yaml")
+task = Agently.create_dynamic_task(
+    target="review policy",
+    plan=graph,
+    handlers={"local_handler": local_handler},
+)
+snapshot = await task.async_run(graph_input={"doc": "policy"}, timeout=10)
+```
+
+`TaskDAG.from_json(...)` 接受文件路径或 JSON/JSON5 原始内容。`from_yaml(...)` 和
+`from_json(...)` 都支持 `task_dag_key_path="plans.review"`，用于从较大的配置文件里选择
+某一个 DAG。使用 `graph.get_yaml(path)` 或 `graph.get_json(path)` 可以导出归一化后的图。
+
 Agent 实例也提供同名 facade：
 
 ```python
@@ -132,3 +151,5 @@ TriggerFlow 是 Dynamic Task 之下的执行基座，不是 owner API。
 - `05_enterprise_renewal_complex_auto_plan.py`：复杂自动规划的企业续约示例。
   模型 planner 会生成多个独立分析 root、汇总 join 阶段，并产出结构化续约
   recovery package。
+- `06_dynamic_task_config_plan.py`：通过 `TaskDAG.from_yaml(...)` 从 YAML 配置加载
+  submitted `TaskDAG`。

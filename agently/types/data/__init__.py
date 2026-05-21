@@ -91,6 +91,12 @@ from .tool import (
     ToolInfo,
 )
 
+from .task_dag import (
+    TASK_DAG_SCHEMA_VERSION,
+    TaskDAG,
+    TaskDAGNode,
+)
+
 from .action import (
     ActionApproval,
     ActionArtifact,

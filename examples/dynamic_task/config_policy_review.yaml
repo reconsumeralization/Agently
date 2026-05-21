@@ -1,0 +1,17 @@
+graph_id: policy-review-config
+task_schema_version: task_dag/v1
+tasks:
+  - id: extract_terms
+    kind: local
+    binding: local_handler
+  - id: extract_dates
+    kind: local
+    binding: local_handler
+  - id: final_review
+    kind: local
+    binding: local_handler
+    depends_on:
+      - extract_terms
+      - extract_dates
+semantic_outputs:
+  final: final_review

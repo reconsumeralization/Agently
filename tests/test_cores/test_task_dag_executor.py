@@ -5,6 +5,7 @@ import pytest
 
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
 from agently.core import (
+    TaskDAG,
     TaskDAGExecutor,
     TaskDAGValidator,
     TriggerFlow,
@@ -78,6 +79,70 @@ def test_task_dag_planner_exposes_output_contract_and_constraints():
     instructions = "\n".join(planner.instructions())
     assert "ordinary model tasks as network side effects" in instructions
     assert "Keep approval empty for read-only model analysis" in instructions
+
+
+def test_task_dag_planner_contract_returns_mutation_safe_copies():
+    planner = AgentlyTaskDAGPlanner({"local": lambda context: context.task.id})
+
+    schema = planner.output_schema()
+    schema["graph_id"] = "mutated"
+    schema["tasks"][0]["id"] = "mutated"
+    assert planner.output_schema()["graph_id"][0] is str
+    assert planner.output_schema()["tasks"][0]["id"][0] is str
+
+    ensure_keys = planner.ensure_keys()
+    ensure_keys.append("mutated")
+    assert planner.ensure_keys() == [
+        "graph_id",
+        "task_schema_version",
+        "tasks[*].id",
+        "tasks[*].kind",
+        "tasks[*].depends_on",
+        "semantic_outputs",
+    ]
+
+
+def test_task_dag_loads_and_exports_yaml_json_config(tmp_path):
+    graph = TaskDAG.from_value(
+        {
+            "graph_id": "config-demo",
+            "task_schema_version": "task_dag/v1",
+            "tasks": [
+                {"id": "extract", "kind": "local", "binding": "local_handler"},
+                {
+                    "id": "final",
+                    "kind": "local",
+                    "binding": "local_handler",
+                    "depends_on": ["extract"],
+                },
+            ],
+            "semantic_outputs": {"final": "final"},
+        }
+    )
+
+    yaml_path = tmp_path / "task_dag.yaml"
+    json_path = tmp_path / "task_dag.json"
+    graph.get_yaml(yaml_path)
+    graph.get_json(json_path)
+
+    assert TaskDAG.from_yaml(yaml_path).to_dict() == graph.to_dict()
+    assert TaskDAG.from_json(json_path).to_dict() == graph.to_dict()
+
+    indented_yaml = "    " + graph.get_yaml().replace("\n", "\n    ")
+    wrapped_yaml = f"""
+plans:
+  review:
+{ indented_yaml }
+"""
+    wrapped_json = """
+{
+  "plans": {
+    "review": %s
+  }
+}
+""" % graph.get_json()
+    assert TaskDAG.from_yaml(wrapped_yaml, task_dag_key_path="plans.review").to_dict() == graph.to_dict()
+    assert TaskDAG.from_json(wrapped_json, task_dag_key_path="plans.review").to_dict() == graph.to_dict()
 
 
 def test_task_dag_planner_validate_output_returns_retry_payload():

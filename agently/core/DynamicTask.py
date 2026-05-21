@@ -22,11 +22,11 @@ from agently.core.TaskDAGExecutor import (
     DynamicTaskContext,
     DynamicTaskHandler,
     DynamicTaskResolver,
-    TaskDAG,
     TaskDAGExecutor,
     TaskDAGValidation,
     TaskDAGValidator,
 )
+from agently.types.data import TaskDAG
 from agently.core.ModelRequest import ModelRequest
 from agently.utils import FunctionShifter, Settings
 

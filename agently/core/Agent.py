@@ -26,7 +26,7 @@ from agently.utils import Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
-    from agently.types.data import OutputValidateHandler, PromptStandardSlot, ChatMessage, ChatMessageDict, RunContext
+    from agently.types.data import OutputValidateHandler, PromptStandardSlot, ChatMessage, ChatMessageDict, RunContext, TaskDAG
 
 
 class BaseAgent:
@@ -112,7 +112,7 @@ class BaseAgent:
         self,
         target: str,
         *,
-        plan: Mapping[str, Any] | None = None,
+        plan: "TaskDAG | Mapping[str, Any] | None" = None,
         planner: Any = None,
         model: Any = None,
         actions: Any = None,

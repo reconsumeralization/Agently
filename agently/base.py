@@ -38,7 +38,7 @@ from agently._default_init import (
 )
 
 if TYPE_CHECKING:
-    from agently.types.data import RuntimeEventLevel, SerializableValue
+    from agently.types.data import RuntimeEventLevel, SerializableValue, TaskDAG
     from agently.builtins.hookers.RuntimeConsoleSinkHooker import RuntimeLogProfile
 
 # Basic Initialize
@@ -299,7 +299,7 @@ class AgentlyMain(Generic[A]):
         self,
         target: str,
         *,
-        plan: Mapping[str, Any] | None = None,
+        plan: "TaskDAG | Mapping[str, Any] | None" = None,
         planner: Any = None,
         model: Any = None,
         actions: Any = None,

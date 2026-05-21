@@ -38,12 +38,11 @@ from .TaskDAGExecutor import (
     DynamicTaskContext,
     DynamicTaskHandler,
     DynamicTaskResolver,
-    TaskDAG,
-    TaskDAGNode,
     TaskDAGExecutor,
     TaskDAGValidation,
     TaskDAGValidator,
 )
+from agently.types.data import TaskDAG, TaskDAGNode
 from .DynamicTask import DynamicTask
 from .SkillsExecutor import SkillsExecutor
 from .Session import Session

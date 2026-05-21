@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import re
-import uuid
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, TYPE_CHECKING
 
+from agently.types.data import TASK_DAG_SCHEMA_VERSION, TaskDAG, TaskDAGNode
 from agently.types.trigger_flow import TriggerFlowRuntimeData
 from agently.utils import FunctionShifter
 
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 
 _TASK_ID_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
-_GRAPH_SCHEMA_VERSION = "task_dag/v1"
+_GRAPH_SCHEMA_VERSION = TASK_DAG_SCHEMA_VERSION
 _DYNAMIC_CACHE_ATTR = "_task_dag_executor_cache"
 _RESERVED_RESOLVER_KEYS = frozenset(
     {
@@ -44,122 +44,6 @@ _RESERVED_RESOLVER_KEYS = frozenset(
         "emit",
     }
 )
-
-
-@dataclass(frozen=True)
-class TaskDAGNode:
-    id: str
-    kind: str = "task"
-    title: str | None = None
-    purpose: str | None = None
-    depends_on: tuple[str, ...] = field(default_factory=tuple)
-    inputs: Any = field(default_factory=dict)
-    binding: Any = None
-    produces: tuple[Any, ...] = field(default_factory=tuple)
-    side_effect_policy: Mapping[str, Any] = field(default_factory=dict)
-    fallback: Any = None
-    approval: Any = None
-
-    @classmethod
-    def from_value(cls, value: "TaskDAGNode | Mapping[str, Any]") -> "TaskDAGNode":
-        if isinstance(value, TaskDAGNode):
-            return value
-        if not isinstance(value, Mapping):
-            raise TypeError(f"Dynamic task must be a mapping or TaskDAGNode, got: { type(value) }.")
-        task_id = value.get("id")
-        if task_id is None:
-            raise ValueError("Dynamic task requires non-empty 'id'.")
-        depends_on = value.get("depends_on", ())
-        if depends_on is None:
-            depends_on = ()
-        if isinstance(depends_on, str):
-            depends_on = (depends_on,)
-        produces = value.get("produces", ())
-        if produces is None:
-            produces = ()
-        if isinstance(produces, (str, Mapping)):
-            produces = (produces,)
-        return cls(
-            id=str(task_id).strip(),
-            kind=str(value.get("kind", "task")).strip() or "task",
-            title=str(value["title"]) if value.get("title") is not None else None,
-            purpose=str(value["purpose"]) if value.get("purpose") is not None else None,
-            depends_on=tuple(str(item).strip() for item in depends_on),
-            inputs=value.get("inputs", {}),
-            binding=value.get("binding"),
-            produces=tuple(produces),
-            side_effect_policy=(
-                dict(value.get("side_effect_policy") or {})
-                if isinstance(value.get("side_effect_policy") or {}, Mapping)
-                else {"value": value.get("side_effect_policy")}
-            ),
-            fallback=value.get("fallback"),
-            approval=value.get("approval"),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "kind": self.kind,
-            "title": self.title,
-            "purpose": self.purpose,
-            "depends_on": list(self.depends_on),
-            "inputs": self.inputs,
-            "binding": self.binding,
-            "produces": list(self.produces),
-            "side_effect_policy": dict(self.side_effect_policy),
-            "fallback": self.fallback,
-            "approval": self.approval,
-        }
-
-
-@dataclass(frozen=True)
-class TaskDAG:
-    graph_id: str
-    tasks: tuple[TaskDAGNode, ...]
-    task_schema_version: str = _GRAPH_SCHEMA_VERSION
-    semantic_outputs: Any = field(default_factory=dict)
-    policies: Mapping[str, Any] = field(default_factory=dict)
-    diagnostics: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
-
-    @classmethod
-    def from_value(cls, value: "TaskDAG | Mapping[str, Any]") -> "TaskDAG":
-        if isinstance(value, TaskDAG):
-            return value
-        if not isinstance(value, Mapping):
-            raise TypeError(f"Task DAG must be a mapping or TaskDAG, got: { type(value) }.")
-        raw_tasks = value.get("tasks")
-        if raw_tasks is None:
-            raise ValueError("Task DAG requires 'tasks'.")
-        if not isinstance(raw_tasks, list | tuple):
-            raise TypeError(f"Task DAG 'tasks' must be a list/tuple, got: { type(raw_tasks) }.")
-        graph_id = str(value.get("graph_id") or f"graph-{ uuid.uuid4().hex[:12] }").strip()
-        if not graph_id:
-            raise ValueError("Task DAG requires non-empty 'graph_id'.")
-        diagnostics = value.get("diagnostics", ())
-        if isinstance(diagnostics, Mapping):
-            diagnostics = (diagnostics,)
-        return cls(
-            graph_id=graph_id,
-            task_schema_version=str(value.get("task_schema_version") or _GRAPH_SCHEMA_VERSION),
-            tasks=tuple(TaskDAGNode.from_value(task) for task in raw_tasks),
-            semantic_outputs=value.get("semantic_outputs", {}),
-            policies=dict(value.get("policies") or {}),
-            diagnostics=tuple(
-                dict(item) if isinstance(item, Mapping) else {"message": str(item)}
-                for item in (diagnostics or ())
-            ),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "graph_id": self.graph_id,
-            "task_schema_version": self.task_schema_version,
-            "tasks": [task.to_dict() for task in self.tasks],
-            "semantic_outputs": self.semantic_outputs,
-            "policies": dict(self.policies),
-            "diagnostics": [dict(item) for item in self.diagnostics],
-        }
 
 
 @dataclass(frozen=True)
@@ -465,94 +349,6 @@ def validate_task_dag(
         topological_task_ids=ordered_ids,
         diagnostics=normalized.diagnostics,
     )
-
-
-def task_dag_planner_output_schema() -> dict[str, Any]:
-    return {
-        "graph_id": (
-            str,
-            "Stable graph id using lowercase words, digits, dash, or underscore.",
-            True,
-        ),
-        "task_schema_version": (
-            str,
-            f"Task graph schema version. Use '{ _GRAPH_SCHEMA_VERSION }'.",
-            True,
-        ),
-        "tasks": [
-            {
-                "id": (
-                    str,
-                    "Unique stable task id. Use letters, digits, underscore, dot, or dash. Do not renumber on retry.",
-                    True,
-                ),
-                "kind": (
-                    str,
-                    "Task kind such as model, action, local, artifact, approval, emit, or validate.",
-                    True,
-                ),
-                "title": (str, "Short human-readable task title."),
-                "purpose": (str, "Why this task exists in the graph."),
-                "depends_on": (
-                    ["str"],
-                    "List of upstream task ids. Use an empty list for root tasks.",
-                    True,
-                ),
-                "inputs": (
-                    dict,
-                    "Task-local static inputs. Do not include dependency results here.",
-                ),
-                "binding": (
-                    str,
-                    "Optional resolver entry name such as risk_check_handler when kind alone is not specific enough.",
-                ),
-                "produces": [
-                    {
-                        "role": (str, "Semantic output or artifact role produced by this task.", True),
-                        "type": (str, "Result type such as text, json, artifact_ref, table, or list."),
-                    }
-                ],
-                "side_effect_policy": (
-                    dict,
-                    "Side-effect declaration such as network, local_write, external_write, or credential_usage.",
-                ),
-                "fallback": (
-                    dict,
-                    "Fallback policy such as {'on_error': 'skip'} or {'on_error': 'fail'}.",
-                ),
-                "approval": (
-                    dict,
-                    "Approval policy. Use {'required': true, 'type': 'human_approval'} when a task must pause.",
-                ),
-            }
-        ],
-        "semantic_outputs": (
-            dict,
-            "Map final deliverable role to source task id or {'task_id': '<id>'}.",
-            True,
-        ),
-        "policies": (
-            dict,
-            "Graph-level policy for concurrency, fallback, retry, approval, and side effects.",
-        ),
-        "diagnostics": [
-            {
-                "level": (str, "info, warning, or repaired."),
-                "message": (str, "Planner normalization note."),
-            }
-        ],
-    }
-
-
-def task_dag_planner_ensure_keys() -> list[str]:
-    return [
-        "graph_id",
-        "task_schema_version",
-        "tasks[*].id",
-        "tasks[*].kind",
-        "tasks[*].depends_on",
-        "semantic_outputs",
-    ]
 
 
 def validate_task_dag_planner_output(

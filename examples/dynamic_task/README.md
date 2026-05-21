@@ -29,6 +29,8 @@ Examples:
 - `05_enterprise_renewal_complex_auto_plan.py`: complex auto-planned business
   example with multiple model-generated root analysis branches, a join
   synthesis stage, and a structured recovery package for an enterprise renewal.
+- `06_dynamic_task_config_plan.py`: submitted `TaskDAG` loaded from YAML config
+  with `TaskDAG.from_yaml(...)`.
 
 Model-powered examples use DeepSeek when `DEEPSEEK_API_KEY` is present, or
 local Ollama otherwise. Set `DYNAMIC_TASK_MODEL_PROVIDER=ollama` to force the
