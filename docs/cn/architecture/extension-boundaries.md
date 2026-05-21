@@ -20,6 +20,10 @@ Core contract
   -> business application
 ```
 
+这个顺序是框架规范，不只是理解模型。新增能力前必须先判断：稳定 contract
+由哪一层拥有，可替换实现由哪个 plugin/provider 拥有，面向用户的快捷入口由哪个
+Agent Component 或 facade 拥有。
+
 ## 谁需要关心
 
 | 对象 | 优先使用 | 避免 |
@@ -44,6 +48,10 @@ Core 负责：
 - observation event contract
 
 Core 不应该直接变成能力目录。例如，`ExecutionEnvironmentManager` 应该知道如何管理 environment requirement，但它不应该成为“让模型在我的 repo 里做 coding 工作”的用户入口。
+
+当 plugin 或 Agent Component 层已经有相应职责时，Core 也不应该拥有 plugin output
+prompt、provider-specific default，或 Agent Component 的便利行为。Plugin 可以导入 core
+contract；core 不能依赖 built-in plugin 或 Agent Component 实现。
 
 ### Plugins And Providers
 

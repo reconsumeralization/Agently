@@ -28,6 +28,7 @@ from agently.core import (
     Prompt,
     ModelRequest,
     BaseAgent,
+    SkillsExecutor,
 )
 from agently._default_init import (
     _load_default_actions,
@@ -37,7 +38,7 @@ from agently._default_init import (
 )
 
 if TYPE_CHECKING:
-    from agently.types.data import RuntimeEventLevel, SerializableValue
+    from agently.types.data import RuntimeEventLevel, SerializableValue, TaskDAG
     from agently.builtins.hookers.RuntimeConsoleSinkHooker import RuntimeLogProfile
 
 # Basic Initialize
@@ -74,6 +75,7 @@ _load_default_actions(action_registry)
 action_dispatcher = action.action_dispatcher
 action_runtime = action.action_runtime
 action_flow = action.action_flow
+skills_executor = SkillsExecutor(plugin_manager, settings)
 _agently_emitter = event_center.create_emitter("Agently")
 
 
@@ -173,6 +175,7 @@ from agently.builtins.agent_extensions import (
     StreamingPrintExtension,
     SessionExtension,
     ActionExtension,
+    SkillsExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
     ConfigurePromptExtension,
@@ -182,6 +185,7 @@ from agently.builtins.agent_extensions import (
 class Agent(
     StreamingPrintExtension,
     SessionExtension,
+    SkillsExtension,
     ActionExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
@@ -214,6 +218,7 @@ class AgentlyMain(Generic[A]):
         self.action_dispatcher = action_dispatcher
         self.action_runtime = action_runtime
         self.action_flow = action_flow
+        self.skills_executor = skills_executor
         self.AgentType = AgentType
 
         def refresh_httpx_log_level():
@@ -294,7 +299,7 @@ class AgentlyMain(Generic[A]):
         self,
         target: str,
         *,
-        plan: Mapping[str, Any] | None = None,
+        plan: "TaskDAG | Mapping[str, Any] | None" = None,
         planner: Any = None,
         model: Any = None,
         actions: Any = None,

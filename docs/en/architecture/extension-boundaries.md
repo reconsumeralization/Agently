@@ -21,6 +21,11 @@ Core contract
   -> business application
 ```
 
+This order is a framework rule, not only a mental model. Before adding a
+feature, decide which layer owns the stable contract, which plugin/provider owns
+replaceable implementation behavior, and which Agent Component or facade owns
+the user-facing shortcut.
+
 ## Who Should Care
 
 | Audience | What to use first | What to avoid |
@@ -48,6 +53,11 @@ Core should not directly become the feature catalog. For example,
 `ExecutionEnvironmentManager` should know how to manage an environment
 requirement, but it should not be the user-facing API for "do coding work in my
 repo".
+
+Core also should not own plugin output prompts, provider-specific defaults, or
+Agent Component convenience behavior when a lower layer already has a contract
+for them. Plugins can import core contracts; core cannot depend on built-in
+plugin or Agent Component implementations.
 
 ### Plugins And Providers
 

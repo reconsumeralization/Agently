@@ -91,6 +91,12 @@ from .tool import (
     ToolInfo,
 )
 
+from .task_dag import (
+    TASK_DAG_SCHEMA_VERSION,
+    TaskDAG,
+    TaskDAGNode,
+)
+
 from .action import (
     ActionApproval,
     ActionArtifact,
@@ -115,4 +121,19 @@ from .execution_environment import (
     ExecutionEnvironmentRequirement,
     ExecutionEnvironmentScope,
     ExecutionEnvironmentStatus,
+)
+
+from .skill import (
+    SkillCard,
+    SkillContract,
+    SkillExecutionDict,
+    SkillExecutionPlan,
+    SkillExecutionStatus,
+    SkillMode,
+    SkillsPackRecord,
+    SkillPlanRejection,
+    SkillPlanSelection,
+    SkillScope,
+    SkillStage,
+    SkillStageKind,
 )

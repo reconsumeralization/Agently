@@ -15,17 +15,100 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any, cast
 
 from agently.core.TaskDAGExecutor import (
     _GRAPH_SCHEMA_VERSION,
     _TASK_ID_PATTERN,
     TaskDAGValidator,
-    task_dag_planner_ensure_keys,
-    task_dag_planner_output_schema,
 )
 from agently.types.plugins import TaskDAGPlanner
 from agently.utils import FunctionShifter, SettingsNamespace
+
+
+TASK_DAG_PLANNER_OUTPUT_SCHEMA: dict[str, Any] = {
+    "graph_id": (
+        str,
+        "Stable graph id using lowercase words, digits, dash, or underscore.",
+        True,
+    ),
+    "task_schema_version": (
+        str,
+        f"Task graph schema version. Use '{ _GRAPH_SCHEMA_VERSION }'.",
+        True,
+    ),
+    "tasks": [
+        {
+            "id": (
+                str,
+                "Unique stable task id. Use letters, digits, underscore, dot, or dash. Do not renumber on retry.",
+                True,
+            ),
+            "kind": (
+                str,
+                "Task kind such as model, action, local, artifact, approval, emit, or validate.",
+                True,
+            ),
+            "title": (str, "Short human-readable task title."),
+            "purpose": (str, "Why this task exists in the graph."),
+            "depends_on": (
+                ["str"],
+                "List of upstream task ids. Use an empty list for root tasks.",
+                True,
+            ),
+            "inputs": (
+                dict,
+                "Task-local static inputs. Do not include dependency results here.",
+            ),
+            "binding": (
+                str,
+                "Optional resolver entry name such as risk_check_handler when kind alone is not specific enough.",
+            ),
+            "produces": [
+                {
+                    "role": (str, "Semantic output or artifact role produced by this task.", True),
+                    "type": (str, "Result type such as text, json, artifact_ref, table, or list."),
+                }
+            ],
+            "side_effect_policy": (
+                dict,
+                "Side-effect declaration such as network, local_write, external_write, or credential_usage.",
+            ),
+            "fallback": (
+                dict,
+                "Fallback policy such as {'on_error': 'skip'} or {'on_error': 'fail'}.",
+            ),
+            "approval": (
+                dict,
+                "Approval policy. Use {'required': true, 'type': 'human_approval'} when a task must pause.",
+            ),
+        }
+    ],
+    "semantic_outputs": (
+        dict,
+        "Map final deliverable role to source task id or {'task_id': '<id>'}.",
+        True,
+    ),
+    "policies": (
+        dict,
+        "Graph-level policy for concurrency, fallback, retry, approval, and side effects.",
+    ),
+    "diagnostics": [
+        {
+            "level": (str, "info, warning, or repaired."),
+            "message": (str, "Planner normalization note."),
+        }
+    ],
+}
+TASK_DAG_PLANNER_ENSURE_KEYS = (
+    "graph_id",
+    "task_schema_version",
+    "tasks[*].id",
+    "tasks[*].kind",
+    "tasks[*].depends_on",
+    "semantic_outputs",
+)
 
 
 class AgentlyTaskDAGPlanner(TaskDAGPlanner):
@@ -87,10 +170,10 @@ class AgentlyTaskDAGPlanner(TaskDAGPlanner):
         pass
 
     def output_schema(self) -> dict[str, Any]:
-        return task_dag_planner_output_schema()
+        return deepcopy(TASK_DAG_PLANNER_OUTPUT_SCHEMA)
 
     def ensure_keys(self) -> list[str]:
-        return task_dag_planner_ensure_keys()
+        return list(TASK_DAG_PLANNER_ENSURE_KEYS)
 
     def validate_output(self, result: dict[str, Any], context: Any = None):
         return self.validator.validate_planner_output(result, context)

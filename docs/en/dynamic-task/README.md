@@ -41,6 +41,26 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=10)
 ```
 
+Submitted plans can also be kept as YAML or JSON config artifacts. Load the
+config into `TaskDAG`, then pass it through the same facade:
+
+```python
+from agently.core import TaskDAG
+
+graph = TaskDAG.from_yaml("examples/dynamic_task/config_policy_review.yaml")
+task = Agently.create_dynamic_task(
+    target="review policy",
+    plan=graph,
+    handlers={"local_handler": local_handler},
+)
+snapshot = await task.async_run(graph_input={"doc": "policy"}, timeout=10)
+```
+
+`TaskDAG.from_json(...)` accepts a file path or raw JSON/JSON5 content. Both
+`from_yaml(...)` and `from_json(...)` support `task_dag_key_path="plans.review"`
+for selecting one DAG inside a larger config file. Use `graph.get_yaml(path)`
+or `graph.get_json(path)` to export a normalized graph.
+
 Agent instances expose the same facade:
 
 ```python
@@ -149,3 +169,5 @@ Use the examples in `examples/dynamic_task/` by layer:
 - `05_enterprise_renewal_complex_auto_plan.py`: complex auto-planned renewal
   example where the model planner creates several independent analysis roots,
   joins them into a synthesis stage, and produces a structured recovery package.
+- `06_dynamic_task_config_plan.py`: submitted `TaskDAG` loaded from YAML config
+  through `TaskDAG.from_yaml(...)`.
