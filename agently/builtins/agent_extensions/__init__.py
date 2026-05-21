@@ -19,3 +19,4 @@ from .AutoFuncExtension import AutoFuncExtension
 from .ConfigurePromptExtension import ConfigurePromptExtension
 from .SessionExtension import SessionExtension
 from .ChatSessionExtension import ChatSessionExtension
+from .SkillsExtension import SkillsExtension

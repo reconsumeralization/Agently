@@ -45,6 +45,7 @@ from .TaskDAGExecutor import (
     TaskDAGValidator,
 )
 from .DynamicTask import DynamicTask
+from .SkillsExecutor import SkillsExecutor
 from .Session import Session
 
 # from .TriggerFlow_old import (

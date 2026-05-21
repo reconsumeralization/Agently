@@ -53,3 +53,15 @@ runtime:
   show_runtime_logs: "off"
   show_deprecation_warnings: True
   httpx_log_level: "WARNING"
+skills:
+  action_resolution:
+    auto_enable_bash: True
+    bash_action_aliases:
+      - bash
+      - shell
+      - sh
+      - cmd
+      - run_bash
+      - bash_sandbox
+    bash_allowed_cmd_prefixes: null
+    bash_timeout: 20
