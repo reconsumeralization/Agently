@@ -258,7 +258,7 @@ def test_install_skills_pack_name_and_skills_pack_id_conflict_fails(tmp_path):
         Agently.skills_executor.install_skills_pack(pack_root, name="release-pack", skills_pack_id="other-pack")
 
 
-def test_model_decision_use_skills_discloses_cards_without_forcing_execution(tmp_path):
+def test_model_decision_use_skills_discloses_route_candidates_without_prompt_guidance(tmp_path):
     skill_root = tmp_path / "release-skill"
     _create_skill(skill_root)
     Agently.skills_executor.install_skills(skill_root)
@@ -272,14 +272,15 @@ def test_model_decision_use_skills_discloses_cards_without_forcing_execution(tmp
         asyncio.run(async_prefix(agent.request.prompt, agent.settings))
 
     info_json = json.dumps(agent.request.prompt.get("info"), ensure_ascii=False)
-    assert "skill_cards" in info_json
+    assert "skill_candidates" in info_json
+    assert "skill_cards" not in info_json
     assert "release-checklist" in info_json
-    assert "optional behavior-loop candidates" in info_json
-    assert "skill_guidance" in info_json
-    assert "Follow the release checklist" in info_json
+    assert "route candidates" in info_json
+    assert "skill_guidance" not in info_json
+    assert "Follow the release checklist" not in info_json
 
 
-def test_chain_style_use_skills_discloses_cards_to_request(tmp_path):
+def test_chain_style_use_skills_uses_route_owned_candidate_summary(tmp_path):
     skill_root = tmp_path / "release-skill"
     _create_skill(skill_root)
     Agently.skills_executor.install_skills(skill_root)
@@ -299,8 +300,8 @@ def test_chain_style_use_skills_discloses_cards_to_request(tmp_path):
         .start()
     )
 
-    assert result["has_skill_cards"] is True
-    assert result["has_primary_guidance"] is True
+    assert result["has_skill_cards"] is False
+    assert result["has_primary_guidance"] is False
     assert result["reply"] == "skills-visible"
 
 
@@ -406,3 +407,47 @@ def test_run_skills_task_executes_action_stage_and_preserves_logs(tmp_path):
     assert task_dag["task_results"]
     assert task_dag["semantic_outputs"]["record_note"]["task_id"]
     assert any(item.get("type") == "task_dag.task" for item in execution.runtime_stream)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_routes_skills_and_streams_stage_progress(tmp_path):
+    calls = []
+
+    def record_release_note(text: str):
+        calls.append(text)
+        return {"recorded": text}
+
+    skill_root = tmp_path / "release-skill"
+    _create_skill(skill_root)
+    Agently.skills_executor.install_skills(skill_root)
+
+    agent = Agently.create_agent("skills-auto-exec-agent")
+    agent.register_action(
+        name="record_release_note",
+        desc="Record release note.",
+        kwargs={"text": (str, "Release note text.")},
+        func=record_release_note,
+    )
+
+    execution = (
+        agent
+        .use_skills(["release-checklist"], mode="required")
+        .input("prepare release notes")
+        .create_execution()
+    )
+
+    stream_items = []
+    async for item in execution.get_async_generator(type="instant"):
+        if item.is_complete:
+            stream_items.append(item)
+
+    data = cast(dict[str, Any], await execution.async_get_data())
+    meta = await execution.async_get_meta()
+
+    assert data["record_note"] == {"recorded": "prepare release notes"}
+    assert calls == ["prepare release notes"]
+    assert meta["route_plan"]["selected_route"] == "skills"
+    assert any(item.path == "route.selected" and item.route == "skills" for item in stream_items)
+    assert any(item.path.startswith("task_dag.tasks.") for item in stream_items)
+    assert any(item.path == "skills.stages.record_note" for item in stream_items)
+    assert any(item.path == "actions.record_release_note" for item in stream_items)

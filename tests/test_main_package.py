@@ -191,6 +191,85 @@ def test_dynamic_task_exposes_actions_only_when_explicit():
     assert task.planner.available_bindings == ("model", "action")
 
 
+@pytest.mark.asyncio
+async def test_agent_execution_runs_submitted_dynamic_task_and_streams_process():
+    async def run_task(context):
+        return {"task_id": context.task.id, "value": context.graph_input["value"]}
+
+    agent = Agently.create_agent("execution-dag-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-execution-dag",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [{"id": "extract", "kind": "local", "binding": "local_handler"}],
+                "semantic_outputs": {"final": "extract"},
+            },
+            handlers={"local_handler": run_task},
+            graph_input={"value": "ok"},
+        )
+        .input("run submitted graph")
+        .create_execution()
+    )
+
+    stream_items = []
+    async for item in execution.get_async_generator(type="instant"):
+        if item.is_complete:
+            stream_items.append(item)
+
+    data = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+
+    assert data["semantic_outputs"]["final"]["result"]["value"] == "ok"
+    assert meta["route_plan"]["selected_route"] == "dynamic_task"
+    assert any(item.path == "route.selected" and item.route == "dynamic_task" for item in stream_items)
+    assert any(item.path == "route.dynamic_task.graph" for item in stream_items)
+    assert any(item.path == "task_dag.tasks.extract.start" for item in stream_items)
+    assert any(item.path == "task_dag.tasks.extract.complete" for item in stream_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_can_use_action_candidates():
+    def classify_ticket(text: str):
+        return {"priority": "high", "text": text}
+
+    agent = Agently.create_agent("execution-action-dag-agent")
+    agent.register_action(
+        name="classify_ticket",
+        desc="Classify support ticket.",
+        kwargs={"text": (str, "ticket text")},
+        func=classify_ticket,
+    )
+    execution = (
+        agent
+        .use_actions(["classify_ticket"])
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-action-dag",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [
+                    {
+                        "id": "classify",
+                        "kind": "action",
+                        "binding": "classify_ticket",
+                        "inputs": {"kwargs": {"text": "payment failed"}},
+                    }
+                ],
+                "semantic_outputs": {"final": "classify"},
+            },
+        )
+        .input("run action graph")
+        .create_execution()
+    )
+
+    data = await execution.async_get_data()
+
+    assert data["semantic_outputs"]["final"]["result"]["priority"] == "high"
+
+
 def test_deprecated_action_manager_aliases_warn():
     with pytest.warns(DeprecationWarning):
         assert Agently.action.tool_manager is not None
