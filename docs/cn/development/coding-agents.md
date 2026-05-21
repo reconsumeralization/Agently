@@ -107,7 +107,7 @@ done
 
 用户可见 feature work 必须为功能所对应的场景新增或更新 examples。example 应在声明环境中可运行，使用当前推荐 API，并通过输出、断言或注释把关键运行时行为展示出来。`Expected key output` 注释应保留一次实际运行中的稳定关键值，而不是只写“可以看到 X”一类泛化描述。当输出本身不足以解释行为时，可在 example 注释中补充简短工作原理或 ASCII 流程图。
 
-对 Agently `4.1.2.4`，把 `examples/cookbook/`、`examples/action_runtime/`、`examples/execution_environment/`、`examples/builtin_actions/`、`examples/trigger_flow/`、`examples/dynamic_task/` 和 `examples/fastapi/` 视为推荐起点；`examples/archived/` 只作为兼容参考。
+对 Agently `4.1.3` 开发线，如果任务涉及默认 `agent.start()` 路由、`agent.create_execution()` 或 Agent 过程流式输出，需要纳入 `examples/agent_auto_orchestration/`。对 4.1.2.4 基础能力线，把 `examples/cookbook/`、`examples/action_runtime/`、`examples/execution_environment/`、`examples/builtin_actions/`、`examples/trigger_flow/`、`examples/dynamic_task/` 和 `examples/fastapi/` 视为推荐起点；`examples/archived/` 只作为兼容参考。
 
 汇报 API、推荐用法、examples 或兼容线变化时，应给出能直观看出新用法的简短样例代码。能用当前用法或 before/after 片段说明时，优先用代码片段而不是抽象描述。
 

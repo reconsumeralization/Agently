@@ -2,7 +2,7 @@
 
 建议按这个顺序读：
 
-1. [入门](start/)：安装、模型设置、异步优先和项目结构。
+1. [入门](start/)：安装、模型设置、异步优先、Agent 自动编排和项目结构。
 2. [Requests](requests/)：单次请求的 prompt、结构化输出、校验、响应读取和 session。
 3. [Actions](actions/)：Action Runtime、工具兼容、MCP 与沙箱动作。
 4. [Dynamic Task](dynamic-task/)：typed task DAG 的 Planner、Validator、Resolver 和 Executor 路径。
