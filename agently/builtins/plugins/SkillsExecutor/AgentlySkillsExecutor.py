@@ -155,49 +155,19 @@ def _flatten_public_text(value: Any) -> str:
     return str(value)
 
 
-_SEMANTIC_TYPE_ALIASES = {
-    "docx": ["docx", "word", "document", "教师版", "报告"],
-    "pdf": ["pdf", "printable", "handout", "summary", "打印", "讲义"],
-    "pptx": ["pptx", "powerpoint", "slides", "slide deck", "deck", "课件", "汇报"],
-    "xlsx": ["xlsx", "excel", "spreadsheet", "workbook", "sheet", "表", "预算"],
-    "json": ["json", "structured", "metadata", "trace", "log", "结构化", "日志"],
-    "md": ["markdown", "md", "plan", "notes", "itinerary", "测试计划"],
-    "directory": ["folder", "directory", "evidence", "screenshots", "截图", "证据包"],
-    "zip": ["zip", "trace", "archive", "package", "压缩", "证据包"],
-}
-
-
-_SEMANTIC_ROLE_ALIASES = {
-    "itinerary": ["itinerary", "daily route", "行程", "每日"],
-    "budget": ["budget", "cost", "expense", "预算", "费用"],
-    "travel_assumptions": ["assumption", "travel assumption", "假设"],
-    "unresolved_questions": ["unresolved", "open question", "missing information", "待确认", "缺失条件"],
-    "execution_log": ["execution log", "skill trace", "trace", "日志"],
-    "course_plan": ["course plan", "unit plan", "课程计划", "课程包"],
-    "teacher_guide": ["teacher guide", "teacher version", "lesson plan", "教师版", "教案"],
-    "student_handout": ["student handout", "learner handout", "worksheet", "学生讲义", "练习"],
-    "lesson_slides": ["lesson slides", "slides", "slide deck", "课件"],
-    "vocabulary_bank": ["vocabulary bank", "vocabulary", "词汇"],
-    "assessment_rubric": ["assessment rubric", "rubric", "formative assessment", "评价量规"],
-    "progress_tracker": ["progress tracker", "progress", "学习进度"],
-    "skill_trace": ["skill trace", "execution trace", "trace", "技能轨迹"],
-    "stock_research_report": ["stock research", "research report", "investment brief", "研究报告"],
-    "comparison_model": ["comparison model", "comparison", "对比"],
-    "source_index": ["source index", "sources", "citations", "来源", "引用"],
-    "compliance_notes": ["compliance", "not investment advice", "non-investment", "合规", "不是投资建议"],
-    "research_notes": ["research notes", "notes", "调研笔记"],
-    "comparison_matrix": ["comparison matrix", "matrix", "对比表"],
-    "full_report": ["full report", "report", "完整报告"],
-    "executive_summary": ["executive summary", "summary", "摘要"],
-    "briefing_deck": ["briefing deck", "deck", "slides", "汇报材料"],
-    "qa_report": ["qa report", "quality check", "quality assurance", "质量检查"],
-    "test_plan": ["test plan", "acceptance plan", "测试计划"],
-    "screenshots": ["screenshot", "screenshots", "截图"],
-    "console_errors": ["console error", "console log", "控制台"],
-    "network_errors": ["network error", "network log", "网络"],
-    "playwright_trace": ["playwright trace", "trace", "浏览器轨迹"],
-    "bug_report": ["bug report", "defect report", "缺陷报告"],
-    "qa_summary": ["qa summary", "test summary", "验收总结"],
+# File-format type terms used in semantic output matching.
+# Keys are canonical type names; values add common synonyms for that format.
+# Skill-specific role aliases are NOT defined here — skills declare their own
+# output schemas and should not rely on framework-level business domain terms.
+_SEMANTIC_TYPE_ALIASES: dict[str, list[str]] = {
+    "docx": ["docx", "word", "document"],
+    "pdf": ["pdf", "printable", "handout"],
+    "pptx": ["pptx", "powerpoint", "slides", "slide deck"],
+    "xlsx": ["xlsx", "excel", "spreadsheet", "workbook"],
+    "json": ["json", "structured"],
+    "md": ["markdown", "md"],
+    "directory": ["folder", "directory"],
+    "zip": ["zip", "archive"],
 }
 
 
@@ -827,32 +797,6 @@ class SkillRegistry:
             metadata["required_capabilities"] = ["browser", "shell", "playwright"]
             metadata["complements"] = ["docx", "pptx"]
             return metadata
-        if "travel" in text or "itinerary" in text or "wanderlog" in text:
-            metadata["stage_roles"] = ["intake", "destination_research", "domain_planning", "fallback_planning"]
-            metadata["artifact_types"] = ["markdown", "json", "pdf", "xlsx"]
-            metadata["produces"] = [
-                {"role": "itinerary", "type": "markdown"},
-                {"role": "travel_assumptions", "type": "json"},
-                {"role": "unresolved_questions", "type": "json"},
-            ]
-            metadata["side_effects"] = [{"kind": "external_saas_write", "policy": "approval_required"}]
-            metadata["complements"] = ["pdf", "xlsx", "docx", "wanderlog_mcp"]
-            return metadata
-        if any(word in text for word in ["stock", "sec", "earnings", "financial", "market", "trading"]):
-            metadata["stage_roles"] = ["data_research", "external_api", "domain_analysis", "compliance"]
-            metadata["artifact_types"] = ["json", "docx", "xlsx"]
-            metadata["produces"] = [{"role": "source_data", "type": "json"}, {"role": "risk_analysis", "type": "json"}]
-            metadata["side_effects"] = [{"kind": "external_api_read", "policy": "credential_required"}]
-            metadata["required_capabilities"] = ["mcp", "api_key"]
-            metadata["complements"] = ["docx", "xlsx", "source-auditor"]
-            metadata["failure_modes"] = ["missing_api_key", "stale_market_data", "partial_source_coverage"]
-            return metadata
-        if any(word in text for word in ["lesson", "education", "curriculum", "assessment", "rubric", "learning"]):
-            metadata["stage_roles"] = ["learner_intake", "domain_planning", "assessment", "content_generation"]
-            metadata["artifact_types"] = ["json", "docx", "pdf", "pptx", "xlsx"]
-            metadata["produces"] = [{"role": "course_component", "type": "structured_text"}]
-            metadata["complements"] = ["docx", "pdf", "pptx", "xlsx"]
-            return metadata
         if "triggerflow" in text or "workflow" in text:
             metadata["stage_roles"] = ["workflow", "orchestration", "dependency_planning"]
             metadata["produces"] = [{"role": "task_graph", "type": "json"}]
@@ -1181,30 +1125,9 @@ class SkillPlanner:
             repaired["boundary_notes"].append(
                 "Current or time-sensitive data must include source/citation records and stale-data warnings."
             )
-        if flags["compliance"] and not self._contains_any(repaired, ["not investment advice", "不是投资建议", "不构成投资建议"]):
-            repaired["boundary_notes"].append(
-                "Financial outputs are research only, not investment advice; do not produce buy/sell orders."
-            )
-            repaired["expected_outputs"].append("compliance_notes.json")
-        if flags["webapp"] and not self._contains_any(repaired, ["screenshot", "console", "network", "trace", "playwright", "截图"]):
+        if flags["webapp"] and not self._contains_any(repaired, ["screenshot", "console", "network", "trace", "playwright"]):
             repaired["intermediate_artifacts"].append(
                 "Web app evidence pack includes screenshots, console_errors.json, network_errors.json, and playwright_trace.zip."
-            )
-        if flags["education"] and not self._contains_any(repaired, ["retrieval"]):
-            repaired["stage_plan"].append(
-                "Education quality stage: include retrieval practice cycles so lessons revisit meeting language, vocabulary, decisions, and summaries."
-            )
-            repaired["intermediate_artifacts"].append(
-                "retrieval_practice_plan links course objectives, vocabulary bank, lesson activities, and formative assessment."
-            )
-        if flags["travel"] and (
-            not self._contains_any(repaired, ["rain"]) or not self._contains_any(repaired, ["transport"])
-        ):
-            repaired["stage_plan"].append(
-                "Travel quality stage: include rain-day fallback options and transport-by-day routing before artifact export."
-            )
-            repaired["intermediate_artifacts"].append(
-                "rain_and_transport_plan records rainy-day alternatives, transport modes, route assumptions, and budget impacts."
             )
 
         if not repaired["boundary_notes"]:
@@ -1248,14 +1171,11 @@ class SkillPlanner:
             " ".join(str(item) for item in deliverables),
         ]).lower()
         return {
-            "external": any(term in text for term in ["api", "mcp", "browser", "playwright", "wanderlog", "stock", "sec", "earnings", "webapp", "server"]),
-            "approval": any(term in text for term in ["write", "external", "wanderlog", "approval", "confirm", "browser", "server", "file", "pdf", "docx", "xlsx", "pptx"]),
+            "external": any(term in text for term in ["api", "mcp", "browser", "playwright", "webapp", "server"]),
+            "approval": any(term in text for term in ["write", "external", "approval", "confirm", "browser", "server", "file", "pdf", "docx", "xlsx", "pptx"]),
             "fallback": True,
-            "current_data": any(term in text for term in ["2026", "current", "recent", "stock", "travel", "research", "price", "weather", "source", "citation"]),
-            "compliance": any(term in text for term in ["stock", "investment", "nvda", "amd", "avgo", "sec", "earnings"]),
+            "current_data": any(term in text for term in ["current", "recent", "research", "price", "weather", "source", "citation"]),
             "webapp": any(term in text for term in ["webapp", "web app", "playwright", "login", "sse", "console", "network"]),
-            "education": any(term in text for term in ["education", "lesson", "course", "learner", "vocabulary", "assessment", "english", "课程", "教案", "词汇", "评价"]),
-            "travel": any(term in text for term in ["travel", "trip", "itinerary", "tokyo", "rain", "transport", "旅行", "行程", "雨天", "交通"]),
         }
 
     def _ensure_stage_plan(
@@ -1400,9 +1320,9 @@ class SkillPlanner:
         searchable = _flatten_public_text(result).lower()
         if output_name.lower().strip("/") in searchable:
             return True
-        role_aliases = _SEMANTIC_ROLE_ALIASES.get(role, [role.replace("_", " ")])
+        role_terms = [role, role.replace("_", " "), role.replace("_", "-")]
         type_aliases = _SEMANTIC_TYPE_ALIASES.get(output_type, [output_type])
-        return any(alias.lower() in searchable for alias in role_aliases) and any(
+        return any(term.lower() in searchable for term in role_terms if term) and any(
             alias.lower() in searchable for alias in type_aliases
         )
 
@@ -1666,9 +1586,11 @@ class SkillExecutor:
 
         runtime_stream.extend(dag_stream)
 
+        failed_stages = [log for log in skill_logs if log.get("status") in {"error", "blocked"}]
+        dag_status = "error" if failed_stages else "success"
         return self._build_execution(
             execution_id=execution_id,
-            status="success",
+            status=dag_status,
             plan=plan,
             state=state,
             skill_logs=skill_logs,
@@ -1825,9 +1747,10 @@ class SkillExecutor:
                 runtime_stream=runtime_stream,
             )
             skill_logs.append(stage_log)
-            if stage_log.get("status") in {"error", "approval_required", "blocked"}:
-                raise SkillExecutionError(str(stage_log.get("error") or stage_log.get("status")))
             stage_id = str(stage_log.get("stage_id") or inputs.get("stage_id") or context.task.id)
+            # Return the stage result even on failure so the TaskDAG chunk completes
+            # normally and downstream stages trigger rather than remaining pending.
+            # Overall skills execution status is derived from skill_logs afterward.
             return {
                 "skill_id": stage_log.get("skill_id"),
                 "stage_id": stage_id,
@@ -1836,12 +1759,13 @@ class SkillExecutor:
                 "value": _copy_public(state.get(stage_id)),
             }
 
+        stage_timeout = float(agent.settings.get("skills.stage_execution_timeout", 600) or 600)
         executor = TaskDAGExecutor({"skill_stage_handler": run_skill_stage}, name="skill-execution")
         compiled = executor.compile(graph)
         execution = compiled.create_execution(auto_close=False)
         stream = execution.get_async_runtime_stream(timeout=0.1)
         await execution.async_start({"task": task, "plan": _copy_public(graph)})
-        close_snapshot = await execution.async_close(timeout=30)
+        close_snapshot = await execution.async_close(timeout=stage_timeout)
         dag_stream = []
         async for item in stream:
             dag_stream.append(item)
@@ -1925,7 +1849,9 @@ class SkillExecutor:
             else:
                 state[stage_id] = {"skipped": True, "reason": f"Stage kind '{ kind }' is not implemented in V1."}
                 log["status"] = "skipped"
-        except Exception as error:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as error:
             log["status"] = "error"
             log["error"] = str(error)
         return log
