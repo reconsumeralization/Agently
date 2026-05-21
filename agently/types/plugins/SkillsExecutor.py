@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
-from agently.types.data import SkillContract, SkillsPackRecord
+from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillScope, SkillsPackRecord
 
 
 class SkillsExecutorPlugin(Protocol):
@@ -47,3 +47,26 @@ class SkillsExecutorPlugin(Protocol):
         resolver_mode: str = "deterministic",
         resolver_agent: Any = None,
     ) -> SkillsPackRecord: ...
+
+    async def async_resolve_plan(
+        self,
+        *,
+        agent: Any,
+        task: str | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        mode: SkillMode = "model_decision",
+        scope: SkillScope = "session",
+        decision_handler: Any = None,
+        semantic_outputs: Any = None,
+        planner_mode: str = "auto",
+        planner_max_revisions: int = 2,
+    ) -> SkillExecutionPlan: ...
+
+    async def async_execute_plan(
+        self,
+        *,
+        agent: Any,
+        task: str,
+        plan: SkillExecutionPlan,
+    ) -> Any: ...

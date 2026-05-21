@@ -20,9 +20,7 @@ from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, Ski
 from agently.utils import FunctionShifter
 
 from .AgentlySkillsExecutor import (
-    SkillExecutor,
     SkillExecution,
-    SkillPlanner,
     SkillRegistry,
     _copy_public,
     _ensure_dict,
@@ -33,8 +31,9 @@ from .AgentlySkillsExecutor import (
 
 
 class AgentSkillsMixin:
-    def _init_skills(self, registry: SkillRegistry):
-        self.skills_registry = registry
+    def _init_skills(self, skills_executor: Any):
+        self.skills_executor = skills_executor
+        self.skills_registry = getattr(skills_executor, "registry", skills_executor)
         self.__session_skill_selectors: list[Any] = []
         self.__request_skill_selectors: list[Any] = []
         self.__session_skills_pack_selectors: list[Any] = []
@@ -84,8 +83,22 @@ class AgentSkillsMixin:
     ) -> SkillExecutionPlan:
         selectors = self._collect_skill_selectors(skills=skills, mode=mode)
         skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=skills_packs, mode=mode)
-        planner = SkillPlanner(self.skills_registry)
-        return await planner.resolve(
+        if hasattr(self.skills_executor, "async_resolve_plan"):
+            return await self.skills_executor.async_resolve_plan(
+                agent=self,
+                task=task,
+                skills=selectors,
+                skills_packs=skills_pack_selectors,
+                mode=mode,
+                scope=scope,
+                decision_handler=self.__skill_decision_handler,
+                semantic_outputs=semantic_outputs,
+                planner_mode=planner_mode,
+                planner_max_revisions=planner_max_revisions,
+            )
+        from .AgentlySkillsExecutor import SkillPlanner
+
+        return await SkillPlanner(self.skills_registry).resolve(
             agent=self,
             task=task,
             skills=selectors,
@@ -143,7 +156,7 @@ class AgentSkillsMixin:
             planner_mode=planner_mode,
             planner_max_revisions=planner_max_revisions,
         )
-        execution = await SkillExecutor(self.skills_registry).execute(agent=self, task=task, plan=plan)
+        execution = await self.async_execute_skills_plan(task, plan=plan)
         self.__skill_execution_logs.append(execution.to_dict())
         return execution
 
@@ -173,6 +186,18 @@ class AgentSkillsMixin:
     def set_skills_decision_handler(self, handler: Callable[..., Any] | None):
         self.__skill_decision_handler = handler
         return self
+
+    async def async_execute_skills_plan(
+        self,
+        task: str,
+        *,
+        plan: SkillExecutionPlan,
+    ) -> SkillExecution:
+        if hasattr(self.skills_executor, "async_execute_plan"):
+            return await self.skills_executor.async_execute_plan(agent=self, task=task, plan=plan)
+        from .AgentlySkillsExecutor import SkillExecutor
+
+        return await SkillExecutor(self.skills_registry).execute(agent=self, task=task, plan=plan)
 
     def get_skills_execution_logs(self) -> list[dict[str, Any]]:
         return _copy_public(self.__skill_execution_logs)
@@ -214,6 +239,19 @@ class AgentSkillsMixin:
                 if include_guidance:
                     guidance.extend(self._collect_prompt_guidance(contract, max_chars=max_guidance_chars))
         if not cards:
+            return
+        prompt_mode = str(settings.get("skills.prompt.mode", settings.get("agent.auto_orchestration.skills_prompt_mode", "route_owned")))
+        if prompt_mode == "route_owned":
+            prompt.append(
+                "info",
+                {
+                    "skill_candidates": cards,
+                    "skill_instruction": (
+                        "These skills are route candidates for Agent auto-orchestration. "
+                        "Do not claim that a Skill was executed unless the selected route provides skill execution logs."
+                    ),
+                },
+            )
             return
         payload = {
             "skill_cards": cards,

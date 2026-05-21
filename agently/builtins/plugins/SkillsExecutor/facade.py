@@ -17,10 +17,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agently.types.data import SkillContract, SkillsPackRecord
+from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillScope, SkillsPackRecord
 from agently.utils import Settings
 
-from .AgentlySkillsExecutor import SkillRegistry
+from .AgentlySkillsExecutor import SkillExecutor, SkillPlanner, SkillRegistry
 
 
 class GlobalSkillsFacade:
@@ -98,3 +98,39 @@ class AgentlySkillsExecutor(GlobalSkillsFacade):
     def __init__(self, *, plugin_manager: Any = None, settings: Settings):
         super().__init__(settings)
         self.plugin_manager = plugin_manager
+
+    async def async_resolve_plan(
+        self,
+        *,
+        agent: Any,
+        task: str | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        mode: SkillMode = "model_decision",
+        scope: SkillScope = "session",
+        decision_handler: Any = None,
+        semantic_outputs: Any = None,
+        planner_mode: str = "auto",
+        planner_max_revisions: int = 2,
+    ) -> SkillExecutionPlan:
+        return await SkillPlanner(self.registry).resolve(
+            agent=agent,
+            task=task,
+            skills=skills,
+            skills_packs=skills_packs,
+            mode=mode,
+            scope=scope,
+            decision_handler=decision_handler,
+            semantic_outputs=semantic_outputs,
+            planner_mode=planner_mode,
+            planner_max_revisions=planner_max_revisions,
+        )
+
+    async def async_execute_plan(
+        self,
+        *,
+        agent: Any,
+        task: str,
+        plan: SkillExecutionPlan,
+    ):
+        return await SkillExecutor(self.registry).execute(agent=agent, task=task, plan=plan)

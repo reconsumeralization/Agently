@@ -30,7 +30,7 @@ class SkillsExtension(AgentSkillsMixin, BaseAgent):
 
         from agently.base import skills_executor
 
-        self._init_skills(skills_executor.registry)
+        self._init_skills(skills_executor)
 
         request_prefixes = self.extension_handlers.get("request_prefixes", [])
         if not isinstance(request_prefixes, list):
