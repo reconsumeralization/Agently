@@ -28,8 +28,8 @@ from agently.core import (
     Prompt,
     ModelRequest,
     BaseAgent,
+    SkillsExecutor,
 )
-from agently.skills import GlobalSkillsFacade
 from agently._default_init import (
     _load_default_actions,
     _load_default_settings,
@@ -75,7 +75,7 @@ _load_default_actions(action_registry)
 action_dispatcher = action.action_dispatcher
 action_runtime = action.action_runtime
 action_flow = action.action_flow
-skills = GlobalSkillsFacade(settings)
+skills_executor = SkillsExecutor(plugin_manager, settings)
 _agently_emitter = event_center.create_emitter("Agently")
 
 
@@ -218,7 +218,7 @@ class AgentlyMain(Generic[A]):
         self.action_dispatcher = action_dispatcher
         self.action_runtime = action_runtime
         self.action_flow = action_flow
-        self.skills = skills
+        self.skills_executor = skills_executor
         self.AgentType = AgentType
 
         def refresh_httpx_log_level():

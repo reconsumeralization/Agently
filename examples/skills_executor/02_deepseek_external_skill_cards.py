@@ -1,7 +1,7 @@
 """DeepSeek + external SKILL.md package smoke test.
 
 Run:
-    PYTHONPATH=. python examples/skills_executor/deepseek_external_skill_cards.py
+    python examples/skills_executor/02_deepseek_external_skill_cards.py
 
 Environment:
     DEEPSEEK_API_KEY must be available in the shell or a .env file.
@@ -34,7 +34,7 @@ Flow:
     local skill dir / cloned upstream skill dir
       |
       v
-    Agently.skills.install(...) -> SkillContract + SkillCard
+    Agently.skills_executor.install_skills(...) -> SkillContract + SkillCard
       |
       v
     agent.use_skills(..., model_decision)
@@ -50,16 +50,19 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from pprint import pprint
 from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from agently import Agently
 
-
-ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor"
 ANTHROPIC_REPO_URL = "https://github.com/anthropics/skills.git"
 
@@ -153,7 +156,7 @@ def _install_targets() -> list[str]:
 
     installed_ids = []
     for case in CASES:
-        contract = Agently.skills.install(_resolve_source(case, anthropic_repo), trust_level="local", update=True)
+        contract = Agently.skills_executor.install_skills(_resolve_source(case, anthropic_repo), trust_level="local", update=True)
         installed_ids.append(str(contract.get("skill_id")))
     return installed_ids
 
@@ -180,7 +183,7 @@ def _run_case(case: dict[str, str]) -> dict[str, Any]:
     selector = case["selector"]
     task = case["task"]
     agent.use_skills([selector], mode="model_decision", scope="request")
-    plan = agent.resolve_skill_plan(task, skills=[selector], mode="model_decision", scope="request")
+    plan = agent.resolve_skills_plan(task, skills=[selector], mode="model_decision", scope="request")
     result = (
         agent.input(
             {

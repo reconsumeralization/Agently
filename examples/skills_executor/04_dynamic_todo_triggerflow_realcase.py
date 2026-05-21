@@ -1,7 +1,7 @@
 """Diagnostic realcase: can DeepSeek + Agently-Skills write a DAG executor?
 
 Run:
-    PYTHONPATH=. python examples/skills_executor/realcase_dynamic_todo_triggerflow.py
+    python examples/skills_executor/04_dynamic_todo_triggerflow_realcase.py
 
 Environment:
     DEEPSEEK_API_KEY must be available in the shell or a .env file.
@@ -46,8 +46,10 @@ Flow:
 from __future__ import annotations
 
 import ast
+import argparse
 import os
 import subprocess
+import sys
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,11 +57,13 @@ from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from agently import Agently
 from agently.types.data import SkillExecutionPlan
 
-
-ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor" / "dynamic_todo"
 GENERATED_PATH = RUNTIME_ROOT / "generated_dynamic_todo_executor.py"
 SKILL_IDS = ["agently-playbook", "agently-request", "agently-triggerflow"]
@@ -115,7 +119,7 @@ def install_agently_skills():
     Agently.settings.set("skills.prompt.max_guidance_chars_per_skill", 9000)
 
     for skill_id in SKILL_IDS:
-        Agently.skills.install(skills_repo / "skills" / skill_id, trust_level="local", update=True)
+        Agently.skills_executor.install_skills(skills_repo / "skills" / skill_id, trust_level="local", update=True)
 
 
 def create_generator_agent():
@@ -133,7 +137,7 @@ def create_generator_agent():
 
 def generate_artifact() -> tuple[SkillExecutionPlan, dict[str, Any]]:
     agent = create_generator_agent()
-    skills_plan = agent.resolve_skill_plan(PROBLEM, skills=SKILL_IDS, mode="model_decision", scope="request")
+    skills_plan = agent.resolve_skills_plan(PROBLEM, skills=SKILL_IDS, mode="model_decision", scope="request")
     agent.use_skills(SKILL_IDS, mode="model_decision", scope="request")
 
     artifact = (
@@ -314,6 +318,14 @@ def print_evaluation(evaluation: Evaluation):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--strict-exit",
+        action="store_true",
+        help="exit with status 1 when the generated diagnostic artifact fails evaluator checks",
+    )
+    args = parser.parse_args()
+
     configure_deepseek()
     install_agently_skills()
     skills_plan, artifact, generated_path, evaluation = generate_evaluate_and_maybe_run()
@@ -328,7 +340,7 @@ def main():
     print(f"todo_plan_summary={ artifact.get('todo_plan_summary') }")
     print_evaluation(evaluation)
 
-    if not evaluation.passed:
+    if args.strict_exit and not evaluation.passed:
         raise SystemExit(1)
 
 

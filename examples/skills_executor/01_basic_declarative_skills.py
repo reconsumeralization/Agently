@@ -1,7 +1,9 @@
 """Low-level Skills Executor smoke example.
 
 Run:
-    PYTHONPATH=. python examples/skills_executor/basic_declarative_skill.py
+    python examples/skills_executor/01_basic_declarative_skills.py
+
+    The script also works when invoked by absolute path from outside the repo.
 
 Expected key output from a real run:
     status=success
@@ -13,8 +15,13 @@ model-owned planning or response generation.
 """
 
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
 from typing import Any, cast
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from agently import Agently
 
@@ -51,7 +58,7 @@ def main():
 
         Agently.settings.set("skills.registry.root", str(registry_root))
         Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
-        Agently.skills.install(skill_root)
+        Agently.skills_executor.install_skills(skill_root)
 
         agent = Agently.create_agent("skills-example")
 
@@ -65,7 +72,7 @@ def main():
             func=record_release_note,
         )
 
-        execution = agent.run_skill_task(
+        execution = agent.run_skills_task(
             "prepare release notes",
             skills=["release-checklist"],
             mode="required",

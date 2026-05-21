@@ -1,10 +1,10 @@
 """Combo Skill Pack diagnostics for Skills Executor.
 
 Run:
-    PYTHONPATH=. python examples/skills_executor/combo_skillpack_diagnostics.py
+    python examples/skills_executor/05_combo_skillpack_diagnostics.py
 
 Optional fetch:
-    PYTHONPATH=. python examples/skills_executor/combo_skillpack_diagnostics.py --fetch-missing
+    python examples/skills_executor/05_combo_skillpack_diagnostics.py --fetch-missing
 
 Environment:
     DEEPSEEK_API_KEY must be available in the shell or a .env file.
@@ -39,7 +39,7 @@ Flow:
     local external SKILL.md checkouts
       |
       v
-    Agently.skills.install(...) -> SkillContracts + SkillCards
+    Agently.skills_executor.install_skills_pack(...) / install_skills(...) -> SkillContracts + SkillCards
       |
       v
     agent.use_skills(..., model_decision)
@@ -48,8 +48,13 @@ Flow:
     DeepSeek returns a structured combo-skill orchestration plan
       |
       v
-    host evaluator checks selection, stage switching, intermediate artifacts,
-    approval gates, fallbacks, side-effect boundaries, and output coverage
+    deterministic host gate checks selection, stage switching, intermediate
+    artifacts, approval gates, fallbacks, side-effect boundaries, and output
+    coverage
+      |
+      v
+    Agently model judge evaluates semantic business-rule satisfaction with
+    output-control fields ordered from evidence/reason to final boolean verdict
 """
 
 from __future__ import annotations
@@ -58,6 +63,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pprint
@@ -65,10 +71,12 @@ from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from agently import Agently
 
-
-ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor" / "combo_skillpacks"
 DEFAULT_ANTHROPIC_REPO = ROOT / ".example_runtime" / "skills_executor" / "anthropic-skills"
 DEFAULT_EXTERNAL_ROOT = RUNTIME_ROOT / "external"
@@ -407,7 +415,7 @@ def _install_available_skills(source_status: dict[str, str], *, registry_root: P
             if not (skill_dir / "SKILL.md").exists():
                 continue
             try:
-                contract = Agently.skills.install(skill_dir, trust_level="local", update=True)
+                contract = Agently.skills_executor.install_skills(skill_dir, trust_level="local", update=True)
             except Exception as error:
                 installed[f"{ group }:{ skill_dir.name }"] = {
                     "skill_id": "",
@@ -461,39 +469,28 @@ def _create_agent():
 
 def _run_case(case: ComboCase, candidate_skill_ids: list[str]) -> dict[str, Any]:
     agent = _create_agent()
-    plan = agent.resolve_skill_plan(case.task, skills=candidate_skill_ids, mode="model_decision", scope="request")
-    agent.use_skills(candidate_skill_ids, mode="model_decision", scope="request")
-    result = (
-        agent.input(
-            {
-                "task": case.task,
-                "case_id": case.case_id,
-                "candidate_skill_ids": candidate_skill_ids,
-                "diagnostic_instruction": (
-                    "Return the orchestration you would execute from the disclosed skills. "
-                    "Do not add implementation hints that are not already in the skills. "
-                    "Do not claim files or external writes are complete; describe the execution plan."
-                ),
-            }
-        )
-        .output(
-            {
-                "selected_skill_ids": [(str, "Skill ids selected for this task.", True)],
-                "entry_skill_id": (str, "The first selected skill id, or none.", True),
-                "stage_plan": [(str, "Ordered stage. Include skill handoff and dependency notes.", True)],
-                "skill_switches": [(str, "Where execution changes from one skill/capability to another.", True)],
-                "intermediate_artifacts": [(str, "Intermediate artifacts passed between stages.", True)],
-                "external_side_effects": [(str, "External API/MCP/SaaS writes or local command effects.", True)],
-                "approval_gates": [(str, "Human approval gates before side effects.", True)],
-                "fallbacks": [(str, "Fallback, retry, or degraded-mode behavior.", True)],
-                "expected_outputs": [(str, "Final output artifact path or result.", True)],
-                "boundary_notes": [(str, "Skill vs action/tool/API/artifact boundary notes.", True)],
-                "risks": [(str, "Execution risks, missing dependencies, or policy constraints.", True)],
-            }
-        )
-        .start(max_retries=1, raise_ensure_failure=False)
+    execution = agent.run_skills_task(
+        case.task,
+        skills=candidate_skill_ids,
+        mode="model_decision",
+        scope="execution",
+        semantic_outputs=case.expected_outputs,
+        planner_mode="model",
+        planner_max_revisions=2,
     )
-    return {"plan": plan, "result": result}
+    plan = execution.plan
+    result = dict(plan.get("planner_result") or {})
+    result["selected_skill_ids"] = [str(item.get("skill_id")) for item in plan.get("selected_skills", [])]
+    result["stage_plan"] = plan.get("stage_plan", result.get("stage_plan", []))
+    result["skill_switches"] = plan.get("skill_switches", result.get("skill_switches", []))
+    result["intermediate_artifacts"] = plan.get("intermediate_artifacts", result.get("intermediate_artifacts", []))
+    result["external_side_effects"] = plan.get("external_side_effects", result.get("external_side_effects", []))
+    result["approval_gates"] = plan.get("approval_gates", result.get("approval_gates", []))
+    result["fallbacks"] = plan.get("fallbacks", result.get("fallbacks", []))
+    result["expected_outputs"] = plan.get("expected_outputs", result.get("expected_outputs", []))
+    result["boundary_notes"] = plan.get("boundary_notes", result.get("boundary_notes", []))
+    result["risks"] = plan.get("risks", result.get("risks", []))
+    return {"plan": plan, "result": result, "execution": execution.to_dict()}
 
 
 def _flatten_text(value: Any) -> str:
@@ -559,6 +556,27 @@ _OUTPUT_ROLE_ALIASES = {
     "qa_summary": ["qa summary", "test summary", "验收总结"],
 }
 
+_REQUIRED_TERM_ALIASES = {
+    "agent skills": ["agent skills", "skills executor", "skill pack", "技能"],
+    "approval": ["approval", "approve", "confirm", "确认", "批准"],
+    "budget": ["budget", "cost", "expense", "预算", "费用"],
+    "comparison": ["comparison", "compare", "matrix", "对比", "比较"],
+    "console": ["console", "控制台"],
+    "deck": ["deck", "slides", "ppt", "pptx", "汇报", "课件"],
+    "dev server": ["dev server", "development server", "npm run dev", "本地服务"],
+    "earnings": ["earnings", "earnings call", "财报", "业绩会"],
+    "fallback": ["fallback", "retry", "repair", "install", "fail closed", "degrade", "local", "降级", "重试", "修复", "安装", "备选"],
+    "login": ["login", "log in", "sign in", "登录"],
+    "network": ["network", "网络"],
+    "qa": ["qa", "quality", "quality assurance", "质量检查"],
+    "rain": ["rain", "rainy", "weather fallback", "雨天", "下雨"],
+    "risk": ["risk", "风险"],
+    "screenshot": ["screenshot", "screen capture", "截图"],
+    "source": ["source", "citation", "来源", "引用"],
+    "tokyo": ["tokyo", "东京"],
+    "transport": ["transport", "transportation", "transit", "route", "交通", "路线"],
+}
+
 
 def _output_role_and_type(output_name: str) -> tuple[str, str]:
     normalized = _normalize_output_name(output_name)
@@ -586,6 +604,54 @@ def _semantic_output_covered(output_name: str, expected_outputs: list[str], full
     return role_covered and type_covered
 
 
+def _required_term_covered(term: str, full_text: str) -> bool:
+    normalized = term.lower()
+    aliases = _REQUIRED_TERM_ALIASES.get(normalized, [term])
+    text = full_text.lower()
+    return any(alias.lower() in text for alias in aliases)
+
+
+def _semantic_rules(case: ComboCase) -> list[str]:
+    rules = [
+        "The plan selects only candidate skills and uses more than one skill when the task needs multiple capability layers.",
+        "The plan has explicit stages for entry planning, stage switching, intermediate artifact handoff, and final semantic outputs.",
+        "The plan distinguishes Skill guidance from Actions, tools, external APIs, execution environments, and artifact files.",
+        "The plan covers every expected deliverable by role/type semantics; exact filenames are not required.",
+    ]
+    if case.case_id == "education_course_pack":
+        rules.extend([
+            "The plan addresses a B1 adult business English learner and meeting-skill goals.",
+            "The plan includes course planning, lessons, vocabulary, retrieval practice, formative assessment, and progress tracking.",
+            "The plan separates domain teaching skills from docx, pdf, pptx, and xlsx artifact generation skills.",
+        ])
+    elif case.case_id == "stock_research_pack":
+        rules.extend([
+            "The plan covers NVDA, AMD, and AVGO across market data, financials, earnings-call analysis, SEC risk factors, and sources.",
+            "The plan treats price, analyst rating, target price, and filing data as current/external data with API or MCP boundaries.",
+            "The plan includes compliance boundaries: research only, not investment advice, no buy/sell orders.",
+            "The plan includes explicit repair, approval-required, fail-closed, or fallback behavior for missing API keys, MCP tools, or live data.",
+        ])
+    elif case.case_id == "travel_planning_pack":
+        rules.extend([
+            "The plan covers the Tokyo July 2026 family trip with pace, budget, location, transport, dining, and rain-day alternatives.",
+            "The plan blocks Wanderlog or other external itinerary writes until explicit user approval.",
+            "The plan includes explicit repair, approval-required, fail-closed, or fallback local-output behavior if current travel data or external tools are unavailable.",
+        ])
+    elif case.case_id == "research_to_briefing_pack":
+        rules.extend([
+            "The plan covers Agent Skills ecosystem research with sources, comparison analysis, full report, spreadsheet, deck, PDF summary, and QA log.",
+            "The plan treats current ecosystem facts as source-backed research data.",
+            "The plan repairs missing artifact-writer dependencies through controlled Actions or environments before fallback; if a writer still fails, it records explicit fallback or fail-closed behavior.",
+        ])
+    elif case.case_id == "webapp_acceptance_pack":
+        rules.extend([
+            "The plan covers dev server startup, login flow, task creation, SSE check, screenshots, console logs, network logs, and trace evidence.",
+            "The plan separates browser/playwright/local command execution from Skill guidance and document report generation.",
+            "The plan repairs missing local dependencies through controlled install-capable Actions or environments before fallback; failing server startup or blocked browser automation has explicit retry, approval-required, fail-closed, or fallback behavior.",
+        ])
+    return rules
+
+
 def _evaluate_case(case: ComboCase, candidate_skill_ids: list[str], result: dict[str, Any]) -> dict[str, Any]:
     selected_skill_ids = [str(item) for item in result.get("selected_skill_ids") or [] if str(item).strip()]
     stage_plan = result.get("stage_plan") or []
@@ -595,6 +661,10 @@ def _evaluate_case(case: ComboCase, candidate_skill_ids: list[str], result: dict
     output_coverage = {}
     for output_name in case.expected_outputs:
         output_coverage[output_name] = _semantic_output_covered(output_name, expected_outputs, full_text)
+    required_term_coverage = {
+        term: _required_term_covered(term, full_text)
+        for term in case.required_terms
+    }
 
     checks = {
         "has_candidates": bool(candidate_skill_ids),
@@ -605,7 +675,7 @@ def _evaluate_case(case: ComboCase, candidate_skill_ids: list[str], result: dict
         "records_intermediate_artifacts": bool(result.get("intermediate_artifacts")),
         "records_boundaries": _contains_any(full_text, ["skill", "action", "tool", "api", "mcp", "artifact"]),
         "covers_expected_outputs": all(output_coverage.values()),
-        "covers_required_terms": all(term.lower() in full_text.lower() for term in case.required_terms),
+        "covers_required_terms": all(required_term_coverage.values()),
     }
     if case.requires_approval_boundary:
         checks["approval_before_side_effect"] = _contains_any(
@@ -614,7 +684,8 @@ def _evaluate_case(case: ComboCase, candidate_skill_ids: list[str], result: dict
         )
     if case.requires_fallback:
         checks["has_fallback_or_degraded_mode"] = bool(result.get("fallbacks")) and _contains_any(
-            _flatten_text(result.get("fallbacks")), ["fallback", "retry", "degrade", "skip", "local", "降级", "重试"]
+            _flatten_text(result.get("fallbacks")),
+            ["fallback", "fall back", "retry", "repair", "install", "fail closed", "approval", "degrade", "skip", "local", "降级", "重试", "修复", "安装"],
         )
     if case.requires_current_data_boundary:
         checks["flags_current_data_dependency"] = _contains_any(
@@ -637,8 +708,55 @@ def _evaluate_case(case: ComboCase, candidate_skill_ids: list[str], result: dict
         "diagnostic_result": "pass" if all(checks.values()) else "fail",
         "checks": checks,
         "output_coverage": output_coverage,
+        "required_term_coverage": required_term_coverage,
         "selected_skill_ids": selected_skill_ids,
     }
+
+
+def _judge_output_schema() -> dict[str, Any]:
+    return {
+        "case_id": (str, "Case id being judged.", True),
+        "rule_results": [({
+            "rule_id": (str, "Stable rule identifier such as R1.", True),
+            "evidence": [(str, "Short evidence from the plan or execution snapshot.", True)],
+            "missing_or_weak_points": [(str, "Missing or weak points, empty when none.", False)],
+            "reason": (str, "Concise rationale for this rule judgment, not verbose hidden reasoning.", True),
+            "passed": (bool, "Final boolean judgment for this rule. Keep this field last in each rule item.", True),
+        }, "Per-rule semantic judgment. Evidence and reason must come before the final boolean.", True)],
+        "overall_reason": (str, "Concise rationale that summarizes the rule judgments.", True),
+        "passes": (bool, "Final benchmark judgment. True only when every required rule passes. Keep this field last.", True),
+    }
+
+
+def _judge_case_with_model(
+    case: ComboCase,
+    candidate_skill_ids: list[str],
+    outcome: dict[str, Any],
+    deterministic_evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    judge = Agently.create_agent("skills-benchmark-judge")
+    rules = _semantic_rules(case)
+    return judge.input({
+        "case_id": case.case_id,
+        "task": case.task,
+        "candidate_skill_ids": candidate_skill_ids,
+        "expected_outputs": case.expected_outputs,
+        "semantic_rules": [
+            {"rule_id": f"R{ index }", "rule": rule}
+            for index, rule in enumerate(rules, start=1)
+        ],
+        "deterministic_evaluation": deterministic_evaluation,
+        "execution_plan": outcome["result"],
+        "execution_snapshot": outcome.get("execution"),
+    }).instruct(
+        "You are the content-level judge for a Skills Executor realcase benchmark. "
+        "Evaluate whether the execution plan satisfies the business rules at the plan/contract layer. "
+        "Do not require physical docx/pdf/pptx/xlsx files to exist unless a rule explicitly asks for already-written files. "
+        "Do not reward exact wording; judge semantic coverage. "
+        "Do not pass a rule just because a deterministic check passed; cite concrete evidence from the plan or snapshot. "
+        "For output-control quality, produce supporting evidence and concise rationale before each final boolean field, "
+        "and put the overall passes field last."
+    ).output(_judge_output_schema()).start()
 
 
 def main():
@@ -690,15 +808,27 @@ def main():
 
         outcome = _run_case(case, candidate_skill_ids)
         evaluation = _evaluate_case(case, candidate_skill_ids, outcome["result"])
+        model_judge = _judge_case_with_model(case, candidate_skill_ids, outcome, evaluation)
+        model_judge_passed = bool(model_judge.get("passes")) and all(
+            bool(item.get("passed")) for item in model_judge.get("rule_results", [])
+        )
         print(f"diagnostic_result={ evaluation['diagnostic_result'] }")
+        print(f"model_judge_passed={ model_judge_passed }")
         print(f"selected_skill_ids={ evaluation['selected_skill_ids'] }")
         print("[CHECKS]")
         pprint(evaluation["checks"])
+        print("[MODEL_JUDGE]")
+        pprint({
+            "passes": model_judge.get("passes"),
+            "overall_reason": model_judge.get("overall_reason"),
+        })
         report["cases"][case.case_id] = {
             "candidate_skill_ids": candidate_skill_ids,
             "plan": outcome["plan"],
             "model_result": outcome["result"],
+            "execution": outcome.get("execution"),
             "evaluation": evaluation,
+            "model_judge": model_judge,
         }
 
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)

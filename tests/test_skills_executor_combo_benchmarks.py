@@ -10,7 +10,7 @@ from dotenv import find_dotenv, load_dotenv
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BENCHMARK_PATH = ROOT / "examples" / "skills_executor" / "combo_skillpack_diagnostics.py"
+BENCHMARK_PATH = ROOT / "examples" / "skills_executor" / "05_combo_skillpack_diagnostics.py"
 
 
 def _load_benchmark_module():
@@ -108,14 +108,22 @@ def test_deepseek_combo_skillpack_benchmark_all_cases(tmp_path):
         candidate_skill_ids = benchmark._candidate_skill_ids(case, installed)
         outcome = benchmark._run_case(case, candidate_skill_ids)
         evaluation = benchmark._evaluate_case(case, candidate_skill_ids, outcome["result"])
+        model_judge = benchmark._judge_case_with_model(case, candidate_skill_ids, outcome, evaluation)
+        judge_passed = bool(model_judge.get("passes")) and all(
+            bool(item.get("passed")) for item in model_judge.get("rule_results", [])
+        )
         report["cases"][case.case_id] = {
             "candidate_skill_ids": candidate_skill_ids,
             "plan": outcome["plan"],
             "model_result": outcome["result"],
+            "execution": outcome.get("execution"),
             "evaluation": evaluation,
+            "model_judge": model_judge,
         }
         if evaluation["diagnostic_result"] != "pass":
             failures[case.case_id] = evaluation
+        elif not judge_passed:
+            failures[case.case_id] = model_judge
 
     benchmark.REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     benchmark.REPORT_PATH.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")

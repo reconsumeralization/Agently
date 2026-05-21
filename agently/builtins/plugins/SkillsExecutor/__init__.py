@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .core import (
+from .facade import (
+    AgentlySkillsExecutor,
     GlobalSkillsFacade,
+)
+from .mixin import AgentSkillsMixin
+from .AgentlySkillsExecutor import (
     SkillError,
     SkillExecution,
     SkillExecutionError,
+    SkillExecutor,
     SkillInstallError,
     SkillNormalizationError,
     SkillPlanner,
@@ -24,10 +29,13 @@ from .core import (
 )
 
 __all__ = [
+    "AgentSkillsMixin",
+    "AgentlySkillsExecutor",
     "GlobalSkillsFacade",
     "SkillError",
     "SkillExecution",
     "SkillExecutionError",
+    "SkillExecutor",
     "SkillInstallError",
     "SkillNormalizationError",
     "SkillPlanner",

@@ -92,8 +92,20 @@ class SkillContract(TypedDict, total=False):
     metadata: dict[str, Any]
 
 
+class SkillsPackRecord(TypedDict, total=False):
+    skills_pack_id: str
+    name: str
+    source: str
+    source_type: str
+    installed_skills: list[str]
+    failed_skills: list[dict[str, Any]]
+    status: str
+
+
 class SkillPlanSelection(TypedDict, total=False):
     skill_id: str
+    skills_pack_id: str
+    skills_pack_name: str
     version: str
     display_name: str
     scope: SkillScope
@@ -116,7 +128,9 @@ class SkillExecutionPlan(TypedDict, total=False):
     status: str
     task_summary: str
     selected_skills: list[SkillPlanSelection]
+    selected_skills_packs: list[SkillsPackRecord]
     rejected_skills: list[SkillPlanRejection]
+    rejected_skills_packs: list[dict[str, Any]]
     composed_stage_graph: list[dict[str, Any]]
     dynamic_task_graph: dict[str, Any]
     prompt_bindings: list[dict[str, Any]]
@@ -132,6 +146,17 @@ class SkillExecutionPlan(TypedDict, total=False):
     fallback_policy: dict[str, Any]
     cleanup_policy: dict[str, Any]
     diagnostics: list[dict[str, Any]]
+    planner_result: dict[str, Any]
+    planner_evaluation: dict[str, Any]
+    stage_plan: list[str]
+    skill_switches: list[str]
+    intermediate_artifacts: list[str]
+    external_side_effects: list[str]
+    approval_gates: list[str]
+    fallbacks: list[str]
+    expected_outputs: list[str]
+    boundary_notes: list[str]
+    risks: list[str]
 
 
 class SkillExecutionDict(TypedDict, total=False):

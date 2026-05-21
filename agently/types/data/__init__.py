@@ -124,6 +124,7 @@ from .skill import (
     SkillExecutionPlan,
     SkillExecutionStatus,
     SkillMode,
+    SkillsPackRecord,
     SkillPlanRejection,
     SkillPlanSelection,
     SkillScope,

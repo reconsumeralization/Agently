@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from agently.core import BaseAgent
-from agently.skills.core import AgentSkillsMixin
+from agently.builtins.plugins.SkillsExecutor import AgentSkillsMixin
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -28,9 +28,9 @@ class SkillsExtension(AgentSkillsMixin, BaseAgent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        from agently.base import skills as global_skills
+        from agently.base import skills_executor
 
-        self._init_skills(global_skills.registry)
+        self._init_skills(skills_executor.registry)
 
         request_prefixes = self.extension_handlers.get("request_prefixes", [])
         if not isinstance(request_prefixes, list):
