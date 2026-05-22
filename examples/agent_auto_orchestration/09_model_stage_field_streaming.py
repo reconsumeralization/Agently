@@ -3,6 +3,13 @@
 Run:
     python examples/agent_auto_orchestration/09_model_stage_field_streaming.py
 
+Expected key output from a real run on 2026-05-22:
+    route: skills
+    stages completed: ['generate_positioning', 'generate_risks', 'save_press_kit']
+    positioning length: 2,298 chars
+    risks length: 2,787 chars
+    press kit saved: /Users/moxin/.agently_press_kits/devflow-code-review-ai_20260522_152158.md
+
 Environment:
     DEEPSEEK_API_KEY in the shell or .env file.
     Set DYNAMIC_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
