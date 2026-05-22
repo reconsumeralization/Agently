@@ -739,11 +739,6 @@ class AgentlyPromptGenerator(PromptGenerator):
                     desc = field_type_schema[1] if len(field_type_schema) > 1 else ""
                     third_value = field_type_schema[2] if len(field_type_schema) > 2 else None
                     ensure_marker = self._is_ensure_marker(third_value)
-                    if len(field_type_schema) > 2 and not ensure_marker:
-                        raise TypeError(
-                            f"Agently output leaf tuple third slot only supports ensure markers (True/1), "
-                            f"got {third_value!r} for field '{field_name}'."
-                        )
                     field_required = strict_output or ensure_marker
                     if field_required:
                         default_value = ...
@@ -917,10 +912,6 @@ class AgentlyPromptGenerator(PromptGenerator):
                         third_value = output_prompt_part[2]
                         if self._is_ensure_marker(third_value):
                             result["$ensure"] = True
-                        else:
-                            raise TypeError(
-                                "Agently output leaf tuple third slot only supports ensure markers (True/1)."
-                            )
                         return result
             else:
                 return list(output_prompt_part)
