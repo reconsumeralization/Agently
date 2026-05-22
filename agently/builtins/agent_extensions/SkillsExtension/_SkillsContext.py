@@ -25,6 +25,8 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -46,8 +48,14 @@ def _ensure_string_list(value: Any) -> list[str]:
 class AgentSkillsRuntimeContext:
     """Agent component adapter passed into SkillsExecutor plugins."""
 
-    def __init__(self, agent: Any):
+    def __init__(
+        self,
+        agent: Any,
+        *,
+        runtime_stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    ):
         self.agent = agent
+        self._runtime_stream_handler = runtime_stream_handler
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         return self.agent.settings.get(key, default)
@@ -129,6 +137,31 @@ class AgentSkillsRuntimeContext:
         result = await request.async_start(max_retries=max(1, max_revisions), raise_ensure_failure=False)
         return dict(result) if isinstance(result, dict) else {}
 
+    async def async_request_model(
+        self,
+        *,
+        prompt: Any,
+        output_schema: Any = None,
+        ensure_keys: list[str] | None = None,
+        max_retries: int = 3,
+        stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
+    ) -> Any:
+        request = self.agent.create_temp_request().input(prompt)
+        if output_schema is not None:
+            request = request.output(output_schema)
+        response = request.get_response()
+        if stream_handler is not None:
+            async for item in response.get_async_generator(type="instant"):
+                maybe_awaitable = stream_handler(item)
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+        result = await response.async_get_data(
+            ensure_keys=ensure_keys,
+            max_retries=max(1, max_retries),
+            raise_ensure_failure=False,
+        )
+        return result
+
     async def async_execute_action(
         self,
         action_id: str,
@@ -144,6 +177,17 @@ class AgentSkillsRuntimeContext:
             source_protocol=source_protocol,
         )
 
+    async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
+        if self._runtime_stream_handler is None:
+            return
+        maybe_awaitable = self._runtime_stream_handler(item)
+        if inspect.isawaitable(maybe_awaitable):
+            await maybe_awaitable
 
-def create_agent_skills_runtime_context(agent: Any) -> SkillsRuntimeContext:
-    return AgentSkillsRuntimeContext(agent)
+
+def create_agent_skills_runtime_context(
+    agent: Any,
+    *,
+    runtime_stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+) -> SkillsRuntimeContext:
+    return AgentSkillsRuntimeContext(agent, runtime_stream_handler=runtime_stream_handler)

@@ -68,7 +68,14 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     )
     if not plan.get("selected_skills"):
         if mode == "required" or plan.get("status") in {"blocked", "rejected"}:
-            skills_execution = await agent.async_execute_skills_plan(task, plan=plan)
+            async def bridge_runtime_stream(item: dict[str, Any]):
+                await execution.bridge_task_dag_stream_item(item, route="skills")
+
+            skills_execution = await agent.async_execute_skills_plan(
+                task,
+                plan=plan,
+                stream_handler=bridge_runtime_stream,
+            )
             execution.close_snapshot = skills_execution.close_snapshot
             execution.logs = dict(skills_execution.to_dict())
             execution.status = skills_execution.status
@@ -89,9 +96,14 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
             raise_ensure_failure=True,
         )
 
-    skills_execution = await agent.async_execute_skills_plan(task, plan=plan)
-    for item in skills_execution.runtime_stream:
+    async def bridge_runtime_stream(item: dict[str, Any]):
         await execution.bridge_task_dag_stream_item(item, route="skills")
+
+    skills_execution = await agent.async_execute_skills_plan(
+        task,
+        plan=plan,
+        stream_handler=bridge_runtime_stream,
+    )
     for log in skills_execution.skill_logs:
         await execution.emit_stream(
             f"skills.stages.{ log.get('stage_id', 'stage') }",

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -71,6 +72,16 @@ class SkillsExecutionContext(Protocol):
 
     def action_available(self, action_id: str) -> bool: ...
 
+    async def async_request_model(
+        self,
+        *,
+        prompt: Any,
+        output_schema: Any = None,
+        ensure_keys: list[str] | None = None,
+        max_retries: int = 3,
+        stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
+    ) -> Any: ...
+
     async def async_execute_action(
         self,
         action_id: str,
@@ -79,6 +90,8 @@ class SkillsExecutionContext(Protocol):
         purpose: str,
         source_protocol: str,
     ) -> ActionResult: ...
+
+    async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None: ...
 
 
 @runtime_checkable
