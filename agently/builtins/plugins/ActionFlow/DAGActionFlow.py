@@ -1,0 +1,477 @@
+# Copyright 2023-2026 AgentEra(Agently.Tech)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""ActionFlow plugin using TaskDAGExecutor for the execute phase.
+
+Replaces the serial ReAct execution loop with DAG-based scheduling:
+- PLAN phase: same planning_handler call as TriggerFlowActionFlow
+- EXECUTE phase: builds a TaskDAG from action_calls, executes via TaskDAGExecutor
+  where each node handler calls action.async_execute_action() directly.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Any
+
+from agently.core.RuntimeContext import bind_runtime_context, resolve_parent_run_context
+
+if TYPE_CHECKING:
+    from agently.core import Prompt
+    from agently.types.data import ActionResult
+    from agently.utils import Settings
+
+
+class DAGActionFlow:
+    name = "DAGActionFlow"
+    DEFAULT_SETTINGS = {}
+
+    def __init__(self, *, plugin_manager, settings: "Settings"):
+        self.plugin_manager = plugin_manager
+        self.settings = settings
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    async def async_run(
+        self,
+        *,
+        action,
+        prompt: "Prompt",
+        settings: "Settings",
+        action_list: list[dict[str, Any]],
+        agent_name: str = "Manual",
+        parent_run_context=None,
+        planning_handler=None,
+        execution_handler=None,
+        max_rounds: int | None = None,
+        concurrency: int | None = None,
+        timeout: float | None = None,
+        planning_protocol: str | None = None,
+    ) -> list["ActionResult"]:
+        from agently.base import async_emit_runtime
+        from agently.core.TaskDAGExecutor import TaskDAGExecutor
+        from agently.core.TriggerFlow import TriggerFlow
+        from agently.types.data import ObservationEvent, RunContext
+        from agently.types.data.task_dag import TaskDAGNode
+
+        if planning_handler is None:
+            raise RuntimeError("[Agently DAGActionFlow] planning_handler is required.")
+
+        parent_run_context = resolve_parent_run_context(parent_run_context)
+        if len(action_list) == 0:
+            return []
+
+        if max_rounds is None:
+            max_rounds = action.action_settings.get("loop.max_rounds", action.tool_settings.get("loop.max_rounds", 5))
+        if concurrency is None:
+            concurrency = action.action_settings.get(
+                "loop.concurrency",
+                action.tool_settings.get("loop.concurrency", None),
+            )
+        if timeout is None:
+            timeout = action.action_settings.get("loop.timeout", action.tool_settings.get("loop.timeout", None))
+
+        if not isinstance(max_rounds, int) or max_rounds < 0:
+            max_rounds = 5
+        if not isinstance(concurrency, int) or concurrency <= 0:
+            concurrency = None
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            timeout = None
+
+        action_loop_run = RunContext.create(
+            run_kind="action_loop",
+            parent=parent_run_context,
+            agent_name=agent_name,
+            session_id=str(settings.get("runtime.session_id")) if settings.get("runtime.session_id", None) else None,
+            meta={
+                "action_count": len(action_list),
+                "tool_count": len(action_list),
+                "action_type": "action_loop",
+                "compat_event_family": "tool",
+            },
+        )
+
+        async def emit_action_loop_event(
+            event_type: str,
+            *,
+            message: str,
+            payload: dict[str, Any],
+            level: str = "INFO",
+            error: BaseException | None = None,
+        ):
+            from agently.types.data import ErrorInfo
+
+            primary_event = ObservationEvent(
+                event_type=event_type,
+                source="DAGActionFlow",
+                level=level,  # type: ignore[arg-type]
+                message=message,
+                payload=payload,
+                error=ErrorInfo.from_exception(error) if error is not None else None,
+                run=action_loop_run,
+            )
+            await async_emit_runtime(primary_event)
+
+            tool_aliases = {
+                "action.loop_started": "tool.loop_started",
+                "action.plan_ready": "tool.plan_ready",
+                "action.loop_failed": "tool.loop_failed",
+                "action.loop_completed": "tool.loop_completed",
+            }
+            if event_type not in tool_aliases:
+                return
+            await async_emit_runtime(
+                ObservationEvent(
+                    event_type=tool_aliases[event_type],
+                    source=primary_event.source,
+                    level=primary_event.level,
+                    message=message,
+                    payload=primary_event.payload,
+                    error=primary_event.error,
+                    run=primary_event.run,
+                    meta={
+                        "compat_event_alias": True,
+                        "compat_alias_for": primary_event.event_type,
+                        "primary_event_id": primary_event.event_id,
+                        "compat_family": "tool",
+                    },
+                )
+            )
+
+        with bind_runtime_context(
+            parent_run_context=action_loop_run,
+            tool_phase_run_context=action_loop_run,
+            settings=settings,
+        ):
+            await emit_action_loop_event(
+                "action.loop_started",
+                message=f"Action loop started for agent '{agent_name}'.",
+                payload={
+                    "agent_name": agent_name,
+                    "action_count": len(action_list),
+                    "tool_count": len(action_list),
+                    "planning_protocol": action.action_runtime.resolve_planning_protocol(settings, planning_protocol),
+                },
+            )
+
+        flow = TriggerFlow(name=f"dag-action-loop-{agent_name}")
+
+        async def initialize_loop(data):
+            data.set_state("done_plans", [])
+            data.set_state("last_round_records", [])
+            data.set_state("round_index", 0)
+            await data.async_emit("PLAN", None)
+            return None
+
+        async def plan_step(data):
+            round_index = data.get_state("round_index", 0)
+            if not isinstance(round_index, int):
+                round_index = 0
+            done_plans = data.get_state("done_plans", [])
+            if not isinstance(done_plans, list):
+                done_plans = []
+            last_round_records = data.get_state("last_round_records", [])
+            if not isinstance(last_round_records, list):
+                last_round_records = []
+            model_visible_done_plans = action.to_model_visible_records(done_plans)
+            model_visible_last_round_records = action.to_model_visible_records(last_round_records)
+            visible_action_list = action._with_action_artifact_recall_action(
+                action_list,
+                model_visible_last_round_records or model_visible_done_plans,
+            )
+
+            decision = action._normalize_action_decision(
+                await planning_handler(
+                    {
+                        "prompt": prompt,
+                        "settings": settings,
+                        "agent_name": agent_name,
+                        "round_index": round_index,
+                        "max_rounds": max_rounds,
+                        "done_plans": model_visible_done_plans,
+                        "last_round_records": model_visible_last_round_records,
+                        "parent_run_context": parent_run_context,
+                        "action": action,
+                        "runtime": action.action_runtime,
+                    },
+                    {
+                        "action_list": visible_action_list,
+                        "planning_protocol": planning_protocol,
+                    },
+                )
+            )
+
+            await emit_action_loop_event(
+                "action.plan_ready",
+                message=f"Action plan ready for round {round_index}.",
+                payload={
+                    "agent_name": agent_name,
+                    "round_index": round_index,
+                    "decision": decision,
+                },
+            )
+            if action._should_continue(decision, round_index=round_index, max_rounds=max_rounds):
+                await data.async_emit("EXECUTE", decision.get("action_calls", []))
+            else:
+                await data.async_emit("DONE", done_plans)
+            return decision
+
+        async def execute_step_via_dag(data):
+            action_calls = data.value if isinstance(data.value, list) else []
+            round_index = data.get_state("round_index", 0)
+            if not isinstance(round_index, int):
+                round_index = 0
+            done_plans = data.get_state("done_plans", [])
+            if not isinstance(done_plans, list):
+                done_plans = []
+
+            if len(action_calls) == 0:
+                await data.async_emit("PLAN", None)
+                return []
+
+            # Build DAG: each action_call becomes an independent node.
+            # Future: model-generated depends_on relationships will create edges.
+            nodes: list[dict[str, Any]] = []
+            for command_index, command in enumerate(action_calls):
+                action_id = str(command.get("action_id", command.get("tool_name", "unknown")))
+                nodes.append({
+                    "id": f"action_{round_index}_{command_index}_{action_id}",
+                    "kind": "task",
+                    "purpose": str(command.get("purpose", f"action_call_{command_index + 1}")),
+                    "inputs": {
+                        "action_id": action_id,
+                        "kwargs": command.get("action_input", command.get("tool_kwargs", {})),
+                        "command": command,
+                    },
+                    "depends_on": [],
+                })
+
+                # Emit per-action started events
+                action_run = action_loop_run.create_child(
+                    run_kind="action",
+                    meta={
+                        "action_type": "tool",
+                        "action_name": action_id,
+                        "round_index": round_index,
+                        "command_index": command_index,
+                    },
+                )
+                await async_emit_runtime(
+                    {
+                        "event_type": "action.started",
+                        "source": "DAGActionFlow",
+                        "message": f"Action '{action_id}' started.",
+                        "payload": {
+                            "agent_name": agent_name,
+                            "round_index": round_index,
+                            "command_index": command_index,
+                            "action_type": "tool",
+                            "action_name": action_id,
+                            "command": command,
+                        },
+                        "run": action_run,
+                    }
+                )
+
+            # Build resolver: map each task_id to a handler that calls the action
+            resolver: dict[str, Any] = {}
+            for command_index, command in enumerate(action_calls):
+                action_id = str(command.get("action_id", command.get("tool_name", "")))
+                task_id = f"action_{round_index}_{command_index}_{action_id}"
+                resolver[task_id] = _make_dag_node_handler(
+                    action=action,
+                    action_id=action_id,
+                    action_call=command,
+                    command_index=command_index,
+                    round_index=round_index,
+                    agent_name=agent_name,
+                    action_loop_run=action_loop_run,
+                )
+
+            graph = {
+                "graph_id": f"dag-action-round-{round_index}",
+                "tasks": nodes,
+                "task_schema_version": "task_dag/v1",
+            }
+
+            dag_executor = TaskDAGExecutor(resolver=resolver, name=f"dag-action-exec-{agent_name}-round-{round_index}")
+            result = await dag_executor.async_run(graph, {"round_index": round_index}, timeout=timeout, concurrency=concurrency)
+
+            # Extract per-task results and collect them
+            task_results: list[dict[str, Any]] = []
+            for command_index, command in enumerate(action_calls):
+                action_id = str(command.get("action_id", command.get("tool_name", "")))
+                task_id = f"action_{round_index}_{command_index}_{action_id}"
+                task_result = result.get(task_id, {})
+                if isinstance(task_result, dict):
+                    task_results.append(task_result)
+                else:
+                    task_results.append({
+                        "ok": False,
+                        "status": "error",
+                        "action_id": action_id,
+                        "error": str(task_result),
+                    })
+
+            # Normalize and finalize records
+            records = action._normalize_execution_records(task_results, action_calls)
+
+            for record_index, record in enumerate(records):
+                action_id = record.get("action_id", record.get("tool_name", "unknown"))
+                success = bool(record.get("success"))
+                action_run = action_loop_run.create_child(
+                    run_kind="action",
+                    meta={
+                        "action_type": "tool",
+                        "action_name": str(action_id),
+                        "round_index": round_index,
+                        "command_index": record_index,
+                    },
+                )
+                await async_emit_runtime(
+                    {
+                        "event_type": "action.completed" if success else "action.failed",
+                        "source": "DAGActionFlow",
+                        "level": "INFO" if success else "WARNING",
+                        "message": f"Action '{action_id}' {'completed' if success else 'failed'}.",
+                        "payload": {
+                            "agent_name": agent_name,
+                            "round_index": round_index,
+                            "record_index": record_index,
+                            "action_type": "tool",
+                            "action_name": str(action_id),
+                            "record": record,
+                        },
+                        "run": action_run,
+                    }
+                )
+
+            done_plans.extend(records)
+            data.set_state("done_plans", done_plans)
+            data.set_state("last_round_records", records)
+            data.set_state("round_index", round_index + 1)
+            await data.async_emit("PLAN", None)
+            return records
+
+        flow.to(initialize_loop)
+        flow.when("PLAN").to(plan_step)
+        flow.when("EXECUTE").to(execute_step_via_dag)
+        flow.when("DONE").to(lambda data: data.value).end()
+
+        execution = flow.create_execution(parent_run_context=action_loop_run)
+        try:
+            with bind_runtime_context(
+                parent_run_context=action_loop_run,
+                tool_phase_run_context=action_loop_run,
+                settings=settings,
+            ):
+                await execution.async_start(wait_for_result=False)
+                result = await execution.async_close(timeout=timeout)
+        except BaseException as error:
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            with bind_runtime_context(
+                parent_run_context=action_loop_run,
+                tool_phase_run_context=action_loop_run,
+                settings=settings,
+            ):
+                await emit_action_loop_event(
+                    "action.loop_failed",
+                    level="ERROR",
+                    message=f"Action loop failed for agent '{agent_name}'.",
+                    payload={"agent_name": agent_name},
+                    error=error,
+                )
+            raise
+        if isinstance(result, dict):
+            result = result.get("$final_result")
+        if not isinstance(result, list):
+            return []
+        normalized = [
+            action._finalize_action_result(action._normalize_execution_record(record, None, index))
+            for index, record in enumerate(result)
+        ]
+        with bind_runtime_context(
+            parent_run_context=action_loop_run,
+            tool_phase_run_context=action_loop_run,
+            settings=settings,
+        ):
+            await emit_action_loop_event(
+                "action.loop_completed",
+                message=f"Action loop completed for agent '{agent_name}'.",
+                payload={
+                    "agent_name": agent_name,
+                    "record_count": len(normalized),
+                },
+            )
+        return normalized
+
+
+def _make_dag_node_handler(
+    *,
+    action,
+    action_id: str,
+    action_call: dict[str, Any],
+    command_index: int,
+    round_index: int,
+    agent_name: str,
+    action_loop_run,
+):
+    """Create a handler for a single action node in the DAG."""
+
+    async def handler(ctx) -> dict[str, Any]:
+        from agently.base import async_emit_runtime
+
+        kwargs = action_call.get("action_input", action_call.get("tool_kwargs", {}))
+        if not isinstance(kwargs, dict):
+            kwargs = {}
+
+        purpose = str(action_call.get("purpose", f"action_call_{command_index + 1}"))
+        source_protocol = str(action_call.get("source_protocol", "dag_flow"))
+
+        try:
+            result = await action.async_execute_action(
+                action_id,
+                kwargs,
+                purpose=purpose,
+                source_protocol=source_protocol,
+                todo_suggestion=str(action_call.get("todo_suggestion", action_call.get("next", ""))),
+                next_value=str(action_call.get("todo_suggestion", action_call.get("next", ""))),
+            )
+        except asyncio.TimeoutError:
+            result = {
+                "ok": False,
+                "status": "error",
+                "action_id": action_id,
+                "error": f"Action '{action_id}' timed out.",
+                "purpose": purpose,
+            }
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "status": "error",
+                "action_id": action_id,
+                "error": str(exc),
+                "purpose": purpose,
+            }
+
+        return dict(result) if isinstance(result, dict) else {"result": result, "action_id": action_id}
+
+    return handler

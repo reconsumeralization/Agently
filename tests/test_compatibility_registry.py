@@ -60,7 +60,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
 
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
-    assert in_development["target_version"] == "4.1.2.4"
+    assert in_development["target_version"] == "4.1.3"
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "ObservationEvent",

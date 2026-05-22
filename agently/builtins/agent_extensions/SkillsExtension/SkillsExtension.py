@@ -14,33 +14,48 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 
+from agently.core import BaseAgent
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillScope
+from agently.types.plugins import SkillsExecutor
 from agently.utils import FunctionShifter
-
-from .AgentlySkillsExecutor import (
-    SkillExecutor,
-    SkillExecution,
-    SkillPlanner,
-    SkillRegistry,
-    _copy_public,
-    _ensure_dict,
-    _ensure_list,
-    _matches_skills_pack_selector,
+from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
+from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.planner import (
     _matches_selector,
+    _matches_skills_pack_selector,
 )
 
+from ._SkillsContext import create_agent_skills_runtime_context
 
-class AgentSkillsMixin:
-    def _init_skills(self, registry: SkillRegistry):
-        self.skills_registry = registry
+if TYPE_CHECKING:
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecution
+    from agently.core import Prompt
+    from agently.utils import Settings
+
+
+class SkillsExtension(BaseAgent):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        from agently.base import skills_executor
+
+        self.skills_executor = cast(SkillsExecutor, skills_executor)
+
         self.__session_skill_selectors: list[Any] = []
         self.__request_skill_selectors: list[Any] = []
         self.__session_skills_pack_selectors: list[Any] = []
         self.__request_skills_pack_selectors: list[Any] = []
         self.__skill_decision_handler: Callable[..., Any] | None = None
         self.__skill_execution_logs: list[Any] = []
+
+        request_prefixes = self.extension_handlers.get("request_prefixes", [])
+        if not isinstance(request_prefixes, list):
+            request_prefixes = []
+        self.extension_handlers.set("request_prefixes", [self.__request_prefix, *request_prefixes])
+        self.extension_handlers.append("finally", self.__finally)
+
+    # ── User-facing API ─────────────────────────────────────────────────────
 
     def use_skills(
         self,
@@ -84,9 +99,9 @@ class AgentSkillsMixin:
     ) -> SkillExecutionPlan:
         selectors = self._collect_skill_selectors(skills=skills, mode=mode)
         skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=skills_packs, mode=mode)
-        planner = SkillPlanner(self.skills_registry)
-        return await planner.resolve(
-            agent=self,
+        context = create_agent_skills_runtime_context(self)
+        return await self.skills_executor.async_resolve_plan(
+            context=context,
             task=task,
             skills=selectors,
             skills_packs=skills_pack_selectors,
@@ -132,7 +147,7 @@ class AgentSkillsMixin:
         semantic_outputs: Any = None,
         planner_mode: str = "auto",
         planner_max_revisions: int = 2,
-    ) -> SkillExecution:
+    ) -> "SkillExecution":
         plan = await self.async_resolve_skills_plan(
             task,
             skills=skills,
@@ -143,7 +158,7 @@ class AgentSkillsMixin:
             planner_mode=planner_mode,
             planner_max_revisions=planner_max_revisions,
         )
-        execution = await SkillExecutor(self.skills_registry).execute(agent=self, task=task, plan=plan)
+        execution = await self.async_execute_skills_plan(task, plan=plan)
         self.__skill_execution_logs.append(execution.to_dict())
         return execution
 
@@ -158,7 +173,7 @@ class AgentSkillsMixin:
         semantic_outputs: Any = None,
         planner_mode: str = "auto",
         planner_max_revisions: int = 2,
-    ) -> SkillExecution:
+    ) -> "SkillExecution":
         return FunctionShifter.syncify(self.async_run_skills_task)(
             task,
             skills=skills,
@@ -174,8 +189,19 @@ class AgentSkillsMixin:
         self.__skill_decision_handler = handler
         return self
 
+    async def async_execute_skills_plan(
+        self,
+        task: str,
+        *,
+        plan: SkillExecutionPlan,
+    ) -> "SkillExecution":
+        context = create_agent_skills_runtime_context(self)
+        return await self.skills_executor.async_execute_plan(context=context, task=task, plan=plan)
+
     def get_skills_execution_logs(self) -> list[dict[str, Any]]:
         return _copy_public(self.__skill_execution_logs)
+
+    # ── Selector collection ─────────────────────────────────────────────────
 
     def _collect_skill_selectors(self, *, skills: Any, mode: SkillMode) -> list[Any]:
         selectors = []
@@ -195,7 +221,9 @@ class AgentSkillsMixin:
                 selectors.append(_ensure_dict(item).get("selector"))
         return selectors
 
-    async def _apply_skill_cards_to_prompt(self, prompt: Any):
+    # ── Prompt injection ────────────────────────────────────────────────────
+
+    async def _apply_skill_cards_to_prompt(self, prompt: "Prompt"):
         selectors = self._collect_skill_selectors(skills=None, mode="model_decision")
         skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=None, mode="model_decision")
         if not selectors and not skills_pack_selectors:
@@ -205,8 +233,8 @@ class AgentSkillsMixin:
         settings = getattr(self, "settings")
         include_guidance = bool(settings.get("skills.prompt.include_primary_guidance", True))
         max_guidance_chars = int(settings.get("skills.prompt.max_guidance_chars_per_skill", 6000) or 6000)
-        for record in self.skills_registry.list_skills():
-            contract = self.skills_registry.inspect_skills(str(record["skill_id"]))
+        for record in self.skills_executor.list_skills():
+            contract = self.skills_executor.inspect_skills(str(record["skill_id"]))
             if any(_matches_selector(contract, selector) for selector in selectors) or any(
                 _matches_skills_pack_selector(contract, selector) for selector in skills_pack_selectors
             ):
@@ -214,6 +242,19 @@ class AgentSkillsMixin:
                 if include_guidance:
                     guidance.extend(self._collect_prompt_guidance(contract, max_chars=max_guidance_chars))
         if not cards:
+            return
+        prompt_mode = str(settings.get("skills.prompt.mode", settings.get("agent.auto_orchestration.skills_prompt_mode", "route_owned")))
+        if prompt_mode == "route_owned":
+            prompt.append(
+                "info",
+                {
+                    "skill_candidates": cards,
+                    "skill_instruction": (
+                        "These skills are route candidates for Agent auto-orchestration. "
+                        "Do not claim that a Skill was executed unless the selected route provides skill execution logs."
+                    ),
+                },
+            )
             return
         payload = {
             "skill_cards": cards,
@@ -250,3 +291,11 @@ class AgentSkillsMixin:
             )
             break
         return guidance_assets
+
+    # ── Extension handlers ──────────────────────────────────────────────────
+
+    async def __request_prefix(self, prompt: "Prompt", _settings: "Settings"):
+        await self._apply_skill_cards_to_prompt(prompt)
+
+    async def __finally(self, *_):
+        self._clear_request_skill_selectors()

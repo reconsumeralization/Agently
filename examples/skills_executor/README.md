@@ -14,6 +14,7 @@ feature branch does not retain a separate `Agently.skills` compatibility alias.
 | `04_dynamic_todo_triggerflow_realcase.py` | Diagnostic realcase: expose `Agently-Skills` guidance to DeepSeek and check whether it can generate a runnable dynamic TriggerFlow Todo-DAG executor without prompt-level API hints or repair rounds. |
 | `05_combo_skillpack_diagnostics.py` | Combo Skill Pack diagnostics for realcase orchestration: education course pack, stock research pack, travel planning pack, research-to-briefing pack, and webapp acceptance pack. |
 | `06_executable_education_course_pack.py` | Real execution benchmark for the education course pack: plan with external Skill Packs, install missing local artifact-writer dependencies through a Skills Executor action stage, generate real docx/pdf/pptx/xlsx/json artifacts, and judge content semantically. |
+| `07_agently_skills_availability_check.py` | Developer pre-flight: install the local `../Agently-Skills` active catalog and verify explicit-selection eligibility without presenting it as model-owned routing evidence. |
 
 ## Recommended Reading Order
 
@@ -29,6 +30,9 @@ feature branch does not retain a separate `Agently.skills` compatibility alias.
    and exits 0 by default; pass `--strict-exit` when using it as a CI gate.
 5. Run `05_combo_skillpack_diagnostics.py` and
    `06_executable_education_course_pack.py` as benchmark/acceptance examples.
+6. Run `07_agently_skills_availability_check.py` only as a local registry and
+   eligibility pre-flight for `../Agently-Skills`; it does not validate
+   auto-orchestration route choice.
 
 ## Minimal Business Shape
 
@@ -162,6 +166,7 @@ python examples/skills_executor/02_deepseek_external_skill_cards.py
 python examples/skills_executor/04_dynamic_todo_triggerflow_realcase.py
 python examples/skills_executor/05_combo_skillpack_diagnostics.py --fetch-missing
 python examples/skills_executor/06_executable_education_course_pack.py
+python examples/skills_executor/07_agently_skills_availability_check.py
 ```
 
 Fast source/install benchmark, no model call:

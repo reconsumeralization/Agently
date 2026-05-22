@@ -70,6 +70,7 @@ class BaseAgent:
         )
         self.request_prompt = self.request.prompt
         self.prompt = self.request_prompt
+        self._dynamic_task_candidates: list[dict[str, Any]] = []
 
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
@@ -138,6 +139,48 @@ class BaseAgent:
             output_schema=output_schema,
             ensure_keys=ensure_keys,
         )
+
+    def use_dynamic_task(
+        self,
+        *,
+        mode: Literal["auto", "submitted"] = "auto",
+        plan: "TaskDAG | Mapping[str, Any] | None" = None,
+        planner: Any = None,
+        model: Any = None,
+        actions: Any = None,
+        skills: Any = None,
+        handlers: Mapping[str, Any] | None = None,
+        name: str | None = None,
+        max_tasks: int | None = None,
+        output_schema: Any = None,
+        ensure_keys: Any = None,
+        graph_input: Any = None,
+        timeout: float | None = None,
+        max_retries: int = 3,
+    ):
+        if mode not in {"auto", "submitted"}:
+            raise ValueError("Dynamic Task mode must be one of: 'auto', 'submitted'.")
+        if mode == "submitted" and plan is None:
+            raise ValueError("use_dynamic_task(mode='submitted') requires plan=.")
+        self._dynamic_task_candidates.append(
+            {
+                "mode": mode,
+                "plan": plan,
+                "planner": planner,
+                "model": model,
+                "actions": actions,
+                "skills": skills,
+                "handlers": handlers,
+                "name": name,
+                "max_tasks": max_tasks,
+                "output_schema": output_schema,
+                "ensure_keys": ensure_keys,
+                "graph_input": graph_input,
+                "timeout": timeout,
+                "max_retries": max_retries,
+            }
+        )
+        return self
 
     def _create_agent_turn_run_context(
         self,
@@ -339,7 +382,7 @@ class BaseAgent:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ):
-        return self.get_data(
+        return self.create_execution(parent_run_context=parent_run_context).get_data(
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
@@ -347,7 +390,6 @@ class BaseAgent:
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
-            parent_run_context=parent_run_context,
         )
 
     async def async_start(
@@ -362,7 +404,7 @@ class BaseAgent:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ):
-        return await self.async_get_data(
+        return await self.create_execution(parent_run_context=parent_run_context).async_get_data(
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
@@ -370,8 +412,13 @@ class BaseAgent:
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
-            parent_run_context=parent_run_context,
         )
+
+    def create_execution(self, *, parent_run_context: "RunContext | None" = None):
+        plugin_name = str(self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator"))
+        plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentOrchestrator", plugin_name))
+        orchestrator = plugin_class(plugin_manager=self.plugin_manager, settings=self.settings)
+        return orchestrator.create_execution(self, parent_run_context=parent_run_context)
 
     def validate(self, handler: "OutputValidateHandler"):
         self.extension_handlers.append("validate_handlers", handler)

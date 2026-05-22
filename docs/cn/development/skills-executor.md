@@ -49,9 +49,22 @@ planner-selected behavior loop 使用。
 ```text
 core/SkillsExecutor.py
   -> active SkillsExecutor plugin
-  -> builtins/plugins/SkillsExecutor/
-  -> builtins/agent_extensions/SkillsExtension.py
+  -> builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/
+       - AgentlySkillsExecutor.py
+       - registry.py
+       - planner.py
+       - executor.py
+  -> types/plugins/SkillsExecutor.py
+       - SkillsExecutor
+       - SkillsPlanningContext / SkillsExecutionContext / SkillsRuntimeContext
+  -> builtins/agent_extensions/SkillsExtension/
+       - SkillsExtension.py
+       - _SkillsContext.py
 ```
+
+plugin 不接收完整 Agent 对象。Agent component 会构造
+`SkillsRuntimeContext` adapter，用于模型规划、settings 读取、action 可用性
+检查和 action 执行。
 
 `Agently.skills_executor` 是这个开发线功能唯一的全局 facade。该功能尚未发布，
 因此不保留 `Agently.skills` 兼容别名。

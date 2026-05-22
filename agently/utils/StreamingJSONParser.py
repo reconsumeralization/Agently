@@ -317,7 +317,7 @@ class StreamingJSONParser:
                     yield StreamingData(
                         path=path,
                         value=current_data,
-                        delta=current_data,
+                        delta=str(current_data),
                         is_complete=False,
                         event_type="delta",
                         full_data=self.current_data,  # Pass the full current_data here

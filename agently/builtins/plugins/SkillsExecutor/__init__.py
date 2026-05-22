@@ -12,32 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .facade import (
-    AgentlySkillsExecutor,
-    GlobalSkillsFacade,
-)
-from .mixin import AgentSkillsMixin
-from .AgentlySkillsExecutor import (
-    SkillError,
-    SkillExecution,
-    SkillExecutionError,
-    SkillExecutor,
-    SkillInstallError,
-    SkillNormalizationError,
-    SkillPlanner,
-    SkillRegistry,
-)
+from .AgentlySkillsExecutor import AgentlySkillsExecutor
+from .AgentlySkillsExecutor.modules.errors import SkillError, SkillExecutionError, SkillInstallError, SkillNormalizationError
+from .AgentlySkillsExecutor.modules.executor import SkillExecution
 
 __all__ = [
-    "AgentSkillsMixin",
     "AgentlySkillsExecutor",
-    "GlobalSkillsFacade",
     "SkillError",
     "SkillExecution",
     "SkillExecutionError",
-    "SkillExecutor",
     "SkillInstallError",
     "SkillNormalizationError",
-    "SkillPlanner",
-    "SkillRegistry",
 ]

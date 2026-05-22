@@ -2,7 +2,7 @@
 
 Suggested reading order:
 
-1. [Get Started](start/): installation, model setup, async-first usage, and project layout.
+1. [Get Started](start/): installation, model setup, async-first usage, Agent auto-orchestration, and project layout.
 2. [Requests](requests/): prompt slots, structured output, validation, response reading, and Session.
 3. [Actions](actions/): Action Runtime, tool compatibility, MCP, and sandbox-backed actions.
 4. [Dynamic Task](dynamic-task/): planner, validator, resolver, and executor path for typed task DAGs.

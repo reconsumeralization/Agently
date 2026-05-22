@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
-    from agently.types.plugins import SkillsExecutorPlugin
     from agently.utils import Settings
 
 

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def _load_default_plugins(plugin_manager: "PluginManager"):
-    from agently.builtins.plugins.ActionFlow import TriggerFlowActionFlow
+    from agently.builtins.plugins.ActionFlow import DAGActionFlow, TriggerFlowActionFlow
     from agently.builtins.plugins.ActionRuntime import AgentlyActionRuntime
     from agently.builtins.plugins.ActionExecutor import (
         BashSandboxActionExecutor,
@@ -47,6 +47,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
 
     plugin_manager.register("ActionRuntime", AgentlyActionRuntime)
     plugin_manager.register("ActionFlow", TriggerFlowActionFlow)
+    plugin_manager.register("ActionFlow", DAGActionFlow, activate=False)
     plugin_manager.register("ActionExecutor", LocalFunctionActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", MCPActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", PythonSandboxActionExecutor, activate=False)
@@ -76,9 +77,13 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
 
     plugin_manager.register("TaskDAGPlanner", AgentlyTaskDAGPlanner)
 
-    from agently.builtins.plugins.SkillsExecutor.facade import AgentlySkillsExecutor
+    from agently.builtins.plugins.SkillsExecutor import AgentlySkillsExecutor
 
     plugin_manager.register("SkillsExecutor", AgentlySkillsExecutor)
+
+    from agently.builtins.plugins.AgentOrchestrator import AgentlyAgentOrchestrator
+
+    plugin_manager.register("AgentOrchestrator", AgentlyAgentOrchestrator)
 
     from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
         OpenAICompatible,

@@ -32,7 +32,7 @@ Default plugin wiring lives in [`agently/_default_init.py`](../../../agently/_de
 - `ActionExecutor`: local function, MCP, Search/Browse, Python/Bash sandbox, Node.js, SQLite, Docker
 - `ExecutionEnvironmentProvider`: MCP, Python, Bash, Node.js, Docker, Browser, SQLite
 
-The public façade is [`agently/core/Action.py`](../../../agently/core/Action.py). Agent-level mounting lives in [`agently/builtins/agent_extensions/ActionExtension.py`](../../../agently/builtins/agent_extensions/ActionExtension.py). The runnable examples are grouped under [`examples/action_runtime/README.md`](../../../examples/action_runtime/README.md), with model-backed cookbook patterns under [`examples/cookbook/`](../../../examples/cookbook/).
+The public facade is [`agently/core/Action/`](../../../agently/core/Action/). Agent-level mounting lives in [`agently/builtins/agent_extensions/ActionExtension.py`](../../../agently/builtins/agent_extensions/ActionExtension.py). The runnable examples are grouped under [`examples/action_runtime/README.md`](../../../examples/action_runtime/README.md), with model-backed cookbook patterns under [`examples/cookbook/`](../../../examples/cookbook/).
 
 ## Reading choices
 

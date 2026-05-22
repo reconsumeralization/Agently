@@ -52,9 +52,22 @@ The retained framework layering is:
 ```text
 core/SkillsExecutor.py
   -> active SkillsExecutor plugin
-  -> builtins/plugins/SkillsExecutor/
-  -> builtins/agent_extensions/SkillsExtension.py
+  -> builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/
+       - AgentlySkillsExecutor.py
+       - registry.py
+       - planner.py
+       - executor.py
+  -> types/plugins/SkillsExecutor.py
+       - SkillsExecutor
+       - SkillsPlanningContext / SkillsExecutionContext / SkillsRuntimeContext
+  -> builtins/agent_extensions/SkillsExtension/
+       - SkillsExtension.py
+       - _SkillsContext.py
 ```
+
+The plugin does not receive the full Agent object. The Agent component builds a
+`SkillsRuntimeContext` adapter for model planning, settings lookup, action
+availability, and action execution.
 
 `Agently.skills_executor` is the only global facade for this development-line
 feature. The feature has not shipped yet, so no `Agently.skills` compatibility

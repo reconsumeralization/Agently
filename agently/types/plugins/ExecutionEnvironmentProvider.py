@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .base import AgentlyPlugin
 
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     )
 
 
+@runtime_checkable
 class ExecutionEnvironmentProvider(AgentlyPlugin, Protocol):
     kind: str
 
