@@ -18,7 +18,7 @@ import asyncio
 from typing import Any, Literal, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from agently.builtins.plugins.AgentOrchestrator.execution import AgentExecution
+    from .execution import AgentExecution
     from agently.types.data import OutputValidateHandler
 
 

@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .AgentlyAgentOrchestrator import AgentlyAgentOrchestrator, AgentExecution
+from .AgentlyAgentOrchestrator import AgentlyAgentOrchestrator
+from .modules.execution import AgentExecution
 
 __all__ = [
     "AgentlyAgentOrchestrator",

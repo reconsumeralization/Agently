@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .execution import AgentExecution
+from agently.types.plugins import AgentOrchestrator
+
+from .modules.execution import AgentExecution
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
     from agently.utils import Settings
 
 
-class AgentlyAgentOrchestrator:
+class AgentlyAgentOrchestrator(AgentOrchestrator):
     """Default Agent auto-orchestration plugin."""
 
     name = "AgentlyAgentOrchestrator"
