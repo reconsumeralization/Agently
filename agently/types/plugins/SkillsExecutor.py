@@ -15,12 +15,81 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
-from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillScope, SkillsPackRecord
+from agently.types.data import ActionResult, SkillContract, SkillExecutionPlan, SkillMode, SkillScope, SkillsPackRecord
+
+# ── Protocol layout ──────────────────────────────────────────────────────────
+# This file defines four protocols because the Skills Executor subsystem has two
+# sides that must agree on a contract:
+#
+#   SkillsExecutor (plugin protocol)
+#     Implemented by framework/third-party plugins (e.g. AgentlySkillsExecutor).
+#     Owns skill-pack lifecycle (install/list/inspect/remove) and plan
+#     resolution/execution.
+#
+#   SkillsPlanningContext / SkillsExecutionContext / SkillsRuntimeContext
+#     Implemented by the Agent host. The Agent injects a context object at
+#     planning time and execution time so the plugin can reach agent-owned
+#     services (settings, action availability, model requests, action dispatch)
+#     without coupling to a concrete Agent class.
+#
+# Every other file in types/plugins/ defines a single plugin protocol.
+# SkillsExecutor is the exception because the context protocols are small and
+# tightly coupled to the plugin contract; splitting them into separate files
+# would create import indirection with no real decoupling benefit.
+# ──────────────────────────────────────────────────────────────────────────────
 
 
-class SkillsExecutorPlugin(Protocol):
+@runtime_checkable
+class SkillsPlanningContext(Protocol):
+    """Agent-owned services exposed to Skills Executor planning."""
+
+    def get_setting(self, key: str, default: Any = None) -> Any: ...
+
+    def action_available(self, action_id: str) -> bool: ...
+
+    def can_auto_bind_bash_action(self, action_id: str) -> bool: ...
+
+    def auto_bind_bash_action(self, action_id: str) -> None: ...
+
+    async def async_request_model_plan(
+        self,
+        *,
+        plan: SkillExecutionPlan,
+        semantic_output_contract: dict[str, Any],
+        output_schema: dict[str, Any],
+        max_revisions: int,
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SkillsExecutionContext(Protocol):
+    """Agent-owned services exposed to Skills Executor execution."""
+
+    def get_setting(self, key: str, default: Any = None) -> Any: ...
+
+    def action_available(self, action_id: str) -> bool: ...
+
+    async def async_execute_action(
+        self,
+        action_id: str,
+        kwargs: dict[str, Any],
+        *,
+        purpose: str,
+        source_protocol: str,
+    ) -> ActionResult: ...
+
+
+@runtime_checkable
+class SkillsRuntimeContext(SkillsPlanningContext, SkillsExecutionContext, Protocol):
+    """Full Agent component adapter surface used by the builtin plugin."""
+
+    agent: Any
+
+
+@runtime_checkable
+class SkillsExecutor(Protocol):
     name: str
     DEFAULT_SETTINGS: dict[str, Any]
 
@@ -48,10 +117,22 @@ class SkillsExecutorPlugin(Protocol):
         resolver_agent: Any = None,
     ) -> SkillsPackRecord: ...
 
+    def list_skills(self) -> list[dict[str, Any]]: ...
+
+    def list_skills_packs(self) -> list[SkillsPackRecord]: ...
+
+    def inspect_skills(self, skill_id: str) -> SkillContract: ...
+
+    def inspect_skills_pack(self, skills_pack_id: str) -> SkillsPackRecord: ...
+
+    def remove_skills(self, skill_id: str) -> dict[str, Any]: ...
+
+    def remove_skills_pack(self, skills_pack_id: str, *, remove_skills: bool = False) -> dict[str, Any]: ...
+
     async def async_resolve_plan(
         self,
         *,
-        agent: Any,
+        context: SkillsPlanningContext,
         task: str | None = None,
         skills: Any = None,
         skills_packs: Any = None,
@@ -66,7 +147,7 @@ class SkillsExecutorPlugin(Protocol):
     async def async_execute_plan(
         self,
         *,
-        agent: Any,
+        context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
     ) -> Any: ...

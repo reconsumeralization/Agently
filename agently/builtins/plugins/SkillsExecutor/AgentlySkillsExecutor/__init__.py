@@ -13,8 +13,8 @@
 # limitations under the License.
 
 from .AgentlySkillsExecutor import AgentlySkillsExecutor
-from .AgentlySkillsExecutor.modules.errors import SkillError, SkillExecutionError, SkillInstallError, SkillNormalizationError
-from .AgentlySkillsExecutor.modules.executor import SkillExecution
+from .modules.errors import SkillError, SkillExecutionError, SkillInstallError, SkillNormalizationError
+from .modules.executor import SkillExecution
 
 __all__ = [
     "AgentlySkillsExecutor",

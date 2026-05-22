@@ -12,15 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .AgentlySkillsExecutor import AgentlySkillsExecutor
-from .AgentlySkillsExecutor.modules.errors import SkillError, SkillExecutionError, SkillInstallError, SkillNormalizationError
-from .AgentlySkillsExecutor.modules.executor import SkillExecution
+from __future__ import annotations
 
-__all__ = [
-    "AgentlySkillsExecutor",
-    "SkillError",
-    "SkillExecution",
-    "SkillExecutionError",
-    "SkillInstallError",
-    "SkillNormalizationError",
-]
+
+class SkillError(RuntimeError):
+    pass
+
+
+class SkillInstallError(SkillError):
+    pass
+
+
+class SkillNormalizationError(SkillError):
+    pass
+
+
+class SkillExecutionError(SkillError):
+    pass

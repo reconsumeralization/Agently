@@ -18,14 +18,32 @@ from pathlib import Path
 from typing import Any
 
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillScope, SkillsPackRecord
+from agently.types.plugins import SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
 from agently.utils import Settings
 
-from .AgentlySkillsExecutor import SkillExecutor, SkillPlanner, SkillRegistry
+from .modules.executor import SkillExecutor
+from .modules.planner import SkillPlanner
+from .modules.registry import SkillRegistry
 
 
-class GlobalSkillsFacade:
-    def __init__(self, settings: Settings):
+class AgentlySkillsExecutor(SkillsExecutor):
+    name = "AgentlySkillsExecutor"
+    DEFAULT_SETTINGS = {}
+
+    def __init__(self, *, plugin_manager: Any = None, settings: Settings):
+        self.plugin_manager = plugin_manager
+        self.settings = settings
         self.registry = SkillRegistry(settings)
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    # ── Registry delegation ────────────────────────────────────────────────
 
     def install_skills(
         self,
@@ -82,27 +100,12 @@ class GlobalSkillsFacade:
     def remove_skills_pack(self, skills_pack_id: str, *, remove_skills: bool = False) -> dict[str, Any]:
         return self.registry.remove_skills_pack(skills_pack_id, remove_skills=remove_skills)
 
-
-class AgentlySkillsExecutor(GlobalSkillsFacade):
-    name = "AgentlySkillsExecutor"
-    DEFAULT_SETTINGS = {}
-
-    @staticmethod
-    def _on_register():
-        pass
-
-    @staticmethod
-    def _on_unregister():
-        pass
-
-    def __init__(self, *, plugin_manager: Any = None, settings: Settings):
-        super().__init__(settings)
-        self.plugin_manager = plugin_manager
+    # ── Plan / Execute ─────────────────────────────────────────────────────
 
     async def async_resolve_plan(
         self,
         *,
-        agent: Any,
+        context: SkillsPlanningContext,
         task: str | None = None,
         skills: Any = None,
         skills_packs: Any = None,
@@ -114,7 +117,7 @@ class AgentlySkillsExecutor(GlobalSkillsFacade):
         planner_max_revisions: int = 2,
     ) -> SkillExecutionPlan:
         return await SkillPlanner(self.registry).resolve(
-            agent=agent,
+            context=context,
             task=task,
             skills=skills,
             skills_packs=skills_packs,
@@ -129,8 +132,8 @@ class AgentlySkillsExecutor(GlobalSkillsFacade):
     async def async_execute_plan(
         self,
         *,
-        agent: Any,
+        context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
     ):
-        return await SkillExecutor(self.registry).execute(agent=agent, task=task, plan=plan)
+        return await SkillExecutor(self.registry).execute(context=context, task=task, plan=plan)
