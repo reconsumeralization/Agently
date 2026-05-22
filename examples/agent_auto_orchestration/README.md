@@ -21,6 +21,7 @@ python examples/agent_auto_orchestration/02_actions_dag_streaming.py
 python examples/agent_auto_orchestration/03_actions_skills_streaming.py
 python examples/agent_auto_orchestration/04_education_lesson_plan_bilingual.py
 python examples/agent_auto_orchestration/05_model_field_delta_streaming.py
+python examples/agent_auto_orchestration/06_parallel_dag_field_streaming.py
 ```
 
 Requires `DEEPSEEK_API_KEY` in the environment or a `.env` file.
@@ -95,3 +96,25 @@ the model is still generating those fields.
 **Real model:** prethinking, tool-call note, customer reply, quality reflection.
 **Key assertions:** `selected_route=dynamic_task`, field delta events appear
 for prethinking/tool-call-note/reply/reflection before task completion.
+
+### 06 — Parallel DAG Field Delta Streaming (multi-branch)
+A launch readiness assessment with three independent workstreams (Security,
+Performance, UX) running concurrently after a shared context-loading step.
+Each workstream has two serial model nodes (analysis → sign-off). A final
+executive brief node waits for all three sign-offs (fan-in), synthesising a
+go/no-go verdict with top cross-cutting risks.
+
+**Stream topology:**
+```
+context ──┬── security_analysis ── security_signoff ──┐
+          ├── perf_analysis ─────── perf_signoff ─────┤
+          └── ux_analysis ───────── ux_signoff ───────┘
+                                                       │
+                                      executive_brief ←┘
+```
+**Mocked:** launch context with service inventory, infra changes, stats, known risks.
+**Real model:** 7 model nodes producing security/perf/UX findings and sign-offs,
+executive verdict with risk summary.
+**Key assertions:** field deltas stream from every parallel workstream plus
+executive synthesis, all 4 tracked signoff/executive tasks complete, and the CLI
+can filter branch-specific field paths before task completion.
