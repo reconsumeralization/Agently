@@ -74,6 +74,8 @@ Agent execution stream items follow the familiar instant-stream shape:
 ```python
 item.path
 item.value
+item.delta
+item.event_type
 item.is_complete
 item.route
 item.stage_id
@@ -84,5 +86,16 @@ item.graph_id
 
 Executor routes bridge TriggerFlow runtime stream and ModelRequest instant
 checkpoints so services can stream route decisions, plan/graph readiness,
-task/stage/action progress, blocked or approval-required states, and final
-semantic outputs.
+task/stage/action progress, blocked or approval-required states, selected model
+field deltas, and final semantic outputs.
+
+For Dynamic Task model nodes, structured output fields stream under stable paths:
+
+```python
+async for item in execution.get_async_generator(type="instant"):
+    if item.path == "task_dag.tasks.reply.fields.reply" and item.delta:
+        print(item.delta, end="", flush=True)
+```
+
+This preserves model-response `instant` semantics while keeping process-stream
+paths owned by the Agent execution route.

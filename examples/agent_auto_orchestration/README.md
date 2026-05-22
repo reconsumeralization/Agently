@@ -20,6 +20,7 @@ python examples/agent_auto_orchestration/01_skills_dag_streaming.py
 python examples/agent_auto_orchestration/02_actions_dag_streaming.py
 python examples/agent_auto_orchestration/03_actions_skills_streaming.py
 python examples/agent_auto_orchestration/04_education_lesson_plan_bilingual.py
+python examples/agent_auto_orchestration/05_model_field_delta_streaming.py
 ```
 
 Requires `DEEPSEEK_API_KEY` in the environment or a `.env` file.
@@ -81,3 +82,16 @@ Demonstrates:
 - streaming with `task_dag.tasks.*` and `skills.stages.*` events
 - final deliverable checklist + AI-generated teacher summary
 - identical skill handling Chinese and English task inputs
+
+### 05 — Operator-visible Field Delta Streaming
+A support operations scenario: a submitted Dynamic Task DAG contains several
+`kind="model"` nodes. The CLI filters selected AgentExecution paths such as
+`task_dag.tasks.prethink.fields.prethinking` and
+`task_dag.tasks.reply.fields.reply`, then prints `item.delta` with
+`print(delta, end="", flush=True)` so process notes and reply text appear while
+the model is still generating those fields.
+
+**Mocked:** ticket context, safe-action list.
+**Real model:** prethinking, tool-call note, customer reply, quality reflection.
+**Key assertions:** `selected_route=dynamic_task`, field delta events appear
+for prethinking/tool-call-note/reply/reflection before task completion.

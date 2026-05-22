@@ -69,6 +69,8 @@ Agent execution stream item 保留熟悉的 instant stream 形态：
 ```python
 item.path
 item.value
+item.delta
+item.event_type
 item.is_complete
 item.route
 item.stage_id
@@ -79,4 +81,16 @@ item.graph_id
 
 Executor route 会桥接 TriggerFlow runtime stream 和 ModelRequest instant
 checkpoint，让服务能流式输出 route decision、plan/graph readiness、
-task/stage/action 进度、blocked / approval_required 状态和最终 semantic outputs。
+task/stage/action 进度、blocked / approval_required 状态、选定模型字段 delta
+和最终 semantic outputs。
+
+Dynamic Task 的 model 节点会把结构化输出字段映射到稳定 path：
+
+```python
+async for item in execution.get_async_generator(type="instant"):
+    if item.path == "task_dag.tasks.reply.fields.reply" and item.delta:
+        print(item.delta, end="", flush=True)
+```
+
+这样保留 ModelResponse `instant` 的字段级 delta 语义，同时让过程流 path
+由 Agent execution route 统一拥有。
