@@ -74,11 +74,13 @@ class AgentExecution:
         graph_id: str | None = None,
         is_complete: bool = True,
         event_type: Literal["delta", "done"] = "done",
+        delta: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> AgentExecutionStreamData:
         return await self.stream.emit(
             path,
             value,
+            delta=delta,
             route=route,
             source=source,
             stage_id=stage_id,
@@ -107,6 +109,31 @@ class AgentExecution:
 
     async def bridge_task_dag_stream_item(self, item: Any, *, route: str):
         await self.stream.bridge_task_dag_item(item, route=route)
+
+    async def bridge_model_stream_item(
+        self,
+        item: Any,
+        *,
+        route: str,
+        source: str = "model_request",
+        path_prefix: str | None = None,
+        stage_id: str | None = None,
+        task_id: str | None = None,
+        action_id: str | None = None,
+        graph_id: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ):
+        await self.stream.bridge_model_stream_item(
+            item,
+            route=route,
+            source=source,
+            path_prefix=path_prefix,
+            stage_id=stage_id,
+            task_id=task_id,
+            action_id=action_id,
+            graph_id=graph_id,
+            meta=meta,
+        )
 
     async def async_start(
         self,

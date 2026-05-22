@@ -232,6 +232,25 @@ async def test_instant_multiple_consumers_share_single_final_parse(monkeypatch):
     assert first_events == second_events
 
 
+@pytest.mark.asyncio
+async def test_instant_primitive_delta_is_string(monkeypatch):
+    monkeypatch.setattr(agently.base, "async_emit_runtime", _noop_async_emit_runtime)
+
+    parser = create_response_parser(
+        [
+            ("delta", '{"ready": tru'),
+            ("done", '{"ready": true}'),
+        ],
+        {"ready": None},
+    )
+
+    events = []
+    async for event in parser.get_async_generator(type="instant"):
+        events.append((event.path, event.event_type, event.value, event.delta))
+
+    assert events[0] == ("ready", "delta", True, "True")
+
+
 def test_instant_sync_generator_replays_final_result(monkeypatch):
     monkeypatch.setattr(agently.base, "async_emit_runtime", _noop_async_emit_runtime)
 

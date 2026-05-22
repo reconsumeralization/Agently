@@ -39,6 +39,8 @@ async def run_model_request_route(
     if ensure_all_keys is not None:
         agent.request.prompt.set("ensure_all_keys", ensure_all_keys)
     response = agent.request.get_response(parent_run_context=turn_run_context)
+    async for item in response.get_async_generator(type="instant"):
+        await execution.bridge_model_stream_item(item, route="model_request")
     data = await response.async_get_data(
         type=type,
         ensure_keys=ensure_keys,

@@ -33,6 +33,7 @@ class AgentExecutionStream:
         path: str,
         value: Any,
         *,
+        delta: str | None = None,
         route: str | None = None,
         source: str | None = "agent_execution",
         stage_id: str | None = None,
@@ -46,6 +47,7 @@ class AgentExecutionStream:
         item = AgentExecutionStreamData(
             path=path,
             value=DataFormatter.sanitize(value),
+            delta=delta,
             is_complete=is_complete,
             event_type=event_type,
             source=source,
@@ -65,6 +67,45 @@ class AgentExecutionStream:
         for queue in list(self.queues):
             await queue.put(None)
 
+    async def bridge_model_stream_item(
+        self,
+        item: Any,
+        *,
+        route: str,
+        source: str = "model_request",
+        path_prefix: str | None = None,
+        stage_id: str | None = None,
+        task_id: str | None = None,
+        action_id: str | None = None,
+        graph_id: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ):
+        raw_path = str(getattr(item, "path", "") or "model")
+        path = f"{path_prefix}.{raw_path}" if path_prefix else raw_path
+        raw_event_type = getattr(item, "event_type", "done")
+        event_type: Literal["delta", "done"] = "delta" if raw_event_type == "delta" else "done"
+        item_meta = {
+            "field_path": raw_path,
+            "wildcard_path": getattr(item, "wildcard_path", None),
+            "indexes": getattr(item, "indexes", None),
+        }
+        if meta:
+            item_meta.update(meta)
+        await self.emit(
+            path,
+            getattr(item, "value", None),
+            delta=getattr(item, "delta", None),
+            route=route,
+            source=source,
+            stage_id=stage_id,
+            task_id=task_id,
+            action_id=action_id,
+            graph_id=graph_id,
+            is_complete=bool(getattr(item, "is_complete", event_type == "done")),
+            event_type=event_type,
+            meta=item_meta,
+        )
+
     async def bridge_task_dag_item(self, item: Any, *, route: str):
         if not isinstance(item, dict):
             await self.emit("runtime.stream", item, route=route, source="triggerflow")
@@ -74,6 +115,23 @@ class AgentExecutionStream:
         payload = item.get("payload", {})
         task_id = str(item.get("task_id") or "") or None
         graph_id = str(item.get("graph_id") or "") or None
+        if item_type == "task_dag.model_field" and task_id:
+            field_path = str(item.get("field_path") or "model")
+            raw_event_type = str(item.get("event_type") or action)
+            event_type: Literal["delta", "done"] = "delta" if raw_event_type == "delta" else "done"
+            await self.emit(
+                f"task_dag.tasks.{task_id}.fields.{field_path}",
+                item.get("value"),
+                delta=item.get("delta") if isinstance(item.get("delta"), str) else None,
+                route=route,
+                source="model_request",
+                task_id=task_id,
+                graph_id=graph_id,
+                is_complete=bool(item.get("is_complete", event_type == "done")),
+                event_type=event_type,
+                meta=payload if isinstance(payload, dict) else None,
+            )
+            return
         if item_type == "task_dag.task" and task_id:
             path = f"task_dag.tasks.{ task_id }.{ action }"
         elif item_type == "task_dag.graph" and graph_id:

@@ -7,6 +7,7 @@ from agently.compatibility import (
     get_devtools_compatibility_manifest,
     get_skills_compatibility_manifest,
 )
+from agently.types.data import StreamingData
 
 
 _RUNTIME_LOG_KEYS = (
@@ -268,6 +269,92 @@ async def test_agent_execution_dynamic_task_can_use_action_candidates():
     data = await execution.async_get_data()
 
     assert data["semantic_outputs"]["final"]["result"]["priority"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_streams_model_field_deltas():
+    schema = {
+        "prethinking": (str, "operator-visible process note", True),
+        "reply": (str, "customer-facing reply", True),
+    }
+
+    class FakeModelResponse:
+        async def get_async_generator(self, type="instant", **_kwargs):
+            assert type == "instant"
+            yield StreamingData(path="prethinking", value="Check", delta="Check", event_type="delta")
+            yield StreamingData(path="prethinking", value="Check billing", delta=" billing", event_type="delta")
+            yield StreamingData(path="reply", value="We are", delta="We are", event_type="delta")
+            yield StreamingData(path="reply", value="We are investigating.", delta=" investigating.", event_type="delta")
+            yield StreamingData(path="prethinking", value="Check billing", event_type="done", is_complete=True)
+            yield StreamingData(path="reply", value="We are investigating.", event_type="done", is_complete=True)
+
+        async def async_get_data(self, **kwargs):
+            assert kwargs == {"ensure_keys": ["prethinking", "reply"]}
+            return {
+                "prethinking": "Check billing",
+                "reply": "We are investigating.",
+            }
+
+    class FakeModelRequest:
+        def __init__(self):
+            self.output_schema = None
+
+        def input(self, _value):
+            return self
+
+        def instruct(self, _value):
+            return self
+
+        def output(self, value):
+            self.output_schema = value
+            return self
+
+        def get_response(self, **_kwargs):
+            return FakeModelResponse()
+
+        async def async_start(self, **_kwargs):  # pragma: no cover - get_response path owns streaming
+            raise AssertionError("streaming model tasks should use get_response()")
+
+    agent = Agently.create_agent("execution-model-field-stream-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-model-field-stream",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [
+                    {
+                        "id": "draft",
+                        "kind": "model",
+                        "inputs": {
+                            "output_schema": schema,
+                            "ensure_keys": ["prethinking", "reply"],
+                        },
+                    }
+                ],
+                "semantic_outputs": {"final": "draft"},
+            },
+            model=FakeModelRequest(),
+        )
+        .input("draft a transparent support reply")
+        .create_execution()
+    )
+
+    streamed = []
+    async for item in execution.get_async_generator(type="instant"):
+        if item.event_type == "delta":
+            streamed.append((item.path, item.delta, item.is_complete))
+
+    data = await execution.async_get_data()
+
+    assert streamed[:4] == [
+        ("task_dag.tasks.draft.fields.prethinking", "Check", False),
+        ("task_dag.tasks.draft.fields.prethinking", " billing", False),
+        ("task_dag.tasks.draft.fields.reply", "We are", False),
+        ("task_dag.tasks.draft.fields.reply", " investigating.", False),
+    ]
+    assert data["semantic_outputs"]["final"]["result"]["reply"] == "We are investigating."
 
 
 def test_deprecated_action_manager_aliases_warn():

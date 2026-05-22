@@ -243,7 +243,37 @@ class DynamicTask:
             start_kwargs["ensure_keys"] = normalized_ensure_keys
         if isinstance(max_retries, int):
             start_kwargs["max_retries"] = max_retries
+        if hasattr(prepared_request, "get_response"):
+            response = prepared_request.get_response(parent_run_context=context.runtime_data.chunk_run_context)
+            async for item in response.get_async_generator(type="instant"):
+                await self._put_model_stream_item(context, item)
+            return await response.async_get_data(**start_kwargs)
         return await prepared_request.async_start(**start_kwargs)
+
+    async def _put_model_stream_item(self, context: DynamicTaskContext, item: Any) -> None:
+        event_type = str(getattr(item, "event_type", "done"))
+        if event_type not in {"delta", "done"}:
+            event_type = "done"
+        field_path = str(getattr(item, "path", "") or "model")
+        await context.runtime_data.execution.async_put_into_stream(
+            {
+                "type": "task_dag.model_field",
+                "action": event_type,
+                "event_type": event_type,
+                "graph_id": context.graph.graph_id,
+                "task_id": context.task.id,
+                "field_path": field_path,
+                "value": getattr(item, "value", None),
+                "delta": getattr(item, "delta", None),
+                "is_complete": bool(getattr(item, "is_complete", event_type == "done")),
+                "payload": {
+                    "field_path": field_path,
+                    "wildcard_path": getattr(item, "wildcard_path", None),
+                    "indexes": getattr(item, "indexes", None),
+                },
+            },
+            _skip_contract_validation=True,
+        )
 
     def _should_apply_default_output_contract(self, graph: TaskDAG, task_id: str) -> bool:
         if self.output_schema is None and self.ensure_keys is None:
