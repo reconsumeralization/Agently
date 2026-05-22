@@ -26,6 +26,9 @@ python examples/agent_auto_orchestration/07_code_security_audit.py
 python examples/agent_auto_orchestration/08_web_research_report.py
 python examples/agent_auto_orchestration/09_model_stage_field_streaming.py
 python examples/agent_auto_orchestration/10_browser_web_testing.py
+python examples/agent_auto_orchestration/11_branch_code_review.py
+python examples/agent_auto_orchestration/12_model_plan_incident_response.py
+python examples/agent_auto_orchestration/13_validate_emit_compliance_check.py
 ```
 
 Requires `DEEPSEEK_API_KEY` in the environment or a `.env` file.
@@ -172,3 +175,48 @@ browser testing workflows.
 parsing, PIL screenshot generation, WCAG accessibility checks.
 **Key assertions:** `selected_route=skills`, 5 stages complete, accessibility
 issues detected and reported, screenshot saved, structured test report generated.
+
+### 11 — PR Severity Triage with Branch Routing (model → branch → model)
+A code review scenario: analyze a realistic PR diff touching payment processing
+and auth middleware. A `smart-code-review` skill uses `kind: model` for severity
+triage (detects the JWT signature bypass as critical), `kind: branch` to route
+to `critical`-depth review, and another `kind: model` stage that calibrates its
+review depth based on the branch decision. Field deltas stream from both model
+stages through `skills.stages.<id>.fields.*` paths.
+
+**Stages:** triage_pr (model) → route_review (branch) → do_review (model) → save_review (action).
+**Real:** model-driven severity classification, branch-driven review depth selection,
+field-level streaming of triage reasoning and review findings.
+**Key assertions:** `selected_route=skills`, 4 stages complete, severity=critical,
+branch=critical routed correctly, 3,300+ char review with actionable findings.
+
+### 12 — Incident Response with model_plan Stage (planning pipeline)
+An SRE scenario: process a PagerDuty alert for payment-gateway latency with
+deployment context, dependency status, and error signatures. An
+`incident-response-planner` skill opens with a `kind: model_plan` stage that
+generates a structured incident response plan (severity, impact radius,
+mitigation, investigation steps, stakeholders, timeline), feeds it into a
+`kind: model` stage for detailed runbook generation, and saves the complete
+document.
+
+**Stages:** analyze_incident (model_plan) → generate_runbook (model) → save_runbook (action).
+**Real:** model_plan generation of structured incident command plan, model-driven
+runbook with executable steps, field-level streaming of plan and runbook.
+**Key assertions:** `selected_route=skills`, 3 stages complete, detailed incident
+plan, step-by-step runbook with mitigation and investigation actions, document saved.
+
+### 13 — Document Compliance Audit with validate + emit Stages
+A legal/compliance scenario: review a vendor services agreement for regulatory
+gaps. A `compliance-audit` skill extracts clauses with `kind: model`, gates
+execution with `kind: validate` (halts pipeline if extraction failed), identifies
+compliance gaps with a downstream `kind: model` stage, publishes the structured
+audit summary via `kind: emit`, and saves the full report.
+
+**Stages:** extract_clauses (model) → validate_extraction (validate) →
+flag_compliance_gaps (model) → emit_summary (emit) → save_audit (action).
+**Real:** model-driven clause extraction (8 clauses across 8 categories), validation
+gating, compliance gap identification with GDPR/SOC 2 concerns, emit to runtime
+stream, file output.
+**Key assertions:** `selected_route=skills`, 5 stages complete, 8 clauses extracted,
+validation passed, risk=HIGH identified (missing DPA, weak data handling, no
+indemnification), structured audit emitted and saved.
