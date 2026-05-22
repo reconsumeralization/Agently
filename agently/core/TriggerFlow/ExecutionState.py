@@ -13,14 +13,9 @@
 # limitations under the License.
 
 
-from .TriggerFlow import TriggerFlow
-from .BluePrint import TriggerFlowBlueprint
-from .Execution import TriggerFlowExecution
-from .ExecutionResult import TriggerFlowExecutionResult
-from .Chunk import TriggerFlowChunk
-from .Process import TriggerFlowProcess
-from .process import (
-    TriggerFlowBaseProcess,
-    TriggerFlowForEachProcess,
-    TriggerFlowMatchCaseProcess,
-)
+from typing import Literal
+
+
+COMPAT_FINAL_RESULT_KEY = "$final_result"
+INTERVENTIONS_STATE_KEY = "$interventions"
+TriggerFlowInterventionMode = Literal["planned", "auto"] | None
