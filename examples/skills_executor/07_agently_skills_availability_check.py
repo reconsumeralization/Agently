@@ -9,24 +9,27 @@ if str(ROOT) not in sys.path:
 
 # Resolve sibling Agently-Skills repo at ../Agently-Skills relative to this repo root.
 AGENTLY_SKILLS_ROOT = ROOT.parent / "Agently-Skills"
+RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor" / "agently_skills_availability"
 
 from agently import Agently
 
 
 # Agently-Skills pack availability check — developer pre-flight case.
 #
-# Scenario: Before wiring an Agently-Skills guidance pack into a coding agent,
-# a developer wants to verify that all skills in the pack are correctly installed
-# and selectable.  This script:
+# Scenario: Before wiring an Agently-Skills guidance pack into the framework-side
+# Skills Executor, a developer wants to verify that every active skill can be
+# installed and passes executor eligibility checks when explicitly selected.
+# This is not an Agent auto-orchestration acceptance example and it does not
+# prove model-owned route selection. This script:
 #   1. Installs the active skills from a local Agently-Skills clone.
 #   2. Lists each installed skill with its purpose and activation hints.
 #   3. Runs a plan-resolution check for every skill using required mode and the
 #      deterministic planner — no model API key is needed.
 #   4. Reports an overall availability verdict.
 #
-# The deterministic planner check is a lightweight "does the skill pass eligibility
-# filters?" gate.  It verifies that trust level and required actions are satisfied
-# without calling the model.  Guidance-only skills (no required actions) resolve
+# The deterministic planner check is a lightweight "does the skill pass
+# eligibility filters when named directly?" gate. It verifies trust level and
+# required actions without calling the model. Guidance-only skills resolve
 # immediately; skills that need missing actions surface a blocking reason code.
 #
 # Expected key output from one local run:
@@ -58,8 +61,8 @@ from agently import Agently
 #   ...
 #
 # Note: these guidance-only skills carry no activation keywords by default.
-# Tasks route to them when the skill is explicitly listed in use_skills() or
-# use_skills_packs(), or when the task text contains their invocation names.
+# Use this output only as registry/eligibility evidence. Route ownership and
+# model-owned skill choice must be verified by separate model-backed examples.
 
 
 def main() -> None:
@@ -75,6 +78,7 @@ def main() -> None:
         return
 
     # Step 1: Install the active skills from the local repo.
+    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
     print("Installing Agently-Skills pack from local repo...")
     pack_report = Agently.skills_executor.install_skills_pack(
         source=str(skills_dir),
@@ -148,8 +152,8 @@ def main() -> None:
                 for s in pack_skills]):
         print(
             "\nNote: these guidance-only skills carry no activation keywords.\n"
-            "Route tasks to them by listing skill ids in use_skills() / use_skills_packs(),\n"
-            "or ensure the task text contains their invocation names."
+            "This script verifies explicit selection only. Use a model-backed\n"
+            "auto-orchestration example to verify route ownership and skill choice."
         )
 
 

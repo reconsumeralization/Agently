@@ -39,10 +39,11 @@ The companion repo does not become a runtime dependency of your Agently app. It 
 | `agently-playbook` | starting fresh — picking the right structure for a new Agently project |
 | `agently-request` | model setup, prompt management, structured output, response reuse, session memory, embeddings, retrieval |
 | `agently-runtime` | Action Runtime, built-in actions, MCP, Execution Environment, FastAPI exposure, DevTools wiring |
+| `agently-dynamic-task` | model-generated or app-submitted DAG planning, validation, and execution |
 | `agently-triggerflow` | needing branching, concurrency, pause/resume, save/load |
 | `agently-migration` | migrating from LangChain, LangGraph, LlamaIndex, CrewAI, or similar systems |
 
-The current public catalog generation is `v2`. The actual default skill list lives in `Agently-Skills/skills/` and should contain only these 5 skills.
+The current public catalog generation is `v2`. The actual default skill list lives in `Agently-Skills/skills/` and should contain only these 6 skills.
 
 ## Installing the skills
 
@@ -65,6 +66,7 @@ for skill in \
   agently-playbook \
   agently-request \
   agently-runtime \
+  agently-dynamic-task \
   agently-triggerflow
 do
   npx skills add AgentEra/Agently-Skills --agent "$AGENT" --skill "$skill" -y
@@ -106,7 +108,7 @@ Feature acceptance also requires spec reconciliation: update the relevant spec t
 
 User-visible feature work must add or update examples for the scenario the feature enables. Keep the example runnable in its declared environment, aligned with the current recommended API, and explicit about the important runtime behavior. Its `Expected key output` comment should preserve stable key values from one real run, not a generic "shows X" description. When the behavior is not obvious from output alone, add concise working-principle notes or an ASCII flow diagram in the example comment.
 
-For Agently `4.1.3` development work, include `examples/agent_auto_orchestration/` when the task touches default `agent.start()` routing, `agent.create_execution()`, or Agent process streaming. For the 4.1.2.4 foundation line, treat `examples/cookbook/`, `examples/action_runtime/`, `examples/execution_environment/`, `examples/builtin_actions/`, `examples/trigger_flow/`, `examples/dynamic_task/`, and `examples/fastapi/` as the recommended starting surfaces. Treat `examples/archived/` as compatibility reference only.
+For Agently `4.1.3` development work, include `examples/agent_auto_orchestration/` when the task touches default `agent.start()` routing, `agent.create_execution()`, or Agent process streaming. Treat local smoke scripts in that directory as infrastructure checks only; model-app or acceptance claims still require real DeepSeek or local Ollama examples. For the 4.1.2.4 foundation line, treat `examples/cookbook/`, `examples/action_runtime/`, `examples/execution_environment/`, `examples/builtin_actions/`, `examples/trigger_flow/`, `examples/dynamic_task/`, and `examples/fastapi/` as the recommended starting surfaces. Treat `examples/archived/` as compatibility reference only.
 
 When reporting API, recommended usage, examples, or compatibility changes, include concise sample code that shows the updated usage shape. Prefer current usage snippets or before/after snippets over abstract prose when that makes the change easier to inspect.
 

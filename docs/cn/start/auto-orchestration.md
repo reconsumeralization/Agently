@@ -19,6 +19,11 @@ result = (
 候选注入是边界。如果没有注册 Actions、Skills、Skills Packs 或 Dynamic Task
 候选，`agent.start()` 仍然是普通模型请求。
 
+当前开发线的路由是候选驱动、确定性优先：submitted Dynamic Task 候选优先，
+required/model-decision Skills 候选进入 Skills route，普通 Action 候选仍交给
+model request 路径。模糊候选集合下的模型自主 route choice 仍是 4.1.3 待验收项，
+不是已经交付的能力声明。
+
 公开 Agent API 仍由 core 持有，但路线规划和执行由 active
 `AgentOrchestrator` plugin 通过 `AgentOrchestrator` protocol 承担。这样
 Skills、Dynamic Task 和后续 route 实现都可以替换，而不需要 core 知道内置

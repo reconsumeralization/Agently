@@ -468,6 +468,7 @@ async def main() -> None:
     provider = configure_model(temperature=0.3)
     print(f"Model provider: {provider}\n")
 
+    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
     skill_root = prepare_skill()
     Agently.skills_executor.install_skills(skill_root, trust_level="local", update=True)
 

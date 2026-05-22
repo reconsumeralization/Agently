@@ -21,6 +21,13 @@ Candidate injection is the boundary. If no Actions, Skills, Skills Packs, or
 Dynamic Task candidates are registered, `agent.start()` remains an ordinary
 model request.
 
+Current development-line routing is candidate-driven and deterministic-first:
+submitted Dynamic Task candidates take precedence, required/model-decision
+Skills candidates run through the Skills route, and ordinary Action candidates
+remain available to the model request path. Model-owned route choice for
+ambiguous candidate sets is still an open 4.1.3 acceptance item, not a shipped
+claim.
+
 The public Agent API stays in core, but route planning and execution are owned
 by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
 protocol. This keeps Skills, Dynamic Task, and future route implementations

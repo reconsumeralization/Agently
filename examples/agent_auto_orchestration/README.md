@@ -1,13 +1,17 @@
 # Agent Auto-Orchestration Examples
 
-These examples cover two complementary layers of the 4.1.3 Agent execution facade:
+These examples demonstrate the 4.1.3 Agent auto-orchestration execution facade
+with real model calls, realistic mock business data, and simulated I/O delays.
 
-- **Examples 01–03** are local process-stream smoke cases. They verify route selection,
-  TriggerFlow/Dynamic Task stream bridging, and response-style consumption through
-  `agent.create_execution()` without business-domain content.
+**Model calls are real** — every stage uses the LLM for classification,
+summarization, drafting, and quality review. Model decision points
+(skill selection, urgency classification, opportunity prioritization) are
+genuine model outputs, never mocked.
 
-- **Examples 04–05** are business-scenario cases. They demonstrate real-world usage
-  patterns on top of the same execution facade.
+**Business data is mocked** — commit logs, CRM tickets, product analytics,
+and market signals are pre-seeded fake data representing what real systems
+(GitLab, Salesforce, Amplitude, Crunchbase) would provide. Delays between
+stages simulate real API fetch latency.
 
 Run from the repository root:
 
@@ -16,56 +20,64 @@ python examples/agent_auto_orchestration/01_skills_dag_streaming.py
 python examples/agent_auto_orchestration/02_actions_dag_streaming.py
 python examples/agent_auto_orchestration/03_actions_skills_streaming.py
 python examples/agent_auto_orchestration/04_education_lesson_plan_bilingual.py
-python examples/agent_auto_orchestration/05_agently_skills_availability_check.py
 ```
+
+Requires `DEEPSEEK_API_KEY` in the environment or a `.env` file.
+Set `DYNAMIC_TASK_MODEL_PROVIDER=ollama` to use a local Ollama endpoint instead.
 
 ## Example summaries
 
-### 01 — Skills + DAG streaming (smoke case)
-Installs a minimal local skill and validates that Skills Executor stages compile
-through Dynamic Task / Task DAG and surface process stream checkpoints through
-`agent.create_execution()`.
+### 01 — Release Notes Generator (Skills + DAG streaming)
+A DevOps scenario: generate professional v2.5.0 release notes from a detailed
+mock commit log (20 commits across features, fixes, docs, breaking changes,
+security). A `release-notes-generator` skill defines five stages
+(classify → summarize → validate → draft → compile), each backed by a
+model-calling action. Simulated GitLab API fetch delay before classification.
 
-### 02 — Actions + DAG streaming (smoke case)
-Submits an explicit task graph with Action-backed nodes and validates that DAG
-compilation, action execution, and stream bridging work end-to-end.
+**Mocked:** commit log, version metadata, team name.
+**Real model:** classification, summarization, announcement drafting, QA.
+**Key assertions:** `selected_route=skills`, four stage stream events,
+feature/fix content present, announcement ready.
 
-### 03 — Actions + Skills streaming (smoke case)
-Verifies that a Skill stage calling an Action surfaces both stage-level and
-action-level progress through the Agent stream.
+### 02 — Customer Support Triage (Actions + DAG streaming)
+A customer support scenario: a P1-critical ticket from an enterprise customer
+(Acme Corp, $120K/yr, 520 users, 1-hour SLA) where payment processing failed
+after a deployment. The full CRM ticket context (customer profile, recent
+changes, previous tickets, environment details) is mocked. Four DAG nodes
+(classify → analyze → draft → review) with dependency edges, each making
+model calls. Simulated CRM fetch and deployment log delays.
 
-### 04 — Bilingual lesson plan generator (education business case)
+**Mocked:** ticket data, customer profile, environment details, change history.
+**Real model:** urgency classification, root cause analysis, reply drafting,
+enterprise QA review.
+**Key assertions:** `selected_route=dynamic_task`, four task stream events,
+valid urgency, draft present, quality approved.
+
+### 03 — Market Research Brief (Actions + Skills streaming)
+A product management scenario: research an "AI code review assistant" feature
+for DevFlow ($14.2M ARR, 8,500 users). Detailed mock business context includes
+internal survey data (n=1,200, pain point rankings), 6-week beta test results
+(47% time reduction, NPS 72), and market signals (competitor funding, analyst
+coverage). A `market-research-brief` skill defines four stages
+(gather → analyze competitors → identify opportunities → compile), each
+calling the model. Simulated Amplitude/G2/Crunchbase fetch delays.
+
+**Mocked:** product analytics, survey results, beta metrics, market signals.
+**Real model:** market landscape analysis, competitor profiling, opportunity
+identification, executive summary generation.
+**Key assertions:** `selected_route=skills`, four stage stream events,
+competitor and opportunity content present, brief compiled.
+
+### 04 — Bilingual Lesson Plan Generator (education business case)
 An EdTech scenario where a single skill generates a bilingual Chinese/English
-lesson package from a natural-language topic description. **Requires a real
-model API key** — each action stage calls the model to produce structured content.
+lesson package from a natural-language topic description. Each action stage
+calls the model to produce structured content.
 
 Demonstrates:
 - real model calls inside async action stages (no mocking)
-- natural-language progress output during each stage
-- multi-stage state passing via `${state.STAGE_ID}` templates in action inputs
-- `validate` stage gating downstream stages on required state keys
-- `emit` stage signalling package readiness into the runtime stream
-- streaming consumption with `task_dag.tasks.*` real-time events and
-  `skills.stages.*` post-execution confirmations
-- final deliverable checklist + AI-generated teacher summary printed at completion
-- identical skill handling Chinese and English task inputs without change
-
-### 05 — Agently-Skills pack availability check (developer pre-flight)
-Installs the active skills from a local `Agently-Skills` clone, lists each skill's
-purpose and activation hints, and runs a deterministic plan-resolution check for
-every skill without a model API call.
-
-Demonstrates:
-- `install_skills_pack()` for bulk installation from a local repository
-- `list_skills()` and `inspect_skills()` for registry inspection
-- `resolve_skills_plan(..., planner_mode="deterministic")` as a lightweight
-  "does this skill pass eligibility filters?" pre-flight gate
-- reading activation hints to understand how tasks route to skills
-
-Requires a local clone of `AgentEra/Agently-Skills` at `../Agently-Skills`
-relative to the Agently repository root.
-
----
-
-Recommended model-owned auto-planning examples still live under
-`examples/dynamic_task/` and use DeepSeek or local Ollama.
+- multi-stage state passing via `${state.STAGE_ID}` templates
+- `validate` stage gating downstream stages
+- `emit` stage signalling package readiness
+- streaming with `task_dag.tasks.*` and `skills.stages.*` events
+- final deliverable checklist + AI-generated teacher summary
+- identical skill handling Chinese and English task inputs
