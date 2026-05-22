@@ -22,6 +22,10 @@ python examples/agent_auto_orchestration/03_actions_skills_streaming.py
 python examples/agent_auto_orchestration/04_education_lesson_plan_bilingual.py
 python examples/agent_auto_orchestration/05_model_field_delta_streaming.py
 python examples/agent_auto_orchestration/06_parallel_dag_field_streaming.py
+python examples/agent_auto_orchestration/07_code_security_audit.py
+python examples/agent_auto_orchestration/08_web_research_report.py
+python examples/agent_auto_orchestration/09_model_stage_field_streaming.py
+python examples/agent_auto_orchestration/10_browser_web_testing.py
 ```
 
 Requires `DEEPSEEK_API_KEY` in the environment or a `.env` file.
@@ -118,3 +122,53 @@ executive verdict with risk summary.
 **Key assertions:** field deltas stream from every parallel workstream plus
 executive synthesis, all 4 tracked signoff/executive tasks complete, and the CLI
 can filter branch-specific field paths before task completion.
+
+### 07 — Code Security Audit (file ops + real code scanning)
+A DevSecOps scenario: scan a mock microservice codebase (6 files: Python, JS,
+TypeScript, Go, SQL, YAML config) for security issues. A `code-security-audit`
+skill defines five action stages (scan → grep secrets → grep injection → CVE
+lookup → compile report), each performing real file I/O and pattern matching.
+The CVE lookup queries a real vulnerability database for known CVEs on detected
+dependency versions.
+
+**Real:** file system scanning, regex secret/injection detection, CVE lookup via
+osv.dev API, model-generated remediation recommendations.
+**Key assertions:** `selected_route=skills`, all five stages complete, findings
+categorized by severity, actionable recommendations generated.
+
+### 08 — Web Research & Report Generation (network + model + file output)
+A market intelligence scenario: research "AI agent observability" by searching
+the web, fetching relevant pages, and synthesising a structured report. A
+`web-research-report` skill chains search → fetch → synthesise → write. The
+synthesise stage calls the model to distil raw web content into an executive
+brief. The final stage writes the report to `~/.agently_reports/`.
+
+**Real:** DuckDuckGo HTML search, httpx page fetching, model synthesis, file write.
+**Key assertions:** `selected_route=skills`, 4 stages complete, report saved
+with model-generated content, web results structured into findings.
+
+### 09 — Product Launch Press Kit (Skill model stage field streaming)
+A product marketing scenario: generate a press kit (positioning brief + risk
+register) for a fictional "DevFlow Code Review AI" product launch. A
+`product-launch-press-kit` skill uses two native `kind: model` stages that
+stream `positioning_text` and `risks_text` through
+`skills.stages.<stage_id>.fields.<field>` paths, then an action stage saves the
+assembled Markdown file. A Rich Live display renders a 2×1 grid showing the
+field deltas as they arrive.
+
+**Real:** model calls for positioning strategy and risk analysis, markdown file
+output to `~/.agently_press_kits/`.
+**Key assertions:** `selected_route=skills`, all 3 stages complete, 2,700+ char
+positioning brief, 6,700+ char risk register, file saved to disk.
+
+### 10 — Browser-Based Web Testing (local HTTP + accessibility audit)
+A QA automation scenario: spin up a local HTTP server serving a sample dashboard
+and settings page, then run a `web-testing` skill that browses both pages,
+audits accessibility (WCAG label checks, form validation), captures a screenshot,
+and compiles a test report. Demonstrates execution environment providers for
+browser testing workflows.
+
+**Real:** http.server serving HTML, httpx page fetching, BeautifulSoup HTML
+parsing, PIL screenshot generation, WCAG accessibility checks.
+**Key assertions:** `selected_route=skills`, 5 stages complete, accessibility
+issues detected and reported, screenshot saved, structured test report generated.
