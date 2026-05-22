@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .base import AgentlyPlugin
 
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from agently.types.data import RunContext
 
 
+@runtime_checkable
 class AgentOrchestrator(AgentlyPlugin, Protocol):
     """Creates response-style executions for Agent auto-orchestration."""
 

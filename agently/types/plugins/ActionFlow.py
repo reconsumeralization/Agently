@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .base import AgentlyPlugin
 from .ActionRuntime import ActionExecutionHandler, ActionPlanningHandler
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from agently.utils import Settings
 
 
+@runtime_checkable
 class ActionFlow(AgentlyPlugin, Protocol):
     """
     Action loop orchestration plugin.
