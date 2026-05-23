@@ -32,7 +32,7 @@ import re
 import threading
 from typing import Any
 
-_ENV_PLACEHOLDER = re.compile(r"\$\{\s*ENV\.([^}]+?)\s*\}")
+_ENV_PLACEHOLDER = re.compile(r"\$\{\s*(?:ENV\.)?([^}]+?)\s*\}")
 
 # Module-level state for key selection strategies (process-scoped).
 _round_robin_counters: dict[str, int] = {}
