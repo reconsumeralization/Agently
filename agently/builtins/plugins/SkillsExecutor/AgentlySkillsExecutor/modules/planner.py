@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from agently.types.data import (
     SkillContract,
@@ -114,6 +114,7 @@ class SkillPlanner:
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
     ) -> SkillExecutionPlan:
         if mode not in {"model_decision", "required"}:
             raise ValueError("Skill mode must be one of: 'model_decision', 'required'.")
@@ -164,6 +165,7 @@ class SkillPlanner:
             "prompt_bindings": prompt_bindings,
             "resource_bindings": [_copy_public(selection.get("resource_index", {})) for selection in selections],
             "expected_result_shape": _ensure_dict(semantic_outputs),
+            "expected_result_format": output_format,
             "diagnostics": diagnostics,
         })
 
@@ -300,6 +302,7 @@ class SkillPlanner:
                     "selected_skill_ids": [(str, "Selected skill ids in execution order.", True)],
                     "reason": (str, "Concise route choice reason."),
                 },
+                output_format="json",
                 ensure_keys=["selected_skill_ids"],
                 max_retries=2,
             )

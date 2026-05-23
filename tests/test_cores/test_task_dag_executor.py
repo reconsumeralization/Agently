@@ -79,6 +79,8 @@ def test_task_dag_planner_exposes_output_contract_and_constraints():
     instructions = "\n".join(planner.instructions())
     assert "ordinary model tasks as network side effects" in instructions
     assert "Keep approval empty for read-only model analysis" in instructions
+    assert "task.inputs.output_format to json" in instructions
+    assert constraints["request_contract"]["output_format"] == "json"
 
 
 def test_task_dag_planner_contract_returns_mutation_safe_copies():
@@ -204,8 +206,8 @@ async def test_task_dag_planner_prepares_agently_request_in_stages():
             self.calls.append(("instruct", value))
             return self
 
-        def output(self, value):
-            self.calls.append(("output", value))
+        def output(self, value, *, format="auto"):
+            self.calls.append(("output", value, format))
             return self
 
         def validate(self, value):
@@ -223,6 +225,8 @@ async def test_task_dag_planner_prepares_agently_request_in_stages():
 
     assert planned == graph
     assert request.calls[0] == ("input", {"goal": "demo"})
+    assert request.calls[2][0] == "output"
+    assert request.calls[2][2] == "json"
     assert request.calls[-1][0] == "async_start"
     assert request.calls[-1][1]["ensure_keys"] == planner.ensure_keys()
     assert request.calls[-1][1]["validate_handler"] == planner.validate_output

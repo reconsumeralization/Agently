@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
 from agently.types.plugins import SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
@@ -123,6 +123,7 @@ class AgentlySkillsExecutor(SkillsExecutor):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
     ) -> SkillExecutionPlan:
         return await SkillPlanner(self.registry).resolve(
             context=context,
@@ -131,6 +132,7 @@ class AgentlySkillsExecutor(SkillsExecutor):
             skills_packs=skills_packs,
             mode=mode,
             semantic_outputs=semantic_outputs,
+            output_format=output_format,
         )
 
     async def async_execute_plan(
@@ -139,9 +141,11 @@ class AgentlySkillsExecutor(SkillsExecutor):
         context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ):
         return await SkillExecutor(self.registry).execute(
             context=context,
             task=task,
             plan=plan,
+            output_format=output_format,
         )

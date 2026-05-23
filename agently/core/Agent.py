@@ -631,12 +631,10 @@ class BaseAgent:
     ):
         if always:
             self.agent_prompt.set("output", prompt, mappings=mappings)
-            if format != "json":
-                self.agent_prompt.set("output_format", format)
+            self.agent_prompt.set("output_format", format)
         else:
             self.request.prompt.set("output", prompt, mappings=mappings)
-            if format != "json":
-                self.request.prompt.set("output_format", format)
+            self.request.prompt.set("output_format", format)
         return self
 
     def attachment(

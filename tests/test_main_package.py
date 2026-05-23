@@ -119,16 +119,19 @@ async def test_hybrid_route_planner_uses_model_when_optional_candidates_are_ambi
     class FakeRequest:
         def __init__(self):
             self.payload: dict[str, Any] = {}
+            self.output_format = None
 
         def input(self, payload):
             self.payload = payload
             return self
 
-        def output(self, _schema):
+        def output(self, _schema, *, format="auto"):
+            self.output_format = format
             return self
 
         async def async_start(self, **_kwargs):
             assert len(self.payload["route_candidates"]) == 3
+            assert self.output_format == "json"
             return {"selected_route": "skills", "reason": "installed Skill is more specific"}
 
     class FakeAction:
@@ -227,6 +230,7 @@ async def test_dynamic_task_model_output_schema_uses_agently_request_pipeline():
     class FakeModelRequest:
         def __init__(self):
             self.output_schema = None
+            self.output_format = None
             self.start_kwargs = None
 
         def input(self, value):
@@ -235,8 +239,9 @@ async def test_dynamic_task_model_output_schema_uses_agently_request_pipeline():
         def instruct(self, value):
             return self
 
-        def output(self, value):
+        def output(self, value, *, format="auto"):
             self.output_schema = value
+            self.output_format = format
             return self
 
         async def async_start(self, **kwargs):
@@ -260,8 +265,60 @@ async def test_dynamic_task_model_output_schema_uses_agently_request_pipeline():
     snapshot = await task.async_run(timeout=1)
 
     assert request.output_schema == schema
+    assert request.output_format == "auto"
     assert request.start_kwargs == {"ensure_keys": ["brief", "next_update"]}
     assert snapshot["semantic_outputs"]["frontstage"]["result"]["brief"] == "Latency is resolved."
+
+
+@pytest.mark.asyncio
+async def test_dynamic_task_model_task_can_select_output_format():
+    schema = {"html": (str, "render-ready HTML", True)}
+
+    class FakeModelRequest:
+        def __init__(self):
+            self.output_schema = None
+            self.output_format = None
+
+        def input(self, _value):
+            return self
+
+        def instruct(self, _value):
+            return self
+
+        def output(self, value, *, format="auto"):
+            self.output_schema = value
+            self.output_format = format
+            return self
+
+        async def async_start(self, **_kwargs):
+            return {"html": "<section>OK</section>"}
+
+    request = FakeModelRequest()
+    task = Agently.create_dynamic_task(
+        "render a fragment",
+        plan={
+            "graph_id": "model-output-format",
+            "task_schema_version": "task_dag/v1",
+            "tasks": [
+                {
+                    "id": "render_html",
+                    "kind": "model",
+                    "inputs": {
+                        "output_schema": schema,
+                        "output_format": "flat_markdown",
+                    },
+                }
+            ],
+            "semantic_outputs": {"fragment": "render_html"},
+        },
+        model=request,
+    )
+
+    snapshot = await task.async_run(timeout=1)
+
+    assert request.output_schema == schema
+    assert request.output_format == "flat_markdown"
+    assert snapshot["semantic_outputs"]["fragment"]["result"]["html"] == "<section>OK</section>"
 
 
 def test_dynamic_task_can_be_created_without_explicit_model_source():
@@ -385,6 +442,7 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
     class FakeModelRequest:
         def __init__(self):
             self.output_schema = None
+            self.output_format = None
 
         def input(self, _value):
             return self
@@ -392,8 +450,9 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
         def instruct(self, _value):
             return self
 
-        def output(self, value):
+        def output(self, value, *, format="auto"):
             self.output_schema = value
+            self.output_format = format
             return self
 
         def get_response(self, **_kwargs):
@@ -402,6 +461,7 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
         async def async_start(self, **_kwargs):  # pragma: no cover - get_response path owns streaming
             raise AssertionError("streaming model tasks should use get_response()")
 
+    request = FakeModelRequest()
     agent = Agently.create_agent("execution-model-field-stream-agent")
     execution = (
         agent
@@ -422,7 +482,7 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
                 ],
                 "semantic_outputs": {"final": "draft"},
             },
-            model=FakeModelRequest(),
+            model=request,
         )
         .input("draft a transparent support reply")
         .create_execution()
@@ -441,6 +501,7 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
         ("task_dag.tasks.draft.fields.reply", "We are", False),
         ("task_dag.tasks.draft.fields.reply", " investigating.", False),
     ]
+    assert request.output_format == "auto"
     assert data["semantic_outputs"]["final"]["result"]["reply"] == "We are investigating."
 
 

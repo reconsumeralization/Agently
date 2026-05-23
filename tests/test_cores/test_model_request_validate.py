@@ -348,7 +348,8 @@ async def test_validate_runs_once_per_response_and_context_exposes_result_object
         {
             "status": (str,),
             "priority": (int,),
-        }
+        },
+        format="json",
     )
 
     calls: list[dict[str, Any]] = []

@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from agently.types.data import SkillExecutionDict, SkillExecutionPlan, SkillExecutionStatus
 from agently.types.plugins import SkillsExecutionContext
@@ -66,6 +66,7 @@ class SkillExecutor:
         context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ) -> SkillExecution:
         execution_id = uuid.uuid4().hex
         runtime_stream: list[dict[str, Any]] = []
@@ -120,9 +121,11 @@ class SkillExecutor:
             )
 
         try:
+            effective_output_format = self._resolve_output_format(plan, output_format)
             result = await context.async_request_model(
                 prompt=prompt,
                 output_schema=self._output_schema(plan),
+                output_format=effective_output_format,
                 ensure_keys=None,
                 max_retries=3,
                 stream_handler=stream_model_item,
@@ -197,6 +200,18 @@ class SkillExecutor:
             "response": (str, "The final response produced by applying the selected SKILL.md guidance."),
             "skill_trace": (list, "Skill ids used and concise notes about how each was applied."),
         }
+
+    def _resolve_output_format(
+        self,
+        plan: SkillExecutionPlan,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None,
+    ) -> Literal["json", "flat_markdown", "hybrid", "auto"]:
+        candidate = str(output_format or plan.get("expected_result_format") or "auto")
+        if candidate not in {"json", "flat_markdown", "hybrid", "auto"}:
+            raise ValueError(
+                "Skill execution output_format must be one of: json, flat_markdown, hybrid, auto."
+            )
+        return cast(Literal["json", "flat_markdown", "hybrid", "auto"], candidate)
 
     async def _emit_runtime_item(
         self,

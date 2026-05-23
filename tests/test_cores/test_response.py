@@ -40,12 +40,12 @@ def test_model_request(require_ollama):
     )
     configure_ollama(request_settings)
     request.set_prompt("input", "hello")
-    request.set_prompt(
-        "output",
+    request.output(
         {
             "thinking": (str,),
             "reply": ([str],),
         },
+        format="json",
     )
     response = request.get_response()
     results = []

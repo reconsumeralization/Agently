@@ -330,7 +330,8 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
             {
                 "summary": (str,),
                 "reply": (str,),
-            }
+            },
+            format="json",
         )
 
         response = request.get_response()
@@ -377,7 +378,8 @@ async def test_model_request_ensure_keys_prefers_complete_json_after_think_block
                     "deadline": (str, "截止日期"),
                 }
             ],
-        }
+        },
+        format="json",
     )
 
     response = request.get_response()

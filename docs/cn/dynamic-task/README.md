@@ -66,7 +66,13 @@ task = agent.create_dynamic_task(target="review policy")
 
 模型任务应复用 Agently request 的输出流水线，不要在 handler 或 example 里自行解析
 模型文本。`output_schema` 会作用到 semantic output 模型节点；如果某个模型节点
-需要独立契约，可以在该节点的 `inputs.output_schema` 覆盖。
+需要独立契约，可以在该节点的 `inputs.output_schema` 覆盖。每个模型任务也可以设置
+`inputs.output_format`：
+
+- `json`：紧凑的机器控制输出、Action 参数、路由标记、数字/布尔事实、严格抽取。
+- `flat_markdown`：扁平标量字段，且包含较长 HTML、Markdown、代码、SVG、SQL、模板或报告章节。
+- `hybrid`：长文本同时需要结构化 list、table、citation、metadata 或嵌套 evidence。
+- `auto`：接受由 schema 自动选择输出格式，并且可以接受重试延迟。
 
 ```python
 task = Agently.create_dynamic_task(
@@ -79,6 +85,19 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=120)
 _, output = next(iter(snapshot["semantic_outputs"].items()))
 brief = output["result"]["brief"]
+```
+
+提交式 DAG 可以把任务级策略放在模型节点自身：
+
+```python
+{
+    "id": "render_html",
+    "kind": "model",
+    "inputs": {
+        "output_schema": {"html": (str, "render-ready HTML", True)},
+        "output_format": "flat_markdown",
+    },
+}
 ```
 
 ## 架构

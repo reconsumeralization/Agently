@@ -70,7 +70,15 @@ task = agent.create_dynamic_task(target="review policy")
 For model tasks, use Agently's request output pipeline instead of parsing model
 text in handlers or examples. `output_schema` applies to semantic output model
 tasks; node-level `inputs.output_schema` can override it for a specific model
-task.
+task. Each model task may also set `inputs.output_format`:
+
+- `json`: compact machine-control outputs, action arguments, routing flags,
+  numeric or boolean facts, and strict extraction.
+- `flat_markdown`: flat scalar fields with long HTML, Markdown, code, SVG,
+  SQL, templates, or report sections.
+- `hybrid`: long prose with structured lists, tables, citations, metadata, or
+  nested evidence.
+- `auto`: schema-driven selection when retry latency is acceptable.
 
 ```python
 task = Agently.create_dynamic_task(
@@ -83,6 +91,19 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=120)
 _, output = next(iter(snapshot["semantic_outputs"].items()))
 brief = output["result"]["brief"]
+```
+
+For submitted DAGs, put the task-specific strategy on the model task itself:
+
+```python
+{
+    "id": "render_html",
+    "kind": "model",
+    "inputs": {
+        "output_schema": {"html": (str, "render-ready HTML", True)},
+        "output_format": "flat_markdown",
+    },
+}
 ```
 
 ## Architecture

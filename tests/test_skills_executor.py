@@ -44,6 +44,9 @@ class MockSkillsRequester:
         MockSkillsRequester.requests.append(request_text)
         if "candidate_skill_cards" in request_text:
             response = {"selected_skill_ids": ["beta-skill", "alpha-skill"], "reason": "Beta fits first."}
+        elif "### html" in request_text:
+            yield "message", "### html\n<section>OK</section>"
+            return
         else:
             response = {
                 "response": "Applied selected SKILL.md guidance.",
@@ -275,10 +278,12 @@ def test_model_decision_orders_multiple_candidates_with_model(tmp_path):
         "handle release",
         skills=["alpha-skill", "beta-skill"],
         mode="model_decision",
+        output_format="hybrid",
     )
 
     selected_skills = cast(list[dict[str, Any]], plan.get("selected_skills", []))
     assert [item["skill_id"] for item in selected_skills] == ["beta-skill", "alpha-skill"]
+    assert plan.get("expected_result_format") == "hybrid"
     assert "candidate_skill_cards" in MockSkillsRequester.requests[-1]
 
 
@@ -297,6 +302,25 @@ def test_run_skills_task_uses_full_skill_guidance_not_only_decision_card(tmp_pat
     assert output["response"] == "Applied selected SKILL.md guidance."
     assert "Alpha guidance full sentence with detailed operating procedure." in MockSkillsRequester.requests[-1]
     assert execution.skill_logs[0]["execution_mode"] == "prompt_only"
+
+
+def test_run_skills_task_passes_output_format_to_model_request(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill", body="Draft a render-ready HTML fragment.")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    execution = _create_agent().run_skills_task(
+        "render release HTML",
+        skills=["alpha-skill"],
+        mode="required",
+        semantic_outputs={"html": (str, "render-ready HTML", True)},
+        output_format="flat_markdown",
+    )
+
+    assert execution.status == "success"
+    assert execution.plan.get("expected_result_format") == "flat_markdown"
+    assert "Required sections" in MockSkillsRequester.requests[-1]
+    output = cast(dict[str, Any], execution.output)
+    assert output["html"] == "<section>OK</section>"
 
 
 def test_run_skills_task_sync_accepts_stream_handler(tmp_path):

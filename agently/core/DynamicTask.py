@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TYPE_CHECKING, cast
+from typing import Any, TYPE_CHECKING, Literal, cast
 
 from agently.core.TaskDAGExecutor import (
     CompiledTaskDAG,
@@ -209,6 +209,10 @@ class DynamicTask:
         output_schema = task_options.get("output_schema", task_options.get("output"))
         if output_schema is None and should_apply_default_contract:
             output_schema = self.output_schema
+        output_format = self._normalize_model_output_format(
+            task_options.get("output_format", "auto"),
+            task_id=context.task.id,
+        )
         ensure_keys = task_options.get("ensure_keys")
         if ensure_keys is None and should_apply_default_contract:
             ensure_keys = self.ensure_keys
@@ -235,7 +239,7 @@ class DynamicTask:
         if output_schema is not None:
             if not hasattr(prepared_request, "output"):
                 raise TypeError("Model dynamic task output_schema requires a request with .output(...).")
-            prepared_request = prepared_request.output(output_schema)
+            prepared_request = prepared_request.output(output_schema, format=output_format)
 
         start_kwargs: dict[str, Any] = {}
         normalized_ensure_keys = self._normalize_ensure_keys(ensure_keys)
@@ -249,6 +253,20 @@ class DynamicTask:
                 await self._put_model_stream_item(context, item)
             return await response.async_get_data(**start_kwargs)
         return await prepared_request.async_start(**start_kwargs)
+
+    def _normalize_model_output_format(
+        self,
+        value: Any,
+        *,
+        task_id: str,
+    ) -> Literal["json", "flat_markdown", "hybrid", "auto"]:
+        output_format = str(value or "auto").strip()
+        if output_format not in {"json", "flat_markdown", "hybrid", "auto"}:
+            raise ValueError(
+                f"Dynamic Task model task '{ task_id }' received invalid output_format "
+                f"'{ output_format }'. Expected one of: json, flat_markdown, hybrid, auto."
+            )
+        return cast(Literal["json", "flat_markdown", "hybrid", "auto"], output_format)
 
     async def _put_model_stream_item(self, context: DynamicTaskContext, item: Any) -> None:
         event_type = str(getattr(item, "event_type", "done"))

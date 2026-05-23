@@ -105,6 +105,21 @@ execution = await agent.async_run_skills_task(
 )
 ```
 
+`output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认
+`"auto"`；扁平标量 schema 且字段包含较长 HTML、Markdown、代码、SQL 或模板时用
+`"flat_markdown"`；长文本同时需要结构化 list、table、citation 或 metadata 时用
+`"hybrid"`；紧凑的机器可读结果用 `"json"`。
+
+```python
+execution = await agent.async_run_skills_task(
+    "Draft a release announcement as HTML.",
+    skills=["release-review"],
+    mode="required",
+    semantic_outputs={"html": (str, "render-ready HTML", True)},
+    output_format="flat_markdown",
+)
+```
+
 直接执行 Skills 时，`stream_handler` 会收到 runtime items：
 
 - `skills.prompt_only.start`

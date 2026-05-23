@@ -191,6 +191,10 @@ class AgentlyTaskDAGPlanner(TaskDAGPlanner):
             "Add approval.required=true for side-effect tasks when graph policy requires approval.",
             "Do not mark ordinary model tasks as network side effects only because they call the model provider; the executor manages provider access.",
             "Keep approval empty for read-only model analysis, synthesis, drafting, validation, or final response tasks unless the user explicitly asks for a human approval gate.",
+            "For model tasks, set task.inputs.output_format to json for compact machine-control outputs, action arguments, routing flags, numeric or boolean facts, and strict extraction.",
+            "For model tasks, set task.inputs.output_format to flat_markdown for flat scalar long text, code, HTML, SVG, Markdown, SQL, or template fields.",
+            "For model tasks, set task.inputs.output_format to hybrid for long prose plus structured lists, tables, citations, metadata, or nested evidence.",
+            "Use task.inputs.output_format=auto only when schema-driven format selection is acceptable and retry latency is acceptable.",
             "Do not invent executor handlers; use only task kinds or binding names that the resolver declares as available.",
         ]
         if self.available_bindings:
@@ -209,6 +213,7 @@ class AgentlyTaskDAGPlanner(TaskDAGPlanner):
             "max_tasks": self.max_tasks,
             "request_contract": {
                 "output_schema": "Task DAG v1 Agently output schema",
+                "output_format": "json",
                 "ensure_keys": self.ensure_keys(),
                 "validate_handler": "validate_output",
                 "retryable": True,
@@ -238,7 +243,7 @@ class AgentlyTaskDAGPlanner(TaskDAGPlanner):
         if hasattr(prepared, "instruct"):
             prepared = prepared.instruct(self.instructions())
         if hasattr(prepared, "output"):
-            prepared = prepared.output(self.output_schema())
+            prepared = prepared.output(self.output_schema(), format="json")
         if hasattr(prepared, "validate"):
             prepared = prepared.validate(self.validate_output)
         return prepared

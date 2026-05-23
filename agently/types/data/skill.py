@@ -102,6 +102,7 @@ class SkillExecutionPlan(TypedDict, total=False):
     prompt_bindings: list[dict[str, Any]]
     resource_bindings: list[dict[str, Any]]
     expected_result_shape: dict[str, Any]
+    expected_result_format: str
     diagnostics: list[dict[str, Any]]
 
 

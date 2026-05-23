@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
 from agently.core import BaseAgent
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode
@@ -87,6 +87,7 @@ class SkillsExtension(BaseAgent):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
     ) -> SkillExecutionPlan:
         selectors = self._collect_skill_selectors(skills=skills, mode=mode)
         skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=skills_packs, mode=mode)
@@ -98,6 +99,7 @@ class SkillsExtension(BaseAgent):
             skills_packs=skills_pack_selectors,
             mode=mode,
             semantic_outputs=semantic_outputs,
+            output_format=output_format,
         )
 
     def resolve_skills_plan(
@@ -108,6 +110,7 @@ class SkillsExtension(BaseAgent):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
     ) -> SkillExecutionPlan:
         return FunctionShifter.syncify(self.async_resolve_skills_plan)(
             task,
@@ -115,6 +118,7 @@ class SkillsExtension(BaseAgent):
             skills_packs=skills_packs,
             mode=mode,
             semantic_outputs=semantic_outputs,
+            output_format=output_format,
         )
 
     async def async_run_skills_task(
@@ -125,6 +129,7 @@ class SkillsExtension(BaseAgent):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> "SkillExecution":
         plan = await self.async_resolve_skills_plan(
@@ -133,10 +138,12 @@ class SkillsExtension(BaseAgent):
             skills_packs=skills_packs,
             mode=mode,
             semantic_outputs=semantic_outputs,
+            output_format=output_format,
         )
         execution = await self.async_execute_skills_plan(
             task,
             plan=plan,
+            output_format=output_format,
             stream_handler=stream_handler,
         )
         self.__skill_execution_logs.append(execution.to_dict())
@@ -150,6 +157,7 @@ class SkillsExtension(BaseAgent):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> "SkillExecution":
         return FunctionShifter.syncify(self.async_run_skills_task)(
@@ -158,6 +166,7 @@ class SkillsExtension(BaseAgent):
             skills_packs=skills_packs,
             mode=mode,
             semantic_outputs=semantic_outputs,
+            output_format=output_format,
             stream_handler=stream_handler,
         )
 
@@ -166,6 +175,7 @@ class SkillsExtension(BaseAgent):
         task: str,
         *,
         plan: SkillExecutionPlan,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> "SkillExecution":
         context = create_agent_skills_runtime_context(self, runtime_stream_handler=stream_handler)
@@ -173,6 +183,7 @@ class SkillsExtension(BaseAgent):
             context=context,
             task=task,
             plan=plan,
+            output_format=output_format,
         )
 
     def get_skills_execution_logs(self) -> list[dict[str, Any]]:

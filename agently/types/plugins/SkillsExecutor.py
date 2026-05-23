@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
 
@@ -32,6 +32,7 @@ class SkillsPlanningContext(Protocol):
         *,
         prompt: Any,
         output_schema: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
         ensure_keys: list[str] | None = None,
         max_retries: int = 3,
         stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
@@ -109,6 +110,7 @@ class SkillsExecutor(Protocol):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
     ) -> SkillExecutionPlan: ...
 
     async def async_execute_plan(
@@ -117,4 +119,5 @@ class SkillsExecutor(Protocol):
         context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ) -> Any: ...

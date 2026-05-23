@@ -113,6 +113,22 @@ execution = await agent.async_run_skills_task(
 )
 ```
 
+`output_format=` selects how that model response is controlled. Leave it as
+`"auto"` for ordinary Skill answers; use `"flat_markdown"` for flat scalar
+schemas that contain long HTML, Markdown, code, SQL, or templates; use
+`"hybrid"` when long prose also needs structured lists, tables, citations, or
+metadata; use `"json"` for compact machine-readable results.
+
+```python
+execution = await agent.async_run_skills_task(
+    "Draft a release announcement as HTML.",
+    skills=["release-review"],
+    mode="required",
+    semantic_outputs={"html": (str, "render-ready HTML", True)},
+    output_format="flat_markdown",
+)
+```
+
 Direct Skills execution streams runtime items through `stream_handler`:
 
 - `skills.prompt_only.start`

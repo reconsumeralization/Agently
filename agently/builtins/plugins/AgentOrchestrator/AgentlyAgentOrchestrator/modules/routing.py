@@ -120,7 +120,8 @@ class HybridRoutePlanner:
                         {
                             "selected_route": (str, "one of: dynamic_task, skills, model_request", True),
                             "reason": (str, "concise business reason for the route choice"),
-                        }
+                        },
+                        format="json",
                     )
                     .async_start(max_retries=2, raise_ensure_failure=False)
                 )
