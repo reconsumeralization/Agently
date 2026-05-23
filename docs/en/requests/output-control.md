@@ -55,6 +55,27 @@ agent.input("Summarize.").output({
 
 The handler runs only on structured-result getters: `start()`, `async_start()`, `get_data()`, `async_get_data()`, `get_data_object()`, `async_get_data_object()`. It does **not** run on `get_text()` / `get_meta()` (those don't carry the parsed structure that validate would inspect).
 
+## Ordered Fields And Evaluation Levels
+
+Agently output schemas are ordered. When later fields depend on earlier
+judgment, put support fields first: evidence, assumptions, clarifications,
+source notes, calculation plans, concise rationale, rule checks, and
+intermediate facts. Put final booleans, verdicts, replies, summaries, and action
+decisions last. User-facing renderers can reorder sections for natural reading,
+but the model generation contract should keep support-before-conclusion order.
+
+For model-owned grading, confidence, trust, relevance, usability, or quality
+judgments, prefer conceptual levels with explicit definitions over precise
+numeric scores. For example, ask for `high_trust`, `moderate_trust`, or
+`low_trust`, and define each level in the prompt. If downstream code needs a
+score for thresholds, weighting, statistics, or index calculations, map levels
+to deterministic numbers in code after generation.
+
+For complex arithmetic, long-number calculation, weighting, aggregation, or
+statistical transformations, ask the model for an executable calculation plan or
+code, run it with tools, and pass the original question, code, and observed
+result into the next model step. Do not make text generation be the calculator.
+
 You can also pass handlers per-call:
 
 ```python
