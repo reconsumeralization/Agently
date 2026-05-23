@@ -1,4 +1,4 @@
-"""Release notes generator — Skills + DAG streaming with real model calls.
+"""Release notes generator — prompt-only Skill with field-level streaming.
 
 Run:
     python examples/agent_auto_orchestration/01_skills_dag_streaming.py
@@ -7,27 +7,33 @@ Environment:
     DEEPSEEK_API_KEY in the shell or .env file.
     Set DYNAMIC_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
 
-Scenario: A DevOps engineer triggers release notes generation for v2.5.0.
-The commit log below is mocked business data — it represents what a real CI/CD
-system would pipe in. Model calls are NOT mocked; each stage calls the LLM to
-classify, summarize, draft, and compile the release notes.
+Scenario: A DevOps engineer triggers release notes generation for v2.5.0. The
+commit log below is mocked business data — what a real CI/CD system would pipe
+in. The model call is NOT mocked.
+
+New-standard Skills model
+-------------------------
+The capability is a single standard ``SKILL.md`` (guidance only — no
+``skill.yaml``, no stages, no embedded actions). Running it is ONE prompt-only
+model request that returns the full structured release notes shaped by
+``semantic_outputs``. We stream field-level deltas as the model fills each
+section, then the HOST writes the published file to disk (the only side effect).
 
 Expected key output from one real DeepSeek run:
-    selected_route=skills
-    stream_classify=True
-    stream_summarize=True
-    stream_draft=True
-    stream_compile=True
+    skill status: success
     has_features=True
     has_fixes=True
     announcement_ready=True
+    release notes written: .../release_notes_v2.5.0.md
 """
 
 from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -74,264 +80,67 @@ MOCK_PREVIOUS_VERSION = "v2.4.1"
 MOCK_TEAM = "Platform Engineering — Release Team Alpha"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Skill definition
+# Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-RELEASE_NOTES_SKILL_YAML = """
-skill_id: release-notes-generator
-version: 0.2.0
-display_name: Release Notes Generator
-purpose: >
-  Generate professional software release notes from commit logs,
-  including feature summaries, fix lists, breaking change guidance,
-  and a publishable announcement.
-trust_level: local
-activation:
-  keywords: [release, notes, changelog, version, deploy, 发布, 版本]
-requires:
-  actions: [classify_changes, summarize_changes, draft_announcement, compile_release_notes]
-stages:
-  - id: classify_changes
-    kind: action
-    action: classify_changes
-    input:
-      commits: "${task}"
-  - id: summarize_changes
-    kind: action
-    action: summarize_changes
-    input:
-      classified: "${state.classify_changes}"
-  - id: validate_summary
-    kind: validate
-    validation:
-      required_state: [classify_changes, summarize_changes]
-  - id: draft_announcement
-    kind: action
-    action: draft_announcement
-    input:
-      summary: "${state.summarize_changes}"
-      version: "${task}"
-  - id: compile_release_notes
-    kind: action
-    action: compile_release_notes
-    input:
-      classified: "${state.classify_changes}"
-      summary: "${state.summarize_changes}"
-      announcement: "${state.draft_announcement}"
-      version: "${task}"
-"""
-
-RELEASE_NOTES_SKILL_MD = """---
+SKILL_MD = """\
+---
 name: Release Notes Generator
-description: Generate professional software release notes from commits.
-keywords:
-  - release
-  - changelog
-  - deploy
-  - 发布
-  - 版本
+description: >-
+  Generate professional software release notes from a commit log: classify
+  changes, write user-facing summaries, draft a publishable announcement, and
+  assess release readiness. Use for release, changelog, version, and deploy
+  requests.
+keywords: [release, notes, changelog, version, deploy, 发布, 版本]
 ---
 
-Generate structured release notes including feature highlights, bug fixes,
-known issues, and upgrade instructions.
+# Release Notes Generator
+
+You are a release engineer + technical writer. Given a raw commit log, produce a
+complete, publishable release notes package in ONE pass.
+
+## Steps
+1. Classify every commit into: feature, fix, breaking change, docs, security.
+   A security-related fix belongs in BOTH fixes and security.
+2. Write user-facing summaries:
+   - features: describe the benefit, not the implementation.
+   - fixes: what was broken and how it is resolved.
+   - breaking changes: ALWAYS include clear migration steps.
+   - security: state the risk addressed without revealing exploit details.
+3. Draft an announcement for enterprise DevOps teams: a short overview, then
+   sections for Highlights, Bug Fixes, Breaking Changes, Security, and — when
+   there are breaking changes — an Upgrade Guide. End with a Get Started CTA.
+4. Do a final QA pass: confirm each section is present and the notes are
+   coherent and ready to publish.
+
+Be specific and accurate to the commit log. Do not invent changes.
 """
 
 
-def _write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-
-
-def prepare_skill() -> Path:
-    skill_root = RUNTIME_ROOT / "release-notes-generator"
-    _write_text(skill_root / "skill.yaml", RELEASE_NOTES_SKILL_YAML)
-    _write_text(skill_root / "SKILL.md", RELEASE_NOTES_SKILL_MD)
-    return skill_root
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Action implementations — real model calls, simulated I/O delay before each
-# ═══════════════════════════════════════════════════════════════════════════════
-
-async def classify_changes(commits: str = "") -> dict:
-    """Classify commits into features, fixes, breaking changes, docs, security."""
-    print("  → 正在分类提交变更（模拟从 GitLab API 拉取数据）...")
-    await asyncio.sleep(0.3)  # simulated I/O: fetching from GitLab
-    print("  → 分类变更类型（模型请求中）...")
-    result = await (
-        Agently.create_agent("release-classify")
-        .input({"commits": commits})
-        .instruct(
-            "You are a release engineer reviewing commits for an upcoming release. "
-            "Classify each change into: feature, fix, breaking_change, docs, security. "
-            "Be thorough — security-related fixes should appear in BOTH 'fixes' and 'security'."
-        )
-        .output({
-            "features": ([str], "Feature additions and enhancements"),
-            "fixes": ([str], "Bug fixes and corrections"),
-            "breaking_changes": ([str], "Breaking or backward-incompatible changes"),
-            "docs": ([str], "Documentation updates"),
-            "security": ([str], "Security-related changes"),
-            "total_count": (int, "Total number of changes classified", True),
-        })
-        .async_start()
-    )
-    return result
-
-
-async def summarize_changes(classified: object = None) -> dict:
-    """Summarize classified changes into user-facing release note sections."""
-    await asyncio.sleep(0.2)  # simulated I/O: loading previous release notes for comparison
-    print("  → 汇总变更描述（模型请求中）...")
-    data = classified if isinstance(classified, dict) else {}
-    result = await (
-        Agently.create_agent("release-summarize")
-        .input({
-            "features": data.get("features", []),
-            "fixes": data.get("fixes", []),
-            "breaking_changes": data.get("breaking_changes", []),
-            "security": data.get("security", []),
-            "previous_version": MOCK_PREVIOUS_VERSION,
-        })
-        .instruct(
-            "You are a technical writer preparing release notes for end users. "
-            "For each category, write concise user-friendly summaries. "
-            "Features: describe the benefit. Fixes: note what was broken and the resolution. "
-            "Breaking changes: MUST include clear migration steps. "
-            "Security: note the risk addressed without revealing exploit details."
-        )
-        .output({
-            "feature_highlights": ([str], "User-friendly feature descriptions"),
-            "fix_summaries": ([str], "User-friendly fix descriptions"),
-            "breaking_notes": ([str], "Breaking change descriptions with migration hints"),
-            "security_notes": ([str], "Security fix summaries"),
-        })
-        .async_start()
-    )
-    return result
-
-
-async def draft_announcement(summary: object = None, version: str = "") -> dict:
-    """Draft a release announcement from the summarized changes."""
-    await asyncio.sleep(0.2)  # simulated I/O: pulling team info and changelog template
-    print("  → 撰写发布公告（模型请求中）...")
-    data = summary if isinstance(summary, dict) else {}
-    result = await (
-        Agently.create_agent("release-announce")
-        .input({
-            "feature_highlights": data.get("feature_highlights", []),
-            "fix_summaries": data.get("fix_summaries", []),
-            "breaking_notes": data.get("breaking_notes", []),
-            "security_notes": data.get("security_notes", []),
-            "version": version,
-            "release_date": MOCK_RELEASE_DATE,
-            "team": MOCK_TEAM,
-        })
-        .instruct(
-            "You are a developer relations writer drafting a release announcement. "
-            "Write for an audience of enterprise DevOps teams. "
-            "Start with a brief overview. Organize under: Highlights, Bug Fixes, "
-            "Breaking Changes, Security. If there are breaking changes, add an "
-            "'Upgrade Guide' section. End with a 'Get Started' call to action."
-        )
-        .output({
-            "title": (str, "Release announcement title including version", True),
-            "overview": (str, "Overview paragraph summarizing the release", True),
-            "body": (str, "Full announcement body with markdown sections", True),
-            "upgrade_guide": (str, "Upgrade instructions for breaking changes"),
-        })
-        .async_start()
-    )
-    return result
-
-
-async def compile_release_notes(
-    classified: object = None,
-    summary: object = None,
-    announcement: object = None,
-    version: str = "",
-) -> dict:
-    """Compile and quality-check the final release notes package."""
-    await asyncio.sleep(0.2)  # simulated I/O: writing to release registry
-    print("  → 编译与质检发布说明（模型请求中）...")
-    cl = classified if isinstance(classified, dict) else {}
-    sm = summary if isinstance(summary, dict) else {}
-    an = announcement if isinstance(announcement, dict) else {}
-
-    result = await (
-        Agently.create_agent("release-compile")
-        .input({
-            "total_changes": cl.get("total_count", 0),
-            "feature_count": len(sm.get("feature_highlights", [])),
-            "fix_count": len(sm.get("fix_summaries", [])),
-            "breaking_count": len(sm.get("breaking_notes", [])),
-            "security_count": len(sm.get("security_notes", [])),
-            "title": an.get("title", ""),
-            "overview": an.get("overview", ""),
-        })
-        .instruct(
-            "You are a release manager doing final QA on release notes. "
-            "Verify completeness and coherence. Flag any missing sections. "
-            "Write a brief quality assessment."
-        )
-        .output({
-            "ready": (bool, "True if release notes are complete and ready", True),
-            "quality_notes": (str, "Quality assessment", True),
-            "has_features": (bool, "Features section present", True),
-            "has_fixes": (bool, "Fixes section present", True),
-            "has_breaking": (bool, "Breaking changes section present", True),
-            "has_security": (bool, "Security section present", True),
-        })
-        .async_start()
-    )
-    return result
-
-
-def register_actions(agent) -> None:
-    agent.register_action(
-        name="classify_changes",
-        desc="Classify commits into feature/fix/breaking/doc/security using AI.",
-        kwargs={"commits": (str, "Commit log text.")},
-        func=classify_changes,
-    )
-    agent.register_action(
-        name="summarize_changes",
-        desc="Summarize classified changes into user-friendly release note entries.",
-        kwargs={"classified": (object, "Output from classify_changes.")},
-        func=summarize_changes,
-    )
-    agent.register_action(
-        name="draft_announcement",
-        desc="Draft a professional release announcement from summaries.",
-        kwargs={
-            "summary": (object, "Output from summarize_changes."),
-            "version": (str, "Version string."),
-        },
-        func=draft_announcement,
-    )
-    agent.register_action(
-        name="compile_release_notes",
-        desc="Compile and quality-check the final release notes.",
-        kwargs={
-            "classified": (object, "Output from classify_changes."),
-            "summary": (object, "Output from summarize_changes."),
-            "announcement": (object, "Output from draft_announcement."),
-            "version": (str, "Version string."),
-        },
-        func=compile_release_notes,
-    )
+def install_skill() -> str:
+    skill_src = RUNTIME_ROOT / "src" / "release-notes-generator"
+    skill_src.mkdir(parents=True, exist_ok=True)
+    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    Agently.settings.set("skills.registry.root", tempfile.mkdtemp(prefix="agently_skills_reg_"))
+    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
+    return str(contract["skill_id"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Main demo
+# Host orchestration: run the Skill (prompt-only) + write the published file
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_STAGE_NARRATIVE = {
-    "classify_changes": "变更分类完成",
-    "summarize_changes": "变更描述汇总完成",
-    "validate_summary": "汇总校验通过",
-    "draft_announcement": "发布公告撰写完成",
-    "compile_release_notes": "发布说明质检完成",
+SEMANTIC_OUTPUTS: dict[str, Any] = {
+    "feature_highlights": ([str], "User-friendly feature descriptions"),
+    "fix_summaries": ([str], "User-friendly fix descriptions"),
+    "breaking_notes": ([str], "Breaking changes with migration steps"),
+    "security_notes": ([str], "Security fix summaries"),
+    "title": (str, "Release announcement title including version", True),
+    "overview": (str, "Overview paragraph summarizing the release", True),
+    "body": (str, "Full announcement body with markdown sections", True),
+    "ready": (bool, "True if the release notes are complete and ready", True),
+    "quality_notes": (str, "Final QA assessment", True),
 }
 
 
@@ -339,111 +148,86 @@ async def main() -> None:
     provider = configure_model(temperature=0.3)
     print(f"Model provider: {provider}\n")
 
-    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
-    skill_root = prepare_skill()
-    Agently.skills_executor.install_skills(skill_root, trust_level="local", update=True)
-
+    skill_id = install_skill()
     agent = Agently.create_agent("release-notes-demo")
-    register_actions(agent)
 
     divider = "=" * 60
     print(divider)
-    print("Release Notes Generator — Skills + DAG Streaming")
-    print(f"Version:  {MOCK_VERSION}")
-    print(f"Date:     {MOCK_RELEASE_DATE}")
+    print("Release Notes Generator — prompt-only Skill")
+    print(f"Version:  {MOCK_VERSION}  ·  Date: {MOCK_RELEASE_DATE}  ·  Prev: {MOCK_PREVIOUS_VERSION}")
     print(f"Team:     {MOCK_TEAM}")
-    print(f"Previous: {MOCK_PREVIOUS_VERSION}")
     print(f"Commits:  {MOCK_COMMITS.count(chr(10))} lines of commit log (mocked CI/CD data)")
     print(divider)
-    print("Starting release notes pipeline...\n")
+    print("Running release notes skill (streaming sections)...\n")
 
-    await asyncio.sleep(0.3)  # simulated: agent startup
+    streamed_fields: set[str] = set()
 
-    execution = (
-        agent
-        .use_skills(["release-notes-generator"], mode="required")
-        .input(MOCK_COMMITS)
-        .create_execution()
+    async def on_stream(item: dict[str, Any]) -> None:
+        if item.get("type") != "skills.model_stream":
+            return
+        path = item.get("path")
+        if path and item.get("is_complete"):
+            if path not in streamed_fields:
+                streamed_fields.add(str(path))
+                print(f"  [section ready] {path}")
+
+    task = (
+        f"Generate release notes for {MOCK_VERSION} (released {MOCK_RELEASE_DATE}, "
+        f"previous {MOCK_PREVIOUS_VERSION}, team {MOCK_TEAM}).\n\nCommit log:\n{MOCK_COMMITS}"
     )
 
-    stream_events: list[str] = []
-    stage_step = 0
+    execution = await agent.async_run_skills_task(
+        task,
+        skills=[skill_id],
+        mode="required",
+        semantic_outputs=SEMANTIC_OUTPUTS,
+        stream_handler=on_stream,
+    )
 
-    async for item in execution.get_async_generator(type="instant"):
-        if not item.is_complete:
-            continue
-        path = item.path
-        stream_events.append(path)
+    print(f"\nskill status: {execution.status}")
+    if execution.status != "success":
+        print("output:", execution.output)
+        return
 
-        if path == "route.selected":
-            route = (item.value or {}).get("selected_route", "skills")
-            print(f"  [route] selected: {route}")
+    result = execution.output or {}
+    features = result.get("feature_highlights", []) or []
+    fixes = result.get("fix_summaries", []) or []
+    breaking = result.get("breaking_notes", []) or []
+    security = result.get("security_notes", []) or []
 
-        elif path.startswith("skills.stages."):
-            stage_id = path.split(".")[-1]
-            stage_step += 1
-            narrative = _STAGE_NARRATIVE.get(stage_id, stage_id)
-            print(f"  [{stage_step}] {narrative}")
-
-    data = await execution.async_get_data()
-    meta = await execution.async_get_meta()
-
-    classified = data.get("classify_changes") or {}
-    summary = data.get("summarize_changes") or {}
-    announcement = data.get("draft_announcement") or {}
-    compiled = data.get("compile_release_notes") or {}
-
-    # Deliverable checklist
-    print(f"\n{divider}")
-    print("发布说明交付清单")
-    print(divider)
-
-    features = summary.get("feature_highlights", [])
-    fixes = summary.get("fix_summaries", [])
-    breaking = summary.get("breaking_notes", [])
-    security = summary.get("security_notes", [])
-
-    print(f"  总变更数: {classified.get('total_count', 0)}")
+    print(f"\n{divider}\n发布说明交付清单\n{divider}")
     print(f"  功能亮点: {len(features)} 项")
     for f in features[:3]:
-        print(f"    · {f[:100]}")
-    if len(features) > 3:
-        print(f"    ... 另 {len(features) - 3} 项")
-
+        print(f"    · {str(f)[:100]}")
     print(f"  缺陷修复: {len(fixes)} 项")
     for f in fixes[:3]:
-        print(f"    · {f[:100]}")
-    if len(fixes) > 3:
-        print(f"    ... 另 {len(fixes) - 3} 项")
-
+        print(f"    · {str(f)[:100]}")
     if breaking:
         print(f"  破坏性变更: {len(breaking)} 项")
         for b in breaking:
-            print(f"    ⚠ {b[:100]}")
-
+            print(f"    ⚠ {str(b)[:100]}")
     if security:
         print(f"  安全修复: {len(security)} 项")
-
-    print(f"\n  公告标题: {announcement.get('title', '—')}")
-    overview = announcement.get("overview", "")
+    print(f"\n  公告标题: {result.get('title', '—')}")
+    overview = str(result.get("overview", ""))
     if overview:
         print(f"  概述: {overview[:150]}...")
 
-    print(f"\n{divider}")
-    print("质检结果")
-    print(divider)
-    print(f"  可发布: {compiled.get('ready')}")
-    print(f"  质检备注: {compiled.get('quality_notes', '—')[:200]}")
+    # ── Host side effect: publish the release notes file ──
+    out_dir = RUNTIME_ROOT / "published"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"release_notes_{MOCK_VERSION}.md"
+    out_path.write_text(str(result.get("body") or result.get("overview") or ""), encoding="utf-8")
 
-    selected_route = meta.get("route_plan", {}).get("selected_route", "")
-    print(f"\nselected_route={selected_route}")
-    print(f"stream_classify={'skills.stages.classify_changes' in stream_events}")
-    print(f"stream_summarize={'skills.stages.summarize_changes' in stream_events}")
-    print(f"stream_draft={'skills.stages.draft_announcement' in stream_events}")
-    print(f"stream_compile={'skills.stages.compile_release_notes' in stream_events}")
-    print(f"has_features={compiled.get('has_features')}")
-    print(f"has_fixes={compiled.get('has_fixes')}")
-    print(f"announcement_ready={compiled.get('ready')}")
+    print(f"\n{divider}\n质检结果\n{divider}")
+    print(f"  可发布: {result.get('ready')}")
+    print(f"  质检备注: {str(result.get('quality_notes', '—'))[:200]}")
+
+    print(f"\nskill status: {execution.status}")
+    print(f"has_features={bool(features)}")
+    print(f"has_fixes={bool(fixes)}")
+    print(f"announcement_ready={bool(result.get('ready'))}")
+    print(f"release notes written: {out_path}")
 
 
 if __name__ == "__main__":

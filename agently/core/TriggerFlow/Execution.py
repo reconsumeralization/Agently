@@ -67,6 +67,7 @@ from .ExecutionResult import TriggerFlowExecutionResult
 InputT = TypeVar("InputT")
 StreamT = TypeVar("StreamT")
 ResultT = TypeVar("ResultT")
+PendingInterruptClosePolicy = Literal["error", "cancel"]
 
 
 class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
@@ -86,6 +87,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         intervention_mode: TriggerFlowInterventionMode = None,
         intervention_policy: Any = None,
+        resume_handle_exposed: bool = True,
     ):
         if intervention_mode not in {None, "planned", "auto"}:
             raise ValueError("TriggerFlow intervention_mode must be one of: None, 'planned', 'auto'.")
@@ -133,6 +135,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._runtime_definition_emitted = False
         self._auto_close = bool(auto_close)
         self._auto_close_timeout = auto_close_timeout
+        self._resume_handle_exposed = bool(resume_handle_exposed)
         self._lifecycle_state = TRIGGER_FLOW_LIFECYCLE_OPEN
         self._created_at = time.time()
         self._started_at: float | None = None
@@ -973,55 +976,74 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         reason: str = "manual",
         timeout: float | None = None,
         seal: bool = True,
+        pending_interrupts: PendingInterruptClosePolicy = "error",
     ):
         if self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED:
             return self._close_result
         if self._close_started:
             await self._closed_event.wait()
             return self._close_result
+        self._validate_pending_interrupt_close_policy(pending_interrupts)
+        await self._handle_pending_interrupts_before_close(
+            pending_interrupts=pending_interrupts,
+            reason=reason,
+        )
 
         self._close_started = True
         self._close_reason = reason
-        if seal:
-            await self.async_seal(reason=reason)
+        sealed_for_close = False
+        try:
+            if seal:
+                await self.async_seal(reason=reason)
+                sealed_for_close = True
 
-        await self._drain_pending_tasks(timeout=timeout)
-        await self._async_expire_pending_interventions()
+            await self._drain_pending_tasks(timeout=timeout)
+            await self._handle_pending_interrupts_before_close(
+                pending_interrupts=pending_interrupts,
+                reason=reason,
+            )
+            await self._async_expire_pending_interventions()
 
-        result = self._build_close_snapshot()
-        if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
-            self._set_status(TRIGGER_FLOW_STATUS_COMPLETED)
-            if not self._runtime_completed_emitted:
-                self._runtime_completed_emitted = True
-                await self._emit_runtime_event(
-                    "triggerflow.execution_completed",
-                    message=f"TriggerFlow execution '{ self.id }' completed.",
-                    payload={
-                        "result": self._to_serializable_value(result),
-                        "origin_chunk": self._get_origin_chunk_payload(),
-                    },
-                )
+            result = self._build_close_snapshot()
+            if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
+                self._set_status(TRIGGER_FLOW_STATUS_COMPLETED)
+                if not self._runtime_completed_emitted:
+                    self._runtime_completed_emitted = True
+                    await self._emit_runtime_event(
+                        "triggerflow.execution_completed",
+                        message=f"TriggerFlow execution '{ self.id }' completed.",
+                        payload={
+                            "result": self._to_serializable_value(result),
+                            "origin_chunk": self._get_origin_chunk_payload(),
+                        },
+                    )
 
-        await self.async_stop_stream()
-        await self._release_managed_execution_environments()
+            await self.async_stop_stream()
+            await self._release_managed_execution_environments()
 
-        self._closed_at = time.time()
-        self._close_result = result
-        self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_CLOSED)
-        await self._emit_runtime_event(
-            "triggerflow.execution_closed",
-            message=f"TriggerFlow execution '{ self.id }' closed.",
-            payload={
-                "reason": reason,
-                "closed_at": self._closed_at,
-                "result": self._to_serializable_value(result),
-            },
-        )
-        self._closed_event.set()
+            self._closed_at = time.time()
+            self._close_result = result
+            self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_CLOSED)
+            await self._emit_runtime_event(
+                "triggerflow.execution_closed",
+                message=f"TriggerFlow execution '{ self.id }' closed.",
+                payload={
+                    "reason": reason,
+                    "closed_at": self._closed_at,
+                    "result": self._to_serializable_value(result),
+                },
+            )
+            self._closed_event.set()
 
-        if self._auto_close_task is not None and self._auto_close_task is not asyncio.current_task():
-            self._auto_close_task.cancel()
-        return self._close_result
+            if self._auto_close_task is not None and self._auto_close_task is not asyncio.current_task():
+                self._auto_close_task.cancel()
+            return self._close_result
+        except BaseException:
+            self._close_started = False
+            self._close_reason = None
+            if sealed_for_close and self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_SEALED:
+                await self.async_unseal(reason="close_failed")
+            raise
 
     async def _emit_runtime_event(
         self,
@@ -1208,6 +1230,68 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             self._set_status(TRIGGER_FLOW_STATUS_WAITING)
         elif self._status == TRIGGER_FLOW_STATUS_WAITING:
             self._set_status(TRIGGER_FLOW_STATUS_RUNNING)
+
+    def _validate_pending_interrupt_close_policy(self, policy: str):
+        if policy not in {"error", "cancel"}:
+            raise ValueError("pending_interrupts must be one of: 'error', 'cancel'.")
+
+    async def _handle_pending_interrupts_before_close(
+        self,
+        *,
+        pending_interrupts: PendingInterruptClosePolicy,
+        reason: str,
+    ):
+        pending = self.get_pending_interrupts()
+        if not pending:
+            return
+        if pending_interrupts == "cancel":
+            await self._cancel_pending_interrupts(reason=reason)
+            return
+        await self._emit_runtime_event(
+            "triggerflow.pending_interrupts_close_rejected",
+            level="ERROR",
+            message=f"TriggerFlow execution '{ self.id }' can not close while pending interrupts are waiting.",
+            payload={
+                "reason": reason,
+                "pending_interrupt_ids": sorted(pending),
+                "pending_interrupts": self._to_serializable_value(pending),
+            },
+        )
+        raise RuntimeError(
+            f"Can not close TriggerFlow execution { self.id } while pending interrupts are waiting: "
+            f"{ sorted(pending) }. Resume them with continue_with(...) or pass pending_interrupts='cancel'."
+        )
+
+    async def _cancel_pending_interrupts(self, *, reason: str):
+        interrupts = self._get_interrupts().copy()
+        cancelled: list[dict[str, Any]] = []
+        cancelled_at = time.time()
+        for interrupt_id, interrupt_state in list(interrupts.items()):
+            if not isinstance(interrupt_state, dict):
+                continue
+            if interrupt_state.get("status") != "waiting":
+                continue
+            interrupt = dict(interrupt_state)
+            interrupt["status"] = "cancelled"
+            interrupt["cancelled_at"] = cancelled_at
+            interrupt["cancel_reason"] = reason
+            interrupts[interrupt_id] = interrupt
+            cancelled.append(interrupt)
+        if not cancelled:
+            return
+        self._system_runtime_data.set("interrupts", interrupts)
+        self._set_status(TRIGGER_FLOW_STATUS_CANCELLED)
+        self._bump_state_version()
+        self._mark_activity()
+        await self._emit_runtime_event(
+            "triggerflow.pending_interrupts_cancelled",
+            level="WARNING",
+            message=f"TriggerFlow execution '{ self.id }' cancelled pending interrupts before close.",
+            payload={
+                "reason": reason,
+                "interrupts": self._to_serializable_value(cancelled),
+            },
+        )
 
     def _get_sub_flow_frames(self) -> dict[str, Any]:
         frames = self._system_runtime_data.get("sub_flow_frames", {}, inherit=False)
@@ -2187,6 +2271,25 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         interrupt_id: str | None = None,
         resume_to: Any = None,
     ):
+        if not self._resume_handle_exposed:
+            await self._emit_runtime_event(
+                "triggerflow.interrupt_unhandled",
+                level="ERROR",
+                message=(
+                    f"TriggerFlow execution '{ self.id }' can not pause because its resume handle is hidden."
+                ),
+                payload={
+                    "type": type,
+                    "payload": self._to_serializable_value(payload),
+                    "resume_event": resume_event,
+                    "resume_to": self._to_serializable_value(resume_to),
+                },
+            )
+            raise RuntimeError(
+                "TriggerFlow pause_for(...) requires an exposed execution handle. "
+                "Use flow.create_execution()/flow.start_execution(), then handle "
+                "get_pending_interrupts() and continue_with(...)."
+            )
         interrupt_id = interrupt_id if interrupt_id is not None else uuid.uuid4().hex
         interrupts = self._get_interrupts().copy()
         current_signal = self.get_last_signal()
@@ -2444,21 +2547,36 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             if not self._started:
                 temp_execution_task = asyncio.create_task(self._async_run_start(initial_value=initial_value))
             while True:
-                if timeout is not None:
-                    try:
-                        next_result = await asyncio.wait_for(
-                            self._runtime_stream_queue.get(),
-                            timeout=timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        warnings.warn(
-                            f"Execution { self.id } runtime stream stopped because of timeout.\n"
-                            f"Timeout seconds: { timeout }\n"
-                            "You can use execution.get_async_runtime_stream(timeout=<int | None>) or execution.get_runtime_stream(timeout=<int | None>) to reset new timeout seconds or use None to wait forever."
-                        )
-                        break
-                else:
-                    next_result = await self._runtime_stream_queue.get()
+                if temp_execution_task is not None and temp_execution_task.done():
+                    await temp_execution_task
+                stream_task = asyncio.create_task(self._runtime_stream_queue.get())
+                waiters: set[asyncio.Task[Any]] = {stream_task}
+                if temp_execution_task is not None:
+                    waiters.add(temp_execution_task)
+                done, pending = await asyncio.wait(
+                    waiters,
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    stream_task.cancel()
+                    await asyncio.gather(stream_task, return_exceptions=True)
+                    warnings.warn(
+                        f"Execution { self.id } runtime stream stopped because of timeout.\n"
+                        f"Timeout seconds: { timeout }\n"
+                        "You can use execution.get_async_runtime_stream(timeout=<int | None>) or execution.get_runtime_stream(timeout=<int | None>) to reset new timeout seconds or use None to wait forever."
+                    )
+                    break
+                if temp_execution_task is not None and temp_execution_task in done:
+                    if stream_task not in done:
+                        stream_task.cancel()
+                        await asyncio.gather(stream_task, return_exceptions=True)
+                    await temp_execution_task
+                    if stream_task not in done:
+                        continue
+                if stream_task not in done:
+                    continue
+                next_result = stream_task.result()
                 if next_result is not RUNTIME_STREAM_STOP:
                     yield next_result
                 else:

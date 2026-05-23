@@ -128,6 +128,72 @@ async def test_trigger_flow_pause_resume_to_self_exposes_resume_context():
     assert snapshot["$final_result"] == "approved"
 
 
+@pytest.mark.asyncio
+async def test_trigger_flow_hidden_start_rejects_pause_without_resume_handle():
+    flow = TriggerFlow()
+
+    async def ask_feedback(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="human_input",
+            payload={"question": "approve?"},
+            resume_to="next",
+        )
+
+    flow.to(ask_feedback)
+
+    with pytest.raises(RuntimeError, match="requires an exposed execution handle"):
+        await flow.async_start("pricing")
+
+
+def test_trigger_flow_hidden_runtime_stream_rejects_pause_without_resume_handle():
+    flow = TriggerFlow()
+
+    async def ask_feedback(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="human_input",
+            payload={"question": "approve?"},
+            resume_to="next",
+        )
+
+    flow.to(ask_feedback)
+
+    with pytest.raises(RuntimeError, match="requires an exposed execution handle"):
+        list(flow.get_runtime_stream("pricing", timeout=1))
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_close_rejects_pending_interrupt_by_default_and_can_cancel():
+    flow = TriggerFlow()
+
+    async def ask_feedback(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            payload={"question": "approve?"},
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    flow.to(ask_feedback)
+
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("pricing", wait_for_result=False)
+
+    with pytest.raises(RuntimeError, match="pending interrupts are waiting"):
+        await execution.async_close()
+
+    assert execution.get_status() == "waiting"
+    assert "approval" in execution.get_pending_interrupts()
+
+    snapshot = await execution.async_close(pending_interrupts="cancel")
+
+    assert execution.get_status() == "cancelled"
+    assert execution.get_pending_interrupts() == {}
+    cancelled_interrupt = execution.get_interrupt("approval")
+    assert isinstance(cancelled_interrupt, dict)
+    assert cancelled_interrupt["status"] == "cancelled"
+    assert isinstance(snapshot, dict)
+
+
 def test_trigger_flow_public_interrupt_event_type_matches_runtime_stream_shape():
     flow = TriggerFlow()
 
@@ -140,7 +206,8 @@ def test_trigger_flow_public_interrupt_event_type_matches_runtime_stream_shape()
 
     flow.to(ask_feedback)
 
-    interrupt_event = next(flow.get_runtime_stream("pricing", timeout=1))
+    execution = flow.create_execution(auto_close=False)
+    interrupt_event = next(execution.get_runtime_stream("pricing", timeout=1))
     validated_event = TypeAdapter(TriggerFlowInterruptEvent).validate_python(interrupt_event)
 
     assert validated_event["type"] == "interrupt"

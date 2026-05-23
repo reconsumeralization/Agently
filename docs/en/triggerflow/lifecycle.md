@@ -49,7 +49,7 @@ Rules:
 - **`auto_close=False` is illegal here** — raises immediately.
 - `wait_for_result=` value is **ignored** with a warning. Return type is fixed to the close snapshot.
 - `timeout=` is treated as `auto_close_timeout` — how long to wait after the last activity before auto-closing.
-- If your flow uses `pause_for(...)`, do **not** use `flow.start()` — there is no handle for the outside to resume against. Use `flow.start_execution(...)`.
+- If your flow uses `pause_for(...)`, do **not** use `flow.start()` — there is no handle for the outside to resume against. TriggerFlow fails fast when hidden execution sugar reaches `pause_for(...)`. Use `flow.start_execution(...)` or `flow.create_execution(...)`.
 
 ### `flow.start_execution(...)` — explicit launch
 
@@ -125,6 +125,8 @@ What close does, in order:
 
 `pause_for(...)` pauses the auto-close timer. After `continue_with(...)`, the idle timer starts fresh.
 
+`close()` / `async_close()` reject pending interrupts by default. Resume them first, or explicitly cancel them with `pending_interrupts="cancel"` when shutdown should abandon the wait.
+
 `auto_close_timeout=None` disables auto-close — the execution stays alive until you call `close()` explicitly. **Don't combine `auto_close_timeout=None` with hidden sugar** — `flow.start()` would never return.
 
 ## Picking the right entry
@@ -153,7 +155,13 @@ await execution.async_start(None)
 snapshot = await execution.async_close()
 ```
 
-If you'd written `await flow.async_start(None)` instead, the hidden execution would never get a handle to receive `continue_with` from the outside.
+If you'd written `await flow.async_start(None)` instead, TriggerFlow would raise when `pause_for(...)` is reached because the hidden execution has no resumable handle.
+
+If you need to stop a waiting execution without resuming it, make that explicit:
+
+```python
+snapshot = await execution.async_close(pending_interrupts="cancel")
+```
 
 ## Compatibility parameters
 

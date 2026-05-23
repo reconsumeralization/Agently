@@ -22,11 +22,11 @@ Dynamic Task candidates are registered, `agent.start()` remains an ordinary
 model request.
 
 Accepted development-line routing is candidate-driven and deterministic-first:
-submitted Dynamic Task candidates take precedence, required/model-decision
-Skills candidates run through the Skills route, and ordinary Action candidates
-remain available to the model request path. Model-owned route choice for
-ambiguous candidate sets is intentionally deferred to future explicit strategy
-plugins instead of being the default route behavior.
+submitted Dynamic Task candidates take precedence and required Skills
+candidates run through the Skills route. When several optional candidates are
+present, such as auto Dynamic Task, model-decision Skills, and ordinary Actions,
+the model chooses the route by default. If there is only one optional candidate,
+that route is selected directly.
 
 The public Agent API stays in core, but route planning and execution are owned
 by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
@@ -86,8 +86,7 @@ item.graph_id
 
 Executor routes bridge TriggerFlow runtime stream and ModelRequest instant
 checkpoints so services can stream route decisions, plan/graph readiness,
-task/stage/action progress, blocked or approval-required states, selected model
-field deltas, and final semantic outputs.
+task/action progress, selected model field deltas, and final semantic outputs.
 
 For Dynamic Task model nodes, structured output fields stream under stable paths:
 

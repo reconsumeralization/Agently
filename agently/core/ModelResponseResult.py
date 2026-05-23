@@ -420,7 +420,7 @@ class ModelResponseResult:
         response_text: str,
         active_ensure_keys: list[str],
         strict_output: bool,
-        key_style: str,
+        key_style: Literal["dot", "slash"],
         validation_outcome: dict[str, Any] | None = None,
         retry_reason: str = "output_constraints",
         message: str | None = None,
@@ -474,6 +474,57 @@ class ModelResponseResult:
                     "run": self.request_run_context,
                 }
             )
+
+    async def _try_auto_degradation(
+        self,
+        *,
+        data: Any,
+        active_ensure_keys: list[str],
+        validate_handler: Any,
+        key_style: Literal["dot", "slash"],
+        max_retries: int,
+        raise_ensure_failure: bool,
+        retry_count: int,
+    ) -> Any | None:
+        """If auto-resolved format failed, degrade to json and retry.
+
+        Returns the retried data on success, ``None`` if no degradation needed.
+        """
+        try:
+            prompt_object = self.prompt.to_prompt_object()
+            if not (
+                getattr(prompt_object, "output_format_resolved_from_auto", False)
+                and prompt_object.output_format in ("flat_markdown", "hybrid")
+            ):
+                return None
+            parsed_result = self._response_parser.full_result_data.get("parsed_result")
+            if parsed_result is not None:
+                return None
+
+            self.prompt.set("output_format", "json")
+            await self._emit_retrying_event(
+                retry_count=retry_count,
+                response_text=await self._response_parser.async_get_text(),
+                active_ensure_keys=active_ensure_keys,
+                strict_output=False,
+                key_style=key_style,
+                retry_reason="format_degradation",
+                message=(
+                    f"Auto-format '{prompt_object.output_format}' parse failed. "
+                    f"Degrading to json."
+                ),
+            )
+            return await self._retry_get_data(
+                type="parsed",
+                ensure_keys=active_ensure_keys,
+                validate_handler=validate_handler,
+                key_style=key_style,
+                max_retries=max_retries,
+                raise_ensure_failure=raise_ensure_failure,
+                retry_count=retry_count + 1,
+            )
+        except Exception:
+            return None
 
     @staticmethod
     def _build_validation_failure_exception(outcome: dict[str, Any]):
@@ -622,12 +673,41 @@ class ModelResponseResult:
         needs_constraint_flow = (type in ("parsed", "all") and (active_ensure_keys or strict_output)) or should_validate
         if not needs_constraint_flow:
             try:
-                return await self._response_parser.async_get_data(type=type)
+                data = await self._response_parser.async_get_data(type=type)
+                # Auto-mode degradation also applies in non-constraint flow
+                if type in ("parsed", "all") and _retry_count < max_retries:
+                    degraded_data = await self._try_auto_degradation(
+                        data=data,
+                        active_ensure_keys=active_ensure_keys,
+                        validate_handler=validate_handler,
+                        key_style=key_style,
+                        max_retries=max_retries,
+                        raise_ensure_failure=raise_ensure_failure,
+                        retry_count=_retry_count,
+                    )
+                    if degraded_data is not None:
+                        return degraded_data
+                return data
             finally:
                 await self._run_finally_handlers_once()
 
         try:
             data = await self._response_parser.async_get_data(type=type)
+
+            # Auto-mode format degradation
+            if type in ("parsed", "all") and _retry_count < max_retries:
+                degraded_data = await self._try_auto_degradation(
+                    data=data,
+                    active_ensure_keys=active_ensure_keys,
+                    validate_handler=validate_handler,
+                    key_style=key_style,
+                    max_retries=max_retries,
+                    raise_ensure_failure=raise_ensure_failure,
+                    retry_count=_retry_count,
+                )
+                if degraded_data is not None:
+                    return degraded_data
+
             try:
                 if strict_output:
                     parsed_result = self._response_parser.full_result_data.get("parsed_result")

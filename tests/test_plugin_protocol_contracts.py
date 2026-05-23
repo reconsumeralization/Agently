@@ -56,6 +56,10 @@ def test_builtin_skills_executor_matches_plugin_protocol():
         assert callable(getattr(plugin, method_name))
 
 
+def test_builtin_skills_executor_has_no_stage_action_defaults():
+    assert AgentlySkillsExecutor.DEFAULT_SETTINGS == {}
+
+
 def test_agent_skills_context_matches_runtime_protocol():
     class FakeAgent:
         settings = Settings(name="fake-skills-agent")

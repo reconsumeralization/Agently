@@ -20,9 +20,9 @@ result = (
 候选，`agent.start()` 仍然是普通模型请求。
 
 已验收开发线的路由是候选驱动、确定性优先：submitted Dynamic Task 候选优先，
-required/model-decision Skills 候选进入 Skills route，普通 Action 候选仍交给
-model request 路径。模糊候选集合下的模型自主 route choice 被延后到未来显式
-strategy plugin，不作为默认 route 行为交付。
+required Skills 候选进入 Skills route。当同时存在多个可选候选，例如 auto Dynamic
+Task、model-decision Skills 和普通 Actions 时，默认由模型选择 route；如果只有一个
+可选候选，则直接选择该 route。
 
 公开 Agent API 仍由 core 持有，但路线规划和执行由 active
 `AgentOrchestrator` plugin 通过 `AgentOrchestrator` protocol 承担。这样
@@ -81,8 +81,7 @@ item.graph_id
 
 Executor route 会桥接 TriggerFlow runtime stream 和 ModelRequest instant
 checkpoint，让服务能流式输出 route decision、plan/graph readiness、
-task/stage/action 进度、blocked / approval_required 状态、选定模型字段 delta
-和最终 semantic outputs。
+task/action 进度、选定模型字段 delta 和最终 semantic outputs。
 
 Dynamic Task 的 model 节点会把结构化输出字段映射到稳定 path：
 

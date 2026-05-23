@@ -1,38 +1,29 @@
-"""Skill with branch routing — model triage → branch → depth-specific review.
+"""Smart code review — prompt-only Skill with severity-scaled depth + host save.
 
 Run:
     python examples/agent_auto_orchestration/11_branch_code_review.py
 
-Expected key output from a real run on 2026-05-22:
-    route: skills
-    stages completed: ['do_review', 'route_review', 'save_review', 'triage_pr']
-    severity: critical
-    branch selected: critical
-    review length: 4,597 chars
-    report saved: /Users/moxin/.agently_code_reviews/payment-processing-refactor_20260522_163453.md
-
 Environment:
     DEEPSEEK_API_KEY in the shell or .env file.
     Set DYNAMIC_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
-    Requires: pip install rich
 
-This example demonstrates a Skill that uses a `kind: branch` stage to route
-code review depth based on model-assessed severity. A realistic PR diff is
-analyzed by a model, the severity decision drives a branch selection, and a
-downstream model stage reads the branch result to calibrate its review depth.
+Scenario: a PR touching payment processing and auth middleware is submitted for
+review. The reviewer must triage severity and scale review depth accordingly.
 
-Stages:
-  1. triage_pr        (model)  — analyzes diff, outputs severity + reasoning
-  2. route_review     (branch) — reads severity, selects low/medium/high/critical
-  3. do_review        (model)  — reviews at the selected depth, streams findings
-  4. save_review      (action) — writes the review report to disk
+New-standard Skills model
+-------------------------
+The old design used a Skill ``branch`` stage to route by severity. Under the new
+standard the Skill is pure ``SKILL.md`` guidance: in ONE prompt-only request the
+model triages severity AND produces a review whose depth matches that severity
+(the guidance tells it to scale rigor with severity). Structured findings come
+from ``semantic_outputs``; the HOST writes the review report to disk.
 
-Capabilities demonstrated:
-  - Native `kind: model` stage with structured output_schema
-  - `kind: branch` stage with model-backed routing
-  - Cross-stage state passing: ${state.triage_pr.severity}
-  - Field-level delta streaming from skill model stages
-  - Rich live display with branch decision visualization
+Expected key output from one real DeepSeek run:
+    skill status: success
+    severity: high|critical   (this diff disables JWT signature verification)
+    findings>=3
+    blocking=True
+    review saved: .../code_review_<stamp>.md
 """
 
 from __future__ import annotations
@@ -40,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -51,116 +42,44 @@ if str(ROOT) not in sys.path:
 from agently import Agently
 from examples.dynamic_task._shared import configure_model
 
-from rich.layout import Layout
-from rich.live import Live
-from rich.panel import Panel
-from rich.text import Text
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# Skill definition
+# Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-CODE_REVIEW_SKILL_YAML = """
-skill_id: smart-code-review
-version: 1.0.0
-display_name: Smart Code Review with Severity Triage
-purpose: >
-  Analyze a PR diff, classify its severity, route to depth-appropriate review,
-  and produce a structured review report saved to disk.
-trust_level: local
-kind: workflow
-activation:
-  keywords:
-    - code review
-    - review pr
-    - severity triage
-    - smart review
-requires:
-  actions:
-    - save_code_review
-stages:
-  - id: triage_pr
-    kind: model
-    purpose: >
-      You are a senior code reviewer doing initial PR triage. Analyze the diff
-      below and classify its severity as one of: low, medium, high, critical.
+SKILL_MD = """\
+---
+name: Smart Code Review
+description: >-
+  Review a PR diff: triage its severity, then produce a depth-appropriate review
+  with structured findings, fix suggestions, and a merge decision. Use for code
+  review, review PR, and severity triage requests.
+keywords: [code review, review pr, severity triage, smart review, diff]
+---
 
-      low: cosmetic changes, typos, comments, formatting only.
-      medium: logic changes in a single function or module.
-      high: API signature changes, database schema migrations, auth/permission
-      changes, or cross-module refactors.
-      critical: cryptographic code, payment handling, PII processing, or
-      authentication bypass changes.
+# Smart Code Review
 
-      Output a severity label and concise reasoning.
-    input:
-      diff: "${task}"
-    output_schema:
-      severity:
-        type: str
-        description: "low, medium, high, or critical"
-      reasoning:
-        type: str
-        description: Brief reasoning for the severity classification
-  - id: route_review
-    kind: branch
-    condition: "${state.triage_pr.severity}"
-    branches:
-      low:
-        description: Light review — surface-level checks only
-      medium:
-        description: Standard review — common bug patterns and best practices
-      high:
-        description: Deep review — security, performance, architecture, edge cases
-      critical:
-        description: Full audit — all checks plus compliance and threat modeling
-  - id: do_review
-    kind: model
-    depends_on:
-      - triage_pr
-      - route_review
-    purpose: >
-      Perform a code review at depth level "${state.route_review.selected_branch}".
+You are a senior code reviewer. Given a PR diff, do this in ONE pass:
 
-      If the depth level requires it, check for:
-      - Security vulnerabilities (injection, XSS, auth bypass, secrets exposure)
-      - Performance issues (N+1 queries, unbounded loops, memory leaks)
-      - Architecture concerns (tight coupling, missing abstractions, wrong layering)
-      - Edge cases (null/empty handling, race conditions, error states)
-      - Best practice violations (naming, error handling, testability)
+## 1. Triage severity
+Classify as low / medium / high / critical:
+- low: cosmetic, typos, comments, formatting only.
+- medium: logic changes in a single function or module.
+- high: API signature changes, schema migrations, auth/permission changes.
+- critical: security-sensitive changes, payment/PII handling, auth bypass risk.
 
-      Output structured findings with severity and actionable fix suggestions.
-    input:
-      diff: "${task}"
-      triage_severity: "${state.triage_pr.severity}"
-      triage_reason: "${state.triage_pr.reasoning}"
-      review_depth: "${state.route_review.selected_branch}"
-    output_schema:
-      review_text:
-        type: str
-        description: The code review with categorized findings and fix suggestions
-  - id: save_review
-    kind: action
-    action: save_code_review
-    depends_on:
-      - do_review
-    input:
-      review_text: "${state.do_review.review_text}"
-      severity: "${state.triage_pr.severity}"
-      review_depth: "${state.route_review.selected_branch}"
-      pr_title: "Payment Processing Refactor"
-semantic_outputs:
-  review_report: save_review
-tags:
-  - code-review
-  - branch
-  - triage
-  - workflow
+## 2. Scale review depth to severity
+- low: a quick sanity check.
+- medium: review logic and edge cases.
+- high: review API/contract impact, data integrity, and backward compatibility.
+- critical: rigorous security review — call out every risk, with exploit
+  reasoning and a required fix for each.
+
+## 3. Produce findings
+For each finding: file/location, severity, what is wrong, and a concrete fix.
+Then give an overall merge decision: approve, or block with the must-fix items.
+
+Be specific to the diff. Do not invent code that is not shown.
 """
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Realistic PR diff (a refactor touching payment + auth)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 PR_DIFF = r"""diff --git a/src/payments/processor.py b/src/payments/processor.py
 index 12a34b..56c78d 100644
@@ -180,16 +99,12 @@ index 12a34b..56c78d 100644
 -    def _format_receipt(self, charge: Charge) -> str:
 +    def _format_receipt(self, charge: Charge, anonymize: bool = False) -> str:
          return (
--            f"Receipt for {charge.amount} {charge.currency}\n"
--            f"Card: ****{charge.last4}\n"
+             f"Receipt for {charge.amount} {charge.currency}\n"
+             f"Card: ****{charge.last4}\n"
 -            f"Customer: {charge.customer_email}\n"
--            f"Date: {charge.created_at}\n"
--            f"Transaction ID: {charge.id}"
-+            f"Receipt for {charge.amount} {charge.currency}\n"
-+            f"Card: ****{charge.last4}\n"
 +            f"Customer: {'[redacted]' if anonymize else charge.customer_email}\n"
-+            f"Date: {charge.created_at}\n"
-+            f"Transaction ID: {charge.id}"
+             f"Date: {charge.created_at}\n"
+             f"Transaction ID: {charge.id}"
          )
 
 diff --git a/src/auth/middleware.py b/src/auth/middleware.py
@@ -212,257 +127,93 @@ index ab89cd..ef01gh 100644
 """
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Action — save the review report
-# ═══════════════════════════════════════════════════════════════════════════════
+def install_skill() -> str:
+    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "smart-code-review"
+    skill_src.mkdir(parents=True, exist_ok=True)
+    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    Agently.settings.set("skills.registry.root", tempfile.mkdtemp(prefix="agently_skills_reg_"))
+    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
+    return str(contract["skill_id"])
 
 
-async def _action_save_code_review(
-    review_text: str = "",
-    severity: str = "unknown",
-    review_depth: str = "unknown",
-    pr_title: str = "PR",
-    **kwargs,
-) -> dict[str, Any]:
-    report = f"""# Code Review Report — {pr_title}
-Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
-Severity: {severity.upper()}
-Review Depth: {review_depth}
-
----
-{review_text or '*No review generated*'}
----
-"""
-
-    reports_dir = Path.home() / ".agently_code_reviews"
+def save_review(reports_dir: Path, severity: str, review_text: str) -> Path:
     reports_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    slug = pr_title.lower().replace(" ", "-")
-    filepath = reports_dir / f"{slug}_{timestamp}.md"
-    filepath.write_text(report)
-
-    return {
-        "file_path": str(filepath),
-        "size_bytes": filepath.stat().st_size,
-        "severity": severity,
-        "review_depth": review_depth,
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Rich display
-# ═══════════════════════════════════════════════════════════════════════════════
-
-SEVERITY_COLORS = {
-    "low": "green",
-    "medium": "yellow",
-    "high": "red",
-    "critical": "bright_red",
-}
-
-
-def _build_triage_panel(severity: str | None, reasoning: str | None, done: bool) -> Panel:
-    if done and severity:
-        color = SEVERITY_COLORS.get(severity.strip().lower(), "white")
-        icon = f"[bold {color}]▼[/]"
-        body = Text(f"Severity: [bold {color}]{severity.upper()}[/]")
-        if reasoning:
-            body.append(f"\n\n{reasoning[:400]}")
-    elif done:
-        icon = "[bold green]✓[/]"
-        body = Text("Triage complete.")
-    else:
-        icon = "[dim]·[/]"
-        body = Text("Analyzing PR diff...", style="dim")
-    return Panel(body, title=f"{icon} PR Triage", border_style="blue")
-
-
-def _build_branch_panel(selected_branch: str | None, done: bool) -> Panel:
-    if done and selected_branch:
-        color = SEVERITY_COLORS.get(selected_branch.strip().lower(), "white")
-        icon = f"[bold {color}]↳[/]"
-        depth_desc = {
-            "low": "Light review — surface checks only",
-            "medium": "Standard review — bug patterns & best practices",
-            "high": "Deep review — security, perf, architecture, edge cases",
-            "critical": "Full audit — all checks + compliance + threat model",
-        }
-        body = Text(f"Routing to: [bold {color}]{selected_branch.upper()}[/] review\n")
-        body.append(depth_desc.get(selected_branch.strip().lower(), ""), style="dim")
-    elif done:
-        icon = "[bold green]✓[/]"
-        body = Text("Branch routed.")
-    else:
-        icon = "[dim]·[/]"
-        body = Text("Routing based on severity...", style="dim")
-    return Panel(body, title=f"{icon} Branch Route", border_style="magenta")
-
-
-def _build_review_panel(review_text: str | None, done: bool, running: bool) -> Panel:
-    if done:
-        icon = "[bold green]✓[/]"
-    elif running:
-        icon = "[bold yellow]◎[/]"
-    else:
-        icon = "[dim]·[/]"
-
-    if review_text:
-        preview = review_text[:500]
-        body = Text(preview)
-        if len(review_text) > 500:
-            body.append(f"\n\n... ({len(review_text):,} chars total)")
-    elif done:
-        body = Text("(no review generated)", style="dim")
-    else:
-        body = Text("Waiting on triage...", style="dim")
-
-    return Panel(body, title=f"{icon} Code Review", border_style="cyan")
-
-
-def _build_output_panel(file_path: str, done: bool) -> Panel:
-    if done and file_path:
-        return Panel(
-            Text(f"Saved to: [green]{file_path}[/]"),
-            title="[bold green]✓[/] Output",
-            border_style="green",
-        )
-    return Panel(Text("waiting...", style="dim"), title="[dim]·[/] Output", border_style="dim")
-
-
-def _build_layout(
-    triage: Panel, branch: Panel, review: Panel, output: Panel
-) -> Layout:
-    layout = Layout()
-    layout.split_column(
-        Layout(name="top", ratio=2),
-        Layout(name="middle", ratio=3),
-        Layout(name="bottom", ratio=1),
-    )
-    layout["top"].split_row(Layout(triage, name="triage"), Layout(branch, name="branch"))
-    layout["middle"].split_row(Layout(review, name="review"))
-    layout["bottom"].split_row(Layout(output, name="output"))
-    return layout
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════════════
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = reports_dir / f"code_review_{stamp}.md"
+    path.write_text(f"# Code Review — severity: {severity}\n\n{review_text}\n", encoding="utf-8")
+    return path
 
 
 async def main() -> None:
-    provider = configure_model(temperature=0.3)
+    provider = configure_model(temperature=0.2)
+    print(f"Model provider: {provider}\n")
 
-    runtime_dir = Path(tempfile.mkdtemp(prefix="agently_skills_"))
-    registry_root = runtime_dir / "registry"
-    skill_dir = runtime_dir / "smart-code-review"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "skill.yaml").write_text(CODE_REVIEW_SKILL_YAML.strip())
+    skill_id = install_skill()
+    agent = Agently.create_agent("code-reviewer")
 
-    Agently.settings.set("skills.registry.root", str(registry_root))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
-    Agently.skills_executor.install_skills(skill_dir, trust_level="local", update=True)
+    divider = "=" * 60
+    print(divider)
+    print("Smart Code Review — prompt-only Skill (severity-scaled depth)")
+    print(divider)
+    print("Reviewing PR (payments + auth middleware)...\n")
 
-    agent = Agently.create_agent("code-review-agent")
+    streamed: set[str] = set()
 
-    agent.register_action(
-        name="save_code_review",
-        desc="Save the code review report to disk.",
-        kwargs={
-            "review_text": ("str", "The review content."),
-            "severity": ("str", "Assessed severity."),
-            "review_depth": ("str", "Selected review depth."),
-            "pr_title": ("str", "PR title for the report filename."),
+    async def on_stream(item: dict[str, Any]) -> None:
+        if item.get("type") != "skills.model_stream":
+            return
+        path = item.get("path")
+        if path and item.get("is_complete") and path not in streamed:
+            streamed.add(str(path))
+            print(f"  [section ready] {path}")
+
+    execution = await agent.async_run_skills_task(
+        f"Review this PR diff:\n\n{PR_DIFF}",
+        skills=[skill_id],
+        mode="required",
+        semantic_outputs={
+            "severity": (str, "Severity: low, medium, high, or critical", True),
+            "reasoning": (str, "Brief reasoning for the severity classification", True),
+            "review_depth": (str, "Review depth applied, matching severity", True),
+            "findings": (
+                [{
+                    "location": (str, "File and location", True),
+                    "severity": (str, "Finding severity", True),
+                    "issue": (str, "What is wrong", True),
+                    "fix": (str, "Concrete fix suggestion", True),
+                }],
+                "Structured review findings",
+                True,
+            ),
+            "blocking": (bool, "True if the PR must be blocked until must-fix items are resolved", True),
+            "decision": (str, "Overall merge decision summary", True),
         },
-        func=_action_save_code_review,
+        stream_handler=on_stream,
     )
 
-    execution = (
-        agent
-        .use_skills(["smart-code-review"], mode="required")
-        .input(PR_DIFF)
-        .create_execution()
-    )
+    print(f"\nskill status: {execution.status}")
+    if execution.status != "success":
+        print("output:", execution.output)
+        return
 
-    completed_stages: set[str] = set()
-    triage_done = False
-    severity: str | None = None
-    reasoning: str | None = None
-    selected_branch: str | None = None
-    review_text: str | None = None
-    review_done = False
-    saved_file = ""
-    save_done = False
-    stage_running: dict[str, bool] = {}
+    result = execution.output or {}
+    severity = str(result.get("severity", "unknown"))
+    findings = result.get("findings", []) or []
 
-    triage_panel = _build_triage_panel(None, None, False)
-    branch_panel = _build_branch_panel(None, False)
-    review_panel = _build_review_panel(None, False, False)
-    output_panel = _build_output_panel("", False)
-    layout = _build_layout(triage_panel, branch_panel, review_panel, output_panel)
+    print(f"\n  severity: {severity}  ({result.get('review_depth', '—')})")
+    print(f"  findings: {len(findings)}")
+    for fnd in findings[:4]:
+        print(f"    · [{fnd.get('severity', '—')}] {fnd.get('location', '—')}: {str(fnd.get('issue', ''))[:80]}")
+    print(f"  decision: {str(result.get('decision', '—'))[:160]}")
 
-    with Live(layout, refresh_per_second=10, screen=True, transient=False) as live:
-        async for item in execution.get_async_generator(type="instant"):
-            # Track stage starts via task_dag
-            if item.path.startswith("task_dag.tasks.") and item.path.endswith(".start"):
-                for sid in ("triage_pr", "route_review", "do_review", "save_review"):
-                    if sid in item.path:
-                        stage_running[sid] = True
+    out_path = save_review(Path(tempfile.mkdtemp(prefix="agently_review_")), severity, str(result.get("decision", "")))
 
-            # Track stage completions
-            if item.path.startswith("skills.stages.") and ".fields." not in item.path and item.is_complete:
-                stage_id = item.path.split(".")[-1]
-                completed_stages.add(stage_id)
-                stage_running[stage_id] = False
-
-            # Stream model field deltas
-            if item.path == "skills.stages.triage_pr.fields.severity" and item.delta:
-                severity = (severity or "") + item.delta
-            elif item.path == "skills.stages.triage_pr.fields.reasoning" and item.delta:
-                reasoning = (reasoning or "") + item.delta
-            elif item.path == "skills.stages.do_review.fields.review_text" and item.delta:
-                review_text = (review_text or "") + item.delta
-
-            # Capture branch result
-            if item.path.startswith("skills.stages.route_review") and ".fields." not in item.path and item.is_complete:
-                val = item.value or {}
-                selected_branch = val.get("selected_branch", "")
-
-            # Capture triage completion
-            if "triage_pr" in completed_stages:
-                triage_done = True
-            if "do_review" in completed_stages:
-                review_done = True
-
-            # Capture action result
-            if item.path.startswith("actions.") and item.is_complete:
-                result = item.value.get("result", item.value) if isinstance(item.value, dict) else item.value
-                if isinstance(result, dict) and result.get("file_path"):
-                    saved_file = result.get("file_path", "")
-                    save_done = True
-
-            # Refresh panels
-            triage_panel = _build_triage_panel(severity, reasoning, triage_done)
-            branch_panel = _build_branch_panel(selected_branch, "route_review" in completed_stages)
-            review_panel = _build_review_panel(
-                review_text, review_done, stage_running.get("do_review", False)
-            )
-            output_panel = _build_output_panel(saved_file, save_done)
-            live.update(_build_layout(triage_panel, branch_panel, review_panel, output_panel))
-
-    # ── Final summary ──────────────────────────────────────────────────────
-    meta = await execution.async_get_meta()
-    route = (meta.get("route_plan") or {}).get("selected_route", "")
-
-    print(f"\nroute: {route}")
-    print(f"stages completed: {sorted(completed_stages)}")
-    print(f"severity: {severity or 'N/A'}")
-    print(f"branch selected: {selected_branch or 'N/A'}")
-    print(f"review length: {len(review_text or ''):,} chars")
-    print(f"report saved: {saved_file or '(not saved)'}")
-
-    if review_text:
-        print(f"\n[Review preview]:")
-        print(review_text[:500])
+    print(f"\nskill status: {execution.status}")
+    print(f"severity: {severity}")
+    print(f"findings={len(findings)}")
+    print(f"blocking={bool(result.get('blocking'))}")
+    print(f"review saved: {out_path}")
 
 
 if __name__ == "__main__":

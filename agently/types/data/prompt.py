@@ -115,7 +115,61 @@ def validate_attachment(attachment) -> list[ChatMessageContent]:
     ]
 
 
-OutputFormat = Literal["markdown", "text", "json"]
+OutputFormat = Literal["markdown", "text", "json", "flat_markdown", "hybrid", "auto"]
+
+_SCALAR_TYPES = (str, int, float, bool)
+
+
+def _is_scalar_field_spec(field_spec: Any) -> bool:
+    """Return ``True`` if *field_spec* represents a scalar value.
+
+    Recognises ``(str, ...)``, ``(int, ...)``, ``(bool, ...)``, and
+    ``(float, ...)`` tuples.
+    """
+    if isinstance(field_spec, tuple) and len(field_spec) >= 1:
+        first = field_spec[0]
+        return isinstance(first, type) and first in _SCALAR_TYPES
+    if isinstance(field_spec, type) and field_spec in _SCALAR_TYPES:
+        return True
+    return False
+
+
+def _classify_field_spec(field_spec: Any) -> Literal["scalar", "complex"]:
+    """Classify a field spec for format selection.
+
+    Returns ``"scalar"`` for str/int/bool/float tuples, ``"complex"`` for
+    lists, nested dicts, and everything else.
+    """
+    return "scalar" if _is_scalar_field_spec(field_spec) else "complex"
+
+
+def _resolve_auto_format(output: Any) -> Literal["json", "flat_markdown", "hybrid"]:
+    """Determine the best output format from schema shape.
+
+    ===================== =============================================
+    Schema shape           Format chosen
+    ===================== =============================================
+    Flat dict, all scalar  ``"flat_markdown"`` (str/int/bool/float)
+    Mixed scalar + complex ``"hybrid"``
+    All complex / non-dict ``"json"``
+    ===================== =============================================
+    """
+    if not isinstance(output, Mapping) or not output:
+        return "json"
+
+    has_scalar = False
+    has_complex = False
+    for value in output.values():
+        if _classify_field_spec(value) == "scalar":
+            has_scalar = True
+        else:
+            has_complex = True
+        if has_scalar and has_complex:
+            return "hybrid"
+
+    if has_scalar:
+        return "flat_markdown"
+    return "json"
 PromptOutputStructure: TypeAlias = Mapping[str, Any] | list[Any]
 PromptStandardSlot = Literal[
     "system",
@@ -156,6 +210,7 @@ class PromptModel(BaseModel):
     output: Any = None
     ensure_all_keys: bool = False
     output_format: OutputFormat | Any = None
+    output_format_resolved_from_auto: bool = False
     options: dict[str, Any] = {}
 
     model_config = ConfigDict(extra="allow")
@@ -163,7 +218,10 @@ class PromptModel(BaseModel):
     @model_validator(mode="after")
     def set_output_format(self) -> "PromptModel":
         if self.output_format is None:
-            if not isinstance(self.output, str) and isinstance(self.output, (Mapping, Sequence)):
+            if isinstance(self.output, Mapping):
+                self.output_format_resolved_from_auto = True
+                self.output_format = _resolve_auto_format(self.output)
+            elif not isinstance(self.output, str) and isinstance(self.output, Sequence):
                 self.output_format = "json"
             elif isinstance(self.output, type):
                 if self.output == str:
@@ -174,6 +232,27 @@ class PromptModel(BaseModel):
                     self.output_format = "json"
             else:
                 self.output_format = "markdown"
+        if self.output_format == "auto":
+            self.output_format_resolved_from_auto = True
+            self.output_format = _resolve_auto_format(self.output)
+        if self.output_format == "flat_markdown":
+            if not isinstance(self.output, Mapping):
+                import warnings
+                warnings.warn(
+                    f"output_format='flat_markdown' requires a dict output schema, "
+                    f"got {type(self.output).__name__}. Falling back to json.",
+                    stacklevel=2,
+                )
+                self.output_format = "json"
+        if self.output_format == "hybrid":
+            if not isinstance(self.output, Mapping):
+                import warnings
+                warnings.warn(
+                    f"output_format='hybrid' requires a dict output schema, "
+                    f"got {type(self.output).__name__}. Falling back to json.",
+                    stacklevel=2,
+                )
+                self.output_format = "json"
         if not isinstance(self.output_format, str):
             self.output_format = str(self.output_format)
         return self

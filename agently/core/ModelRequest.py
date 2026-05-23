@@ -266,8 +266,11 @@ class ModelRequest:
         ),
         *,
         mappings: dict[str, Any] | None = None,
+        format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
     ):
         self.prompt.set("output", prompt, mappings=mappings)
+        if format != "json":
+            self.prompt.set("output_format", format)
         return self
 
     def attachment(

@@ -58,7 +58,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     mode = cast(Any, route_meta.get("mode", "model_decision"))
     task = execution.task_target()
     agent = cast(Any, execution.agent)
-    plan = await agent.async_resolve_skills_plan(task, mode=mode, scope="execution")
+    plan = await agent.async_resolve_skills_plan(task, mode=mode)
     await execution.emit_stream(
         "route.skills.plan",
         plan,
@@ -106,11 +106,11 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     )
     for log in skills_execution.skill_logs:
         await execution.emit_stream(
-            f"skills.stages.{ log.get('stage_id', 'stage') }",
+            f"skills.{ log.get('skill_id', 'skill') }",
             log,
             route="skills",
             source="skills_executor",
-            stage_id=str(log.get("stage_id") or "") or None,
+            stage_id=None,
         )
     for log in skills_execution.action_logs:
         await execution.emit_stream(

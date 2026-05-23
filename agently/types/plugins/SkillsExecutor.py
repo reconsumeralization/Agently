@@ -18,28 +18,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from agently.types.data import ActionResult, SkillContract, SkillExecutionPlan, SkillMode, SkillScope, SkillsPackRecord
-
-# ── Protocol layout ──────────────────────────────────────────────────────────
-# This file defines four protocols because the Skills Executor subsystem has two
-# sides that must agree on a contract:
-#
-#   SkillsExecutor (plugin protocol)
-#     Implemented by framework/third-party plugins (e.g. AgentlySkillsExecutor).
-#     Owns skill-pack lifecycle (install/list/inspect/remove) and plan
-#     resolution/execution.
-#
-#   SkillsPlanningContext / SkillsExecutionContext / SkillsRuntimeContext
-#     Implemented by the Agent host. The Agent injects a context object at
-#     planning time and execution time so the plugin can reach agent-owned
-#     services (settings, action availability, model requests, action dispatch)
-#     without coupling to a concrete Agent class.
-#
-# Every other file in types/plugins/ defines a single plugin protocol.
-# SkillsExecutor is the exception because the context protocols are small and
-# tightly coupled to the plugin contract; splitting them into separate files
-# would create import indirection with no real decoupling benefit.
-# ──────────────────────────────────────────────────────────────────────────────
+from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
 
 
 @runtime_checkable
@@ -47,30 +26,6 @@ class SkillsPlanningContext(Protocol):
     """Agent-owned services exposed to Skills Executor planning."""
 
     def get_setting(self, key: str, default: Any = None) -> Any: ...
-
-    def action_available(self, action_id: str) -> bool: ...
-
-    def can_auto_bind_bash_action(self, action_id: str) -> bool: ...
-
-    def auto_bind_bash_action(self, action_id: str) -> None: ...
-
-    async def async_request_model_plan(
-        self,
-        *,
-        plan: SkillExecutionPlan,
-        semantic_output_contract: dict[str, Any],
-        output_schema: dict[str, Any],
-        max_revisions: int,
-    ) -> dict[str, Any]: ...
-
-
-@runtime_checkable
-class SkillsExecutionContext(Protocol):
-    """Agent-owned services exposed to Skills Executor execution."""
-
-    def get_setting(self, key: str, default: Any = None) -> Any: ...
-
-    def action_available(self, action_id: str) -> bool: ...
 
     async def async_request_model(
         self,
@@ -82,20 +37,16 @@ class SkillsExecutionContext(Protocol):
         stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
     ) -> Any: ...
 
-    async def async_execute_action(
-        self,
-        action_id: str,
-        kwargs: dict[str, Any],
-        *,
-        purpose: str,
-        source_protocol: str,
-    ) -> ActionResult: ...
+
+@runtime_checkable
+class SkillsExecutionContext(SkillsPlanningContext, Protocol):
+    """Agent-owned services exposed to Skills Executor execution."""
 
     async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None: ...
 
 
 @runtime_checkable
-class SkillsRuntimeContext(SkillsPlanningContext, SkillsExecutionContext, Protocol):
+class SkillsRuntimeContext(SkillsExecutionContext, Protocol):
     """Full Agent component adapter surface used by the builtin plugin."""
 
     agent: Any
@@ -150,11 +101,7 @@ class SkillsExecutor(Protocol):
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
-        scope: SkillScope = "session",
-        decision_handler: Any = None,
         semantic_outputs: Any = None,
-        planner_mode: str = "auto",
-        planner_max_revisions: int = 2,
     ) -> SkillExecutionPlan: ...
 
     async def async_execute_plan(

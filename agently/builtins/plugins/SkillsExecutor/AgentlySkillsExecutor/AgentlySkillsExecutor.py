@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillScope, SkillsPackRecord
+from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
 from agently.types.plugins import SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
 from agently.utils import Settings
 
@@ -28,7 +28,7 @@ from .modules.registry import SkillRegistry
 
 class AgentlySkillsExecutor(SkillsExecutor):
     name = "AgentlySkillsExecutor"
-    DEFAULT_SETTINGS = {}
+    DEFAULT_SETTINGS: dict[str, Any] = {}
 
     def __init__(self, *, plugin_manager: Any = None, settings: Settings):
         self.plugin_manager = plugin_manager
@@ -110,11 +110,7 @@ class AgentlySkillsExecutor(SkillsExecutor):
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
-        scope: SkillScope = "session",
-        decision_handler: Any = None,
         semantic_outputs: Any = None,
-        planner_mode: str = "auto",
-        planner_max_revisions: int = 2,
     ) -> SkillExecutionPlan:
         return await SkillPlanner(self.registry).resolve(
             context=context,
@@ -122,11 +118,7 @@ class AgentlySkillsExecutor(SkillsExecutor):
             skills=skills,
             skills_packs=skills_packs,
             mode=mode,
-            scope=scope,
-            decision_handler=decision_handler,
             semantic_outputs=semantic_outputs,
-            planner_mode=planner_mode,
-            planner_max_revisions=planner_max_revisions,
         )
 
     async def async_execute_plan(
@@ -136,4 +128,8 @@ class AgentlySkillsExecutor(SkillsExecutor):
         task: str,
         plan: SkillExecutionPlan,
     ):
-        return await SkillExecutor(self.registry).execute(context=context, task=task, plan=plan)
+        return await SkillExecutor(self.registry).execute(
+            context=context,
+            task=task,
+            plan=plan,
+        )

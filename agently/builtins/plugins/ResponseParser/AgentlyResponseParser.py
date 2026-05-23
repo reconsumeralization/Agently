@@ -19,8 +19,6 @@ import warnings
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Generator, Literal, Mapping, cast
 from pydantic import BaseModel
 
-import json5
-
 from agently.types.plugins import ResponseParser
 from agently.types.data import StreamingData
 from agently.utils import (
@@ -28,11 +26,21 @@ from agently.utils import (
     DataFormatter,
     StateDataNamespace,
     GeneratorConsumer,
-    DataLocator,
     FunctionShifter,
-    StreamingJSONCompleter,
     StreamingJSONParser,
     DeprecationWarnings,
+)
+
+from agently.builtins.plugins.ResponseParser.modules.json_output import (
+    parse_json_output,
+)
+from agently.builtins.plugins.ResponseParser.modules.flat_markdown import (
+    FlatMarkdownStreamingParser,
+    parse_flat_markdown_output,
+)
+from agently.builtins.plugins.ResponseParser.modules.hybrid import (
+    HybridStreamingParser,
+    parse_hybrid_output,
 )
 
 if TYPE_CHECKING:
@@ -85,7 +93,7 @@ class AgentlyResponseParser(ResponseParser):
             "extra": {},
         }
         self._prompt_object = prompt.to_prompt_object()
-        self._OutputModel = prompt.to_output_model() if self._prompt_object.output_format == "json" else None
+        self._OutputModel = prompt.to_output_model() if self._prompt_object.output_format in ("json", "flat_markdown", "hybrid") else None
         self._response_consumer: GeneratorConsumer | None = None
         self._consumer_lock = asyncio.Lock()
         self._final_json_parse_result: tuple[str | None, Any, BaseModel | None, bool] | None = None
@@ -114,28 +122,11 @@ class AgentlyResponseParser(ResponseParser):
         return None
 
     def _parse_json_output(self, text: str) -> tuple[str | None, Any, BaseModel | None, bool]:
-        cleaned_json = DataLocator.locate_output_json(text, self._prompt_object.output)
-        if cleaned_json is None:
-            return None, None, None, False
-
-        completer = StreamingJSONCompleter()
-        completer.reset(cleaned_json)
-        completed = completer.complete()
-        try:
-            parsed = json5.loads(completed)
-            return completed, parsed, self._build_result_object(parsed), False
-        except Exception:
-            repaired_json = DataLocator.repair_json_fragment(cleaned_json)
-            if repaired_json == cleaned_json:
-                return completed, None, None, False
-
-            completer.reset(repaired_json)
-            repaired_completed = completer.complete()
-            try:
-                parsed = json5.loads(repaired_completed)
-                return repaired_completed, parsed, self._build_result_object(parsed), True
-            except Exception:
-                return repaired_completed, None, None, False
+        return parse_json_output(
+            text,
+            self._prompt_object.output,
+            self._build_result_object,
+        )
 
     async def _handle_done_event(self, data: Any, buffer: str, async_emit_runtime) -> None:
         self.full_result_data["text_result"] = str(data)
@@ -178,6 +169,92 @@ class AgentlyResponseParser(ResponseParser):
                             "response_id": self.response_id,
                             "result": str(data),
                             "cleaned_text": completed,
+                            "streamed_text": buffer,
+                        },
+                        "run": self.run_context,
+                    }
+                )
+            return
+
+        if self._prompt_object.output_format == "flat_markdown":
+            parsed = parse_flat_markdown_output(str(data), self._prompt_object.output or {})
+            if parsed is not None:
+                result_object = self._build_result_object(parsed)
+                self.full_result_data["parsed_result"] = parsed
+                self.full_result_data["result_object"] = result_object
+                self.full_result_data["text_result"] = str(data)
+                await async_emit_runtime(
+                    {
+                        "event_type": "model.completed",
+                        "source": "AgentlyResponseParser",
+                        "message": "Model response parsed as flat_markdown output.",
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.response_id,
+                            "result": DataFormatter.sanitize(parsed),
+                            "raw_text": str(data),
+                            "streamed_text": buffer,
+                        },
+                        "run": self.run_context,
+                    }
+                )
+            else:
+                self.full_result_data["parsed_result"] = None
+                self.full_result_data["result_object"] = None
+                self.full_result_data["text_result"] = str(data)
+                await async_emit_runtime(
+                    {
+                        "event_type": "model.parse_failed",
+                        "source": "AgentlyResponseParser",
+                        "level": "WARNING",
+                        "message": "Can not parse flat_markdown output from model response.",
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.response_id,
+                            "result": str(data),
+                            "streamed_text": buffer,
+                        },
+                        "run": self.run_context,
+                    }
+                )
+            return
+
+        if self._prompt_object.output_format == "hybrid":
+            parsed = parse_hybrid_output(str(data), self._prompt_object.output or {})
+            if parsed is not None:
+                result_object = self._build_result_object(parsed)
+                self.full_result_data["parsed_result"] = parsed
+                self.full_result_data["result_object"] = result_object
+                self.full_result_data["text_result"] = str(data)
+                await async_emit_runtime(
+                    {
+                        "event_type": "model.completed",
+                        "source": "AgentlyResponseParser",
+                        "message": "Model response parsed as hybrid output.",
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.response_id,
+                            "result": DataFormatter.sanitize(parsed),
+                            "raw_text": str(data),
+                            "streamed_text": buffer,
+                        },
+                        "run": self.run_context,
+                    }
+                )
+            else:
+                self.full_result_data["parsed_result"] = None
+                self.full_result_data["result_object"] = None
+                self.full_result_data["text_result"] = str(data)
+                await async_emit_runtime(
+                    {
+                        "event_type": "model.parse_failed",
+                        "source": "AgentlyResponseParser",
+                        "level": "WARNING",
+                        "message": "Can not parse hybrid output from model response.",
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.response_id,
+                            "result": str(data),
                             "streamed_text": buffer,
                         },
                         "run": self.run_context,
@@ -358,7 +435,7 @@ class AgentlyResponseParser(ResponseParser):
                 return self.full_result_data.copy()
 
     async def async_get_data_object(self) -> BaseModel | None:
-        if self._prompt_object.output_format != "json":
+        if self._prompt_object.output_format not in ("json", "flat_markdown", "hybrid"):
             raise TypeError(
                 "Error: Cannot build an output model for a non-structure output.\n"
                 f"Output Format: { self._prompt_object.output_format }\n"
@@ -383,8 +460,15 @@ class AgentlyResponseParser(ResponseParser):
         parsed_generator = consumer.get_async_generator()
         _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
         streaming_json_parser = None
-        if type in ("instant", "streaming_parse") and self._prompt_object.output_format == "json":
-            streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+        streaming_flat_markdown_parser = None
+        streaming_hybrid_parser = None
+        if type in ("instant", "streaming_parse"):
+            if self._prompt_object.output_format == "json":
+                streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+            elif self._prompt_object.output_format == "flat_markdown":
+                streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
+            elif self._prompt_object.output_format == "hybrid":
+                streaming_hybrid_parser = HybridStreamingParser(self._prompt_object.output or {})
         if type is None and content is not None:
             DeprecationWarnings.warn_deprecated_once(
                 "AgentlyResponseParser.get_async_generator.content",
@@ -421,6 +505,28 @@ class AgentlyResponseParser(ResponseParser):
                                     if _streaming_parse_path_style == "slash":
                                         streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
                                     yield streaming_data
+                        if streaming_flat_markdown_parser is not None:
+                            if event == "delta":
+                                async for streaming_data in streaming_flat_markdown_parser.parse_chunk(str(data)):
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
+                            elif event == "done":
+                                async for streaming_data in streaming_flat_markdown_parser.flush():
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
+                        if streaming_hybrid_parser is not None:
+                            if event == "delta":
+                                async for streaming_data in streaming_hybrid_parser.parse_chunk(str(data)):
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
+                            elif event == "done":
+                                async for streaming_data in streaming_hybrid_parser.flush():
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
                     case "original":
                         if event.startswith("original"):
                             yield data
@@ -439,8 +545,15 @@ class AgentlyResponseParser(ResponseParser):
         parsed_generator = cast(GeneratorConsumer, self._response_consumer).get_generator()
         _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
         streaming_json_parser = None
-        if type in ("instant", "streaming_parse") and self._prompt_object.output_format == "json":
-            streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+        streaming_flat_markdown_parser = None
+        streaming_hybrid_parser = None
+        if type in ("instant", "streaming_parse"):
+            if self._prompt_object.output_format == "json":
+                streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+            elif self._prompt_object.output_format == "flat_markdown":
+                streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
+            elif self._prompt_object.output_format == "hybrid":
+                streaming_hybrid_parser = HybridStreamingParser(self._prompt_object.output or {})
         if type is None and content is not None:
             DeprecationWarnings.warn_deprecated_once(
                 "AgentlyResponseParser.get_generator.content",
@@ -476,6 +589,21 @@ class AgentlyResponseParser(ResponseParser):
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 self._flush_streaming_json_events(streaming_json_parser)
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                    if streaming_flat_markdown_parser is not None:
+                        if event == "delta":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_flat_markdown_parser.parse_chunk(str(data))
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                        elif event == "done":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_flat_markdown_parser.flush()
                             ):
                                 if _streaming_parse_path_style == "slash":
                                     streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)

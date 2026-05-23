@@ -116,7 +116,6 @@ def main() -> None:
             task=f"availability check for {skill_id}",
             skills=[skill_id],
             mode="required",
-            planner_mode="deterministic",
         )
         resolved_status = plan.get("status", "unknown")
         is_available = resolved_status == "resolved"

@@ -29,6 +29,10 @@ python examples/agent_auto_orchestration/10_browser_web_testing.py
 python examples/agent_auto_orchestration/11_branch_code_review.py
 python examples/agent_auto_orchestration/12_model_plan_incident_response.py
 python examples/agent_auto_orchestration/13_validate_emit_compliance_check.py
+python examples/agent_auto_orchestration/14_deep_research.py
+python examples/agent_auto_orchestration/15_agentic_research.py
+python examples/agent_auto_orchestration/16_report_evaluation.py
+python examples/agent_auto_orchestration/17_self_reflective_research.py
 ```
 
 Requires `DEEPSEEK_API_KEY` in the environment or a `.env` file.
@@ -220,3 +224,105 @@ stream, file output.
 **Key assertions:** `selected_route=skills`, 5 stages complete, 8 clauses extracted,
 validation passed, risk=HIGH identified (missing DPA, weak data handling, no
 indemnification), structured audit emitted and saved.
+
+### 14 — Deep Research Pipeline (interactive input → topic refinement → model_plan → parallel search → browse → dive → synthesis)
+A comprehensive deep research scenario with interactive topic input and
+2-layer research depth. A pre-pipeline Phase 0 uses a model call to expand
+brief user questions (e.g., "6G什么时候商用？") into structured research briefs
+with dimensions, sub-questions, and key entities. The pipeline decomposes the
+topic with `kind: model_plan`, executes 3 parallel web searches via
+`kind: action`, gates with `kind: validate`, browses full article content and
+extracts reference hooks (companies, technologies, standards cited in articles),
+runs targeted follow-up "dive" searches on those hooks, fetches dive results,
+gates again with `kind: validate`, synthesizes all 3 layers (abstracts +
+full-text + dive findings) with `kind: model`, cross-validates with a final
+`kind: model` stage, and saves the complete research document.
+
+**Stages (10):** plan_research (model_plan) → {search_upstream, search_core,
+search_downstream} in parallel → validate_searches (validate) → browse_deepen
+(action, 4 internal phases) → validate_depth (validate) → synthesize (model)
+→ cross_validate (model) → compile_report (action).
+**Real:** interactive topic input (CLI arg > env var > interactive prompt),
+model-powered topic refinement, DuckDuckGo HTTP search, httpx article fetching
+with BeautifulSoup content extraction, model-driven reference hook extraction,
+model synthesis with field-level delta streaming, model cross-validation,
+report output to `~/.agently_deep_research/`.
+**Key assertions:** `selected_route=skills`, 10 stages complete, 3-way parallel
+search fan-out, 2-layer browse+dive depth, comprehensive report with
+cross-validation notes saved. No hardcoded topics — every run researches
+whatever question the user asks.
+
+### 15 — Agentic Research Pipeline (model-driven adaptive decisions)
+A model-controlled research pipeline where the model decides how to research,
+not just what to write. Unlike example 14's fixed pipeline (always 3 dimensions,
+always 2-layer depth), here the model makes 5 key decisions during execution:
+(1) how many dimensions to investigate (2–5), (2) which dimensions need
+deep-dives after assessing initial results, (3) which specific articles to
+browse in full (not blind top-N), (4) whether reference hooks are worth
+pursuing, and (5) when enough research has been gathered — stopping early or
+triggering additional gap-filling rounds. The Rich display is ordered by step
+from left to right and top to bottom; queued, active, and completed panels make
+the current focus explicit. Long-running research action internals update the
+progress panel with real search, browse, dive, and gap-fill status, while model
+decisions stream to the "Model Decisions" panel as they are made.
+
+**Stages (6):** plan_research (model_plan, dynamic N dimensions) →
+execute_research (action, agentic loop with 5 internal model calls) →
+validate_coverage (validate) → synthesize (model) → cross_validate (model) →
+compile_report (action).
+**Real:** dynamic dimension decomposition, model conceptual depth assessment per
+dimension, model article selection with reasons, model dive/skip decision,
+model sufficiency check with gap detection, up to 3 adaptive research rounds,
+step-ordered Rich progress and decision-log display, report output to
+`~/.agently_deep_research/`.
+**Key assertions:** `selected_route=skills`, 6 stages complete, model-decided
+dimension count (2-5), adaptive research depth, decision log with 5+ model
+decisions recorded, report reflects asymmetric depth across dimensions.
+
+### 16 — Report Evaluation Pipeline (quality audit for research output)
+A quality assurance scenario: evaluate a research report (e.g., from example 15)
+against its original topic across 6 dimensions — content relevance
+(signal-to-noise ratio), coverage completeness, source authority, depth
+balance, internal consistency, and decision quality. Each dimension receives
+a conceptual quality level with specific issues and severity ratings. Numeric
+display values are mapped deterministically in code after model output.
+Produces a structured evaluation matrix with cross-cutting root cause analysis
+and prioritized, actionable remediation steps. Fully generic — works on any
+domain's reports.
+
+**Stages (5):** extract_metadata (model) → evaluate_dimensions (model) →
+synthesize_findings (model) → generate_remediation (model) →
+save_evaluation (action).
+**Real:** model-driven metadata extraction, 6-dimension conceptual grading with
+evidence quotes and issue tracking, code-mapped display scores, cross-cutting
+root cause analysis, P0/P1/P2 remediation planning, evaluation output to
+`~/.agently_deep_research/evaluations/`.
+**Key assertions:** `selected_route=skills`, 5 stages complete, conceptual
+levels for all 6 dimensions, severity-tagged issues, concrete remediation
+recommendations.
+
+### 17 — Self-Reflective Research Pipeline (research → evaluate → reflect → improve)
+A meta-cognitive scenario: chains the agentic research core (from example 15)
+with the evaluation framework (from example 16) into a self-improving loop.
+The pipeline researches a topic, evaluates its own output, decides whether
+reflection is needed, performs targeted gap-fill research, re-synthesizes an
+improved report, and compares v1 vs v2 quality. The model controls the
+reflection decision — it can ship immediately if quality is sufficient, or
+trigger up to 2 reflection rounds if gaps are found.
+
+**Stages (7):** initial_research (action, full agentic research) →
+evaluate_report (model, 6-dimension conceptual grading) → reflect_and_plan
+(model_plan, gap-aware reflection decision) → gap_fill_research (action,
+targeted re-research) → re_synthesize (model, improved v2 report) →
+final_evaluate (model, v1 vs v2 comparison) → compile_report (action).
+**Real:** full agentic research with search + browse + synthesis, model
+self-evaluation with conceptual levels, code-mapped display score deltas, model
+reflection decision (sufficient vs. gap-fill), targeted re-research on specific
+weaknesses, reflection trail documentation, report output to
+`~/.agently_deep_research/`. The Rich display marks each region as queued,
+active, or done; the active research panel includes elapsed time plus real
+planning, search, browse, and gap-fill counters so long model calls do not look
+frozen.
+**Key assertions:** `selected_route=skills`, 7 stages complete, v1 and v2 levels
+tracked, model decides whether to reflect, mapped delta shows improvement,
+reflection trail documents the self-improvement process.

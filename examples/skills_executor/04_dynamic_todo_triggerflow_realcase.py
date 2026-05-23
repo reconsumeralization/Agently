@@ -137,8 +137,8 @@ def create_generator_agent():
 
 def generate_artifact() -> tuple[SkillExecutionPlan, dict[str, Any]]:
     agent = create_generator_agent()
-    skills_plan = agent.resolve_skills_plan(PROBLEM, skills=SKILL_IDS, mode="model_decision", scope="request")
-    agent.use_skills(SKILL_IDS, mode="model_decision", scope="request")
+    skills_plan = agent.resolve_skills_plan(PROBLEM, skills=SKILL_IDS, mode="model_decision")
+    agent.use_skills(SKILL_IDS, mode="model_decision")
 
     artifact = (
         agent.input({"problem": PROBLEM})

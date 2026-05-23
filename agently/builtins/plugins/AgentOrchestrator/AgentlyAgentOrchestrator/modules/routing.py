@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 from agently.utils import DataFormatter
 
@@ -69,18 +69,76 @@ class HybridRoutePlanner:
 
     async def select_route(self) -> tuple[str, dict[str, Any]]:
         dynamic_candidates = self.dynamic_task_candidates()
-        if dynamic_candidates:
-            return "dynamic_task", {"candidate": dynamic_candidates[-1]}
+        submitted_dynamic_candidates = [
+            candidate for candidate in dynamic_candidates if str(candidate.get("mode") or "auto") == "submitted"
+        ]
+        if submitted_dynamic_candidates:
+            return "dynamic_task", {"candidate": submitted_dynamic_candidates[-1], "selected_by": "deterministic"}
 
         skills = self.skill_candidate_summary()
         if skills["required"]:
-            return "skills", {"mode": "required"}
-        if skills["model_decision"]:
-            return "skills", {"mode": "model_decision"}
+            return "skills", {"mode": "required", "selected_by": "deterministic"}
 
-        if self.action_candidates():
-            return "model_request", {"with_actions": True}
+        optional_candidates = []
+        if dynamic_candidates:
+            optional_candidates.append({"route": "dynamic_task", "candidate": dynamic_candidates[-1]})
+        if skills["model_decision"]:
+            optional_candidates.append({"route": "skills", "mode": "model_decision"})
+        action_candidates = self.action_candidates()
+        if action_candidates:
+            optional_candidates.append({"route": "model_request", "with_actions": True})
+
+        if len(optional_candidates) > 1:
+            return await self._select_ambiguous_route(optional_candidates)
+        if optional_candidates:
+            selected = optional_candidates[0]
+            route = str(selected.get("route"))
+            meta = {key: value for key, value in selected.items() if key != "route"}
+            meta["selected_by"] = "single_candidate"
+            return route, meta
+
         return "model_request", {}
+
+    async def _select_ambiguous_route(self, candidates: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+        request_factory = getattr(self.agent, "create_temp_request", None)
+        if callable(request_factory):
+            try:
+                result = await (
+                    cast(Any, request_factory())
+                    .input(
+                        {
+                            "task": self.task_target(),
+                            "route_candidates": DataFormatter.sanitize(candidates),
+                            "route_policy": (
+                                "Choose exactly one route. Prefer dynamic_task for multi-step explicit DAG work, "
+                                "skills for installed domain Skill behavior, and model_request when direct model "
+                                "reasoning with available actions is sufficient."
+                            ),
+                        }
+                    )
+                    .output(
+                        {
+                            "selected_route": (str, "one of: dynamic_task, skills, model_request", True),
+                            "reason": (str, "concise business reason for the route choice"),
+                        }
+                    )
+                    .async_start(max_retries=2, raise_ensure_failure=False)
+                )
+                selected_route = str(_safe_get(result, "selected_route") or "").strip()
+                for candidate in candidates:
+                    if selected_route == candidate.get("route"):
+                        meta = {key: value for key, value in candidate.items() if key != "route"}
+                        meta["selected_by"] = "model"
+                        meta["route_choice_reason"] = _safe_get(result, "reason")
+                        return selected_route, meta
+            except Exception:
+                pass
+        candidate = candidates[0]
+        route = str(candidate.get("route"))
+        meta = {key: value for key, value in candidate.items() if key != "route"}
+        meta["selected_by"] = "fallback"
+        meta["route_choice_reason"] = "Model route choice failed; selected first optional route candidate."
+        return route, meta
 
     def build_route_plan(self, *, execution_id: str, route: str, route_meta: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -93,3 +151,7 @@ class HybridRoutePlanner:
                 "dynamic_task": self.dynamic_task_candidates(),
             },
         }
+
+
+def _safe_get(value: Any, key: str) -> Any:
+    return value.get(key) if isinstance(value, dict) else None
