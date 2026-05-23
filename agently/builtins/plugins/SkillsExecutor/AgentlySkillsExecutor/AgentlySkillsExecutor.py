@@ -43,6 +43,18 @@ class AgentlySkillsExecutor(SkillsExecutor):
     def _on_unregister():
         pass
 
+    def configure(
+        self,
+        *,
+        registry_root: str | Path | None = None,
+        allowed_trust_levels: list[str] | None = None,
+    ) -> "AgentlySkillsExecutor":
+        if registry_root is not None:
+            self.settings.set("skills.registry.root", str(registry_root))
+        if allowed_trust_levels is not None:
+            self.settings._set_item_by_dot_path("skills.allowed_trust_levels", list(allowed_trust_levels), cover=True)
+        return self
+
     # ── Registry delegation ────────────────────────────────────────────────
 
     def install_skills(

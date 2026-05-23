@@ -30,8 +30,10 @@ def _load_benchmark_module():
 
 def test_dependency_installer_skill_contract_runs_through_skills_executor(tmp_path):
     benchmark = _load_benchmark_module()
-    Agently.settings.set("skills.registry.root", str(tmp_path / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(
+        registry_root=tmp_path / "registry",
+        allowed_trust_levels=["local"],
+    )
     execution = benchmark._run_dependency_install_skill(tmp_path / "dependency-skill")
 
     assert execution.status == "success"

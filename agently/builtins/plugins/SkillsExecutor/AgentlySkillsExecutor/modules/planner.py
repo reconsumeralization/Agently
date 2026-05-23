@@ -35,7 +35,12 @@ def _matches_selector(contract: SkillContract, selector: Any) -> bool:
     if selector is None:
         return True
     if isinstance(selector, str):
-        return selector == contract.get("skill_id")
+        card = _ensure_dict(contract.get("card"))
+        return selector in {
+            str(contract.get("skill_id") or ""),
+            str(card.get("display_name") or ""),
+            str(card.get("name") or ""),
+        }
     if not isinstance(selector, dict):
         return False
     skill_id = selector.get("skill_id") or selector.get("id") or selector.get("name")
@@ -65,6 +70,37 @@ def _matches_skills_pack_selector(contract: SkillContract, selector: Any) -> boo
     return skills_pack_selector in candidates
 
 
+def _matches_record_selector(record: dict[str, Any], selector: Any) -> bool:
+    if selector is None:
+        return True
+    if isinstance(selector, str):
+        return selector in {
+            str(record.get("skill_id") or ""),
+            str(record.get("display_name") or ""),
+            str(record.get("name") or ""),
+        }
+    if not isinstance(selector, dict):
+        return False
+    skill_id = selector.get("skill_id") or selector.get("id") or selector.get("name")
+    if skill_id:
+        return str(skill_id) in {
+            str(record.get("skill_id") or ""),
+            str(record.get("display_name") or ""),
+            str(record.get("name") or ""),
+        }
+    return True
+
+
+def _matches_record_pack_selector(record: dict[str, Any], selector: Any) -> bool:
+    skills_pack_selector = _normalize_skills_pack_identifier(selector)
+    if not skills_pack_selector:
+        return False
+    return skills_pack_selector in {
+        str(record.get("skills_pack_id") or ""),
+        str(record.get("skills_pack_name") or ""),
+    }
+
+
 class SkillPlanner:
     def __init__(self, registry: SkillRegistry):
         self.registry = registry
@@ -84,7 +120,12 @@ class SkillPlanner:
         task_text = str(task or "")
         selectors = _ensure_list(skills)
         pack_selectors = _ensure_list(skills_packs)
-        installed = [self.registry.inspect_skills(str(item["skill_id"])) for item in self.registry.list_skills()]
+        records = self._records_for_scope(
+            self.registry.list_skills(),
+            selectors=selectors,
+            pack_selectors=pack_selectors,
+        )
+        installed, diagnostics = self._inspect_records(records)
         rejected: list[SkillPlanRejection] = []
         rejected_packs: list[dict[str, Any]] = []
         selected_pack_records: dict[str, SkillsPackRecord] = {}
@@ -123,8 +164,50 @@ class SkillPlanner:
             "prompt_bindings": prompt_bindings,
             "resource_bindings": [_copy_public(selection.get("resource_index", {})) for selection in selections],
             "expected_result_shape": _ensure_dict(semantic_outputs),
-            "diagnostics": [],
+            "diagnostics": diagnostics,
         })
+
+    def _records_for_scope(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        selectors: list[Any],
+        pack_selectors: list[Any],
+    ) -> list[dict[str, Any]]:
+        if not selectors and not pack_selectors:
+            return records
+        return [
+            record
+            for record in records
+            if any(_matches_record_selector(record, selector) for selector in selectors)
+            or any(_matches_record_pack_selector(record, selector) for selector in pack_selectors)
+        ]
+
+    def _inspect_records(self, records: list[dict[str, Any]]) -> tuple[list[SkillContract], list[dict[str, Any]]]:
+        installed: list[SkillContract] = []
+        diagnostics: list[dict[str, Any]] = []
+        for record in records:
+            skill_id = str(record.get("skill_id") or "")
+            if not skill_id:
+                diagnostics.append({
+                    "level": "warning",
+                    "code": "skill_unreadable",
+                    "skill_id": "",
+                    "message": "Installed skill index entry is missing skill_id.",
+                    "record": _copy_public(record),
+                })
+                continue
+            try:
+                installed.append(self.registry.inspect_skills(skill_id))
+            except Exception as error:
+                diagnostics.append({
+                    "level": "warning",
+                    "code": "skill_unreadable",
+                    "skill_id": skill_id,
+                    "message": str(error),
+                    "record": _copy_public(record),
+                })
+        return installed, diagnostics
 
     def _select_required(
         self,

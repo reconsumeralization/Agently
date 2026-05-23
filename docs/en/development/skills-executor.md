@@ -46,6 +46,15 @@ The `.agently/` files speed up routing and inspection. They are not Skill
 capability definitions. If a derived file is missing or stale, Agently rebuilds
 or falls back to reading `SKILL.md`.
 
+`skill_id` is derived from the `SKILL.md` frontmatter `name`: lowercase,
+whitespace becomes `-`, and only `a-z0-9._-` remains. Use the returned
+`contract["skill_id"]` when wiring later calls.
+
+```python
+contract = Agently.skills_executor.install_skills("./release-review")
+agent.use_skills([contract["skill_id"]], mode="model_decision")
+```
+
 Root-level non-standard manifests such as `skill.yaml`, `skill.json`, or
 `agently.skill.yaml` are rejected. Files with those names inside `scripts/`,
 `references/`, or `assets/` are treated as ordinary resources.
@@ -92,6 +101,27 @@ print(execution.output)
 print(execution.skill_logs)
 ```
 
+`semantic_outputs=` uses the same schema grammar as `.output(...)`; it is the
+structured-output schema for the Skill run:
+
+```python
+execution = await agent.async_run_skills_task(
+    "Write a release decision.",
+    skills=["release-review"],
+    mode="required",
+    semantic_outputs={"decision": (str, "go or no-go", True)},
+)
+```
+
+Direct Skills execution streams runtime items through `stream_handler`:
+
+- `skills.prompt_only.start`
+- `skills.model_stream` with `path`, `value`, `delta`, and `is_complete`
+- `skills.prompt_only.done`
+
+When Skills are selected through Agent auto-orchestration, model field stream
+items are bridged to stable paths like `skills.model.fields.<field_path>`.
+
 Bundled scripts and resources are never executed just because a Skill is
 installed. They can only be used through explicit Action or Execution
 Environment paths chosen by the host application.
@@ -109,10 +139,20 @@ Plugin defaults load first when present; framework settings are the final
 application-level defaults. Neither setting layer can replace `SKILL.md` as the
 Skill capability definition.
 
+Use the public Skills Executor configuration helper for local registry options:
+
+```python
+Agently.skills_executor.configure(
+    registry_root="./.agently/skills-dev",
+    allowed_trust_levels=["local"],
+)
+```
+
 ## API Summary
 
 - `Agently.skills_executor.install_skills(...)`
 - `Agently.skills_executor.install_skills_pack(...)`
+- `Agently.skills_executor.configure(...)`
 - `Agently.skills_executor.inspect_skills(...)`
 - `agent.use_skills(...)`
 - `agent.use_skills_packs(...)`

@@ -66,6 +66,13 @@ class SkillsExecutor(Protocol):
         update: bool = False,
     ) -> SkillContract: ...
 
+    def configure(
+        self,
+        *,
+        registry_root: str | Path | None = None,
+        allowed_trust_levels: list[str] | None = None,
+    ) -> "SkillsExecutor": ...
+
     def install_skills_pack(
         self,
         source: str | Path,

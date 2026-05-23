@@ -134,6 +134,23 @@ class AgentExecutionStream:
                 meta=payload if isinstance(payload, dict) else None,
             )
             return
+        if item_type == "skills.model_stream":
+            field_path = str(item.get("path") or "model")
+            raw_event_type = str(item.get("event_type") or action)
+            event_type: Literal["delta", "done"] = "delta" if raw_event_type == "delta" else "done"
+            await self.emit(
+                f"skills.model.fields.{field_path}",
+                item.get("value"),
+                delta=item.get("delta") if isinstance(item.get("delta"), str) else None,
+                route=route,
+                source="model_request",
+                stage_id=stage_id,
+                graph_id=graph_id,
+                is_complete=bool(item.get("is_complete", event_type == "done")),
+                event_type=event_type,
+                meta=payload if isinstance(payload, dict) else None,
+            )
+            return
         if item_type == "task_dag.model_field" and task_id:
             field_path = str(item.get("field_path") or "model")
             raw_event_type = str(item.get("event_type") or action)

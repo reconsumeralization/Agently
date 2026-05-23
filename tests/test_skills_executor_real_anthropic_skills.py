@@ -40,8 +40,10 @@ _STANDARD_RESOURCE_TOP = {"scripts", "references", "assets"}
 
 @pytest.fixture(autouse=True)
 def _isolated_registry(tmp_path):
-    Agently.settings.set("skills.registry.root", str(tmp_path / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(
+        registry_root=tmp_path / "registry",
+        allowed_trust_levels=["local"],
+    )
 
 
 def _write(path: Path, content: str):

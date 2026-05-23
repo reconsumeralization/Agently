@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
+from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import AgentExecutionStream
 from agently.builtins.plugins.SkillsExecutor import SkillInstallError, SkillNormalizationError
 from agently.core import PluginManager
 from agently.types.data import AgentlyRequestData
@@ -92,8 +93,10 @@ name: {name}
 
 @pytest.fixture(autouse=True)
 def isolated_skills(tmp_path):
-    Agently.settings.set("skills.registry.root", str(tmp_path / "skills-registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(
+        registry_root=tmp_path / "skills-registry",
+        allowed_trust_levels=["local"],
+    )
     MockSkillsRequester.requests = []
 
 
@@ -114,6 +117,19 @@ def test_install_standard_skill_preserves_root_structure_and_writes_agently_meta
     assert (installed / ".agently" / "resource_index.json").is_file()
     assert (installed / ".agently" / "checksums.json").is_file()
     assert contract["decision_card"]["description"] == "Use for alpha release review."
+
+
+def test_skills_executor_configure_sets_public_registry_options(tmp_path):
+    registry_root = tmp_path / "configured-registry"
+
+    result = Agently.skills_executor.configure(
+        registry_root=registry_root,
+        allowed_trust_levels=["local"],
+    )
+
+    assert result is Agently.skills_executor
+    assert Agently.settings.get("skills.registry.root") == str(registry_root)
+    assert Agently.settings.get("skills.allowed_trust_levels") == ["local"]
 
 
 def test_skill_id_slug_and_conflict_rules(tmp_path):
@@ -211,6 +227,44 @@ def test_required_plan_preserves_user_order(tmp_path):
     assert plan.get("status") == "resolved"
 
 
+def test_required_plan_can_select_by_display_name(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    plan = _create_agent().resolve_skills_plan(
+        "handle release",
+        skills=["Alpha Skill"],
+        mode="required",
+    )
+
+    selected_skills = cast(list[dict[str, Any]], plan.get("selected_skills", []))
+    assert [item["skill_id"] for item in selected_skills] == ["alpha-skill"]
+
+
+def test_planner_skips_unreadable_entries_when_scanning_registry(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    registry_root = Path(str(Agently.settings.get("skills.registry.root")))
+    broken_root = registry_root / "broken-skill"
+    broken_root.mkdir(parents=True)
+    index_path = registry_root / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["skills"]["broken-skill"] = {
+        "skill_id": "broken-skill",
+        "display_name": "Broken Skill",
+        "installed_path": str(broken_root),
+    }
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    plan = _create_agent().resolve_skills_plan("handle release", mode="model_decision")
+
+    selected_skills = cast(list[dict[str, Any]], plan.get("selected_skills", []))
+    assert [item["skill_id"] for item in selected_skills] == ["alpha-skill"]
+    diagnostics = cast(list[dict[str, Any]], plan.get("diagnostics", []))
+    assert diagnostics[0]["code"] == "skill_unreadable"
+    assert diagnostics[0]["skill_id"] == "broken-skill"
+
+
 def test_model_decision_orders_multiple_candidates_with_model(tmp_path):
     _skill(tmp_path / "alpha", name="Alpha Skill")
     _skill(tmp_path / "beta", name="Beta Skill")
@@ -243,6 +297,46 @@ def test_run_skills_task_uses_full_skill_guidance_not_only_decision_card(tmp_pat
     assert output["response"] == "Applied selected SKILL.md guidance."
     assert "Alpha guidance full sentence with detailed operating procedure." in MockSkillsRequester.requests[-1]
     assert execution.skill_logs[0]["execution_mode"] == "prompt_only"
+
+
+def test_run_skills_task_sync_accepts_stream_handler(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    stream_items: list[dict[str, Any]] = []
+
+    execution = _create_agent().run_skills_task(
+        "handle release",
+        skills=["alpha-skill"],
+        mode="required",
+        stream_handler=stream_items.append,
+    )
+
+    assert execution.status == "success"
+    assert stream_items[0]["type"] == "skills.prompt_only.start"
+    assert stream_items[-1]["type"] == "skills.prompt_only.done"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stream_bridge_maps_prompt_only_skill_model_fields():
+    stream = AgentExecutionStream()
+
+    await stream.bridge_task_dag_item(
+        {
+            "type": "skills.model_stream",
+            "action": "delta",
+            "path": "response",
+            "value": "partial",
+            "delta": "partial",
+            "is_complete": False,
+        },
+        route="skills",
+    )
+
+    assert stream.items[0].path == "skills.model.fields.response"
+    assert stream.items[0].route == "skills"
+    assert stream.items[0].source == "model_request"
+    assert stream.items[0].event_type == "delta"
+    assert stream.items[0].is_complete is False
 
 
 def test_no_matching_skill_returns_no_match(tmp_path):

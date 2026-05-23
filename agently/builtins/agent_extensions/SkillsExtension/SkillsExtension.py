@@ -150,6 +150,7 @@ class SkillsExtension(BaseAgent):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
+        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> "SkillExecution":
         return FunctionShifter.syncify(self.async_run_skills_task)(
             task,
@@ -157,6 +158,7 @@ class SkillsExtension(BaseAgent):
             skills_packs=skills_packs,
             mode=mode,
             semantic_outputs=semantic_outputs,
+            stream_handler=stream_handler,
         )
 
     async def async_execute_skills_plan(
