@@ -42,6 +42,7 @@ from pydantic import (
 
 from agently.types.plugins import PromptGenerator
 from agently.types.data import PromptModel, ChatMessageContent, TextMessageContent
+from agently.types.data.prompt import _classify_field_spec
 from agently.utils import SettingsNamespace, DataFormatter, DataPathBuilder, TimeInfo
 
 if TYPE_CHECKING:
@@ -185,6 +186,93 @@ class AgentlyPromptGenerator(PromptGenerator):
 
         return f"<{str(output)}>"
 
+    def _generate_flat_markdown_output_prompt(
+        self,
+        output: dict[str, Any],
+        *,
+        ensure_all_keys: bool = False,
+        title_mapping: dict[str, str] | None = None,
+    ) -> list[str]:
+        lines: list[str] = [
+            f"[{ (title_mapping or {}).get('output_requirement', 'OUTPUT REQUIREMENT') }]:",
+            "Data Format: Structured Markdown",
+            "",
+            "Respond in clearly separated sections. Each section MUST start with the exact",
+            "markdown header shown below (### field_name). Write your content after the header.",
+            "Separate sections with a blank line.",
+        ]
+        if ensure_all_keys:
+            lines.extend([
+                "",
+                "All defined fields are required. Every section header listed below MUST appear",
+                "in your response exactly as specified.",
+            ])
+        lines.append("")
+        lines.append("Required sections:")
+        lines.append("")
+        for field_name, field_spec in output.items():
+            desc = ""
+            if isinstance(field_spec, tuple) and len(field_spec) >= 2 and field_spec[1]:
+                desc = f"<!-- {field_spec[1]} -->"
+            lines.append(f"### {field_name}")
+            if desc:
+                lines.append(desc)
+            lines.append("(your content here)")
+            lines.append("")
+        return lines
+
+    def _generate_hybrid_output_prompt(
+        self,
+        output: dict[str, Any],
+        *,
+        ensure_all_keys: bool = False,
+        title_mapping: dict[str, str] | None = None,
+    ) -> list[str]:
+        lines: list[str] = [
+            f"[{ (title_mapping or {}).get('output_requirement', 'OUTPUT REQUIREMENT') }]:",
+            "Data Format: Structured Markdown with JSON blocks",
+            "",
+            "Respond in clearly separated sections. Each section MUST start with the exact",
+            "markdown header shown below (### field_name).",
+            "",
+            "Sections marked [text] expect plain text content. Write your content directly",
+            "after the header.",
+            "",
+            "Sections marked [JSON] expect valid JSON inside a ```json code block.",
+            "Write the opening ```json on its own line, then your JSON content, then",
+            "the closing ``` on its own line.",
+            "",
+            "Separate sections with a blank line.",
+        ]
+        if ensure_all_keys:
+            lines.extend([
+                "",
+                "All defined fields are required. Every section header listed below MUST appear",
+                "in your response exactly as specified.",
+            ])
+        lines.append("")
+        lines.append("Required sections:")
+        lines.append("")
+        for field_name, field_spec in output.items():
+            kind = _classify_field_spec(field_spec)
+            kind_note = "(text)" if kind == "scalar" else "(JSON)"
+            desc = ""
+            if isinstance(field_spec, tuple) and len(field_spec) >= 2 and field_spec[1]:
+                desc = f"{field_spec[1]}"
+            lines.append(f"### {field_name}")
+            if desc:
+                lines.append(f"<!-- {kind_note} {desc} -->")
+            else:
+                lines.append(f"<!-- {kind_note} -->")
+            if kind == "scalar":
+                lines.append("(your content here)")
+            else:
+                lines.append("```json")
+                lines.append("(your JSON content here)")
+                lines.append("```")
+            lines.append("")
+        return lines
+
     def _generate_yaml_prompt_list(self, title: str, prompt_part: Any) -> list[str]:
         sanitized_part = DataFormatter.sanitize(prompt_part)
         return [
@@ -311,6 +399,22 @@ class AgentlyPromptGenerator(PromptGenerator):
                             self._generate_json_output_prompt(final_output),
                             "",
                         ]
+                    )
+                case "flat_markdown":
+                    prompt_text_list.extend(
+                        self._generate_flat_markdown_output_prompt(
+                            DataFormatter.sanitize(prompt_object.output),
+                            ensure_all_keys=getattr(prompt_object, "ensure_all_keys", False),
+                            title_mapping=prompt_title_mapping,
+                        )
+                    )
+                case "hybrid":
+                    prompt_text_list.extend(
+                        self._generate_hybrid_output_prompt(
+                            DataFormatter.sanitize(prompt_object.output),
+                            ensure_all_keys=getattr(prompt_object, "ensure_all_keys", False),
+                            title_mapping=prompt_title_mapping,
+                        )
                     )
                 case "markdown":
                     prompt_text_list.extend(

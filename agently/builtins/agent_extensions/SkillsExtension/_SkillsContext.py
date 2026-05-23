@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from agently.types.plugins import SkillsRuntimeContext
 
@@ -52,13 +52,14 @@ class AgentSkillsRuntimeContext:
         *,
         prompt: Any,
         output_schema: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
         ensure_keys: list[str] | None = None,
         max_retries: int = 3,
         stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
     ) -> Any:
         request = self.agent.create_temp_request().input(prompt)
         if output_schema is not None:
-            request = request.output(output_schema)
+            request = request.output(output_schema, format=output_format)
         response = request.get_response()
         if stream_handler is not None:
             async for item in response.get_async_generator(type="instant"):

@@ -1,0 +1,213 @@
+"""Tests for hybrid output format, auto resolution, and degradation."""
+
+import pytest
+from agently.types.data.prompt import (
+    _is_scalar_field_spec,
+    _classify_field_spec,
+    _resolve_auto_format,
+    PromptModel,
+)
+from agently.builtins.plugins.ResponseParser.modules.hybrid import (
+    parse_hybrid_output,
+    _extract_json_block,
+)
+
+
+class TestScalarClassification:
+    def test_str_tuple_is_scalar(self):
+        assert _is_scalar_field_spec((str, "desc")) is True
+
+    def test_int_tuple_is_scalar(self):
+        assert _is_scalar_field_spec((int, "age")) is True
+
+    def test_bool_tuple_is_scalar(self):
+        assert _is_scalar_field_spec((bool, "active")) is True
+
+    def test_float_tuple_is_scalar(self):
+        assert _is_scalar_field_spec((float, "score")) is True
+
+    def test_list_is_not_scalar(self):
+        assert _is_scalar_field_spec([(str,)]) is False
+
+    def test_dict_is_not_scalar(self):
+        assert _is_scalar_field_spec({"nested": (str,)}) is False
+
+    def test_non_type_tuple_is_not_scalar(self):
+        assert _is_scalar_field_spec(("not-a-type", "desc")) is False
+
+
+class TestClassifyFieldSpec:
+    def test_str_is_scalar(self):
+        assert _classify_field_spec((str, "desc")) == "scalar"
+
+    def test_int_is_scalar(self):
+        assert _classify_field_spec((int,)) == "scalar"
+
+    def test_list_is_complex(self):
+        assert _classify_field_spec([(str,)]) == "complex"
+
+    def test_dict_is_complex(self):
+        assert _classify_field_spec({"a": (int,)}) == "complex"
+
+
+class TestResolveAutoFormat:
+    def test_all_str_flat_markdown(self):
+        assert _resolve_auto_format({"html": (str, "HTML"), "notes": (str, "Notes")}) == "flat_markdown"
+
+    def test_mixed_scalar_types_flat_markdown(self):
+        """All scalars (str + int + bool) are flat_markdown, not just str."""
+        assert _resolve_auto_format({"name": (str,), "age": (int,), "active": (bool,)}) == "flat_markdown"
+
+    def test_mixed_scalar_complex_hybrid(self):
+        assert _resolve_auto_format({"summary": (str,), "items": [(str,)]}) == "hybrid"
+
+    def test_eda_schema_hybrid(self):
+        """EDA-like: scalar fields + complex lists."""
+        schema = {
+            "intent": (str, "must be exactly 'create_schematic'"),
+            "title": (str, "short circuit title"),
+            "analysis": (str, "one-paragraph circuit description"),
+            "components": [{"refdes": (str,), "query": (str,)}],
+            "nets": [{"name": (str,), "connections": [{"refdes": (str,)}]}],
+        }
+        assert _resolve_auto_format(schema) == "hybrid"
+
+    def test_all_complex_json(self):
+        assert _resolve_auto_format({"items": [(str,)]}) == "json"
+
+    def test_nested_dict_json(self):
+        assert _resolve_auto_format({"analysis": {"finding": (str,), "confidence": (int,)}}) == "json"
+
+    def test_empty_dict_json(self):
+        assert _resolve_auto_format({}) == "json"
+
+    def test_non_dict_json(self):
+        assert _resolve_auto_format("just a string") == "json"
+        assert _resolve_auto_format(None) == "json"
+        assert _resolve_auto_format([(str,)]) == "json"
+
+
+class TestPromptModelAuto:
+    def test_auto_with_mixed_sets_hybrid_and_flag(self):
+        m = PromptModel(output={"name": (str,), "items": [(str,)]}, output_format="auto")
+        assert m.output_format == "hybrid"
+        assert m.output_format_resolved_from_auto is True
+
+    def test_auto_with_all_scalar_sets_flat_markdown_and_flag(self):
+        m = PromptModel(output={"name": (str,), "age": (int,)}, output_format="auto")
+        assert m.output_format == "flat_markdown"
+        assert m.output_format_resolved_from_auto is True
+
+    def test_auto_with_all_complex_sets_json_and_flag(self):
+        m = PromptModel(output={"items": [(str,)]}, output_format="auto")
+        assert m.output_format == "json"
+        assert m.output_format_resolved_from_auto is True
+
+    def test_explicit_format_no_auto_flag(self):
+        m = PromptModel(output={"html": (str,)}, output_format="flat_markdown")
+        assert m.output_format == "flat_markdown"
+        assert m.output_format_resolved_from_auto is False
+
+    def test_hybrid_with_non_dict_warns_and_falls_back(self):
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            m = PromptModel(output="not dict", output_format="hybrid")
+            assert m.output_format == "json"
+            assert len(w) == 1 and "hybrid" in str(w[0].message)
+
+
+class TestExtractJsonBlock:
+    def test_json_code_block(self):
+        assert _extract_json_block('```json\n[1,2,3]\n```') == '[1,2,3]'
+
+    def test_plain_code_block(self):
+        assert _extract_json_block('```\n{"a":1}\n```') == '{"a":1}'
+
+    def test_no_block_returns_none(self):
+        assert _extract_json_block("no json here") is None
+
+
+class TestParseHybridOutput:
+    def test_mixed_scalar_and_complex(self):
+        text = (
+            "### summary\n"
+            "A summary paragraph.\n"
+            "\n"
+            "### items\n"
+            "```json\n"
+            '[{"id": 1, "name": "item1"}, {"id": 2, "name": "item2"}]\n'
+            "```\n"
+            "\n"
+            "### notes\n"
+            "Final notes here.\n"
+        )
+        schema = {
+            "summary": (str, "A summary"),
+            "items": [{"id": (int,), "name": (str,)}],
+            "notes": (str, "Final notes"),
+        }
+        result = parse_hybrid_output(text, schema)
+        assert result is not None
+        assert result["summary"] == "A summary paragraph."
+        assert result["notes"] == "Final notes here."
+        assert isinstance(result["items"], list)
+        assert len(result["items"]) == 2
+        assert result["items"][0] == {"id": 1, "name": "item1"}
+
+    def test_scalar_only(self):
+        """Degenerate hybrid: all scalar fields still works."""
+        text = "### name\nAlice\n\n### age\n30\n"
+        result = parse_hybrid_output(text, {"name": (str,), "age": (int,)})
+        assert result is not None
+        assert result["name"] == "Alice"
+        assert result["age"] == "30"
+
+    def test_missing_json_block_fallback_to_raw(self):
+        text = "### items\nsome raw content without json\n"
+        result = parse_hybrid_output(text, {"items": [(str,)]})
+        assert result is not None
+        assert result["items"] == "some raw content without json"
+
+    def test_malformed_json_fallback_to_raw(self):
+        text = "### items\n```json\n{broken json!!!\n```\n"
+        result = parse_hybrid_output(text, {"items": [{"id": (int,)}]})
+        assert result is not None
+        assert isinstance(result["items"], str)
+
+    def test_empty_schema_returns_none(self):
+        assert parse_hybrid_output("### x\ntext", {}) is None
+
+    def test_no_sections_returns_none(self):
+        assert parse_hybrid_output("just some text", {"field": (str,)}) is None
+
+    def test_accepts_model_copied_header_annotations(self):
+        text = (
+            "### summary [text]\n"
+            "A summary paragraph.\n\n"
+            "### items [JSON]\n"
+            "```json\n"
+            '["one", "two"]\n'
+            "```\n"
+        )
+        result = parse_hybrid_output(text, {"summary": (str,), "items": [(str,)]})
+        assert result == {"summary": "A summary paragraph.", "items": ["one", "two"]}
+
+
+class TestHybridStreamingParser:
+    async def _collect_events(self, parser, chunks):
+        events = []
+        for chunk in chunks:
+            async for ev in parser.parse_chunk(chunk):
+                events.append(ev)
+        async for ev in parser.flush():
+            events.append(ev)
+        return events
+
+    @pytest.mark.asyncio
+    async def test_streaming_header_annotation_keeps_clean_field_path(self):
+        from agently.builtins.plugins.ResponseParser.modules.hybrid import HybridStreamingParser
+
+        parser = HybridStreamingParser({"summary": (str,), "items": [(str,)]})
+        events = await self._collect_events(parser, ["### summary [text]\nA summary"])
+        assert events[0].path == "summary"

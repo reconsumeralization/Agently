@@ -473,10 +473,7 @@ def _run_case(case: ComboCase, candidate_skill_ids: list[str]) -> dict[str, Any]
         case.task,
         skills=candidate_skill_ids,
         mode="model_decision",
-        scope="execution",
         semantic_outputs=case.expected_outputs,
-        planner_mode="model",
-        planner_max_revisions=2,
     )
     plan = execution.plan
     result = dict(plan.get("planner_result") or {})

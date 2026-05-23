@@ -19,7 +19,7 @@ def test_to_prompt_object():
     prompt["output"] = {"reply": (str, "your reply")}
     po3 = prompt.to_prompt_object().model_dump()
     assert po3["output"] == {"reply": (str, "your reply")}
-    assert po3.get("output_format") == "json"  # Be automatically changed by `output`
+    assert po3.get("output_format") == "flat_markdown"  # Be automatically resolved by `output`
     prompt["output_format"] = "yaml"
     po4 = prompt.to_prompt_object().model_dump()
     assert po4["output"] == {"reply": (str, "your reply")}
@@ -45,6 +45,7 @@ def test_to_text():
                 "thinking": (str, "describe how will you plan to reply?"),
                 "reply": (str, "your final reply"),
             },
+            "output_format": "json",
         }
     )
     assert (
@@ -84,6 +85,7 @@ def test_to_text_complex():
                 "thinking": (str, "describe how will you plan to reply?"),
                 "reply": (str, "your final reply"),
             },
+            "output_format": "json",
         }
     )
     prompt.set(
@@ -191,6 +193,7 @@ def test_message_prompt():
                 "thinking": (str, "describe how will you plan to reply?"),
                 "reply": (str, "your final reply"),
             },
+            "output_format": "json",
         }
     )
     prompt.set(
