@@ -14,7 +14,10 @@
 
 """Standard Action Blocks — strategy-agnostic, TriggerFlow-compatible.
 
-Model-side blocks wrapping ``async_request_model`` and ``async_read_resource``.
+Model-side blocks (ReasonBlock, IntentBlock, ReadBlock, FinalizeBlock) wrap
+``async_request_model`` and ``async_read_resource``. Acting blocks (ActBlock,
+ObserveBlock) wrap the acting surface and artifact-aware observation.
+
 Reusable by Skills strategies, DAG stages, and future orchestrators.
 """
 
@@ -23,6 +26,8 @@ from agently.builtins.blocks.ReasonBlock import ReasonBlock
 from agently.builtins.blocks.IntentBlock import IntentBlock
 from agently.builtins.blocks.ReadBlock import ReadBlock
 from agently.builtins.blocks.FinalizeBlock import FinalizeBlock
+from agently.builtins.blocks.ActBlock import ActBlock
+from agently.builtins.blocks.ObserveBlock import ObserveBlock
 
 __all__ = [
     "FlowBlock",
@@ -30,4 +35,6 @@ __all__ = [
     "IntentBlock",
     "ReadBlock",
     "FinalizeBlock",
+    "ActBlock",
+    "ObserveBlock",
 ]

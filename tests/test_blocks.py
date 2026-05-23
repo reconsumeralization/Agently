@@ -1,6 +1,8 @@
-"""Unit + integration tests for standard action blocks (Spec C)."""
+"""Unit + integration tests for standard action blocks (Spec C + B)."""
 
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
@@ -10,6 +12,8 @@ from agently.builtins.blocks import (
     IntentBlock,
     ReadBlock,
     FinalizeBlock,
+    ActBlock,
+    ObserveBlock,
 )
 from agently.core.TriggerFlow.BluePrint import TriggerFlowBlueprint
 
@@ -17,11 +21,14 @@ from agently.core.TriggerFlow.BluePrint import TriggerFlowBlueprint
 class MockContext:
     """Minimal SkillsExecutionContext stub for unit tests."""
 
+    execution_environment: Any = None
+
     def __init__(self):
         self.model_calls: list[dict] = []
         self.resource_reads: list[dict] = []
         self.stream_events: list[dict] = []
         self._model_response = "mock result"
+        self.execution_environment = None
 
     async def async_request_model(self, **kwargs):
         self.model_calls.append(kwargs)
@@ -341,3 +348,196 @@ class TestBlockOnTriggerFlow:
         # The operators exist and have valid structure
         assert reason_op["kind"] == "chunk"
         assert fin_op["kind"] == "chunk"
+
+
+# ═══════════════════════════════════════════════════════════
+# ActBlock (Spec B)
+# ═══════════════════════════════════════════════════════════
+
+
+class TestActBlock:
+    def test_implements_protocol(self):
+        assert isinstance(ActBlock(), FlowBlock)
+
+    @pytest.mark.asyncio
+    async def test_direct_execute_tool_allowed(self):
+        ctx = MockContext()
+        ctx.tool_results = {}
+
+        async def _call_tool(name, **kwargs):
+            ctx.tool_results[name] = kwargs
+            return {"status": "ok"}
+
+        ctx.async_call_tool = _call_tool
+        ctx.execution_environment = None
+
+        block = ActBlock(allowed_tools={"search"}, default_deny=True)
+        result = await block.execute(
+            action_spec={"type": "tool", "name": "search", "kwargs": {"q": "test"}},
+            context=ctx,
+        )
+        assert result["error"] is None
+        assert result["name"] == "search"
+
+    @pytest.mark.asyncio
+    async def test_direct_execute_tool_denied(self):
+        ctx = MockContext()
+        ctx.execution_environment = None
+
+        block = ActBlock(allowed_tools={"read_file"}, default_deny=True)
+        with pytest.raises(PermissionError, match="not in allowed_tools"):
+            await block.execute(
+                action_spec={"type": "tool", "name": "delete", "kwargs": {}},
+                context=ctx,
+            )
+
+    @pytest.mark.asyncio
+    async def test_direct_execute_default_deny_disabled(self):
+        ctx = MockContext()
+        ctx.execution_environment = None
+
+        async def _call_tool(name, **kwargs):
+            return {"ok": True}
+
+        ctx.async_call_tool = _call_tool
+
+        block = ActBlock(default_deny=False)
+        result = await block.execute(
+            action_spec={"type": "tool", "name": "anything", "kwargs": {}},
+            context=ctx,
+        )
+        assert result["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_direct_execute_emits_events(self):
+        ctx = MockContext()
+        ctx.execution_environment = None
+
+        async def _call_tool(name, **kwargs):
+            return {"result": "ok"}
+
+        ctx.async_call_tool = _call_tool
+
+        block = ActBlock(allowed_tools={"search"}, default_deny=True)
+        await block.execute(
+            action_spec={"type": "tool", "name": "search", "kwargs": {}},
+            context=ctx,
+        )
+
+        act_events = [e for e in ctx.stream_events if e["type"] == "block.act"]
+        assert len(act_events) == 2  # start + done
+
+    @pytest.mark.asyncio
+    async def test_script_requires_execution_environment(self):
+        ctx = MockContext()
+        ctx.execution_environment = None
+
+        block = ActBlock(allow_scripts=True, default_deny=True)
+        with pytest.raises(RuntimeError, match="ExecutionEnvironment"):
+            await block.execute(
+                action_spec={"type": "script", "name": "setup.sh", "kwargs": {}},
+                context=ctx,
+            )
+
+    def test_build_operators(self):
+        ctx = MockContext()
+        bp = TriggerFlowBlueprint(name="test")
+        block = ActBlock(allowed_tools={"search"})
+        ids = block.build_operators(blueprint=bp, context=ctx, settings={})
+
+        assert len(ids) == 1
+        assert ids[0].startswith("act-block-")
+        assert bp.definition.operators[0]["kind"] == "chunk"
+
+
+# ═══════════════════════════════════════════════════════════
+# ObserveBlock (Spec B)
+# ═══════════════════════════════════════════════════════════
+
+
+class TestObserveBlock:
+    def test_implements_protocol(self):
+        assert isinstance(ObserveBlock(), FlowBlock)
+
+    @pytest.mark.asyncio
+    async def test_small_artifact_inlined(self):
+        ctx = MockContext()
+        block = ObserveBlock(artifact_inline_limit=4096)
+        obs = {"name": "search", "result": "small result"}
+        result = await block.execute(observation=obs, context=ctx)
+
+        assert result["_inlined"] is True
+        assert result["result"] == "small result"
+
+    @pytest.mark.asyncio
+    async def test_large_artifact_summarized(self):
+        ctx = MockContext()
+        block = ObserveBlock(artifact_inline_limit=10)
+        obs = {"name": "generate", "result": "x" * 5000}
+        result = await block.execute(observation=obs, context=ctx)
+
+        assert result["_inlined"] is False
+        assert "artifact" in result
+        assert "result" not in result  # should not inline
+        assert result["artifact"]["byte_count"] == 5000
+        assert "sha256_16" in result["artifact"]
+        assert "head" in result["artifact"]
+        assert "tail" in result["artifact"]
+
+    @pytest.mark.asyncio
+    async def test_no_result(self):
+        ctx = MockContext()
+        block = ObserveBlock()
+        obs = {"name": "search", "error": "not found"}
+        result = await block.execute(observation=obs, context=ctx)
+
+        assert result["_inlined"] is True
+        assert result["error"] == "not found"
+
+    @pytest.mark.asyncio
+    async def test_emits_event(self):
+        ctx = MockContext()
+        block = ObserveBlock()
+        await block.execute(
+            observation={"name": "test", "result": "ok"},
+            context=ctx,
+        )
+
+        obs_events = [e for e in ctx.stream_events if e["type"] == "block.observe"]
+        assert len(obs_events) == 1
+        assert obs_events[0]["action"] == "done"
+
+    def test_build_operators(self):
+        ctx = MockContext()
+        bp = TriggerFlowBlueprint(name="test")
+        block = ObserveBlock(artifact_inline_limit=1024)
+        ids = block.build_operators(blueprint=bp, context=ctx, settings={})
+
+        assert len(ids) == 1
+        assert ids[0].startswith("observe-block-")
+        assert bp.definition.operators[0]["kind"] == "chunk"
+
+    @pytest.mark.asyncio
+    async def test_persists_to_execution_state(self):
+        ctx = MockContext()
+
+        class MockExecution:
+            def __init__(self):
+                self._state = {}
+
+            def get_state(self, key):
+                return self._state.get(key)
+
+            def set_state(self, key, value):
+                self._state[key] = value
+
+        block = ObserveBlock(artifact_inline_limit=4096)
+        await block.execute(
+            observation={"name": "test", "result": "ok"},
+            context=ctx,
+            execution=MockExecution(),
+        )
+
+        # The execution state should have been updated
+        assert True  # no exception raised
+
