@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 from agently.core import BaseAgent
@@ -147,6 +148,7 @@ class SkillsExtension(BaseAgent):
         semantic_outputs: Any = None,
         planner_mode: str = "auto",
         planner_max_revisions: int = 2,
+        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> "SkillExecution":
         plan = await self.async_resolve_skills_plan(
             task,
@@ -158,7 +160,7 @@ class SkillsExtension(BaseAgent):
             planner_mode=planner_mode,
             planner_max_revisions=planner_max_revisions,
         )
-        execution = await self.async_execute_skills_plan(task, plan=plan)
+        execution = await self.async_execute_skills_plan(task, plan=plan, stream_handler=stream_handler)
         self.__skill_execution_logs.append(execution.to_dict())
         return execution
 
@@ -194,8 +196,9 @@ class SkillsExtension(BaseAgent):
         task: str,
         *,
         plan: SkillExecutionPlan,
+        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> "SkillExecution":
-        context = create_agent_skills_runtime_context(self)
+        context = create_agent_skills_runtime_context(self, runtime_stream_handler=stream_handler)
         return await self.skills_executor.async_execute_plan(context=context, task=task, plan=plan)
 
     def get_skills_execution_logs(self) -> list[dict[str, Any]]:

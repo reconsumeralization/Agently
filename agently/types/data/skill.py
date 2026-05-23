@@ -23,7 +23,20 @@ from .execution_environment import ExecutionEnvironmentRequirement
 
 SkillMode = Literal["model_decision", "required"]
 SkillScope = Literal["request", "session", "agent", "execution"]
-SkillStageKind = Literal["model", "action", "branch", "for_each", "wait", "validate", "emit"]
+SkillStageKind = Literal[
+    "model",
+    "action",
+    "branch",
+    "for_each",
+    "wait",
+    "validate",
+    "emit",
+    "model_plan",
+    "artifact_plan",
+    "approval",
+    "fallback",
+    "qa_validation",
+]
 SkillExecutionStatus = Literal[
     "created",
     "planned",

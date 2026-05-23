@@ -184,8 +184,13 @@ def _make_kickoff_handler(
         await data.async_set_state("artifact_refs", {}, emit=False)
         await data.async_set_state("semantic_outputs", {}, emit=False)
         await data.async_set_state("task_dag", graph.to_dict(), emit=False)
+        root_tasks = []
         for task_id in root_task_ids:
-            data.emit_nowait(_start_task_event(task_id), {"task_id": task_id, "graph_id": graph.graph_id})
+            task = data.emit_nowait(_start_task_event(task_id), {"task_id": task_id, "graph_id": graph.graph_id})
+            if task is not None:
+                root_tasks.append(task)
+        if root_tasks:
+            await asyncio.gather(*root_tasks)
 
     return kickoff
 
@@ -297,6 +302,7 @@ async def _record_task_success(
     *,
     result_lock: asyncio.Lock,
 ) -> None:
+    emit_done_graph = False
     async with result_lock:
         results = dict(data.get_state("task_results", {}) or {})
         statuses = dict(data.get_state("task_statuses", {}) or {})
@@ -310,9 +316,11 @@ async def _record_task_success(
         await data.async_set_state("task_statuses", statuses, emit=False)
         if extracted_artifacts:
             await data.async_set_state("artifact_refs", artifact_refs, emit=False)
-        data.emit_nowait(_done_task_event(task.id), {"task_id": task.id, "result": output})
         if len(results) == len(graph.tasks):
-            data.emit_nowait(_done_graph_event(graph.graph_id), dict(results))
+            emit_done_graph = True
+    await data.async_emit(_done_task_event(task.id), {"task_id": task.id, "result": output})
+    if emit_done_graph:
+        await data.async_emit(_done_graph_event(graph.graph_id), dict(results))
 
 
 async def _record_task_failure(
@@ -333,7 +341,8 @@ async def _record_task_failure(
         statuses[task.id] = "failed"
         await data.async_set_state("task_failures", failures, emit=False)
         await data.async_set_state("task_statuses", statuses, emit=False)
-        data.emit_nowait(_failed_task_event(task.id), failures[task.id])
+        failure_payload = failures[task.id]
+    await data.async_emit(_failed_task_event(task.id), failure_payload)
 
 
 async def _put_task_event(

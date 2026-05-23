@@ -37,7 +37,11 @@ The current implementation provides:
   validate deliverable role/type coverage instead of hard-coded filenames
 - model-composed multi-skill planning through `planner_mode="model"` with a
   bounded evaluate/repair loop controlled by `planner_max_revisions`
-- declarative `action`, `model`, `validate`, and `emit` stage handling
+- declarative `action`, `model`, `model_plan`, `branch`, `validate`, and
+  `emit` stage handling
+- native Skill model stages through `SkillsExecutionContext.async_request_model(...)`;
+  model outputs are stored in execution state and stream as
+  `skills.stages.<stage_id>.fields.<field_path>` delta/done events
 - Dynamic Task DAG execution underneath `run_skills_task(...)`, so
   `SkillExecution.close_snapshot` preserves the compiled task graph result
   alongside skill/action logs
@@ -66,8 +70,9 @@ core/SkillsExecutor.py
 ```
 
 The plugin does not receive the full Agent object. The Agent component builds a
-`SkillsRuntimeContext` adapter for model planning, settings lookup, action
-availability, and action execution.
+`SkillsRuntimeContext` adapter for model planning, model-stage requests,
+settings lookup, action availability, action execution, and runtime stream
+bridging.
 
 `Agently.skills_executor` is the only global facade for this development-line
 feature. The feature has not shipped yet, so no `Agently.skills` compatibility
@@ -188,6 +193,34 @@ print(execution.close_snapshot["task_dag"]["semantic_outputs"])
 deliverable dictionaries. The executor normalizes them into roles and artifact
 types, so an output can pass as long as the plan covers the required meaning.
 Filename normalization is an executor concern; it is not the user's contract.
+
+## Model Stage Streaming
+
+Use `kind: model` when the Skill stage itself should call the model. Declare an
+`output_schema` when downstream stages or CLIs need stable fields.
+
+```yaml
+stages:
+  - id: draft_reply
+    kind: model
+    purpose: Draft the customer reply and explain the next operational step.
+    output_schema:
+      prethinking:
+        type: str
+        description: Operator-facing reasoning notes.
+      reply:
+        type: str
+        description: Customer-facing reply.
+```
+
+During `agent.create_execution()` streaming, those fields are available as
+delta events:
+
+```python
+async for item in execution.get_async_generator(type="instant"):
+    if item.path == "skills.stages.draft_reply.fields.reply" and item.delta:
+        print(item.delta, end="", flush=True)
+```
 
 ## Minimal Skill Package
 

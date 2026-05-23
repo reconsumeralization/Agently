@@ -41,11 +41,16 @@ class MockSkillsChainRequester:
         )
 
     async def request_model(self, request_data: AgentlyRequestData):
+        request_text = json.dumps(request_data.data, ensure_ascii=False)
         info_text = json.dumps(request_data.data.get("info"), ensure_ascii=False)
+        has_release_prompt = "release readiness" in request_text or "release notes" in request_text
         response = {
             "has_skill_cards": "skill_cards" in info_text,
             "has_primary_guidance": "Follow the release checklist" in info_text,
-            "reply": "skills-visible" if "release-checklist" in info_text else "skills-missing",
+            "reply": "skills-visible" if "release-checklist" in info_text or has_release_prompt else "skills-missing",
+            "plan": "use the release readiness path",
+            "selected_branch": "ready",
+            "reason": "release context is available",
         }
         yield "message", json.dumps(response, ensure_ascii=False)
 
@@ -156,6 +161,94 @@ keywords:
 ---
 
 Inspect the workspace with a controlled shell command.
+""",
+    )
+
+
+def _create_model_skill(root: Path):
+    _write(
+        root / "skill.yaml",
+        """
+skill_id: model-writer
+version: 0.1.0
+display_name: Model Writer
+purpose: Write a structured model response for a release task.
+trust_level: local
+activation:
+  keywords: [model, release]
+kind: workflow
+card:
+  stage_roles: [draft]
+  produces:
+    - role: reply
+      type: text
+semantic_outputs:
+  reply:
+    type: text
+stages:
+  - id: draft_reply
+    kind: model
+    prompt: "Draft a concise release readiness reply for ${task}."
+    output_schema:
+      reply:
+        type: str
+        description: Release readiness reply.
+""",
+    )
+    _write(
+        root / "SKILL.md",
+        """---
+name: Model Writer
+description: Use model stage to draft release replies.
+keywords:
+  - release
+---
+
+Draft a concise release readiness reply.
+""",
+    )
+
+
+def _create_model_plan_branch_skill(root: Path):
+    _write(
+        root / "skill.yaml",
+        """
+skill_id: model-plan-branch
+version: 0.1.0
+display_name: Model Plan Branch
+purpose: Plan release work and choose a branch.
+trust_level: local
+activation:
+  keywords: [release, branch]
+kind: workflow
+stages:
+  - id: plan_steps
+    kind: model_plan
+    purpose: "Plan the release readiness path for ${task}."
+    output_schema:
+      plan:
+        type: str
+        description: Release plan.
+  - id: choose_path
+    kind: branch
+    condition: ready
+    branches:
+      ready:
+        description: Continue with release readiness.
+      fallback:
+        description: Ask for missing context.
+""",
+    )
+    _write(
+        root / "SKILL.md",
+        """---
+name: Model Plan Branch
+description: Use model_plan and branch stages.
+keywords:
+  - release
+---
+
+Plan release work and choose a branch.
 """,
     )
 
@@ -409,6 +502,45 @@ def test_run_skills_task_executes_action_stage_and_preserves_logs(tmp_path):
     assert any(item.get("type") == "task_dag.task" for item in execution.runtime_stream)
 
 
+def test_model_stage_calls_model_and_stores_output(tmp_path):
+    skill_root = tmp_path / "model-skill"
+    _create_model_skill(skill_root)
+    Agently.skills_executor.install_skills(skill_root)
+
+    execution = _create_chain_test_agent().run_skills_task(
+        "prepare release notes",
+        skills=["model-writer"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    output = cast(dict[str, Any], execution.output)
+    assert output["draft_reply"]["reply"] == "skills-visible"
+    assert execution.skill_logs[0]["kind"] == "model"
+    assert execution.skill_logs[0]["status"] == "success"
+    assert execution.skill_logs[0]["output_keys"] == ["reply"]
+    assert any(item.get("type") == "skills.stage_field" for item in execution.runtime_stream)
+
+
+def test_model_plan_and_branch_stages_execute(tmp_path):
+    skill_root = tmp_path / "model-plan-branch"
+    _create_model_plan_branch_skill(skill_root)
+    Agently.skills_executor.install_skills(skill_root)
+
+    execution = _create_chain_test_agent().run_skills_task(
+        "prepare release notes",
+        skills=["model-plan-branch"],
+        mode="required",
+    )
+
+    output = cast(dict[str, Any], execution.output)
+
+    assert execution.status == "success"
+    assert output["plan_steps"]["plan"] == "use the release readiness path"
+    assert output["choose_path"]["selected_branch"] == "ready"
+    assert [log["kind"] for log in execution.skill_logs] == ["model_plan", "branch"]
+
+
 @pytest.mark.asyncio
 async def test_agent_execution_routes_skills_and_streams_stage_progress(tmp_path):
     calls = []
@@ -451,3 +583,36 @@ async def test_agent_execution_routes_skills_and_streams_stage_progress(tmp_path
     assert any(item.path.startswith("task_dag.tasks.") for item in stream_items)
     assert any(item.path == "skills.stages.record_note" for item in stream_items)
     assert any(item.path == "actions.record_release_note" for item in stream_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_streams_skill_model_stage_field_delta(tmp_path):
+    skill_root = tmp_path / "model-skill"
+    _create_model_skill(skill_root)
+    Agently.skills_executor.install_skills(skill_root)
+
+    execution = (
+        _create_chain_test_agent()
+        .use_skills(["model-writer"], mode="required")
+        .input("prepare release notes")
+        .create_execution()
+    )
+
+    stream_items = []
+    async for item in execution.get_async_generator(type="instant"):
+        stream_items.append(item)
+
+    data = cast(dict[str, Any], await execution.async_get_data())
+
+    assert data["draft_reply"]["reply"] == "skills-visible"
+    assert any(
+        item.path == "skills.stages.draft_reply.fields.reply"
+        and item.event_type == "delta"
+        and item.delta
+        for item in stream_items
+    )
+    assert any(
+        item.path == "skills.stages.draft_reply.fields.reply"
+        and item.is_complete
+        for item in stream_items
+    )

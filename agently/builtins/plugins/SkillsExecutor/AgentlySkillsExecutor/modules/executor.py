@@ -144,7 +144,8 @@ class SkillExecutor:
                 task_dag_close_snapshot={"error": str(error)},
             )
 
-        runtime_stream.extend(dag_stream)
+        for item in dag_stream:
+            await self._emit_runtime_item(context=context, runtime_stream=runtime_stream, item=item)
 
         failed_stages = [log for log in skill_logs if log.get("status") in {"error", "blocked"}]
         dag_status = "error" if failed_stages else "success"
@@ -379,21 +380,60 @@ class SkillExecutor:
                     log["status"] = result.get("status", "error")
                     log["error"] = result.get("error", "")
             elif kind == "model":
-                prompt = str(stage.get("prompt") or "")
-                state[stage_id] = {"prompt": self._resolve_templates(prompt, task=task, state=state)}
-                log["status"] = "prepared"
+                result = await self._execute_model_stage(
+                    context=context,
+                    task=task,
+                    selection=selection,
+                    stage=stage,
+                    state=state,
+                    stage_id=stage_id,
+                    runtime_stream=runtime_stream,
+                    default_field="reply",
+                )
+                state[stage_id] = result
+                if isinstance(result, dict):
+                    log["output_keys"] = list(result.keys())
+            elif kind == "model_plan":
+                result = await self._execute_model_stage(
+                    context=context,
+                    task=task,
+                    selection=selection,
+                    stage=stage,
+                    state=state,
+                    stage_id=stage_id,
+                    runtime_stream=runtime_stream,
+                    default_field="plan",
+                )
+                state[stage_id] = result
+                if isinstance(result, dict):
+                    log["output_keys"] = list(result.keys())
+            elif kind == "branch":
+                result = await self._execute_branch_stage(
+                    context=context,
+                    task=task,
+                    selection=selection,
+                    stage=stage,
+                    state=state,
+                    stage_id=stage_id,
+                    runtime_stream=runtime_stream,
+                )
+                state[stage_id] = result
+                if isinstance(result, dict):
+                    log["selected_branch"] = result.get("selected_branch")
             elif kind == "validate":
                 self._validate_stage(stage, state)
                 state[stage_id] = {"validated": True}
             elif kind == "emit":
                 item = {
+                    "type": "skills.stage_emit",
+                    "action": "done",
                     "skill_id": selection.get("skill_id"),
                     "stage_id": stage_id,
                     "data": self._resolve_templates(stage.get("data", stage.get("emits", {})), task=task, state=state),
                 }
-                runtime_stream.append(item)
+                await self._emit_runtime_item(context=context, runtime_stream=runtime_stream, item=item)
                 state[stage_id] = item
-            elif kind in {"model_plan", "artifact_plan", "approval", "fallback", "qa_validation"}:
+            elif kind in {"artifact_plan", "approval", "fallback", "qa_validation"}:
                 state[stage_id] = {
                     "skill_id": selection.get("skill_id"),
                     "stage_id": stage_id,
@@ -412,6 +452,239 @@ class SkillExecutor:
             log["status"] = "error"
             log["error"] = str(error)
         return log
+
+    async def _execute_model_stage(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        task: str,
+        selection: dict[str, Any],
+        stage: dict[str, Any],
+        state: dict[str, Any],
+        stage_id: str,
+        runtime_stream: list[dict[str, Any]],
+        default_field: str,
+    ) -> Any:
+        prompt = self._build_model_stage_prompt(
+            task=task,
+            selection=selection,
+            stage=stage,
+            state=state,
+            stage_id=stage_id,
+        )
+        output_schema = self._normalize_stage_output_schema(stage, default_field=default_field)
+        ensure_keys = self._normalize_ensure_keys(stage, output_schema)
+        max_retries = int(stage.get("max_retries", 3) or 3)
+
+        async def stream_model_item(item: Any):
+            await self._emit_runtime_item(
+                context=context,
+                runtime_stream=runtime_stream,
+                item=self._model_stream_item_to_skill_stream(
+                    item,
+                    selection=selection,
+                    stage=stage,
+                    stage_id=stage_id,
+                ),
+            )
+
+        result = await context.async_request_model(
+            prompt=prompt,
+            output_schema=output_schema,
+            ensure_keys=ensure_keys,
+            max_retries=max_retries,
+            stream_handler=stream_model_item,
+        )
+        if ensure_keys and isinstance(result, dict):
+            result = {key: result.get(key) for key in ensure_keys if key in result}
+        return _copy_public(result)
+
+    async def _execute_branch_stage(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        task: str,
+        selection: dict[str, Any],
+        stage: dict[str, Any],
+        state: dict[str, Any],
+        stage_id: str,
+        runtime_stream: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if stage.get("prompt") or stage.get("purpose") or stage.get("model") is not None:
+            result = await self._execute_model_stage(
+                context=context,
+                task=task,
+                selection=selection,
+                stage={
+                    **stage,
+                    "output_schema": stage.get("output_schema")
+                    or stage.get("output")
+                    or {
+                        "selected_branch": (
+                            str,
+                            "The selected branch or case key from the declared branches.",
+                        ),
+                        "reason": (str, "Concise reason for the branch selection."),
+                    },
+                },
+                state=state,
+                stage_id=stage_id,
+                runtime_stream=runtime_stream,
+                default_field="selected_branch",
+            )
+            return dict(result) if isinstance(result, dict) else {"selected_branch": str(result), "reason": ""}
+
+        condition = self._resolve_templates(stage.get("condition", stage.get("when")), task=task, state=state)
+        branches = _ensure_dict(stage.get("branches") or stage.get("cases"))
+        selected_branch = self._select_branch(condition, branches)
+        return {
+            "selected_branch": selected_branch,
+            "condition": _copy_public(condition),
+            "branches": _copy_public(branches),
+        }
+
+    def _build_model_stage_prompt(
+        self,
+        *,
+        task: str,
+        selection: dict[str, Any],
+        stage: dict[str, Any],
+        state: dict[str, Any],
+        stage_id: str,
+    ) -> dict[str, Any]:
+        stage_prompt = stage.get("prompt") or stage.get("purpose") or stage.get("title") or f"Complete skill stage { stage_id }."
+        return {
+            "task": task,
+            "skill": {
+                "skill_id": selection.get("skill_id"),
+                "card": _copy_public(selection.get("card", {})),
+            },
+            "stage": {
+                "stage_id": stage_id,
+                "kind": stage.get("kind", "model"),
+                "title": stage.get("title", ""),
+                "purpose": stage.get("purpose", ""),
+                "prompt": self._resolve_templates(stage_prompt, task=task, state=state),
+                "produces": _copy_public(stage.get("produces", [])),
+            },
+            "stage_input": self._resolve_templates(stage.get("input", {}), task=task, state=state),
+            "prior_state": _copy_public(state),
+        }
+
+    def _normalize_stage_output_schema(self, stage: dict[str, Any], *, default_field: str) -> dict[str, Any]:
+        raw_schema = stage.get("output_schema") or stage.get("output") or stage.get("outputs")
+        if not raw_schema:
+            field_name = self._default_output_field(stage, default_field=default_field)
+            return {field_name: (str, f"Model-generated output for stage '{ stage.get('stage_id') or stage.get('id') or 'stage' }'.")}
+        if isinstance(raw_schema, dict):
+            normalized = {}
+            for key, value in raw_schema.items():
+                field_name = str(key)
+                if isinstance(value, dict):
+                    type_name = value.get("type") or value.get("kind") or "str"
+                    desc = value.get("description") or value.get("desc") or value.get("purpose") or field_name
+                    normalized[field_name] = (self._schema_type_from_name(type_name), str(desc))
+                elif isinstance(value, list | tuple):
+                    if value and isinstance(value[0], str):
+                        normalized[field_name] = (self._schema_type_from_name(value[0]), *tuple(value[1:]))
+                    else:
+                        normalized[field_name] = tuple(value)
+                elif isinstance(value, str):
+                    normalized[field_name] = (str, value)
+                else:
+                    normalized[field_name] = value
+            return normalized
+        return {default_field: (str, str(raw_schema))}
+
+    def _normalize_ensure_keys(self, stage: dict[str, Any], output_schema: Any) -> list[str] | None:
+        configured = _ensure_string_list(stage.get("ensure_keys"))
+        if configured:
+            return configured
+        if isinstance(output_schema, dict):
+            return [str(key) for key in output_schema.keys()]
+        return None
+
+    def _default_output_field(self, stage: dict[str, Any], *, default_field: str) -> str:
+        for produced in _ensure_dict_list(stage.get("produces")):
+            role = str(produced.get("role") or "").strip()
+            if role:
+                normalized = re.sub(r"[^A-Za-z0-9_]+", "_", role).strip("_")
+                if normalized:
+                    return normalized
+        return default_field
+
+    def _schema_type_from_name(self, type_name: Any) -> type:
+        normalized = str(type_name or "str").strip().lower()
+        if normalized in {"str", "string", "text", "markdown", "md"}:
+            return str
+        if normalized in {"int", "integer"}:
+            return int
+        if normalized in {"float", "number"}:
+            return float
+        if normalized in {"bool", "boolean"}:
+            return bool
+        if normalized in {"dict", "object", "json", "structured"}:
+            return dict
+        if normalized in {"list", "array"}:
+            return list
+        return str
+
+    def _model_stream_item_to_skill_stream(
+        self,
+        item: Any,
+        *,
+        selection: dict[str, Any],
+        stage: dict[str, Any],
+        stage_id: str,
+    ) -> dict[str, Any]:
+        event_type = str(getattr(item, "event_type", "done"))
+        if event_type not in {"delta", "done"}:
+            event_type = "done"
+        field_path = str(getattr(item, "path", "") or "model")
+        return {
+            "type": "skills.stage_field",
+            "action": event_type,
+            "event_type": event_type,
+            "skill_id": selection.get("skill_id"),
+            "stage_id": stage_id,
+            "field_path": field_path,
+            "value": getattr(item, "value", None),
+            "delta": getattr(item, "delta", None),
+            "is_complete": bool(getattr(item, "is_complete", event_type == "done")),
+            "payload": {
+                "field_path": field_path,
+                "wildcard_path": getattr(item, "wildcard_path", None),
+                "indexes": getattr(item, "indexes", None),
+                "kind": stage.get("kind", "model"),
+            },
+        }
+
+    async def _emit_runtime_item(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        runtime_stream: list[dict[str, Any]],
+        item: dict[str, Any],
+    ) -> None:
+        runtime_stream.append(item)
+        await context.async_emit_runtime_stream(item)
+
+    def _select_branch(self, condition: Any, branches: dict[str, Any]) -> str:
+        if isinstance(condition, bool):
+            preferred = "true" if condition else "false"
+            if preferred in branches:
+                return preferred
+        key = str(condition).strip()
+        if key in branches:
+            return key
+        lowered = key.lower()
+        for candidate in branches:
+            if str(candidate).strip().lower() == lowered:
+                return str(candidate)
+        for fallback in ("default", "else", "fallback"):
+            if fallback in branches:
+                return fallback
+        return key or "default"
 
     def _validate_stage(self, stage: dict[str, Any], state: dict[str, Any]):
         validation = _ensure_dict(stage.get("validation") or stage)

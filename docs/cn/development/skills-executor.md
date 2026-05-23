@@ -36,7 +36,11 @@ planner-selected behavior loop 使用。
   的角色和类型验收，而不是依赖固定文件名
 - 通过 `planner_mode="model"` 启用模型组合式多 skill planning，并用
   `planner_max_revisions` 控制有界 evaluate/repair loop
-- declarative `action`、`model`、`validate`、`emit` stage 处理
+- declarative `action`、`model`、`model_plan`、`branch`、`validate`、`emit`
+  stage 处理
+- 通过 `SkillsExecutionContext.async_request_model(...)` 原生执行 Skill
+  model stage；模型输出会写入 execution state，并以
+  `skills.stages.<stage_id>.fields.<field_path>` 路径输出 delta/done 事件
 - `run_skills_task(...)` 底层使用 Dynamic Task DAG 执行，
   `SkillExecution.close_snapshot` 会保留编译后的 task graph 结果以及 skill/action logs
 
@@ -63,8 +67,8 @@ core/SkillsExecutor.py
 ```
 
 plugin 不接收完整 Agent 对象。Agent component 会构造
-`SkillsRuntimeContext` adapter，用于模型规划、settings 读取、action 可用性
-检查和 action 执行。
+`SkillsRuntimeContext` adapter，用于模型规划、model-stage 请求、settings
+读取、action 可用性检查、action 执行和 runtime stream bridge。
 
 `Agently.skills_executor` 是这个开发线功能唯一的全局 facade。该功能尚未发布，
 因此不保留 `Agently.skills` 兼容别名。
@@ -179,6 +183,33 @@ print(execution.close_snapshot["task_dag"]["semantic_outputs"])
 `semantic_outputs` 可以直接传类似文件名的字符串，也可以传显式 deliverable dict。
 执行器会把它们归一化为 role 和 artifact type，所以只要计划覆盖了要求的语义产物，
 文件名不同也不应误判失败。文件名规范化是执行器职责，不是用户契约。
+
+## Model Stage 流式输出
+
+当 Skill stage 本身应该调用模型时，用 `kind: model`。如果下游 stage 或 CLI
+需要稳定字段，应声明 `output_schema`。
+
+```yaml
+stages:
+  - id: draft_reply
+    kind: model
+    purpose: Draft the customer reply and explain the next operational step.
+    output_schema:
+      prethinking:
+        type: str
+        description: Operator-facing reasoning notes.
+      reply:
+        type: str
+        description: Customer-facing reply.
+```
+
+在 `agent.create_execution()` 的流中，这些字段会以 delta 事件出现：
+
+```python
+async for item in execution.get_async_generator(type="instant"):
+    if item.path == "skills.stages.draft_reply.fields.reply" and item.delta:
+        print(item.delta, end="", flush=True)
+```
 
 ## 最小 Skill Package
 
