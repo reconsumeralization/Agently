@@ -188,7 +188,9 @@ async def test_trigger_flow_close_rejects_pending_interrupt_by_default_and_can_c
 
     assert execution.get_status() == "cancelled"
     assert execution.get_pending_interrupts() == {}
-    assert execution.get_interrupt("approval")["status"] == "cancelled"
+    cancelled_interrupt = execution.get_interrupt("approval")
+    assert isinstance(cancelled_interrupt, dict)
+    assert cancelled_interrupt["status"] == "cancelled"
     assert isinstance(snapshot, dict)
 
 

@@ -14,27 +14,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlparse
 
 import yaml
 
-from agently.types.data import SkillCard, SkillContract, SkillStage, SkillsPackRecord
+from agently.types.data import SkillContract, SkillDecisionCard, SkillsPackRecord
 from agently.utils import Settings
-from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_dict_list, _ensure_list, _ensure_string_list
+from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list, _ensure_string_list
 
 from .errors import SkillInstallError, SkillNormalizationError
-from .helpers import _SEMANTIC_TYPE_ALIASES
 
-# ── Manifest discovery ──────────────────────────────────────────────────────
-
-_MANIFEST_NAMES = (
+_FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+_ROOT_MANIFEST_NAMES = (
     "agently.skill.yaml",
     "agently.skill.yml",
     "agently.skill.json",
@@ -42,11 +42,15 @@ _MANIFEST_NAMES = (
     "skill.yml",
     "skill.json",
 )
+_STANDARD_RESOURCE_DIRS = ("scripts", "references", "assets")
+_DECISION_CARD_FORBIDDEN_KEYS = {"only_when", "exclude_when", "not_for", "required_context", "availability"}
 
-# ── Manifest / frontmatter parsing ──────────────────────────────────────────
 
-_FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
-_SKILL_ID_PATTERN = re.compile(r"[^a-z0-9._-]+")
+@dataclass
+class SkillSource:
+    source: str
+    source_type: str
+    materialized_path: Path
 
 
 def _read_text(path: Path) -> str:
@@ -55,14 +59,26 @@ def _read_text(path: Path) -> str:
 
 def _write_json(path: Path, value: Any):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(_read_text(path))
+    except json.JSONDecodeError as error:
+        raise SkillInstallError(f"Cannot parse '{ path }': { error }") from error
+    if not isinstance(data, dict):
+        raise SkillInstallError(f"'{ path }' must parse to a dict.")
+    return data
 
 
 def _sanitize_skill_id(value: str) -> str:
-    skill_id = _SKILL_ID_PATTERN.sub("-", value.strip().lower()).strip("-")
-    if not skill_id:
-        raise SkillNormalizationError("Skill id is empty after normalization.")
-    return skill_id
+    normalized = re.sub(r"\s+", "-", value.strip().lower())
+    normalized = re.sub(r"[^a-z0-9._-]+", "-", normalized).strip("._-")
+    normalized = re.sub(r"[-_.]{2,}", "-", normalized).strip("._-")
+    if not normalized:
+        raise SkillNormalizationError("Skill id is empty after normalizing SKILL.md frontmatter 'name'.")
+    return normalized
 
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -76,23 +92,17 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return _ensure_dict(parsed), text[match.end():]
 
 
-def _load_structured_file(path: Path) -> dict[str, Any]:
-    text = _read_text(path)
-    try:
-        if path.suffix.lower() in {".yaml", ".yml"}:
-            parsed = yaml.safe_load(text)
-        else:
-            parsed = json.loads(text)
-    except (yaml.YAMLError, json.JSONDecodeError) as error:
-        raise SkillNormalizationError(f"Cannot parse skill manifest '{ path }': { error }") from error
-    if not isinstance(parsed, dict):
-        raise SkillNormalizationError(f"Skill manifest '{ path }' must parse to a dict.")
-    return parsed
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def _sanitize_skills_pack_storage_id(value: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip()).strip("_.-")
-    return normalized or "skill_pack"
+def _safe_excerpt(text: str, *, limit: int = 1200) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    return compact[:limit]
 
 
 def _default_skills_pack_id(source: str | Path) -> str:
@@ -112,11 +122,9 @@ def _default_skills_pack_id(source: str | Path) -> str:
     return Path(raw).expanduser().name or raw
 
 
-@dataclass
-class SkillSource:
-    source: str
-    source_type: str
-    materialized_path: Path
+def _sanitize_skills_pack_storage_id(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip()).strip("_.-")
+    return normalized or "skill_pack"
 
 
 class SkillRegistry:
@@ -131,28 +139,6 @@ class SkillRegistry:
     def index_path(self) -> Path:
         return self.root / "index.json"
 
-    def _ensure_root(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-        if not self.index_path.exists():
-            _write_json(self.index_path, {"skills": {}})
-
-    def _read_index(self) -> dict[str, Any]:
-        self._ensure_root()
-        try:
-            data = json.loads(_read_text(self.index_path))
-        except json.JSONDecodeError as error:
-            raise SkillInstallError(f"Cannot parse skills index '{ self.index_path }': { error }") from error
-        if not isinstance(data, dict):
-            raise SkillInstallError("Skills index must be a dict.")
-        data.setdefault("skills", {})
-        data.setdefault("packs", {})
-        return data
-
-    def _write_index(self, data: dict[str, Any]):
-        data.setdefault("skills", {})
-        data.setdefault("packs", {})
-        _write_json(self.index_path, data)
-
     def install_skills(
         self,
         source: str | Path,
@@ -164,8 +150,11 @@ class SkillRegistry:
         skills_pack_name: str | None = None,
     ) -> SkillContract:
         source_info = self._materialize_source(source, source_type=source_type)
-        contract = self._normalize_contract(source_info, trust_level=trust_level)
-        skill_id = str(contract.get("skill_id", ""))
+        frontmatter, body = self._read_standard_skill(source_info.materialized_path)
+        name = str(frontmatter.get("name") or "").strip()
+        if not name:
+            raise SkillNormalizationError("SKILL.md frontmatter must include non-empty 'name'.")
+        skill_id = _sanitize_skill_id(name)
         skill_root = self.root / skill_id
         index = self._read_index()
         if skill_root.exists():
@@ -173,31 +162,31 @@ class SkillRegistry:
                 raise SkillInstallError(f"Skill '{ skill_id }' is already installed. Pass update=True to replace it.")
             shutil.rmtree(skill_root)
 
-        content_root = skill_root / "content"
-        shutil.copytree(source_info.materialized_path, content_root)
-        contract["source"] = {
-            **_ensure_dict(contract.get("source")),
-            "source": str(source),
-            "source_type": source_info.source_type,
-            "installed_path": str(content_root),
-        }
-        if skills_pack_id:
-            contract["source"]["skills_pack_id"] = skills_pack_id
-            contract["metadata"] = {**_ensure_dict(contract.get("metadata")), "skills_pack_id": skills_pack_id}
-        if skills_pack_name:
-            contract["source"]["skills_pack_name"] = skills_pack_name
-            contract["metadata"] = {**_ensure_dict(contract.get("metadata")), "skills_pack_name": skills_pack_name}
-        _write_json(skill_root / "canonical.skill.json", contract)
+        shutil.copytree(source_info.materialized_path, skill_root, ignore=shutil.ignore_patterns(".agently"))
+        agently_root = skill_root / ".agently"
+        if agently_root.exists():
+            shutil.rmtree(agently_root)
+        agently_root.mkdir(parents=True, exist_ok=True)
+
+        contract = self._build_installed_contract(
+            skill_root=skill_root,
+            source=source_info,
+            frontmatter=frontmatter,
+            body=body,
+            trust_level=trust_level,
+            skills_pack_id=skills_pack_id,
+            skills_pack_name=skills_pack_name,
+        )
         index["skills"][skill_id] = {
             "skill_id": skill_id,
             "skills_pack_id": skills_pack_id or "",
             "skills_pack_name": skills_pack_name or "",
-            "version": contract.get("version", "0.1.0"),
             "display_name": contract.get("card", {}).get("display_name", skill_id),
-            "purpose": contract.get("card", {}).get("purpose", ""),
+            "description": contract.get("card", {}).get("description", ""),
             "trust_level": contract.get("trust_level", "local"),
             "source_type": source_info.source_type,
-            "manifest_path": str(skill_root / "canonical.skill.json"),
+            "installed_path": str(skill_root),
+            "metadata_path": str(agently_root / "install.json"),
         }
         self._write_index(index)
         return _copy_public(contract)
@@ -230,10 +219,9 @@ class SkillRegistry:
             fetch=fetch,
             update=update,
         )
-        skill_dirs = self._discover_skills_pack_dirs(source_root)
         installed_skills: list[str] = []
         failed_skills: list[dict[str, Any]] = []
-        for skill_dir in skill_dirs:
+        for skill_dir in self._discover_skills_pack_dirs(source_root):
             try:
                 contract = self.install_skills(
                     skill_dir,
@@ -273,6 +261,11 @@ class SkillRegistry:
         records.sort(key=lambda item: str(item.get("skills_pack_id", "")))
         return _copy_public(records)
 
+    def inspect_skills(self, skill_id: str) -> SkillContract:
+        record = self._get_record(skill_id)
+        installed_path = Path(str(record.get("installed_path") or Path(str(record.get("manifest_path", ""))).parent))
+        return _copy_public(self._load_installed_contract(installed_path))
+
     def inspect_skills_pack(self, skills_pack_id: str) -> SkillsPackRecord:
         packs = _ensure_dict(self._read_index().get("packs"))
         if skills_pack_id not in packs:
@@ -282,21 +275,10 @@ class SkillRegistry:
             raise SkillInstallError(f"Installed skills pack record '{ skills_pack_id }' is malformed.")
         return _copy_public(record)
 
-    def inspect_skills(self, skill_id: str) -> SkillContract:
-        record = self._get_record(skill_id)
-        manifest_path = Path(str(record["manifest_path"]))
-        try:
-            parsed = json.loads(_read_text(manifest_path))
-        except json.JSONDecodeError as error:
-            raise SkillInstallError(f"Cannot parse installed skill manifest '{ manifest_path }': { error }") from error
-        if not isinstance(parsed, dict):
-            raise SkillInstallError(f"Installed skill manifest '{ manifest_path }' must parse to a dict.")
-        return _copy_public(parsed)
-
     def remove_skills(self, skill_id: str) -> dict[str, Any]:
         index = self._read_index()
         record = self._get_record(skill_id, index=index)
-        skill_root = Path(str(record["manifest_path"])).parent
+        skill_root = Path(str(record.get("installed_path") or Path(str(record.get("metadata_path", ""))).parent.parent))
         if skill_root.exists():
             shutil.rmtree(skill_root)
         del index["skills"][skill_id]
@@ -324,6 +306,32 @@ class SkillRegistry:
         self._write_index(index)
         return {"removed": True, "skills_pack_id": skills_pack_id, "removed_skills": removed_skills}
 
+    def rebuild_agently_metadata(self, skill_id: str) -> SkillContract:
+        record = self._get_record(skill_id)
+        return self._rebuild_agently_metadata(Path(str(record["installed_path"])))
+
+    def _ensure_root(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        if not self.index_path.exists():
+            _write_json(self.index_path, {"skills": {}, "packs": {}})
+
+    def _read_index(self) -> dict[str, Any]:
+        self._ensure_root()
+        try:
+            data = json.loads(_read_text(self.index_path))
+        except json.JSONDecodeError as error:
+            raise SkillInstallError(f"Cannot parse skills index '{ self.index_path }': { error }") from error
+        if not isinstance(data, dict):
+            raise SkillInstallError("Skills index must be a dict.")
+        data.setdefault("skills", {})
+        data.setdefault("packs", {})
+        return data
+
+    def _write_index(self, data: dict[str, Any]):
+        data.setdefault("skills", {})
+        data.setdefault("packs", {})
+        _write_json(self.index_path, data)
+
     def _get_record(self, skill_id: str, *, index: dict[str, Any] | None = None) -> dict[str, Any]:
         skills = _ensure_dict((index or self._read_index()).get("skills"))
         if skill_id not in skills:
@@ -336,7 +344,7 @@ class SkillRegistry:
     def _materialize_source(self, source: str | Path, *, source_type: str | None = None) -> SkillSource:
         resolved_type = source_type or "local"
         if resolved_type != "local":
-            raise SkillInstallError("V1 Skills install supports local directories only.")
+            raise SkillInstallError("Skills install supports local directories only.")
         source_path = Path(source).expanduser().resolve()
         if not source_path.exists() or not source_path.is_dir():
             raise SkillInstallError(f"Local skill source '{ source }' is not a directory.")
@@ -361,17 +369,12 @@ class SkillRegistry:
                 shutil.rmtree(destination)
             if not destination.exists():
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                completed = subprocess.run(
-                    ["git", "clone", "--depth", "1", raw, str(destination)],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
+                completed = subprocess.run(["git", "clone", "--depth", "1", raw, str(destination)], check=False, capture_output=True, text=True)
                 if completed.returncode != 0:
                     raise SkillInstallError(f"Cannot fetch skills pack '{ raw }': { completed.stderr[-1000:] }")
             return destination, "git"
         if source_type and source_type != "local":
-            raise SkillInstallError("V1 install_skills_pack supports local directories and git URLs only.")
+            raise SkillInstallError("install_skills_pack supports local directories and git URLs only.")
         source_path = Path(source).expanduser().resolve()
         if not source_path.exists() or not source_path.is_dir():
             raise SkillInstallError(f"Local skills pack source '{ source }' is not a directory.")
@@ -381,9 +384,7 @@ class SkillRegistry:
         discovered: list[Path] = []
         seen: set[Path] = set()
         for candidate in [root, *root.rglob("*")]:
-            if not candidate.is_dir():
-                continue
-            if not self._looks_like_skill_dir(candidate):
+            if not candidate.is_dir() or not (candidate / "SKILL.md").is_file():
                 continue
             resolved = candidate.resolve()
             if resolved in seen:
@@ -393,214 +394,250 @@ class SkillRegistry:
         discovered.sort(key=lambda path: (len(path.relative_to(root).parts), str(path)))
         return discovered
 
-    def _looks_like_skill_dir(self, path: Path) -> bool:
-        if (path / "SKILL.md").is_file():
-            return True
-        return any((path / name).is_file() for name in _MANIFEST_NAMES)
-
-    def _normalize_contract(self, source: SkillSource, *, trust_level: str | None) -> SkillContract:
-        root = source.materialized_path
-        manifest: dict[str, Any] = {}
-        for name in _MANIFEST_NAMES:
-            candidate = root / name
-            if candidate.exists() and candidate.is_file():
-                manifest = _load_structured_file(candidate)
-                break
-        frontmatter: dict[str, Any] = {}
-        skill_body = ""
+    def _read_standard_skill(self, root: Path) -> tuple[dict[str, Any], str]:
+        for name in _ROOT_MANIFEST_NAMES:
+            if (root / name).is_file():
+                raise SkillInstallError(
+                    f"Non-standard Skill manifest '{ name }' is not supported. "
+                    "Agently Skills use SKILL.md as the only capability definition."
+                )
         skill_md = root / "SKILL.md"
-        if skill_md.exists() and skill_md.is_file():
-            frontmatter, skill_body = _parse_frontmatter(_read_text(skill_md))
+        if not skill_md.is_file():
+            raise SkillInstallError("Standard Skill directories must contain SKILL.md.")
+        return _parse_frontmatter(_read_text(skill_md))
 
-        skill_id = _sanitize_skill_id(str(
-            manifest.get("skill_id")
-            or manifest.get("id")
-            or frontmatter.get("name")
-            or root.name
-        ))
-        version = str(manifest.get("version") or frontmatter.get("version") or "0.1.0")
-        display_name = str(
-            manifest.get("display_name")
-            or manifest.get("name")
-            or frontmatter.get("name")
-            or skill_id
-        )
-        purpose = str(manifest.get("purpose") or manifest.get("description") or frontmatter.get("description") or "")
-        stages = self._normalize_stages(manifest)
-        action_requirements = [
-            str(item)
-            for item in _ensure_list(
-                manifest.get("action_requirements")
-                or manifest.get("requires", {}).get("actions")
-            )
-        ]
-        declared_permissions = _ensure_dict(manifest.get("declared_permissions") or manifest.get("permissions"))
-        card = self._normalize_card(
-            manifest,
+    def _load_installed_contract(self, skill_root: Path) -> SkillContract:
+        try:
+            frontmatter, body = self._read_standard_skill(skill_root)
+        except SkillInstallError:
+            raise
+        except Exception as error:
+            raise SkillInstallError(f"Cannot inspect installed Skill '{ skill_root }': { error }") from error
+        contract = self._contract_from_files(skill_root=skill_root, frontmatter=frontmatter, body=body)
+        self._apply_install_metadata(skill_root, contract)
+        decision_card = self._load_valid_decision_card(skill_root, contract)
+        if decision_card is None:
+            contract = self._rebuild_agently_metadata(skill_root)
+        elif decision_card:
+            contract["decision_card"] = decision_card
+        return contract
+
+    def _rebuild_agently_metadata(self, skill_root: Path) -> SkillContract:
+        frontmatter, body = self._read_standard_skill(skill_root)
+        contract = self._contract_from_files(skill_root=skill_root, frontmatter=frontmatter, body=body)
+        self._apply_install_metadata(skill_root, contract)
+        self._write_agently_metadata(skill_root=skill_root, contract=contract)
+        return contract
+
+    def _build_installed_contract(
+        self,
+        *,
+        skill_root: Path,
+        source: SkillSource,
+        frontmatter: dict[str, Any],
+        body: str,
+        trust_level: str | None,
+        skills_pack_id: str | None,
+        skills_pack_name: str | None,
+    ) -> SkillContract:
+        contract = self._contract_from_files(skill_root=skill_root, frontmatter=frontmatter, body=body)
+        install_metadata = {
+            "schema_version": "agently.skills.install.v1",
+            "source": source.source,
+            "source_type": source.source_type,
+            "trust_level": str(trust_level or source.source_type),
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+            "skills_pack_id": skills_pack_id or "",
+            "skills_pack_name": skills_pack_name or "",
+        }
+        contract["source"] = {
+            "source": source.source,
+            "source_type": source.source_type,
+            "installed_path": str(skill_root),
+            "skills_pack_id": skills_pack_id or "",
+            "skills_pack_name": skills_pack_name or "",
+        }
+        contract["trust_level"] = install_metadata["trust_level"]
+        contract["install_metadata"] = install_metadata
+        self._write_agently_metadata(skill_root=skill_root, contract=contract)
+        return self._load_installed_contract(skill_root)
+
+    def _apply_install_metadata(self, skill_root: Path, contract: SkillContract) -> None:
+        metadata_path = skill_root / ".agently" / "install.json"
+        if not metadata_path.exists():
+            return
+        try:
+            install_metadata = _read_json(metadata_path)
+        except SkillInstallError:
+            return
+        contract["install_metadata"] = install_metadata
+        source = _ensure_dict(contract.get("source"))
+        source.update({
+            "source": str(install_metadata.get("source") or source.get("source") or ""),
+            "source_type": str(install_metadata.get("source_type") or source.get("source_type") or "local"),
+            "installed_path": str(skill_root),
+            "skills_pack_id": str(install_metadata.get("skills_pack_id") or ""),
+            "skills_pack_name": str(install_metadata.get("skills_pack_name") or ""),
+        })
+        contract["source"] = source
+        contract["trust_level"] = str(install_metadata.get("trust_level") or contract.get("trust_level") or "local")
+
+    def _contract_from_files(self, *, skill_root: Path, frontmatter: dict[str, Any], body: str) -> SkillContract:
+        name = str(frontmatter.get("name") or "").strip()
+        if not name:
+            raise SkillNormalizationError("SKILL.md frontmatter must include non-empty 'name'.")
+        skill_id = _sanitize_skill_id(name)
+        description = str(frontmatter.get("description") or "")
+        diagnostics = []
+        if not description.strip():
+            diagnostics.append({
+                "level": "warning",
+                "code": "missing_description",
+                "message": "SKILL.md frontmatter does not include a description.",
+            })
+        checksums = self._build_checksums(skill_root)
+        resource_index = self._build_resource_index(skill_root)
+        decision_card = self._build_decision_card(
             skill_id=skill_id,
-            version=version,
-            display_name=display_name,
-            purpose=purpose,
+            name=name,
+            description=description,
             frontmatter=frontmatter,
-            action_requirements=action_requirements,
-            has_primary_guidance=bool(skill_body.strip()),
+            body=body,
+            resource_index=resource_index,
+            checksum=str(checksums.get("root_checksum", "")),
         )
-        assets = _ensure_dict(manifest.get("assets"))
-        if skill_body.strip():
-            guidance_assets = _ensure_list(assets.get("guidance_assets"))
-            guidance_assets.insert(
-                0,
-                {
-                    "asset_id": "primary-guidance",
-                    "kind": "guidance",
-                    "path": "SKILL.md",
-                    "title": display_name,
-                    "content": skill_body.strip(),
-                },
-            )
-            assets["guidance_assets"] = guidance_assets
-
         return SkillContract({
             "skill_id": skill_id,
-            "version": version,
-            "source": {"source": source.source, "source_type": source.source_type},
-            "trust_level": str(manifest.get("trust_level") or trust_level or source.source_type),
-            "card": card,
-            "kind": str(manifest.get("kind") or "guidance"),
-            "declared_permissions": declared_permissions,
-            "dependencies": [str(item) for item in _ensure_list(manifest.get("dependencies"))],
-            "assets": assets,
-            "declarative_stages": stages,
-            "semantic_outputs": _ensure_dict(manifest.get("semantic_outputs") or manifest.get("outputs")),
-            "action_requirements": action_requirements,
-            "execution_environment_requirements": _ensure_list(
-                manifest.get("execution_environment_requirements")
-                or manifest.get("requires", {}).get("execution_environments")
-            ),
-            "validation_rules": _ensure_list(manifest.get("validation_rules")),
-            "completion_rules": _ensure_dict(manifest.get("completion") or manifest.get("completion_rules")),
-            "extension_slots": _ensure_dict(manifest.get("extension_slots")),
-            "metadata": {
-                "tags": [str(item) for item in _ensure_list(manifest.get("tags") or frontmatter.get("tags"))],
+            "version": str(frontmatter.get("version") or "0.1.0"),
+            "source": {"installed_path": str(skill_root)},
+            "trust_level": "local",
+            "card": {
+                "skill_id": skill_id,
+                "name": name,
+                "display_name": name,
+                "description": description,
+                "purpose": description,
+                "activation_hints": {"keywords": _ensure_string_list(frontmatter.get("keywords"))},
+                "content_refs": ["SKILL.md"],
             },
+            "guidance": {"path": "SKILL.md", "content": body.strip()},
+            "assets": {"skill_root": str(skill_root)},
+            "decision_card": decision_card,
+            "resource_index": resource_index,
+            "checksums": checksums,
+            "diagnostics": diagnostics,
+            "metadata": {"skill_format": "anthropic-skill", "frontmatter": _copy_public(frontmatter)},
         })
 
-    def _normalize_card(
-        self,
-        manifest: dict[str, Any],
-        *,
-        skill_id: str,
-        version: str,
-        display_name: str,
-        purpose: str,
-        frontmatter: dict[str, Any],
-        action_requirements: list[str],
-        has_primary_guidance: bool,
-    ) -> SkillCard:
-        raw_card = _ensure_dict(manifest.get("card"))
-        activation = _ensure_dict(manifest.get("activation") or manifest.get("activation_hints") or frontmatter.get("activation_hints"))
-        keywords = [str(item).lower() for item in _ensure_list(activation.get("keywords") or frontmatter.get("keywords"))]
-        inferred = self._infer_card_metadata(skill_id=skill_id, display_name=display_name, purpose=purpose)
-        return SkillCard({
-            "skill_id": skill_id,
-            "version": version,
-            "display_name": str(raw_card.get("display_name") or display_name),
-            "purpose": str(raw_card.get("purpose") or purpose),
-            "activation_hints": {
-                "keywords": keywords,
-                "invocation_names": [
-                    str(item).lower()
-                    for item in _ensure_list(activation.get("invocation_names") or [skill_id, display_name])
-                    if str(item).strip()
-                ],
-            },
-            "stage_roles": [
-                str(item)
-                for item in _ensure_list(raw_card.get("stage_roles") or manifest.get("stage_roles") or inferred.get("stage_roles"))
-            ],
-            "consumes": _ensure_dict_list(raw_card.get("consumes") or manifest.get("consumes") or inferred.get("consumes")),
-            "produces": _ensure_dict_list(raw_card.get("produces") or manifest.get("produces") or inferred.get("produces")),
-            "artifact_types": [
-                str(item)
-                for item in _ensure_list(raw_card.get("artifact_types") or manifest.get("artifact_types") or inferred.get("artifact_types"))
-            ],
-            "side_effects": _ensure_dict_list(raw_card.get("side_effects") or manifest.get("side_effects") or inferred.get("side_effects")),
-            "required_capabilities": [
-                str(item)
-                for item in _ensure_list(raw_card.get("required_capabilities") or manifest.get("required_capabilities") or inferred.get("required_capabilities"))
-            ] or action_requirements,
-            "complements": [
-                str(item)
-                for item in _ensure_list(raw_card.get("complements") or manifest.get("complements") or inferred.get("complements"))
-            ],
-            "task_fit_examples": [str(item) for item in _ensure_list(raw_card.get("task_fit_examples"))],
-            "input_expectations": str(raw_card.get("input_expectations") or ""),
-            "output_expectations": str(raw_card.get("output_expectations") or ""),
-            "available_action_summary": action_requirements,
-            "required_permissions": _ensure_dict(raw_card.get("required_permissions")),
-            "risk_profile": str(raw_card.get("risk_profile") or ""),
-            "composition_hints": [str(item) for item in _ensure_list(raw_card.get("composition_hints"))],
-            "failure_modes": [
-                str(item)
-                for item in _ensure_list(raw_card.get("failure_modes") or manifest.get("failure_modes") or inferred.get("failure_modes"))
-            ],
-            "content_refs": [
-                str(item)
-                for item in _ensure_list(
-                    raw_card.get("content_refs")
-                    or (["primary-guidance"] if has_primary_guidance else [])
-                )
-            ],
-        })
+    def _write_agently_metadata(self, *, skill_root: Path, contract: SkillContract) -> None:
+        agently_root = skill_root / ".agently"
+        agently_root.mkdir(parents=True, exist_ok=True)
+        install_metadata = _ensure_dict(contract.get("install_metadata"))
+        if not install_metadata:
+            install_metadata = {
+                "schema_version": "agently.skills.install.v1",
+                "source": _ensure_dict(contract.get("source")).get("source", ""),
+                "source_type": _ensure_dict(contract.get("source")).get("source_type", "local"),
+                "trust_level": contract.get("trust_level", "local"),
+                "installed_at": datetime.now(timezone.utc).isoformat(),
+                "skills_pack_id": _ensure_dict(contract.get("source")).get("skills_pack_id", ""),
+                "skills_pack_name": _ensure_dict(contract.get("source")).get("skills_pack_name", ""),
+            }
+            contract["install_metadata"] = install_metadata
+        _write_json(agently_root / "install.json", install_metadata)
+        _write_json(agently_root / "checksums.json", contract.get("checksums", {}))
+        _write_json(agently_root / "resource_index.json", contract.get("resource_index", {}))
+        _write_json(agently_root / "decision_card.json", contract.get("decision_card", {}))
 
-    def _infer_card_metadata(self, *, skill_id: str, display_name: str, purpose: str) -> dict[str, Any]:
-        text = f"{ skill_id } { display_name } { purpose }".lower()
-        metadata: dict[str, Any] = {
-            "stage_roles": [],
-            "consumes": [{"role": "task_request", "type": "text"}],
-            "produces": [],
-            "artifact_types": [],
-            "side_effects": [],
-            "required_capabilities": [],
-            "complements": [],
-            "failure_modes": ["missing_dependency", "partial_output"],
-        }
-        artifact_type = self._infer_artifact_type(text)
-        if artifact_type:
-            metadata["stage_roles"] = ["artifact_generation", "export"]
-            metadata["artifact_types"] = [artifact_type]
-            metadata["produces"] = [{"role": f"{ artifact_type }_artifact", "type": artifact_type}]
-            metadata["side_effects"] = [{"kind": "local_file_write", "policy": "approval_or_workspace_policy"}]
-            return metadata
-        if "triggerflow" in text or "workflow" in text:
-            metadata["stage_roles"] = ["workflow", "orchestration", "dependency_planning"]
-            metadata["produces"] = [{"role": "task_graph", "type": "json"}]
-            return metadata
-        if "runtime" in text or "action" in text or "environment" in text:
-            metadata["stage_roles"] = ["tool_or_action_binding", "execution_environment"]
-            metadata["side_effects"] = [{"kind": "local_or_external_tool", "policy": "capability_policy"}]
-            return metadata
-        metadata["stage_roles"] = ["guidance"]
-        metadata["produces"] = [{"role": "guidance", "type": "text"}]
-        return metadata
+    def _build_checksums(self, skill_root: Path) -> dict[str, Any]:
+        files = []
+        for path in self._iter_standard_files(skill_root):
+            rel = path.relative_to(skill_root).as_posix()
+            files.append({"path": rel, "sha256": _sha256_file(path), "size": path.stat().st_size})
+        root_digest = hashlib.sha256()
+        for item in sorted(files, key=lambda value: str(value["path"])):
+            root_digest.update(str(item["path"]).encode("utf-8"))
+            root_digest.update(str(item["sha256"]).encode("utf-8"))
+        return {"schema_version": "agently.skills.checksums.v1", "root_checksum": root_digest.hexdigest(), "files": files}
 
-    def _infer_artifact_type(self, text: str) -> str:
-        for artifact_type, aliases in _SEMANTIC_TYPE_ALIASES.items():
-            if artifact_type in {"json", "md", "directory", "zip"}:
+    def _build_resource_index(self, skill_root: Path) -> dict[str, Any]:
+        resources = []
+        for dirname in _STANDARD_RESOURCE_DIRS:
+            root = skill_root / dirname
+            if not root.exists():
                 continue
-            terms = [artifact_type, *aliases]
-            if any(term in text for term in terms):
-                return artifact_type
+            for path in sorted(item for item in root.rglob("*") if item.is_file()):
+                resources.append({
+                    "path": path.relative_to(skill_root).as_posix(),
+                    "kind": dirname.rstrip("s"),
+                    "size": path.stat().st_size,
+                    "sha256": _sha256_file(path),
+                    "summary": self._resource_summary(path),
+                })
+        return {"schema_version": "agently.skills.resources.v1", "resources": resources}
+
+    def _resource_summary(self, path: Path) -> str:
+        if path.suffix.lower() in {".md", ".txt", ".py", ".js", ".ts", ".json", ".yaml", ".yml"}:
+            try:
+                return _safe_excerpt(_read_text(path), limit=300)
+            except UnicodeDecodeError:
+                return ""
         return ""
 
-    def _normalize_stages(self, manifest: dict[str, Any]) -> list[SkillStage]:
-        stages = []
-        for index, raw in enumerate(_ensure_list(manifest.get("stages") or manifest.get("declarative_stages")), start=1):
-            stage = _ensure_dict(raw)
-            if not stage:
+    def _build_decision_card(
+        self,
+        *,
+        skill_id: str,
+        name: str,
+        description: str,
+        frontmatter: dict[str, Any],
+        body: str,
+        resource_index: dict[str, Any],
+        checksum: str,
+    ) -> SkillDecisionCard:
+        return SkillDecisionCard({
+            "skill_id": skill_id,
+            "name": name,
+            "description": description,
+            "keywords": _ensure_string_list(frontmatter.get("keywords")),
+            "guidance_excerpt": _safe_excerpt(body),
+            "resource_summary": [
+                {"path": item.get("path"), "kind": item.get("kind"), "summary": item.get("summary", "")}
+                for item in _ensure_list(resource_index.get("resources"))[:20]
+                if isinstance(item, dict)
+            ],
+            "checksum": checksum,
+        })
+
+    def _load_valid_decision_card(self, skill_root: Path, contract: SkillContract) -> SkillDecisionCard | None:
+        path = skill_root / ".agently" / "decision_card.json"
+        if not path.exists():
+            return None
+        try:
+            card = _read_json(path)
+        except SkillInstallError:
+            return None
+        if _DECISION_CARD_FORBIDDEN_KEYS.intersection(card.keys()):
+            return None
+        if str(card.get("checksum") or "") != str(_ensure_dict(contract.get("checksums")).get("root_checksum") or ""):
+            return None
+        return SkillDecisionCard({
+            "skill_id": str(card.get("skill_id") or contract.get("skill_id") or ""),
+            "name": str(card.get("name") or _ensure_dict(contract.get("card")).get("display_name") or ""),
+            "description": str(card.get("description") or _ensure_dict(contract.get("card")).get("description") or ""),
+            "keywords": _ensure_string_list(card.get("keywords")),
+            "guidance_excerpt": str(card.get("guidance_excerpt") or ""),
+            "resource_summary": [item for item in _ensure_list(card.get("resource_summary")) if isinstance(item, dict)],
+            "checksum": str(card.get("checksum") or ""),
+        })
+
+    def _iter_standard_files(self, skill_root: Path):
+        skill_md = skill_root / "SKILL.md"
+        if skill_md.is_file():
+            yield skill_md
+        for dirname in _STANDARD_RESOURCE_DIRS:
+            root = skill_root / dirname
+            if not root.exists():
                 continue
-            stage_id = str(stage.get("stage_id") or stage.get("id") or f"stage_{ index }")
-            kind = str(stage.get("kind") or "model")
-            normalized = cast(SkillStage, {**stage, "stage_id": stage_id, "id": stage_id, "kind": kind})
-            stages.append(normalized)
-        return stages
+            for path in sorted(item for item in root.rglob("*") if item.is_file()):
+                yield path

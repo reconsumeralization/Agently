@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.3",
-  "release_train": "2026-05-4.1.3",
+  "target_version": "4.1.2.5",
+  "release_train": "2026-05-4.1.2",
   "notes": "Current public development-line manifest for the next Agently release before publication.",
   "companions": {
     "devtools": {
@@ -18,7 +18,8 @@
     },
     "skills": {
       "repository": "Agently-Skills",
-      "authoring_protocol": "agently-skills.authoring.v1",
+      "authoring_protocol": "agently-skills.authoring.v2",
+      "authoring_format": "standard SKILL.md only",
       "devtools_guidance_protocol": "agently-skills.devtools-guidance.v1",
       "catalog_generation": "v2",
       "recommended_bundle": "app",

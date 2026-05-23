@@ -1,4 +1,6 @@
 import logging
+from typing import Any, cast
+
 import pytest
 import yaml
 from agently import Agently
@@ -8,6 +10,7 @@ from agently.compatibility import (
     get_skills_compatibility_manifest,
 )
 from agently.types.data import StreamingData
+from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import HybridRoutePlanner
 
 
 _RUNTIME_LOG_KEYS = (
@@ -88,6 +91,14 @@ def test_dynamic_task_plugin_registered():
     assert "local_handler" in task.resolver.keys()
 
 
+def test_skills_executor_plugin_has_no_stage_action_resolution_defaults():
+    assert Agently.settings.get("plugins.SkillsExecutor.AgentlySkillsExecutor.action_resolution") is None
+    framework_default = Agently.settings.get("skills.action_resolution")
+    assert isinstance(framework_default, dict)
+    aliases = cast(list[Any], framework_default.get("bash_action_aliases", []))
+    assert "bash" in aliases
+
+
 def test_agent_can_create_dynamic_task():
     agent = Agently.create_agent("graph-agent")
     task = agent.create_dynamic_task(
@@ -101,6 +112,82 @@ def test_agent_can_create_dynamic_task():
 
     assert task.name == "graph-agent-DynamicTask"
     assert task.settings.parent is agent.settings
+
+
+@pytest.mark.asyncio
+async def test_hybrid_route_planner_uses_model_when_optional_candidates_are_ambiguous():
+    class FakeRequest:
+        def __init__(self):
+            self.payload: dict[str, Any] = {}
+
+        def input(self, payload):
+            self.payload = payload
+            return self
+
+        def output(self, _schema):
+            return self
+
+        async def async_start(self, **_kwargs):
+            assert len(self.payload["route_candidates"]) == 3
+            return {"selected_route": "skills", "reason": "installed Skill is more specific"}
+
+    class FakeAction:
+        def get_action_list(self, tags=None):
+            return [{"name": "lookup_release"}]
+
+    class FakePrompt:
+        def get(self, _key, default=None):
+            return "prepare release notes"
+
+    class FakeAgent:
+        name = "fake-route-agent"
+        action = FakeAction()
+
+        def __init__(self):
+            self.request = type("Request", (), {"prompt": FakePrompt()})()
+            self._dynamic_task_candidates = [{"mode": "auto", "name": "planner"}]
+
+        def _collect_skill_selectors(self, *, skills, mode):
+            return ["release-checklist"] if mode == "model_decision" else []
+
+        def _collect_skills_pack_selectors(self, *, skills_packs, mode):
+            return []
+
+        def create_temp_request(self):
+            return FakeRequest()
+
+    route, meta = await HybridRoutePlanner(cast(Any, FakeAgent())).select_route()
+
+    assert route == "skills"
+    assert meta["mode"] == "model_decision"
+    assert meta["selected_by"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_route_planner_keeps_required_routes_deterministic():
+    class FakePrompt:
+        def get(self, _key, default=None):
+            return "prepare release notes"
+
+    class FakeAgent:
+        name = "fake-route-agent"
+        action = None
+
+        def __init__(self):
+            self.request = type("Request", (), {"prompt": FakePrompt()})()
+            self._dynamic_task_candidates = [{"mode": "auto", "name": "planner"}]
+
+        def _collect_skill_selectors(self, *, skills, mode):
+            return ["release-checklist"] if mode == "required" else []
+
+        def _collect_skills_pack_selectors(self, *, skills_packs, mode):
+            return []
+
+    route, meta = await HybridRoutePlanner(cast(Any, FakeAgent())).select_route()
+
+    assert route == "skills"
+    assert meta["mode"] == "required"
+    assert meta["selected_by"] == "deterministic"
 
 
 @pytest.mark.asyncio
