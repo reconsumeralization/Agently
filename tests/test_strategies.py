@@ -1,0 +1,248 @@
+"""Unit tests for staged and react strategy runners on TriggerFlow."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+
+class MockStrategyContext:
+    """Minimal context stub for strategy runner unit tests."""
+
+    execution_environment: Any = None
+
+    def __init__(self):
+        self.model_calls: list[dict] = []
+        self.resource_reads: list[dict] = []
+        self.stream_events: list[dict] = []
+        self._model_response = "mock result"
+        self.tool_results: dict[str, Any] = {}
+        self.action_results: dict[str, Any] = {}
+
+    async def async_request_model(self, **kwargs):
+        self.model_calls.append(kwargs)
+        sh = kwargs.get("stream_handler")
+        if sh:
+            await sh({"delta": "mock", "path": "output"})
+        return self._model_response
+
+    async def async_read_resource(self, *, skill_id, path, max_bytes=65536):
+        self.resource_reads.append({"skill_id": skill_id, "path": path, "max_bytes": max_bytes})
+        return f"content of {path} (max {max_bytes} bytes)"
+
+    async def async_emit_runtime_stream(self, item):
+        self.stream_events.append(item)
+
+    async def async_call_tool(self, name, **kwargs):
+        self.tool_results[name] = kwargs
+        return {"status": "ok", "tool": name}
+
+    async def async_call_action(self, name, **kwargs):
+        self.action_results[name] = kwargs
+        return {"status": "ok", "action": name}
+
+
+class TestStagedStrategy:
+    @pytest.mark.asyncio
+    async def test_staged_executes_steps_in_order(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.staged import run_staged_execution
+
+        ctx = MockStrategyContext()
+        plan = {
+            "execution_stages": [
+                {"description": "Analyze input data"},
+                {"description": "Generate report"},
+                {"description": "Format output"},
+            ],
+        }
+
+        result = await run_staged_execution(
+            task="test task",
+            plan=plan,
+            context=ctx,
+        )
+
+        # Should have 3 model calls (one per step) + 1 finalize
+        assert len(ctx.model_calls) >= 3
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_staged_emits_events(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.staged import run_staged_execution
+
+        ctx = MockStrategyContext()
+        plan = {
+            "execution_stages": [
+                {"description": "Step 1"},
+                {"description": "Step 2"},
+            ],
+        }
+
+        await run_staged_execution(task="test", plan=plan, context=ctx)
+
+        event_types = [e["type"] for e in ctx.stream_events]
+        assert "skills.staged.start" in event_types
+        assert "skills.staged.step_start" in event_types
+        assert "skills.staged.step_done" in event_types
+        assert "skills.staged.done" in event_types
+
+    @pytest.mark.asyncio
+    async def test_staged_handles_empty_stages(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.staged import run_staged_execution
+
+        ctx = MockStrategyContext()
+        plan = {"execution_stages": []}
+
+        result = await run_staged_execution(task="test", plan=plan, context=ctx)
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_staged_respects_step_budget(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.staged import run_staged_execution
+
+        ctx = MockStrategyContext()
+        plan = {
+            "execution_stages": [
+                {"description": f"Step {i}"} for i in range(10)
+            ],
+        }
+
+        await run_staged_execution(task="test", plan=plan, context=ctx, step_budget=3)
+        # Should only execute 3 steps (budget cap), but it starts from step_budget limit applied to stages[:step_budget]
+        # Actually the budget cuts the stages list: stages[:3]
+        # So 3 reason calls + 1 finalize
+        reason_calls = [c for c in ctx.model_calls if c.get("stream_handler")]
+        assert len(reason_calls) <= 4  # 3 steps + finalize
+
+    @pytest.mark.asyncio
+    async def test_staged_folds_prior_outputs(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.staged import run_staged_execution
+
+        ctx = MockStrategyContext()
+        ctx._model_response = "output from step"
+        plan = {
+            "execution_stages": [
+                {"description": "Step 1"},
+                {"description": "Step 2"},
+                {"description": "Step 3"},
+            ],
+        }
+
+        await run_staged_execution(task="test", plan=plan, context=ctx)
+
+        # Step 2+ prompts should include prior outputs
+        step_prompts = [c["prompt"] for c in ctx.model_calls]
+        # Second prompt should reference Step 1's output
+        assert "output from step" in str(step_prompts[1])
+        # Third prompt should reference both prior outputs
+        assert "output from step" in str(step_prompts[2])
+
+
+class TestReactStrategy:
+    @pytest.mark.asyncio
+    async def test_react_terminates_on_final(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = MockStrategyContext()
+        ctx._model_response = {"next_action": "done", "final": True}
+
+        result = await run_react_execution(
+            task="test task",
+            plan={},
+            context=ctx,
+            allowed_tools=["search"],
+        )
+
+        assert result is not None
+        # Should have 1 reason call (model said final=True immediately)
+        reason_calls = [c for c in ctx.model_calls if c.get("output_format") == "json"]
+        assert len(reason_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_react_loops_until_budget_exhausted(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = MockStrategyContext()
+        call_count = [0]
+
+        async def dynamic_response(**kwargs):
+            call_count[0] += 1
+            sh = kwargs.get("stream_handler")
+            if sh:
+                await sh({"delta": "mock"})
+            return {"next_action": f"step {call_count[0]}", "next_tool": "search", "final": False}
+
+        ctx.async_request_model = dynamic_response
+
+        await run_react_execution(
+            task="test",
+            plan={},
+            context=ctx,
+            step_budget=3,
+            allowed_tools=["search"],
+        )
+
+        # Should stop at step_budget (3 reason calls)
+        assert call_count[0] <= 3
+
+    @pytest.mark.asyncio
+    async def test_react_emits_events(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = MockStrategyContext()
+        ctx._model_response = {"next_action": "done", "final": True}
+
+        await run_react_execution(
+            task="test",
+            plan={},
+            context=ctx,
+        )
+
+        event_types = [e["type"] for e in ctx.stream_events]
+        assert "skills.react.start" in event_types
+        assert "skills.react.done" in event_types
+
+    @pytest.mark.asyncio
+    async def test_react_act_block_called_when_tool_specified(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = MockStrategyContext()
+        call_count = [0]
+
+        async def dynamic_response(**kwargs):
+            call_count[0] += 1
+            sh = kwargs.get("stream_handler")
+            if sh:
+                await sh({"delta": "mock"})
+            if call_count[0] == 1:
+                return {"next_action": "search for data", "next_tool": "search", "final": False}
+            return {"next_action": "done", "final": True}
+
+        ctx.async_request_model = dynamic_response
+
+        await run_react_execution(
+            task="test",
+            plan={},
+            context=ctx,
+            allowed_tools=["search"],
+        )
+
+        # Should have called search tool
+        assert len(ctx.tool_results) >= 1
+        assert "search" in ctx.tool_results
+
+    @pytest.mark.asyncio
+    async def test_react_empty_tools_list(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = MockStrategyContext()
+        ctx._model_response = {"next_action": "think about it", "final": True}
+
+        result = await run_react_execution(
+            task="test",
+            plan={},
+            context=ctx,
+        )
+
+        assert result is not None

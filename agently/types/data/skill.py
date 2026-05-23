@@ -20,6 +20,7 @@ from typing_extensions import TypedDict
 
 SkillMode = Literal["model_decision", "required"]
 SkillExecutionStatus = Literal["created", "running", "success", "no_match", "blocked", "error"]
+ExecutionStrategy = Literal["single_shot", "staged", "react"]
 
 
 class SkillCard(TypedDict, total=False):
@@ -103,6 +104,8 @@ class SkillExecutionPlan(TypedDict, total=False):
     resource_bindings: list[dict[str, Any]]
     expected_result_shape: dict[str, Any]
     expected_result_format: str
+    execution_strategy: ExecutionStrategy
+    execution_stages: list[dict[str, Any]]
     diagnostics: list[dict[str, Any]]
 
 

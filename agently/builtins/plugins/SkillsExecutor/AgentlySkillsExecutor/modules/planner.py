@@ -18,6 +18,7 @@ import uuid
 from typing import Any, Literal
 
 from agently.types.data import (
+    ExecutionStrategy,
     SkillContract,
     SkillExecutionPlan,
     SkillMode,
@@ -152,6 +153,9 @@ class SkillPlanner:
         if mode == "required" and (rejected or rejected_packs):
             status = "blocked"
 
+        execution_strategy = self._resolve_execution_strategy(selected)
+        execution_stages = self._resolve_execution_stages(selected, execution_strategy)
+
         return SkillExecutionPlan({
             "plan_id": uuid.uuid4().hex,
             "mode": mode,
@@ -166,8 +170,58 @@ class SkillPlanner:
             "resource_bindings": [_copy_public(selection.get("resource_index", {})) for selection in selections],
             "expected_result_shape": _ensure_dict(semantic_outputs),
             "expected_result_format": output_format,
+            "execution_strategy": execution_strategy,
+            "execution_stages": execution_stages,
             "diagnostics": diagnostics,
         })
+
+    def _resolve_execution_strategy(
+        self,
+        selected: list[SkillContract],
+    ) -> ExecutionStrategy:
+        """Determine execution strategy from selected skill contracts.
+
+        Priority: react > staged > single_shot. Degrades to simpler when
+        affordances are missing.
+        """
+        has_tools = False
+        has_staged_hint = False
+
+        for contract in selected:
+            metadata = _ensure_dict(contract.get("metadata"))
+            fm = _ensure_dict(metadata.get("frontmatter"))
+            allowed_tools = fm.get("allowed-tools") or fm.get("allowed_tools") or []
+            if allowed_tools:
+                has_tools = True
+            if fm.get("execution") == "staged":
+                has_staged_hint = True
+
+        if has_tools:
+            return "react"
+        if has_staged_hint:
+            return "staged"
+        return "single_shot"
+
+    def _resolve_execution_stages(
+        self,
+        selected: list[SkillContract],
+        execution_strategy: str,
+    ) -> list[dict[str, Any]]:
+        """Extract declared stages from skill frontmatter when strategy is staged."""
+        if execution_strategy != "staged":
+            return []
+
+        for contract in selected:
+            metadata = _ensure_dict(contract.get("metadata"))
+            fm = _ensure_dict(metadata.get("frontmatter"))
+            stages = fm.get("stages")
+            if isinstance(stages, list) and stages:
+                return [
+                    {"description": str(s) if isinstance(s, str) else s}
+                    for s in stages
+                ]
+
+        return []
 
     def _records_for_scope(
         self,

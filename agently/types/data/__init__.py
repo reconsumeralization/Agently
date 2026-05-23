@@ -125,6 +125,7 @@ from .execution_environment import (
 )
 
 from .skill import (
+    ExecutionStrategy,
     SkillCard,
     SkillContract,
     SkillDecisionCard,

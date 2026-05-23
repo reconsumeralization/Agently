@@ -22,6 +22,15 @@ from agently.types.plugins import SkillsExecutionContext
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
 
 from .registry import SkillRegistry
+from .strategies import run_staged_execution, run_react_execution
+
+
+def _to_int(value: Any, default: int) -> int:
+    """Safely coerce a settings value to int."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class SkillExecution:
@@ -95,6 +104,23 @@ class SkillExecutor:
                 output=None,
             )
 
+        strategy = plan.get("execution_strategy", "single_shot")
+        if strategy == "staged":
+            return await self._execute_staged(
+                context=context,
+                task=task,
+                plan=plan,
+                execution_id=execution_id,
+            )
+        if strategy == "react":
+            return await self._execute_react(
+                context=context,
+                task=task,
+                plan=plan,
+                execution_id=execution_id,
+            )
+
+        # ── single_shot (existing prompt-only path) ──
         prompt = self._build_prompt(task=task, plan=plan)
         await self._emit_runtime_item(
             context=context,
@@ -166,6 +192,127 @@ class SkillExecutor:
             skill_logs=skill_logs,
             output=_copy_public(result),
         )
+
+    async def _execute_staged(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        task: str,
+        plan: SkillExecutionPlan,
+        execution_id: str,
+    ) -> SkillExecution:
+        step_budget = _to_int(self.registry.settings.get("skills.staged_max_steps", 12), 12)
+        model_key = str(plan.get("model_key") or "reason")
+        artifact_inline_limit = _to_int(self.registry.settings.get("skills.artifact_inline_limit", 4096), 4096)
+
+        try:
+            result = await run_staged_execution(
+                task=task,
+                plan=dict(plan),
+                context=context,
+                settings=self.registry.settings,
+                step_budget=step_budget,
+                model_key=model_key,
+                artifact_inline_limit=artifact_inline_limit,
+            )
+        except Exception as error:
+            return self._build_execution(
+                execution_id=execution_id,
+                status="error",
+                plan=plan,
+                runtime_stream=[],
+                skill_logs=[],
+                output={"error": str(error)},
+            )
+
+        return self._build_execution(
+            execution_id=execution_id,
+            status="success",
+            plan=plan,
+            runtime_stream=[],
+            skill_logs=[],
+            output=_copy_public(result),
+        )
+
+    async def _execute_react(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        task: str,
+        plan: SkillExecutionPlan,
+        execution_id: str,
+    ) -> SkillExecution:
+        step_budget = _to_int(self.registry.settings.get("skills.react_max_steps", 30), 30)
+        model_key = str(plan.get("model_key") or "reason")
+        artifact_inline_limit = _to_int(self.registry.settings.get("skills.artifact_inline_limit", 4096), 4096)
+
+        allowed_tools, allowed_actions, allow_scripts = self._extract_react_affordances(plan)
+
+        try:
+            result = await run_react_execution(
+                task=task,
+                plan=dict(plan),
+                context=context,
+                settings=self.registry.settings,
+                step_budget=step_budget,
+                model_key=model_key,
+                allowed_tools=allowed_tools,
+                allowed_actions=allowed_actions,
+                allow_scripts=allow_scripts,
+                artifact_inline_limit=artifact_inline_limit,
+            )
+        except Exception as error:
+            return self._build_execution(
+                execution_id=execution_id,
+                status="error",
+                plan=plan,
+                runtime_stream=[],
+                skill_logs=[],
+                output={"error": str(error)},
+            )
+
+        return self._build_execution(
+            execution_id=execution_id,
+            status="success",
+            plan=plan,
+            runtime_stream=[],
+            skill_logs=[],
+            output=_copy_public(result),
+        )
+
+    def _extract_react_affordances(
+        self,
+        plan: SkillExecutionPlan,
+    ) -> tuple[list[str], list[str], bool]:
+        """Extract allowed_tools, allowed_actions, and allow_scripts from selected skill contracts."""
+        allowed_tools: list[str] = []
+        allowed_actions: list[str] = []
+        allow_scripts = False
+
+        for selection in _ensure_list(plan.get("selected_skills")):
+            skill_id = str(_ensure_dict(selection).get("skill_id", ""))
+            if not skill_id:
+                continue
+            try:
+                contract = self.registry.inspect_skills(skill_id)
+            except Exception:
+                continue
+            metadata = _ensure_dict(contract.get("metadata"))
+            fm = _ensure_dict(metadata.get("frontmatter"))
+            tools = fm.get("allowed-tools") or fm.get("allowed_tools") or []
+            if isinstance(tools, list):
+                for t in tools:
+                    if isinstance(t, str) and t not in allowed_tools:
+                        allowed_tools.append(t)
+            actions = fm.get("allowed-actions") or fm.get("allowed_actions") or []
+            if isinstance(actions, list):
+                for a in actions:
+                    if isinstance(a, str) and a not in allowed_actions:
+                        allowed_actions.append(a)
+            if fm.get("allow-scripts") or fm.get("allow_scripts"):
+                allow_scripts = True
+
+        return allowed_tools, allowed_actions, allow_scripts
 
     def _build_prompt(self, *, task: str, plan: SkillExecutionPlan) -> dict[str, Any]:
         selected = [_ensure_dict(item) for item in _ensure_list(plan.get("selected_skills"))]
