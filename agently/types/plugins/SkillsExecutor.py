@@ -31,6 +31,7 @@ class SkillsPlanningContext(Protocol):
         self,
         *,
         prompt: Any,
+        model_key: str | None = None,
         output_schema: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
         ensure_keys: list[str] | None = None,

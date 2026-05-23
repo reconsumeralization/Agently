@@ -82,6 +82,7 @@ class BaseAgent:
         name: str | None = None,
         inherit_agent_prompt: bool = True,
         inherit_extension_handlers: bool = True,
+        model_key: str | None = None,
     ):
         """
         Create a request instance.
@@ -100,13 +101,15 @@ class BaseAgent:
             parent_settings=self.settings,
             parent_prompt=self.agent_prompt if inherit_agent_prompt else None,
             parent_extension_handlers=self.extension_handlers if inherit_extension_handlers else None,
+            model_key=model_key,
         )
 
-    def create_temp_request(self):
+    def create_temp_request(self, model_key: str | None = None):
         return self.create_request(
             name=f"{ self.name }-Temp-{ uuid.uuid4().hex }",
             inherit_agent_prompt=False,
             inherit_extension_handlers=False,
+            model_key=model_key,
         )
 
     def create_dynamic_task(

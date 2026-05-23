@@ -88,6 +88,7 @@ class ModelRequest:
         parent_settings: Settings | None = None,
         parent_prompt: Prompt | None = None,
         parent_extension_handlers: ExtensionHandlers | None = None,
+        model_key: str | None = None,
     ):
         self.agent_name = agent_name if agent_name is not None else "Directly Request"
         self.agent_id = agent_id
@@ -113,6 +114,7 @@ class ModelRequest:
             name="Request-ExtensionHandlers",
             parent=parent_extension_handlers,
         )
+        self._model_key = model_key
 
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
@@ -287,6 +289,9 @@ class ModelRequest:
 
     # Response & Result
     def get_response(self, *, parent_run_context: "RunContext | None" = None):
+        if self._model_key:
+            from agently.utils.ModelPool import resolve_model_pool_settings
+            resolve_model_pool_settings(self._model_key, self.settings)
         parent_run_context = resolve_parent_run_context(parent_run_context)
         agent_turn_run_context = (
             parent_run_context

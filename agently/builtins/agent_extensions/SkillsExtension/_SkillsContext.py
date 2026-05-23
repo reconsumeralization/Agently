@@ -55,13 +55,14 @@ class AgentSkillsRuntimeContext:
         self,
         *,
         prompt: Any,
+        model_key: str | None = None,
         output_schema: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
         ensure_keys: list[str] | None = None,
         max_retries: int = 3,
         stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
     ) -> Any:
-        request = self.agent.create_temp_request().input(prompt)
+        request = self.agent.create_temp_request(model_key=model_key).input(prompt)
         if output_schema is not None:
             request = request.output(output_schema, format=output_format)
         response = request.get_response()
