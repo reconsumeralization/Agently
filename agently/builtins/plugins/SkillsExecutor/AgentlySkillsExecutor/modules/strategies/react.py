@@ -14,13 +14,15 @@
 
 """React execution strategy — reason→act→observe loop on TriggerFlow.
 
-Uses ``flow.to()`` / ``flow.when()`` / ``data.emit_nowait()`` to drive the
-reasoning loop. Bounded by a step budget with a stop condition (model sets
+Uses ``flow.to()`` / ``flow.when()`` / ``data.async_emit()`` to drive the
+reasoning loop with blocking event dispatch, ensuring sequential state
+transitions. Bounded by a step budget with a stop condition (model sets
 ``final: true`` in its structured decision).
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -50,8 +52,8 @@ async def run_react_execution(
     """Execute a skill using the react (reason→act→observe) strategy.
 
     The model receives a structured decision prompt and must output
-    ``{next_action: ..., next_tool: ..., final: bool}``. The loop terminates
-    when ``final=True`` or the step budget is exhausted.
+    ``{next_action: ..., next_tool: ..., next_kwargs: ..., final: bool}``.
+    The loop terminates when ``final=True`` or the step budget is exhausted.
     """
     allowed_tools = allowed_tools or []
     allowed_actions = allowed_actions or []
@@ -71,24 +73,32 @@ async def run_react_execution(
 
     flow = TriggerFlow(name=f"react-skill-{uuid.uuid4().hex[:8]}")
 
-    # ── Start handler: init state, build prompt, kick off REASON ──
+    # ── Start handler: init state, kick off first REASON ──
     async def start(data: Any) -> None:
         await data.async_set_state("task", task)
         await data.async_set_state("step_count", 0)
         await data.async_set_state("step_budget", step_budget)
         await data.async_set_state("observation_history", [])
         await data.async_set_state("model_key", model_key)
-        data.emit_nowait("REASON")
+        await data.async_emit("REASON")
 
     # ── Reason handler: model decides next action ──
     async def reason(data: Any) -> None:
         step_count = data.get_state("step_count", 0)
         history = data.get_state("observation_history", [])
+        current_task = data.get_state("task", task)
+
+        # Check budget before making a model call
+        budget = data.get_state("step_budget", step_budget)
+        if step_count >= budget:
+            await data.async_emit("FINALIZE")
+            return
 
         prompt = _build_react_prompt(
-            task=data.get_state("task", task),
+            task=current_task,
             step=step_count,
             history=history,
+            allowed_tools=allowed_tools,
         )
 
         reason_block = ReasonBlock(
@@ -102,27 +112,46 @@ async def run_react_execution(
         except Exception as exc:
             decision = {"next_action": f"error: {exc}", "final": True}
 
+        # Parse JSON string responses (model may return raw JSON text)
+        if isinstance(decision, str):
+            try:
+                decision = json.loads(decision)
+            except json.JSONDecodeError:
+                decision = {"next_action": decision, "final": False}
+
         # Ensure decision is a dict
         if not isinstance(decision, dict):
             decision = {"next_action": str(decision), "final": False}
 
         await data.async_set_state("current_decision", decision)
 
-        # If decision requires action, emit ACT; otherwise check for final
+        # If decision requires tool/action, go through ACT; otherwise OBSERVE
         next_tool = decision.get("next_tool")
         if next_tool:
-            data.emit_nowait("ACT")
+            await data.async_emit("ACT")
         else:
-            data.emit_nowait("OBSERVE")
+            await data.async_emit("OBSERVE")
 
     # ── Act handler: execute the decided action ──
     async def act(data: Any) -> None:
         decision = data.get_state("current_decision", {})
 
+        # Build kwargs: prefer next_kwargs, fall back to stripping known fields
+        tool_kwargs = decision.get("next_kwargs") or {}
+        if not isinstance(tool_kwargs, dict):
+            tool_kwargs = {}
+        if not tool_kwargs:
+            # Auto-extract: anything that isn't a known decision field is a kwarg
+            known_keys = {"next_action", "next_tool", "next_type", "next_kwargs", "final"}
+            tool_kwargs = {
+                k: v for k, v in decision.items()
+                if k not in known_keys and v is not None
+            }
+
         action_spec = {
             "type": decision.get("next_type", "tool"),
             "name": decision.get("next_tool", ""),
-            "kwargs": decision.get("next_kwargs", {}) or {},
+            "kwargs": tool_kwargs,
         }
 
         act_block = ActBlock(
@@ -142,7 +171,7 @@ async def run_react_execution(
             act_result = {"name": action_spec.get("name", "unknown"), "error": str(exc)}
 
         await data.async_set_state("current_act_result", act_result)
-        data.emit_nowait("OBSERVE")
+        await data.async_emit("OBSERVE")
 
     # ── Observe handler: fold result, check stop conditions ──
     async def observe(data: Any) -> None:
@@ -154,10 +183,13 @@ async def run_react_execution(
 
         await data.async_set_state("step_count", step_count)
 
-        # Build observation
+        # Build observation — use `or` to handle None/null values correctly
+        obs_name = act_result.get("name") or decision.get("next_tool") or "reason"
+        obs_result = act_result.get("result") if "result" in act_result else decision.get("next_action", "")
+
         observation: dict[str, Any] = {
-            "name": act_result.get("name", decision.get("next_tool", "reason")),
-            "result": act_result.get("result", decision.get("next_action", "")),
+            "name": obs_name,
+            "result": obs_result,
             "error": act_result.get("error"),
         }
 
@@ -170,14 +202,18 @@ async def run_react_execution(
         history.append(folded)
         await data.async_set_state("observation_history", history)
 
+        # Clear per-step state for next iteration
+        await data.async_set_state("current_decision", {})
+        await data.async_set_state("current_act_result", {})
+
         # Check stop conditions
         is_final = decision.get("final", False)
         budget_exhausted = step_count >= budget
 
         if is_final or budget_exhausted:
-            data.emit_nowait("FINALIZE")
+            await data.async_emit("FINALIZE")
         else:
-            data.emit_nowait("REASON")
+            await data.async_emit("REASON")
 
     # ── Finalize handler: assemble terminal output ──
     async def finalize(data: Any) -> None:
@@ -185,7 +221,7 @@ async def run_react_execution(
         step_count = data.get_state("step_count", 0)
         budget = data.get_state("step_budget", step_budget)
 
-        finalize_block = FinalizeBlock(model_key=data.get_state("model_key", model_key))
+        finalize_block = FinalizeBlock()
         result = await finalize_block.execute(
             context=context,
             collected_outputs={
@@ -229,24 +265,35 @@ def _build_react_prompt(
     task: str,
     step: int,
     history: list[dict[str, Any]],
+    allowed_tools: list[str] | None = None,
 ) -> str:
     """Build the react decision prompt with structured output instructions."""
+    tools_section = ""
+    if allowed_tools:
+        tools_section = (
+            "## Available Tools\n"
+            + "\n".join(f"- {t}" for t in allowed_tools)
+            + "\n\nWhen using a tool, pass arguments via `next_kwargs` as a dict.\n"
+        )
+
     history_text = ""
     if history:
         history_text = "## Observation History\n" + "\n".join(
-            f"- Step {i}: [{h.get('name', 'unknown')}] {str(h.get('result', ''))[:200]}"
-            for i, h in enumerate(history)
+            f"- Step {i}: [{h.get('name', 'unknown')}] {str(h.get('result', ''))[:300]}"
+            for i, h in enumerate(history[-10:])  # keep last 10 for context window
         )
 
     return f"""## Task
 {task}
 
+{tools_section}
 ## Instructions
 You are in a reason→act→observe loop. At each step:
 1. Decide the next action to take
 2. Output a JSON object with:
-   - "next_action": the action to take as a natural language instruction
+   - "next_action": natural language description of the action
    - "next_tool": tool name if a tool call is needed, otherwise null
+   - "next_kwargs": dict of arguments for the tool, or empty dict {{}}
    - "final": true if the task is complete, false to continue
 
 {history_text}

@@ -88,7 +88,7 @@ class AgentSkillsRuntimeContext:
     # ── Acting surface ──
 
     async def async_call_tool(self, name: str, /, **kwargs: Any) -> Any:
-        return await self.agent.tool.async_call_action(name, kwargs)
+        return await self.agent.action.async_call_action(name, kwargs)
 
     async def async_call_action(self, name: str, /, **kwargs: Any) -> Any:
         return await self.agent.action.async_call_action(name, kwargs)
