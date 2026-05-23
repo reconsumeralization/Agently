@@ -12,6 +12,40 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 对 Agently `4.1.0.1+`，默认 authoring 路径是：在 `.output(...)` 里直接用第三槽 `ensure` 标记固定必填叶子，再由运行时把这些标记编译成 `ensure_keys`。只有当必填路径是运行时决定、条件分支决定，或用静态 schema 不好表达时，才手动传 `ensure_keys=`。
 
+## 选择输出格式
+
+`.output(...)` 默认是 `format="auto"`。Auto 会根据 schema 形态选择最简单的
+结构化格式：全标量 dict 走 `flat_markdown`，标量与 list/dict 混合走
+`hybrid`，全复杂结构或非 dict 输出仍走 `json`。如果下游代码依赖固定的原始
+输出形态，应显式指定格式。
+
+| 模式 | 适用场景 | 不适合 |
+|---|---|---|
+| `auto` | 希望使用框架默认策略，并让 schema 自己决定最适合模型生成的结构化格式。适合应用代码通过 Agently 消费解析后的数据，而不是依赖模型原始文本。 | 旧消费者、测试 fixture、外部 API 或保存的 prompt 期待原始 JSON 文本。此时显式用 `format="json"`。 |
+| `flat_markdown` | 输出是扁平 dict，字段都是标量，尤其某些字段可能包含大量代码、HTML、SVG、Markdown、SQL、模板或多段 prose。用章节标题隔离字段，可以减少 JSON 转义问题，也让大文本块更易读。 | 需要嵌套 list/object、记录数组，或只需要一个非结构化文档。 |
+| `hybrid` | 输出同时有 prose/code 字段和结构化 list/object，例如 `summary` + `citations`、`analysis` + `components`、`notes` + `next_steps`。标量字段保持文本章节，复杂字段放 JSON code block。 | 所有字段都是标量，或所有字段都是紧凑的深层结构且 JSON 更直接。 |
+| `json` | 需要最稳定的机器契约、嵌套数据、数组、外部系统互通、兼容旧 prompt/测试，或下游明确依赖原始 JSON 行为。 | 大段嵌入文档或代码会让转义变脆弱，也更难让模型稳定生成。 |
+| 纯文本 | 请求只要一个自由文本成品：文章、邮件、解释、报告、Markdown 页面、HTML 页面，或其他单一多段落文档。不要调用 `output()`；直接用 `start()` / `async_start()`，或读取 `response.result.get_text()`。 | 需要可单独寻址的字段、路径校验、`ensure_keys`、typed object 或下游分支。 |
+
+典型用法：
+
+```python
+# 默认：auto，根据 schema 形态选择格式。
+agent.input("Create a self-contained page.").output({
+    "html": (str, "complete HTML document"),
+    "notes": (str, "short implementation notes"),
+}).start()
+
+# 下游契约期待 JSON 时，显式固定 json。
+agent.input("Extract invoice fields.").output({
+    "vendor": (str, "vendor name", True),
+    "line_items": [{"sku": (str,), "amount": (float,)}],
+}, format="json").start()
+
+# 纯文本：一个成品文档，不走结构化 parser。
+html = agent.input("Write a complete landing page as HTML.").start()
+```
+
 ## 流水线
 
 ```text

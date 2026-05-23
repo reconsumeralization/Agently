@@ -12,6 +12,41 @@ The validation pipeline runs the first time a structured response result is cons
 
 For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leaves directly in `.output(...)` with the third-slot `ensure` flag, then let the runtime compile those flags into `ensure_keys`. Pass `ensure_keys=` manually only when the required path is runtime-dependent, conditional, or easier to express outside the static schema.
 
+## Choosing An Output Format
+
+`.output(...)` defaults to `format="auto"`. Auto chooses the simplest structured
+format from the schema shape: all-scalar dicts become `flat_markdown`, mixed
+scalar-plus-list/dict schemas become `hybrid`, and all-complex or non-dict
+schemas stay `json`. If downstream code relies on a specific wire shape, set the
+format explicitly.
+
+| Mode | Use When | Avoid When |
+|---|---|---|
+| `auto` | You want the framework default and the schema itself should choose the most model-friendly structured format. Good for application code that consumes parsed data through Agently rather than the raw model text. | A legacy consumer, test fixture, external API, or saved prompt expects raw JSON text. Use `format="json"` there. |
+| `flat_markdown` | The result is a flat dict of named scalar fields, especially when one or more fields may contain large code, HTML, SVG, Markdown, SQL, templates, or multi-paragraph prose. Section headers avoid JSON escaping problems and keep big text blocks readable. | You need nested lists/objects, arrays of records, or a single unstructured document. |
+| `hybrid` | The result mixes prose/code fields with structured lists or objects, for example `summary` plus `citations`, `analysis` plus `components`, or `notes` plus `next_steps`. Scalar fields stay as text sections; complex fields use JSON blocks. | Every field is scalar, or every field is deeply structured and compact enough for JSON. |
+| `json` | You need the strictest machine contract, nested data, arrays, interop with external systems, compatibility with old prompts/tests, or exact raw JSON behavior. | Large embedded documents or code blocks make escaping fragile or hard for the model to read. |
+| Plain text | The request asks for one freeform artifact: an article, email, explanation, report, Markdown page, HTML page, or other single multi-paragraph document. Do not call `output()`; use `start()` / `async_start()` directly or read `response.result.get_text()`. | You need separately addressable fields, path validation, `ensure_keys`, typed objects, or downstream branching. |
+
+Typical usage:
+
+```python
+# Default: auto, chosen from schema shape.
+agent.input("Create a self-contained page.").output({
+    "html": (str, "complete HTML document"),
+    "notes": (str, "short implementation notes"),
+}).start()
+
+# Force JSON when a downstream contract expects raw JSON-like structure.
+agent.input("Extract invoice fields.").output({
+    "vendor": (str, "vendor name", True),
+    "line_items": [{"sku": (str,), "amount": (float,)}],
+}, format="json").start()
+
+# Plain text: one artifact, no structured parser.
+html = agent.input("Write a complete landing page as HTML.").start()
+```
+
 ## The pipeline
 
 ```text
