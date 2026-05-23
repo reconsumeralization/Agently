@@ -98,7 +98,7 @@ async def main():
 asyncio.run(main())
 ```
 
-注意：这个 flow 用了 `pause_for(...)`。必须用 `flow.create_execution(...)`（或 `flow.start_execution(...)`），**不要**用 `flow.start(...)` —— 隐式 execution 没有外部可用的 handle 来调 `continue_with`。
+注意：这个 flow 用了 `pause_for(...)`。必须用 `flow.create_execution(...)`（或 `flow.start_execution(...)`），**不要**用 `flow.start(...)` —— 隐式 execution 没有外部可用的 handle 来调 `continue_with`，走到 `pause_for(...)` 时 TriggerFlow 会直接报错。
 
 模型自主决定中断的文档审查例子见 `examples/step_by_step/11-triggerflow-19_document_review_pause_resume.py`：模型拥有的 gate 先判断是否需要人工复核，需要时调用 `pause_for(..., resume_to="self")`，恢复后同一 gate 通过 `data.is_resume` 与 `data.resume` 继续。
 
@@ -148,6 +148,12 @@ interrupt 是 saved state 的一部分，新进程知道有什么待处理。详
 只要存在未决 `pause_for`，`auto_close=True` 不触发。`continue_with` 解掉最后一个 pending interrupt 后 execution 重新进入空闲，auto-close 计时从零重启。
 
 希望等待时永不 auto-close 用 `auto_close_timeout=None`（记得显式 `close()`）。
+
+`async_close()` 默认拒绝关闭仍有 pending interrupt 的 execution。应先恢复这些 interrupt；如果确实要放弃等待，必须显式取消：
+
+```python
+snapshot = await execution.async_close(pending_interrupts="cancel")
+```
 
 ## 另见
 

@@ -49,7 +49,7 @@ snapshot = await flow.async_start("input value")
 - **`auto_close=False` 非法** —— 立刻报错。
 - `wait_for_result=` 的值被**忽略**并 warn。返回类型固定为 close snapshot。
 - `timeout=` 当作 `auto_close_timeout` —— 最后一次活动后多久自动关闭。
-- flow 用了 `pause_for(...)` 时**不要**用 `flow.start()` —— 外部没有 handle 来恢复。改用 `flow.start_execution(...)`。
+- flow 用了 `pause_for(...)` 时**不要**用 `flow.start()` —— 外部没有 handle 来恢复。隐式 execution 走到 `pause_for(...)` 时 TriggerFlow 会 fail fast。改用 `flow.start_execution(...)` 或 `flow.create_execution(...)`。
 
 ### `flow.start_execution(...)` —— 显式启动
 
@@ -125,6 +125,8 @@ close 上的 `timeout=` 是 **drain timeout** —— 在途 task 的最大等待
 
 `pause_for(...)` 暂停 auto-close 计时。`continue_with(...)` 后空闲计时重新开始。
 
+`close()` / `async_close()` 默认拒绝关闭仍有 pending interrupt 的 execution。应先恢复这些 interrupt；如果关闭时就是要放弃等待，必须显式传 `pending_interrupts="cancel"`。
+
 `auto_close_timeout=None` 关掉 auto-close —— execution 一直存活直到显式 `close()`。**不要把 `auto_close_timeout=None` 与隐式糖一起用** —— `flow.start()` 会永远不返回。
 
 ## 选哪个入口
@@ -153,7 +155,13 @@ await execution.async_start(None)
 snapshot = await execution.async_close()
 ```
 
-如果写成 `await flow.async_start(None)`，隐式 execution 没 handle，外部无法 `continue_with`。
+如果写成 `await flow.async_start(None)`，隐式 execution 没有可恢复 handle，走到 `pause_for(...)` 时会直接报错。
+
+如果需要停止一个等待中的 execution 且不恢复它，必须显式表达取消等待：
+
+```python
+snapshot = await execution.async_close(pending_interrupts="cancel")
+```
 
 ## 兼容参数
 

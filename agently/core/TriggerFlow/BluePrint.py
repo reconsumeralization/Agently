@@ -1889,6 +1889,7 @@ class TriggerFlowBlueprint:
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         intervention_mode: Literal["planned", "auto"] | None = None,
         intervention_policy: Any = None,
+        resume_handle_exposed: bool = True,
     ):
         handlers_snapshot: TriggerFlowAllHandlers = {
             "event": {k: v.copy() for k, v in self._handlers["event"].items()},
@@ -1909,6 +1910,7 @@ class TriggerFlowBlueprint:
             execution_environments=execution_environments,
             intervention_mode=intervention_mode,
             intervention_policy=intervention_policy,
+            resume_handle_exposed=resume_handle_exposed,
         )
 
     def copy(self, *, name: str | None = None):
