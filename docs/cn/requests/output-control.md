@@ -27,6 +27,36 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 | `json` | 需要最稳定的机器契约、嵌套数据、数组、外部系统互通、兼容旧 prompt/测试，或下游明确依赖原始 JSON 行为。 | 大段嵌入文档或代码会让转义变脆弱，也更难让模型稳定生成。 |
 | 纯文本 | 请求只要一个自由文本成品：文章、邮件、解释、报告、Markdown 页面、HTML 页面，或其他单一多段落文档。不要调用 `output()`；直接用 `start()` / `async_start()`，或读取 `response.result.get_text()`。 | 需要可单独寻址的字段、路径校验、`ensure_keys`、typed object 或下游分支。 |
 
+### Instant Streaming
+
+当调用方需要在完整响应结束前看到字段级更新时，使用
+`get_generator(type="instant")` 或 `get_async_generator(type="instant")`：
+进度面板、实时表单、可分区渲染的长报告、模型阶段 dashboard，或能在字段完成后
+立即展示的 workflow UI。对于单一自由文本成品，用 `type="delta"`；纯文本没有
+结构化字段路径可供 instant 事件使用。
+
+| 输出模式 | Instant 支持 | 使用建议 |
+|---|---|---|
+| `auto` | 支持，auto 先解析为 `json`、`flat_markdown` 或 `hybrid` 后使用对应流式解析器。 | UI streaming 的默认选择，前提是调用方消费 Agently 的 `StreamingData`，而不是依赖模型原始文本。如果 auto 最终降级到 JSON 重试，把 instant 事件当作临时 UI 数据，持久写入以最终解析结果为准。 |
+| `flat_markdown` | 支持，按 `### field` 章节输出字段级 text delta。 | 适合代码、HTML、Markdown、报告章节等长标量字段。字段的首个更新会在模型输出该字段 header 后出现；纯数字标量 schema 的 header 遵循风险更高。 |
+| `hybrid` | 支持，按章节输出字段级 text delta。JSON block 内容先按文本流出，最终再解析成 list/object。 | 适合 prose + 结构化 records 的混合输出。instant 用于 UI/进度，最终 typed 结构用 `get_data()` / `async_get_data()`。 |
+| `json` | 支持，走增量 JSON parser。 | 适合数组或嵌套对象的路径级更新。流式阶段更依赖模型及时输出合法 JSON 片段；完成后仍会做最终 repair/parse。 |
+| 纯文本 / `text` | 不提供结构化 instant path。 | 用 `type="delta"` 做原始 token 流式，或完成后 `get_text()`。 |
+
+### 可靠性记录
+
+2026-05-23 的 cross-model 验收覆盖了 6 个 provider、12 个场景（共 72 个
+检查），包括 DeepSeek、Qwen、Qianfan ERNIE、MiniMax、GLM 和本地 Qwen2.5。
+这些是已观察到的兼容性数据，不是数学保证：
+
+| 模式 / 场景集合 | 观察结果 | 选择含义 |
+|---|---|---|
+| `auto` overall | 72/72 通过。Auto degradation 会在解析失败后用 JSON 重试并救回结果。 | 应用消费最终解析数据、且可接受重试延迟时，适合作为默认。 |
+| `hybrid` native parsing | 24/24 原生解析成功，0 次降级。 | 在 prose + structured fields 混合场景里，观察到的风险最低。 |
+| `flat_markdown` native parsing | flat_markdown 场景中有 9 次 auto 降级，全部由 JSON retry 救回。主要原因是模型漏掉 `### field` header，尤其纯数字字段以及部分 ERNIE/GLM 运行。 | 适合大段文本/代码字段；不太适合全数字标量 schema 或已知不稳定遵循章节标题的模型。如果不能接受重试延迟，显式用 `json`。 |
+| `json` scenarios | JSON 形态场景在同一轮验收中通过；JSON 也是 auto 降级后的成功 fallback。 | 当严格互通比可读性和大文本 ergonomics 更重要时优先使用。 |
+| `instant` sampled scenarios | Instant 覆盖了 flat scalar 输出（S8）和 hybrid 混合输出（S11），并在 provider 集合中验收。 | 支持 UI/进度展示，但业务决策与持久化应消费完成后的最终解析结果；streaming event 是临时状态。 |
+
 典型用法：
 
 ```python

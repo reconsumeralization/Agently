@@ -196,6 +196,22 @@ All 6 models correctly follow the hybrid prompt instructions:
 
 S7 is the weakest flat_markdown scenario — models tend to omit section headers for pure-numeric content. This is a prompt-level improvement area.
 
+### 5.6 Instant Streaming Support
+
+`instant` / `streaming_parse` support is available for structured output modes:
+
+| Format | Instant support | Notes |
+|--------|-----------------|-------|
+| `json` | Yes | Uses incremental JSON parsing; final repair/parse still happens on completion. |
+| `flat_markdown` | Yes | Emits field-level text deltas from `### field_name` sections. |
+| `hybrid` | Yes | Emits field-level text deltas; JSON block parsing is deferred to finalization. |
+| `auto` | Yes | Uses the streaming parser for the resolved format. If final auto degradation retries as JSON, instant events from the first attempt should be treated as provisional UI state. |
+| `text` / plain text | No structured instant paths | Use raw `delta` streaming or final `get_text()` instead. |
+
+Instant scenarios in the 72-case acceptance run covered flat scalar output
+(S8) and hybrid mixed output (S11). Durable business decisions should consume
+the completed parsed result, not provisional streaming events.
+
 ## 6. Files
 
 | File | Change |

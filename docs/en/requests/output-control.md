@@ -28,6 +28,39 @@ format explicitly.
 | `json` | You need the strictest machine contract, nested data, arrays, interop with external systems, compatibility with old prompts/tests, or exact raw JSON behavior. | Large embedded documents or code blocks make escaping fragile or hard for the model to read. |
 | Plain text | The request asks for one freeform artifact: an article, email, explanation, report, Markdown page, HTML page, or other single multi-paragraph document. Do not call `output()`; use `start()` / `async_start()` directly or read `response.result.get_text()`. | You need separately addressable fields, path validation, `ensure_keys`, typed objects, or downstream branching. |
 
+### Instant Streaming
+
+Use `get_generator(type="instant")` or `get_async_generator(type="instant")`
+when the caller benefits from field-level updates before the full response is
+finished: progress panels, live forms, long reports with independently
+renderable sections, model-stage dashboards, or workflow UIs that can show a
+field as soon as it is complete. For one freeform text artifact, use
+`type="delta"` instead; plain text has no structured field paths for instant
+events.
+
+| Output Mode | Instant Support | Practical Guidance |
+|---|---|---|
+| `auto` | Yes, after auto resolves to `json`, `flat_markdown`, or `hybrid`. | Good default for UI streaming when callers consume Agently `StreamingData` rather than raw model text. If auto later degrades to JSON during final parsing, treat instant events as provisional UI data and use the final parsed result for durable writes. |
+| `flat_markdown` | Yes, field-level text deltas by `### field` sections. | Strong fit for long scalar fields such as code, HTML, Markdown, or report sections. First update for a field appears after the model emits that field header; pure-numeric scalar schemas have higher header-adherence risk. |
+| `hybrid` | Yes, field-level text deltas by section. JSON block contents stream as text and are parsed into lists/objects at finalization. | Best for mixed prose plus structured records. Use instant for UI/progress, then use `get_data()` / `async_get_data()` for the finalized typed structure. |
+| `json` | Yes, via incremental JSON parsing. | Best when arrays or nested objects need path-level updates. More sensitive to malformed or delayed JSON syntax while streaming; final repair still happens at completion. |
+| Plain text / `text` | No structured instant paths. | Use `type="delta"` for raw token streaming, or `get_text()` after completion. |
+
+### Reliability Notes
+
+The 2026-05-23 cross-model acceptance run covered 6 providers and 12 scenarios
+(72 total checks) using DeepSeek, Qwen, Qianfan ERNIE, MiniMax, GLM, and local
+Qwen2.5. Treat these as observed compatibility data, not a mathematical
+guarantee:
+
+| Mode / Scenario Set | Observed Result | Selection Implication |
+|---|---|---|
+| `auto` overall | 72/72 passed. Auto degradation rescued parse failures by retrying as JSON. | Good default when the application consumes final parsed data and can tolerate retry latency. |
+| `hybrid` native parsing | 24/24 native successes, 0 degradations. | Lowest observed risk for mixed prose plus structured fields. |
+| `flat_markdown` native parsing | 9 auto degradations among flat-markdown scenarios, all recovered by JSON retry. Most failures were models omitting `### field` headers, especially pure numeric fields and some ERNIE/GLM runs. | Good for large text/code fields; less ideal for all-number scalar schemas or models known to ignore section headers. Use explicit `json` if retry latency is unacceptable. |
+| `json` scenarios | JSON-shaped scenarios passed in the same acceptance run; JSON also served as the successful fallback for degraded auto cases. | Prefer when strict interop matters more than readability or large text ergonomics. |
+| `instant` sampled scenarios | Instant was included for flat scalar output (S8) and hybrid mixed output (S11) across the provider set. | Supported for UI/progress, but final business decisions should consume the completed parsed result because streaming events are provisional. |
+
 Typical usage:
 
 ```python
