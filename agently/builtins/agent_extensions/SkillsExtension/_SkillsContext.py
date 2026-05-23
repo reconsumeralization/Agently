@@ -40,9 +40,13 @@ class AgentSkillsRuntimeContext:
         agent: Any,
         *,
         runtime_stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        resource_reader: Callable[
+            [str, str, int], str | Awaitable[str]
+        ] | None = None,
     ):
         self.agent = agent
         self._runtime_stream_handler = runtime_stream_handler
+        self._resource_reader = resource_reader
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         return self.agent.settings.get(key, default)
@@ -80,10 +84,46 @@ class AgentSkillsRuntimeContext:
         if inspect.isawaitable(maybe_awaitable):
             await maybe_awaitable
 
+    # ── Acting surface ──
+
+    async def async_invoke_tool(self, name: str, /, **kwargs: Any) -> Any:
+        return await self.agent.tool.async_call_action(name, kwargs)
+
+    async def async_invoke_action(self, name: str, /, **kwargs: Any) -> Any:
+        return await self.agent.action.async_call_action(name, kwargs)
+
+    # ── Progressive disclosure ──
+
+    async def async_read_resource(
+        self, *, skill_id: str, path: str, max_bytes: int = 65536
+    ) -> str:
+        if self._resource_reader is None:
+            raise RuntimeError(
+                "async_read_resource is not available: no resource_reader was "
+                "provided when constructing the Skills runtime context."
+            )
+        result = self._resource_reader(skill_id, path, max_bytes)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    # ── Execution environment ──
+
+    @property
+    def execution_environment(self) -> Any | None:
+        return getattr(self.agent, "execution_environment", None)
+
 
 def create_agent_skills_runtime_context(
     agent: Any,
     *,
     runtime_stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    resource_reader: Callable[
+        [str, str, int], str | Awaitable[str]
+    ] | None = None,
 ) -> SkillsRuntimeContext:
-    return AgentSkillsRuntimeContext(agent, runtime_stream_handler=runtime_stream_handler)
+    return AgentSkillsRuntimeContext(
+        agent,
+        runtime_stream_handler=runtime_stream_handler,
+        resource_reader=resource_reader,
+    )

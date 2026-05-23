@@ -178,7 +178,13 @@ class SkillsExtension(BaseAgent):
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> "SkillExecution":
-        context = create_agent_skills_runtime_context(self, runtime_stream_handler=stream_handler)
+        context = create_agent_skills_runtime_context(
+            self,
+            runtime_stream_handler=stream_handler,
+            resource_reader=lambda sid, path, mb: self.skills_executor.read_resource(
+                sid, path, max_bytes=mb
+            ),
+        )
         return await self.skills_executor.async_execute_plan(
             context=context,
             task=task,

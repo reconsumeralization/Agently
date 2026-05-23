@@ -176,7 +176,7 @@ class SkillExecutor:
                 "Use the full guidance content as the source of behavior, not Agently decision-card summaries.",
                 "Synthesize all relevant selected Skills in one response.",
                 "Do not treat a selected Skill as disabled or unavailable because of Agently metadata.",
-                "Bundled scripts, references, and assets are resources only; do not claim they were executed unless an explicit Action or environment did so.",
+                "Bundled scripts, references, and assets are listed in resource_indexes with path, kind, and summary. They may be read on demand when the execution strategy supports it. Do not claim bundled resources were executed unless an explicit Action or environment did so.",
             ],
             "selected_skill_cards": [_copy_public(item.get("decision_card", {})) for item in selected],
             "selected_skill_guidance": [

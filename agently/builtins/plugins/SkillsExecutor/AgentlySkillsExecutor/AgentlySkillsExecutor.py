@@ -112,6 +112,9 @@ class AgentlySkillsExecutor(SkillsExecutor):
     def remove_skills_pack(self, skills_pack_id: str, *, remove_skills: bool = False) -> dict[str, Any]:
         return self.registry.remove_skills_pack(skills_pack_id, remove_skills=remove_skills)
 
+    def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 65536) -> str:
+        return self.registry.read_resource(skill_id, path, max_bytes=max_bytes)
+
     # ── Plan / Execute ─────────────────────────────────────────────────────
 
     async def async_resolve_plan(

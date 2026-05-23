@@ -576,6 +576,36 @@ class SkillRegistry:
                 })
         return {"schema_version": "agently.skills.resources.v1", "resources": resources}
 
+    def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 65536) -> str:
+        """Read a bundled resource file content, byte-budgeted.
+
+        Returns the full file content if size ≤ max_bytes, otherwise truncated
+        content with a trailing truncation marker.
+        """
+        record = self._get_record(skill_id)
+        skill_root = Path(str(record.get("installed_path") or ""))
+        if not skill_root.is_dir():
+            raise SkillInstallError(f"Skill '{ skill_id }' installed path is not a directory.")
+        resource_path = (skill_root / path).resolve()
+        if skill_root not in resource_path.parents and resource_path != skill_root:
+            raise SkillInstallError(
+                f"Resource path '{ path }' escapes skill root for '{ skill_id }'."
+            )
+        if not resource_path.is_file():
+            raise SkillInstallError(
+                f"Resource '{ path }' not found in skill '{ skill_id }'."
+            )
+        file_size = resource_path.stat().st_size
+        content = _read_text(resource_path)
+        if len(content) <= max_bytes:
+            return content
+        truncated = content[:max_bytes]
+        marker = (
+            f"\n\n... [truncated at { max_bytes }/{ file_size } bytes; "
+            f"use max_bytes=N to increase]"
+        )
+        return truncated + marker
+
     def _resource_summary(self, path: Path) -> str:
         if path.suffix.lower() in {".md", ".txt", ".py", ".js", ".ts", ".json", ".yaml", ".yml"}:
             try:

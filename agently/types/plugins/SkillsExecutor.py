@@ -45,6 +45,22 @@ class SkillsExecutionContext(SkillsPlanningContext, Protocol):
 
     async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None: ...
 
+    # ── Acting surface (bound only when granted by the plan) ──
+
+    async def async_invoke_tool(self, name: str, /, **kwargs: Any) -> Any: ...
+    async def async_invoke_action(self, name: str, /, **kwargs: Any) -> Any: ...
+
+    # ── Progressive disclosure over resource_index ──
+
+    async def async_read_resource(
+        self, *, skill_id: str, path: str, max_bytes: int = 65536
+    ) -> str: ...
+
+    # ── Controlled side effects; None when not granted ──
+
+    @property
+    def execution_environment(self) -> Any | None: ...
+
 
 @runtime_checkable
 class SkillsRuntimeContext(SkillsExecutionContext, Protocol):
@@ -96,6 +112,8 @@ class SkillsExecutor(Protocol):
     def inspect_skills(self, skill_id: str) -> SkillContract: ...
 
     def inspect_skills_pack(self, skills_pack_id: str) -> SkillsPackRecord: ...
+
+    def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 65536) -> str: ...
 
     def remove_skills(self, skill_id: str) -> dict[str, Any]: ...
 
