@@ -114,8 +114,7 @@ def install_agently_skills():
         raise RuntimeError(f"Agently-Skills repo is required for this realcase example: { skills_repo }")
 
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(registry_root=str(RUNTIME_ROOT / "registry"), allowed_trust_levels=["local"])
     Agently.settings.set("skills.prompt.max_guidance_chars_per_skill", 9000)
 
     for skill_id in SKILL_IDS:

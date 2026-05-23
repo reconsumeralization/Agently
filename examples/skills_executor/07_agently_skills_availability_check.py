@@ -78,7 +78,7 @@ def main() -> None:
         return
 
     # Step 1: Install the active skills from the local repo.
-    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
+    Agently.skills_executor.configure(registry_root=str(RUNTIME_ROOT / "registry"))
     print("Installing Agently-Skills pack from local repo...")
     pack_report = Agently.skills_executor.install_skills_pack(
         source=str(skills_dir),

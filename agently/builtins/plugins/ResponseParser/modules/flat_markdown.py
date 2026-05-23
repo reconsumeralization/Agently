@@ -24,6 +24,8 @@ from typing import Any, AsyncGenerator, Mapping
 
 from agently.types.data.response import StreamingData
 
+from .code_fence import strip_enclosing_code_fence
+
 
 def parse_flat_markdown_output(text: str, output_schema: Mapping[str, Any]) -> dict[str, Any] | None:
     """Parse a flat_markdown model response into a dict keyed by output schema fields.
@@ -60,7 +62,7 @@ def parse_flat_markdown_output(text: str, output_schema: Mapping[str, Any]) -> d
     for i in range(1, len(sections), 2):
         field_name = sections[i].strip()
         content = sections[i + 1].strip() if i + 1 < len(sections) else ""
-        result[field_name] = content
+        result[field_name] = strip_enclosing_code_fence(content)
 
     return result if result else None
 

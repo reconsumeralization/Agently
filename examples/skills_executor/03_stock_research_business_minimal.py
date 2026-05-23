@@ -97,8 +97,7 @@ def install_demo_skills_pack() -> None:
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(EQUITY_RESEARCH_SKILL, encoding="utf-8")
 
-    Agently.settings.set("skills.registry.root", tempfile.mkdtemp(prefix="agently_skills_reg_"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     Agently.skills_executor.install_skills_pack(
         skill_dir.parent,
         name=SKILLS_PACK_NAME,

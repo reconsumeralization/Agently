@@ -31,6 +31,8 @@ from agently.types.data.prompt import _classify_field_spec
 from agently.types.data.response import StreamingData
 from agently.utils import DataLocator
 
+from .code_fence import strip_enclosing_code_fence
+
 
 def _extract_json_block(content: str) -> str | None:
     """Extract JSON from a markdown code block or raw text.
@@ -93,22 +95,20 @@ def parse_hybrid_output(text: str, output_schema: Mapping[str, Any]) -> dict[str
             else:
                 result[field_name] = content
         else:
-            # Scalar field — store plain text, but if the model erroneously
-            # wrapped it in a JSON code block, extract the value.
+            # Scalar field. If the model JSON-encoded the value as a string,
+            # decode it so quotes/escapes resolve; otherwise unwrap any single
+            # enclosing code fence (```html, ```svg, ``` ...) and store the raw
+            # artifact. Content that is not wholly a fence is left untouched.
             json_text = _extract_json_block(content)
+            decoded_string: str | None = None
             if json_text is not None:
                 try:
                     parsed = json5.loads(json_text)
-                    # If the JSON is a simple string, unwrap it
                     if isinstance(parsed, str):
-                        result[field_name] = parsed
-                    else:
-                        # Complex JSON in a scalar field — keep as stringified
-                        result[field_name] = content
+                        decoded_string = parsed
                 except Exception:
-                    result[field_name] = content
-            else:
-                result[field_name] = content
+                    decoded_string = None
+            result[field_name] = decoded_string if decoded_string is not None else strip_enclosing_code_fence(content)
 
     return result if result else None
 

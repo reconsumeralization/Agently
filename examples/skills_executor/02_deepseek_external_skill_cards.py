@@ -151,8 +151,7 @@ def _resolve_source(case: dict[str, str], anthropic_repo: Path) -> Path:
 def _install_targets() -> list[str]:
     anthropic_repo = _ensure_anthropic_repo()
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(registry_root=str(RUNTIME_ROOT / "registry"), allowed_trust_levels=["local"])
 
     installed_ids = []
     for case in CASES:

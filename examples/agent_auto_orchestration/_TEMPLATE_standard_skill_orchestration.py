@@ -105,8 +105,7 @@ def install_skill(runtime_dir: Path) -> str:
     skill_src.mkdir(parents=True, exist_ok=True)
     (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
 
-    Agently.settings.set("skills.registry.root", str(runtime_dir / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(registry_root=str(runtime_dir / "registry"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])  # -> "incident-response-planner"
 

@@ -403,8 +403,7 @@ def _select_group_skill_dirs(group: str, *, limit: int = 12) -> list[Path]:
 
 def _install_available_skills(source_status: dict[str, str], *, registry_root: Path | None = None) -> dict[str, dict[str, Any]]:
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    Agently.settings.set("skills.registry.root", str(registry_root or RUNTIME_ROOT / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(registry_root=str(registry_root or RUNTIME_ROOT / "registry"), allowed_trust_levels=["local"])
     Agently.settings.set("skills.prompt.max_guidance_chars_per_skill", 2400)
 
     installed: dict[str, dict[str, Any]] = {}
