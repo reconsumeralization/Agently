@@ -144,6 +144,9 @@ old_*
 demo/
 demo_*
 
+# Generated artifacts (comparison experiments, etc.)
+_artifacts/
+
 # DB
 *.db
 
