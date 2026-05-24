@@ -38,7 +38,7 @@ class ActBlock(FlowBlock):
         allowed_tools: set[str] | None = None,
         allowed_actions: set[str] | None = None,
         allow_scripts: bool = False,
-        artifact_inline_limit: int = 4096,
+        artifact_inline_limit: int = 65536,
         default_deny: bool = True,
     ):
         self._allowed_tools = allowed_tools or set()

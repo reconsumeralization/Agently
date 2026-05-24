@@ -60,7 +60,7 @@ class SkillsExecutionContext(SkillsPlanningContext, Protocol):
     # ── Progressive disclosure over resource_index ──
 
     async def async_read_resource(
-        self, *, skill_id: str, path: str, max_bytes: int = 65536
+        self, *, skill_id: str, path: str, max_bytes: int = 262144
     ) -> str: ...
 
     # ── Controlled side effects; None when not granted ──
@@ -120,7 +120,7 @@ class SkillsExecutor(Protocol):
 
     def inspect_skills_pack(self, skills_pack_id: str) -> SkillsPackRecord: ...
 
-    def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 65536) -> str: ...
+    def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 262144) -> str: ...
 
     def remove_skills(self, skill_id: str) -> dict[str, Any]: ...
 

@@ -3,14 +3,17 @@
 These examples demonstrate agent execution with real model calls and realistic
 mock business data.
 
-Two execution shapes appear here:
+Three execution shapes appear here:
 
 - **Skills examples** (01, 03, 04, 07–17) use standard `SKILL.md` packages.
-  The examples in this folder intentionally keep their Skills on the default
-  `single_shot` path and put side effects (disk writes, web fetches, scans,
-  adaptive loops) in host code. The wider Skills Executor also supports
-  `execution: staged`, `allowed-tools`, and `effort=`; those are demonstrated in
+  These intentionally keep their Skills on the default `single_shot` path and
+  put side effects (disk writes, web fetches, scans, adaptive loops) in host
+  code. The wider Skills Executor also supports `execution: staged`,
+  `allowed-tools`, and `effort=`; those are demonstrated in
   `examples/skills_executor/09_staged_effort_strategy.py`.
+- **Skill + real remote MCP** (18) shows a `react` Skill that calls a live
+  external MCP server's tools through the agent's Action runtime, then a
+  prompt-only Skill synthesizes the gathered real data.
 - **Dynamic Task DAG examples** (02, 05, 06) show submitted DAG execution:
   local handlers, model nodes, parallel branches, and field-level delta
   streaming. These do not use Skills.
@@ -40,6 +43,7 @@ python examples/agent_auto_orchestration/14_deep_research.py
 python examples/agent_auto_orchestration/15_agentic_research.py
 python examples/agent_auto_orchestration/16_report_evaluation.py
 python examples/agent_auto_orchestration/17_self_reflective_research.py
+python examples/agent_auto_orchestration/18_amap_mcp_trip_planner.py   # needs AMAP_API_KEY
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` is the canonical reference for the
@@ -91,6 +95,18 @@ single-shot Skill + host orchestration pattern.
 - **17 — Self-Reflective Research.** The **host** runs a reflect→revise loop (up to
   2 revisions): the Skill drafts, then critiques and improves prior drafts and
   judges whether further revision is warranted; the host keeps the reflection trail.
+
+## Skill + real remote MCP (tool-using Skill)
+
+- **18 — AMap MCP Trip Planner.** A two-phase agent. Phase 1 is a `react` Skill
+  (`execution: react`, `allowed-tools: [maps_weather, maps_text_search]`) wired to
+  the **real remote AMap MCP server** via `agent.use_mcp(...)`; the react loop calls
+  the live tools to gather actual weather and points-of-interest. Phase 2 is a
+  prompt-only Skill that synthesizes those real observations into a structured
+  one-day itinerary; the host writes the markdown plan. MCP data and model calls
+  are both real. Needs `AMAP_API_KEY` (free at https://lbs.amap.com/); skips
+  gracefully if absent. This is the canonical reference for a Skill that drives an
+  external MCP server through the Action runtime.
 
 ## Actions / Dynamic-Task DAG examples (not Skills)
 

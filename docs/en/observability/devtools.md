@@ -44,6 +44,8 @@ finally:
 
 Use `auto_watch=False` plus `bridge.watch(flow)` when only selected flows should be uploaded; see [`02_observation_bridge_selective_watch.py`](../../../examples/devtools/02_observation_bridge_selective_watch.py).
 
+`ObservationBridge` uploads from a background queue and coalesces high-frequency observation events such as `model.streaming` before sending them to the listener. This keeps passive observation off the request/output path. For short scripts that exit immediately after a run, call `await bridge.flush()` before process exit if you need all buffered events uploaded.
+
 ## EvaluationBridge
 
 [`03_scenario_evaluations.py`](../../../examples/devtools/03_scenario_evaluations.py) builds a small TriggerFlow, binds it with `EvaluationBinding`, and runs `EvaluationRunner` across multiple `EvaluationCase` inputs. Use this path for repeatable scenario checks, not for request-time validation inside application code.

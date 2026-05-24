@@ -21,7 +21,8 @@ by walking the three-layer agent settings configuration::
 
 Every step falls back gracefully when the corresponding pool is absent or doesn't
 contain the expected key, preserving full backward compatibility with single-model
-setups.
+setups. An unmapped model key is treated as "use the request's inherited model",
+not as a concrete provider model name.
 """
 
 from __future__ import annotations
@@ -93,8 +94,12 @@ def resolve_model_pool_settings(model_key: str, settings: Any) -> None:
     key_pool: dict[str, str] = settings.get("key_pool", {}) or {}
     key_pool_strategy: dict[str, dict[str, Any]] = settings.get("key_pool_strategy", {}) or {}
 
-    # Step 1: model_key → model_name
-    model_name = model_pool.get(model_key, model_key)
+    # Step 1: model_key → model_name. If no mapping is configured, leave the
+    # request's inherited provider settings untouched. Internal keys such as
+    # "reason" must not leak to the provider as literal model names.
+    model_name = model_pool.get(model_key)
+    if not model_name:
+        return
 
     # Determine the active ModelRequester plugin namespace
     active_plugin = str(settings.get("plugins.ModelRequester.activate", "OpenAICompatible"))

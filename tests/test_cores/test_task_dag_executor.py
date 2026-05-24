@@ -3,6 +3,7 @@ import time
 
 import pytest
 
+from agently import Agently
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
 from agently.core import (
     TaskDAG,
@@ -390,7 +391,7 @@ async def test_task_dag_executor_resolver_factory_can_bind_by_task():
 
 
 @pytest.mark.asyncio
-async def test_task_dag_executor_resolves_input_placeholders():
+async def test_task_dag_executor_resolves_runtime_placeholders():
     async def local_task(context):
         if context.task.id == "lookup":
             return {
@@ -412,8 +413,9 @@ async def test_task_dag_executor_resolves_input_placeholders():
                 "depends_on": ["lookup"],
                 "inputs": {
                     "ticket": "${DEPS.lookup.ticket}",
-                    "summary": "Account ${INPUT.account} ticket ${STATE.lookup.ticket.id}",
-                    "raw_input": "${INPUT}",
+                    "summary": "Account ${INIT.account} ticket ${STATE.task_results.lookup.ticket.id}",
+                    "upstream_ticket": "${TRIGGER.result.ticket}",
+                    "raw_init": "${INIT}",
                 },
             },
         ],
@@ -429,11 +431,12 @@ async def test_task_dag_executor_resolves_input_placeholders():
     assert draft["task_inputs"] == draft["task_input_inputs"]
     assert draft["task_inputs"]["ticket"] == {"id": "T-42", "priority": "high"}
     assert draft["task_inputs"]["summary"] == "Account Acme ticket T-42"
-    assert draft["task_inputs"]["raw_input"] == {"account": "Acme"}
+    assert draft["task_inputs"]["upstream_ticket"] == {"id": "T-42", "priority": "high"}
+    assert draft["task_inputs"]["raw_init"] == {"account": "Acme"}
 
 
 @pytest.mark.asyncio
-async def test_task_dag_executor_fails_closed_for_missing_input_placeholder():
+async def test_task_dag_executor_fails_closed_for_missing_runtime_placeholder():
     async def local_task(context):
         return context.task.inputs
 
@@ -443,17 +446,114 @@ async def test_task_dag_executor_fails_closed_for_missing_input_placeholder():
             {
                 "id": "draft",
                 "kind": "local",
-                "inputs": {"summary": "Ticket ${INPUT.ticket_id}"},
+                "inputs": {"summary": "Ticket ${INIT.ticket_id}"},
             },
         ],
     }
 
-    with pytest.raises(ValueError, match="input placeholder"):
+    with pytest.raises(ValueError, match="runtime placeholder"):
         await TaskDAGExecutor({"local": local_task}).async_run(
             graph,
             graph_input={"account": "Acme"},
             timeout=1,
         )
+
+
+@pytest.mark.asyncio
+async def test_dynamic_task_default_structured_contract_overrides_planner_flat_markdown():
+    class FakeModelRequest:
+        def __init__(self):
+            self.output_format = None
+            self.output_schema = None
+            self.start_kwargs = None
+
+        def input(self, _value):
+            return self
+
+        def instruct(self, _value):
+            return self
+
+        def output(self, value, *, format="auto"):
+            self.output_schema = value
+            self.output_format = format
+            return self
+
+        async def async_start(self, **kwargs):
+            self.start_kwargs = kwargs
+            return {"summary": "ok", "risk": "low"}
+
+    model = FakeModelRequest()
+    task = Agently.create_dynamic_task(
+        "review contract",
+        plan={
+            "graph_id": "structured-contract-format",
+            "task_schema_version": "task_dag/v1",
+            "tasks": [
+                {
+                    "id": "final",
+                    "kind": "model",
+                    "inputs": {"output_format": "flat_markdown"},
+                }
+            ],
+            "semantic_outputs": {"final": "final"},
+        },
+        model=model,
+        output_schema={
+            "summary": (str, "summary", True),
+            "risk": (str, "risk", True),
+        },
+        ensure_keys=["summary", "risk"],
+    )
+
+    snapshot = await task.async_run(timeout=1)
+
+    assert model.output_format == "auto"
+    assert model.start_kwargs == {"ensure_keys": ["summary", "risk"]}
+    assert snapshot["semantic_outputs"]["final"]["result"] == {"summary": "ok", "risk": "low"}
+
+
+def test_agent_create_dynamic_task_consumes_prompt_snapshot_for_target_and_output_contract():
+    agent = Agently.create_agent("dynamic-task-prompt-agent")
+    agent.set_agent_prompt("info", {"customer": "Acme"})
+    agent.set_request_prompt("instruct", "Focus on renewal risk.")
+    task = (
+        agent
+        .input({"account": "Acme", "ticket": "T-42"})
+        .output({"summary": (str, "risk summary", True)}, format="json")
+        .create_dynamic_task()
+    )
+
+    assert "[INFO]:" in task.target
+    assert "customer: Acme" in task.target
+    assert "[INSTRUCT]:" in task.target
+    assert "Focus on renewal risk." in task.target
+    assert "[INPUT]:" in task.target
+    assert "ticket: T-42" in task.target
+    assert "[OUTPUT REQUIREMENT]" not in task.target
+    assert task.output_schema == {"summary": (str, "risk summary", True)}
+    assert task.output_format == "json"
+    assert task._graph_input() == {"account": "Acme", "ticket": "T-42"}
+    assert agent.request.prompt.get(inherit=False) == {}
+    assert agent.agent_prompt.get("info") == {"customer": "Acme"}
+
+
+def test_agent_create_dynamic_task_explicit_arguments_override_prompt_output_contract():
+    agent = Agently.create_agent("dynamic-task-explicit-agent")
+    task = (
+        agent
+        .input("prompt target")
+        .output({"prompt_summary": (str, "prompt summary", True)}, format="json")
+        .create_dynamic_task(
+            "explicit target",
+            output_schema={"explicit_summary": (str, "explicit summary", True)},
+            output_format="hybrid",
+        )
+    )
+
+    assert task.target == "explicit target"
+    assert task.output_schema == {"explicit_summary": (str, "explicit summary", True)}
+    assert task.output_format == "hybrid"
+    assert task._graph_input() == "explicit target"
 
 
 def test_task_dag_validator_prunes_unknown_optional_handler():

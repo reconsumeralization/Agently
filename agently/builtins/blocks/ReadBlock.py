@@ -27,7 +27,7 @@ class ReadBlock(FlowBlock):
 
     name = "ReadBlock"
 
-    def __init__(self, *, max_bytes: int = 65536):
+    def __init__(self, *, max_bytes: int = 262144):
         self._max_bytes = max_bytes
 
     # ── Direct execution ──

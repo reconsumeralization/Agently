@@ -576,7 +576,7 @@ class SkillRegistry:
                 })
         return {"schema_version": "agently.skills.resources.v1", "resources": resources}
 
-    def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 65536) -> str:
+    def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 262144) -> str:
         """Read a bundled resource file content, byte-budgeted.
 
         Returns the full file content if size ≤ max_bytes, otherwise truncated

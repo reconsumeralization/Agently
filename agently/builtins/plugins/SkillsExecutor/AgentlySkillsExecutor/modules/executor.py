@@ -257,7 +257,7 @@ class SkillExecutor:
         ec = effort_config or {}
         step_budget = _to_int(ec.get("step_budget") or self.registry.settings.get("skills.staged_max_steps", 12), 12)
         model_key = str(ec.get("reason_key") or plan.get("model_key") or "reason")
-        artifact_inline_limit = _to_int(ec.get("artifact_inline_limit") or self.registry.settings.get("skills.artifact_inline_limit", 4096), 4096)
+        artifact_inline_limit = _to_int(ec.get("artifact_inline_limit") or self.registry.settings.get("skills.artifact_inline_limit", 65536), 65536)
         runtime_stream: list[dict[str, Any]] = []
         capture_context = _RuntimeStreamCaptureContext(context, runtime_stream)
 
@@ -308,7 +308,7 @@ class SkillExecutor:
         ec = effort_config or {}
         step_budget = _to_int(ec.get("step_budget") or self.registry.settings.get("skills.react_max_steps", 30), 30)
         model_key = str(ec.get("reason_key") or plan.get("model_key") or "reason")
-        artifact_inline_limit = _to_int(ec.get("artifact_inline_limit") or self.registry.settings.get("skills.artifact_inline_limit", 4096), 4096)
+        artifact_inline_limit = _to_int(ec.get("artifact_inline_limit") or self.registry.settings.get("skills.artifact_inline_limit", 65536), 65536)
         runtime_stream: list[dict[str, Any]] = []
         capture_context = _RuntimeStreamCaptureContext(context, runtime_stream)
 

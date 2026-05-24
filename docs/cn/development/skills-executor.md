@@ -82,6 +82,9 @@ plan = await agent.async_resolve_skills_plan(
 decision cards、资源摘要和任务放进一次模型请求。声明了 `execution: staged`
 或 `allowed-tools` 的 Skill 可以走 TriggerFlow 支撑的 `staged` / `react`
 策略。
+当可用 action 存在时，`react` 会把 tool/action 规划和执行委托给 Agent
+ActionRuntime，因此 kwargs schema、MCP tools、policy、approval、concurrency 和
+Execution Environment 处理仍由 Action 层拥有，而不是由 Skills 重新实现。
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -106,6 +109,25 @@ execution = await agent.async_run_skills_task(
     semantic_outputs={"decision": (str, "go or no-go", True)},
 )
 ```
+
+显式 Skills 执行也支持 Agent prompt 方法。Skill run 会消费当前 prompt snapshot，
+把渲染后的 prompt 文本作为 task，并把 `output` / `output_format` slot 映射为
+`semantic_outputs` / `output_format`：
+
+```python
+execution = await (
+    agent
+    .info({"release": "4.1.2.x"})
+    .input("Write a release decision.")
+    .output({"decision": (str, "go or no-go", True)}, format="json")
+    .async_run_skills_task(skills=["release-review"], mode="required")
+)
+```
+
+`set_agent_prompt(...)` 写入的长期 prompt 会被继承并保留给后续轮次；
+`set_request_prompt(...)` / quick prompt 写入的本轮 request prompt 会被冻结到这次
+Skill run，然后从 pending request 清理。显式传入的 `semantic_outputs=` 和
+`output_format=` 参数优先于 prompt 推导值。
 
 `output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认
 `"auto"`。Auto 是结构规则：扁平且全是字符串字段时选择
@@ -170,6 +192,10 @@ execution = await agent.async_run_skills_task(
     effort="normal",
 )
 ```
+
+`reason_key` 是 model-pool 的符号 key。如果它没有在 `model_pool` 里映射，
+Agently 会沿用 agent 继承来的模型配置，而不会把这个符号 key 当成 provider model
+name 发出去。
 
 通过 Agent 自动编排选中 Skills route 时，模型字段流会桥接到稳定路径，例如
 `skills.model.fields.<field_path>`。

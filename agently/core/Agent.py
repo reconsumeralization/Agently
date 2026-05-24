@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import uuid
 
 from collections.abc import Mapping
@@ -22,7 +23,7 @@ from agently.core.ExtensionHandlers import ExtensionHandlers
 from agently.core.DynamicTask import DynamicTask
 from agently.core.ModelRequest import ModelRequest, _resolve_quick_prompt_input, _UNSET
 from agently.core.RuntimeContext import resolve_parent_run_context
-from agently.utils import Settings
+from agently.utils import DataFormatter, Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
@@ -112,9 +113,96 @@ class BaseAgent:
             model_key=model_key,
         )
 
+    _DYNAMIC_TASK_TARGET_EXCLUDED_PROMPT_KEYS = {
+        "output",
+        "output_format",
+        "ensure_all_keys",
+    }
+
+    def _snapshot_request_prompt(self) -> dict[str, Any]:
+        prompt_snapshot = self.request.prompt.get()
+        return dict(prompt_snapshot) if isinstance(prompt_snapshot, Mapping) else {}
+
+    def _has_dynamic_task_prompt_context(self, prompt_snapshot: Mapping[str, Any]) -> bool:
+        for key, value in prompt_snapshot.items():
+            if key in self._DYNAMIC_TASK_TARGET_EXCLUDED_PROMPT_KEYS:
+                continue
+            if value not in (None, "", [], {}):
+                return True
+        return False
+
+    def _has_dynamic_task_prompt_context_besides_input(self, prompt_snapshot: Mapping[str, Any]) -> bool:
+        for key, value in prompt_snapshot.items():
+            if key == "input" or key in self._DYNAMIC_TASK_TARGET_EXCLUDED_PROMPT_KEYS:
+                continue
+            if value not in (None, "", [], {}):
+                return True
+        return False
+
+    def _render_dynamic_task_target_from_prompt(self, prompt_snapshot: Mapping[str, Any]) -> str | None:
+        prompt_data = {
+            key: value
+            for key, value in prompt_snapshot.items()
+            if key not in self._DYNAMIC_TASK_TARGET_EXCLUDED_PROMPT_KEYS
+        }
+        if not self._has_dynamic_task_prompt_context(prompt_data):
+            return None
+        prompt = Prompt(
+            name=f"{ self.name }-DynamicTaskPromptSnapshot",
+            plugin_manager=self.plugin_manager,
+            parent_settings=self.settings,
+            prompt_dict=dict(prompt_data),
+        )
+        text = str(prompt.to_text() or "").strip()
+        text = text.removesuffix("assistant:").rstrip()
+        text = text.removesuffix("[OUTPUT]:").rstrip()
+        return text or None
+
+    def _dynamic_task_prompt_defaults(
+        self,
+        target: Any = None,
+        *,
+        prompt_snapshot: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshot = dict(prompt_snapshot or self._snapshot_request_prompt())
+        original_snapshot = dict(snapshot)
+        if target is not None:
+            snapshot["input"] = target
+
+        output_schema = snapshot.get("output")
+        output_format = snapshot.get("output_format")
+        input_value = snapshot.get("input")
+
+        target_text: str | None = None
+        if target is not None and not self._has_dynamic_task_prompt_context_besides_input(original_snapshot):
+            target_text = str(target)
+        elif (
+            target is None
+            and set(key for key, value in snapshot.items() if value not in (None, "", [], {}))
+            <= {"input", "output", "output_format", "ensure_all_keys"}
+            and isinstance(input_value, str)
+            and input_value.strip()
+        ):
+            target_text = input_value.strip()
+        else:
+            target_text = self._render_dynamic_task_target_from_prompt(snapshot)
+
+        if target_text is None and input_value is not None:
+            if isinstance(input_value, str):
+                target_text = input_value.strip() or None
+            else:
+                target_text = json.dumps(DataFormatter.sanitize(input_value), ensure_ascii=False)
+
+        return {
+            "target": target_text,
+            "output_schema": output_schema,
+            "output_format": output_format,
+            "initial_graph_input": input_value,
+        }
+
     def create_dynamic_task(
         self,
-        target: str,
+        target: str | None = None,
         *,
         plan: "TaskDAG | Mapping[str, Any] | None" = None,
         planner: Any = None,
@@ -126,10 +214,20 @@ class BaseAgent:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        _prompt_snapshot: Mapping[str, Any] | None = None,
     ) -> DynamicTask:
+        prompt_defaults = self._dynamic_task_prompt_defaults(target, prompt_snapshot=_prompt_snapshot)
+        resolved_target = target if target is not None and prompt_defaults["target"] is None else prompt_defaults["target"]
+        if not resolved_target:
+            raise ValueError("agent.create_dynamic_task(...) requires target=... or a configured agent.input(...).")
+        resolved_output_schema = output_schema if output_schema is not None else prompt_defaults["output_schema"]
+        resolved_output_format = output_format if output_format is not None else prompt_defaults["output_format"]
+        initial_graph_input = prompt_defaults["initial_graph_input"]
+        self.request.prompt.clear()
         return DynamicTask(
             self.plugin_manager,
-            target,
+            str(resolved_target),
             plan=plan,
             planner=self if planner is None else planner,
             model=self if model is None else model,
@@ -139,8 +237,10 @@ class BaseAgent:
             parent_settings=self.settings,
             name=name if name is not None else f"{ self.name }-DynamicTask",
             max_tasks=max_tasks,
-            output_schema=output_schema,
+            output_schema=resolved_output_schema,
             ensure_keys=ensure_keys,
+            output_format=cast(Any, resolved_output_format),
+            initial_graph_input=initial_graph_input,
         )
 
     def use_dynamic_task(
@@ -157,6 +257,7 @@ class BaseAgent:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         graph_input: Any = _UNSET,
         timeout: float | None = None,
         max_retries: int = 3,
@@ -179,6 +280,7 @@ class BaseAgent:
                 "max_tasks": max_tasks,
                 "output_schema": output_schema,
                 "ensure_keys": ensure_keys,
+                "output_format": output_format,
                 "graph_input": graph_input if graph_input_provided else None,
                 "graph_input_provided": graph_input_provided,
                 "timeout": timeout,

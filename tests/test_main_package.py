@@ -385,7 +385,7 @@ def _agent_input_placeholder_graph() -> dict[str, Any]:
                 "id": "echo",
                 "kind": "local",
                 "binding": "echo_handler",
-                "inputs": {"kwargs": {"ticket": "${INPUT.ticket}"}},
+                "inputs": {"kwargs": {"ticket": "${INIT.ticket}"}},
             }
         ],
         "semantic_outputs": {"final": "echo"},
@@ -469,7 +469,7 @@ async def test_agent_execution_dynamic_task_missing_input_path_names_graph_input
         .create_execution()
     )
 
-    with pytest.raises(ValueError, match=r"\$\{INPUT\.ticket\}.*execution prompt snapshot input slot"):
+    with pytest.raises(ValueError, match=r"\$\{INIT\.ticket\}.*execution prompt snapshot input slot"):
         await asyncio.wait_for(execution.async_get_data(), timeout=2)
 
 

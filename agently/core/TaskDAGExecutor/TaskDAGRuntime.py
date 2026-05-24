@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
 
 _DYNAMIC_CACHE_ATTR = "_task_dag_executor_cache"
-_INPUT_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
+_RUNTIME_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 
 
 @dataclass
@@ -209,9 +209,12 @@ def _make_task_runner(
         graph_input = data.get_state("graph_input")
         task_results = dict(data.get_state("task_results", {}) or {})
         dependency_results = {dependency: task_results[dependency] for dependency in task.depends_on}
+        execution_state = data.get_state() or {}
         resolved_inputs = _resolve_task_input_placeholders(
             task.inputs,
-            graph_input=graph_input,
+            trigger_payload=data.value,
+            initial_input=graph_input,
+            execution_state=execution_state,
             dependency_results=dependency_results,
             task_id=task.id,
         )
@@ -220,9 +223,12 @@ def _make_task_runner(
             "task_id": resolved_task.id,
             "task": resolved_task.to_dict(),
             "graph_id": graph.graph_id,
+            "init_input": graph_input,
             "graph_input": graph_input,
             "inputs": resolved_inputs,
             "deps": dependency_results,
+            "state": execution_state,
+            "trigger": data.value,
             "dependency_payload": data.value,
         }
         await _put_task_event(data, graph, resolved_task, "start", input=task_input)
@@ -270,7 +276,9 @@ def _make_task_runner(
 def _resolve_task_input_placeholders(
     value: Any,
     *,
-    graph_input: Any,
+    trigger_payload: Any,
+    initial_input: Any,
+    execution_state: Any,
     dependency_results: Mapping[str, Any],
     task_id: str,
 ) -> Any:
@@ -278,7 +286,9 @@ def _resolve_task_input_placeholders(
         return {
             key: _resolve_task_input_placeholders(
                 item,
-                graph_input=graph_input,
+                trigger_payload=trigger_payload,
+                initial_input=initial_input,
+                execution_state=execution_state,
                 dependency_results=dependency_results,
                 task_id=task_id,
             )
@@ -288,7 +298,9 @@ def _resolve_task_input_placeholders(
         return [
             _resolve_task_input_placeholders(
                 item,
-                graph_input=graph_input,
+                trigger_payload=trigger_payload,
+                initial_input=initial_input,
+                execution_state=execution_state,
                 dependency_results=dependency_results,
                 task_id=task_id,
             )
@@ -298,7 +310,9 @@ def _resolve_task_input_placeholders(
         return tuple(
             _resolve_task_input_placeholders(
                 item,
-                graph_input=graph_input,
+                trigger_payload=trigger_payload,
+                initial_input=initial_input,
+                execution_state=execution_state,
                 dependency_results=dependency_results,
                 task_id=task_id,
             )
@@ -307,14 +321,16 @@ def _resolve_task_input_placeholders(
     if not isinstance(value, str):
         return value
 
-    matches = list(_INPUT_PLACEHOLDER_RE.finditer(value))
+    matches = list(_RUNTIME_PLACEHOLDER_RE.finditer(value))
     if not matches:
         return value
 
     if len(matches) == 1 and matches[0].span() == (0, len(value)):
         return _resolve_single_task_placeholder(
             matches[0].group(1),
-            graph_input=graph_input,
+            trigger_payload=trigger_payload,
+            initial_input=initial_input,
+            execution_state=execution_state,
             dependency_results=dependency_results,
             task_id=task_id,
         )
@@ -322,19 +338,23 @@ def _resolve_task_input_placeholders(
     def replace_match(match: re.Match[str]) -> str:
         resolved = _resolve_single_task_placeholder(
             match.group(1),
-            graph_input=graph_input,
+            trigger_payload=trigger_payload,
+            initial_input=initial_input,
+            execution_state=execution_state,
             dependency_results=dependency_results,
             task_id=task_id,
         )
         return _stringify_placeholder_value(resolved)
 
-    return _INPUT_PLACEHOLDER_RE.sub(replace_match, value)
+    return _RUNTIME_PLACEHOLDER_RE.sub(replace_match, value)
 
 
 def _resolve_single_task_placeholder(
     expression: str,
     *,
-    graph_input: Any,
+    trigger_payload: Any,
+    initial_input: Any,
+    execution_state: Any,
     dependency_results: Mapping[str, Any],
     task_id: str,
 ) -> Any:
@@ -342,14 +362,18 @@ def _resolve_single_task_placeholder(
     root_name = parts[0].strip().upper()
     path = parts[1].strip() if len(parts) > 1 else ""
 
-    if root_name == "INPUT":
-        root = graph_input
-    elif root_name in {"DEPS", "STATE"}:
+    if root_name == "INIT":
+        root = initial_input
+    elif root_name == "STATE":
+        root = execution_state
+    elif root_name == "DEPS":
         root = dependency_results
+    elif root_name == "TRIGGER":
+        root = trigger_payload
     else:
         raise ValueError(
-            f"Dynamic task '{ task_id }' has unsupported input placeholder '${{{ expression }}}'. "
-            "Use ${INPUT...}, ${DEPS...}, or ${STATE...}."
+            f"Dynamic task '{ task_id }' has unsupported runtime placeholder '${{{ expression }}}'. "
+            "Use ${INIT...}, ${DEPS...}, ${STATE...}, or ${TRIGGER...}."
         )
 
     if not path:
@@ -359,7 +383,7 @@ def _resolve_single_task_placeholder(
     value = DataLocator.locate_path_in_dict(root, path, "dot", default=missing)
     if value is missing:
         raise ValueError(
-            f"Dynamic task '{ task_id }' input placeholder '${{{ expression }}}' "
+            f"Dynamic task '{ task_id }' runtime placeholder '${{{ expression }}}' "
             f"does not match an available runtime path."
         )
     return value

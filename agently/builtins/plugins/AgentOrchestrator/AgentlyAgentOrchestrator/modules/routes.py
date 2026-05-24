@@ -58,7 +58,14 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     mode = cast(Any, route_meta.get("mode", "model_decision"))
     task = execution.task_target()
     agent = cast(Any, execution.agent)
-    plan = await agent.async_resolve_skills_plan(task, mode=mode)
+    semantic_outputs = execution.prompt_snapshot.get("output")
+    output_format = execution.prompt_snapshot.get("output_format") or "auto"
+    plan = await agent.async_resolve_skills_plan(
+        task,
+        mode=mode,
+        semantic_outputs=semantic_outputs,
+        output_format=output_format,
+    )
     await execution.emit_stream(
         "route.skills.plan",
         plan,
@@ -74,6 +81,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
             skills_execution = await agent.async_execute_skills_plan(
                 task,
                 plan=plan,
+                output_format=output_format,
                 stream_handler=bridge_runtime_stream,
             )
             execution.close_snapshot = skills_execution.close_snapshot
@@ -102,6 +110,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     skills_execution = await agent.async_execute_skills_plan(
         task,
         plan=plan,
+        output_format=output_format,
         stream_handler=bridge_runtime_stream,
     )
     for log in skills_execution.skill_logs:
@@ -146,6 +155,8 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
         max_tasks=candidate.get("max_tasks"),
         output_schema=candidate.get("output_schema"),
         ensure_keys=candidate.get("ensure_keys"),
+        output_format=candidate.get("output_format"),
+        _prompt_snapshot=execution.prompt_snapshot,
     )
     graph = candidate.get("plan")
     if graph is None or mode == "auto":
@@ -164,7 +175,7 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
             return await dag_execution.async_close(timeout=candidate.get("timeout", 30))
         except BaseException as error:
             await dag_execution.async_stop_stream()
-            if _is_input_placeholder_error(error):
+            if _is_init_placeholder_error(error):
                 raise ValueError(
                     f"{ error } Agent Dynamic Task route resolved graph_input from "
                     f"{ graph_input_source }."
@@ -211,6 +222,6 @@ def _resolve_dynamic_task_graph_input(
     return {"target": target}, "fallback target"
 
 
-def _is_input_placeholder_error(error: BaseException) -> bool:
+def _is_init_placeholder_error(error: BaseException) -> bool:
     message = str(error)
-    return "input placeholder" in message and "${INPUT" in message
+    return "runtime placeholder" in message and "${INIT" in message

@@ -60,6 +60,40 @@ class MockStrategyContext:
         ]
 
 
+class ActionRuntimeRoundContext(MockStrategyContext):
+    def __init__(self):
+        super().__init__()
+        self.action_rounds: list[dict[str, Any]] = []
+
+    async def async_execute_action_round(
+        self,
+        *,
+        prompt: Any,
+        allowed_tools: list[str] | None = None,
+        allowed_actions: list[str] | None = None,
+        concurrency: int | None = None,
+        max_rounds: int = 1,
+        planning_protocol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.action_rounds.append(
+            {
+                "prompt": prompt,
+                "allowed_tools": allowed_tools,
+                "allowed_actions": allowed_actions,
+                "concurrency": concurrency,
+                "max_rounds": max_rounds,
+                "planning_protocol": planning_protocol,
+            }
+        )
+        return [
+            {
+                "status": "success",
+                "action_id": "add",
+                "result": 3,
+            }
+        ]
+
+
 class TestStagedStrategy:
     @pytest.mark.asyncio
     async def test_staged_executes_steps_in_order(self):
@@ -330,3 +364,25 @@ class TestReactStrategy:
         assert len(ctx.action_spec_batches) == 1
         assert [spec["name"] for spec in ctx.action_spec_batches[0]["specs"]] == ["search", "lookup"]
         assert ctx.tool_results == {}
+
+    @pytest.mark.asyncio
+    async def test_react_delegates_tool_planning_to_action_runtime_when_available(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = ActionRuntimeRoundContext()
+
+        result = await run_react_execution(
+            task="add one and two",
+            plan={},
+            context=ctx,
+            step_budget=1,
+            allowed_tools=["add"],
+        )
+
+        assert ctx.model_calls == []
+        assert len(ctx.action_rounds) == 1
+        assert ctx.action_rounds[0]["allowed_tools"] == ["add"]
+        assert ctx.action_rounds[0]["max_rounds"] == 1
+        assert result["history"][0]["name"] == "add"
+        assert result["history"][0]["result"] == 3
+        assert any(event["type"] == "skills.react.action_runtime_round" for event in ctx.stream_events)

@@ -44,6 +44,8 @@ finally:
 
 只想上传指定 flow 时，用 `auto_watch=False` 加 `bridge.watch(flow)`；见 [`02_observation_bridge_selective_watch.py`](../../../examples/devtools/02_observation_bridge_selective_watch.py)。
 
+`ObservationBridge` 会通过后台队列上传，并在发送到 listener 前合并 `model.streaming` 这类高频 observation event，避免被动观测进入请求/输出的同步路径。短脚本如果在运行结束后马上退出，而你需要确保缓冲事件全部上传，可以在退出前调用 `await bridge.flush()`。
+
 ## EvaluationBridge
 
 [`03_scenario_evaluations.py`](../../../examples/devtools/03_scenario_evaluations.py) 会构建一个小 TriggerFlow，用 `EvaluationBinding` 绑定，再通过 `EvaluationRunner` 跑多个 `EvaluationCase`。它适合可重复的场景检查，不适合当作应用请求内的实时校验。

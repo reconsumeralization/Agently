@@ -2,6 +2,7 @@ import pytest
 import yaml
 
 from agently.utils import Settings
+from agently.utils.ModelPool import resolve_model_pool_settings
 
 
 def test_settings():
@@ -83,3 +84,22 @@ def test_settings_load_yaml_file_raise_on_missing_env(tmp_path, monkeypatch):
 
     with pytest.raises(KeyError, match="MISSING_API_KEY"):
         settings.load("yaml_file", str(config_path), auto_load_env=True, raise_empty=True)
+
+
+def test_model_pool_unmapped_key_keeps_inherited_model():
+    settings = Settings()
+    settings.set("plugins.ModelRequester.OpenAICompatible.model", "deepseek-chat")
+
+    resolve_model_pool_settings("reason", settings)
+
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.model") == "deepseek-chat"
+
+
+def test_model_pool_mapped_key_updates_model():
+    settings = Settings()
+    settings.set("plugins.ModelRequester.OpenAICompatible.model", "deepseek-chat")
+    settings.set("model_pool", {"reason": "deepseek-reasoner"})
+
+    resolve_model_pool_settings("reason", settings)
+
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.model") == "deepseek-reasoner"

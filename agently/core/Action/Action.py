@@ -499,11 +499,11 @@ class Action:
         return ActionArtifactManager._is_sensitive_key(key)
 
     @staticmethod
-    def _compact_text(value: Any, *, limit: int = 700):
+    def _compact_text(value: Any, *, limit: int = 4000):
         return ActionArtifactManager._compact_text(value, limit=limit)
 
     @classmethod
-    def _compact_value(cls, value: Any, *, limit: int = 700, depth: int = 0):
+    def _compact_value(cls, value: Any, *, limit: int = 4000, depth: int = 0):
         return ActionArtifactManager._compact_value(value, limit=limit, depth=depth)
 
     @classmethod
@@ -569,8 +569,6 @@ class Action:
                 if spec is None:
                     continue
                 if expose_only and spec.get("expose_to_model", True) is not True:
-                    continue
-                if any(tag.startswith("agent-") for tag in self.action_registry.get_tags(action_id)):
                     continue
                 collected.append(action_id)
             return collected

@@ -40,7 +40,7 @@ async def run_staged_execution(
     step_budget: int = 12,
     model_key: str = "reason",
     semantic_outputs: dict[str, Any] | None = None,
-    artifact_inline_limit: int = 4096,
+    artifact_inline_limit: int = 65536,
     allow_escalation: bool = False,
     escalation_tools: list[str] | None = None,
 ) -> dict[str, Any]:

@@ -47,7 +47,7 @@ async def run_react_execution(
     allowed_tools: list[str] | None = None,
     allowed_actions: list[str] | None = None,
     allow_scripts: bool = False,
-    artifact_inline_limit: int = 4096,
+    artifact_inline_limit: int = 65536,
 ) -> dict[str, Any]:
     """Execute a skill using the react (reason→act→observe) strategy.
 
@@ -95,6 +95,47 @@ async def run_react_execution(
         budget = data.get_state("step_budget", step_budget)
         if step_count >= budget:
             await data.async_emit("FINALIZE")
+            return
+
+        if _can_delegate_action_round(context, allowed_tools, allowed_actions):
+            try:
+                action_records = await context.async_execute_action_round(
+                    prompt=_build_action_runtime_prompt(
+                        task=current_task,
+                        step=step_count,
+                        history=history,
+                    ),
+                    allowed_tools=allowed_tools,
+                    allowed_actions=allowed_actions,
+                    concurrency=action_concurrency,
+                    max_rounds=1,
+                )
+            except Exception as exc:
+                action_records = [{"status": "error", "error": str(exc), "action_id": "action_runtime"}]
+
+            await data.async_set_state(
+                "current_decision",
+                {
+                    "next_action": "action_runtime_round",
+                    "final": len(action_records) == 0,
+                    "action_runtime": True,
+                },
+            )
+            await data.async_set_state(
+                "current_act_results",
+                [_normalize_action_runtime_record(record) for record in action_records],
+            )
+            await context.async_emit_runtime_stream(
+                {
+                    "type": "skills.react.action_runtime_round",
+                    "action": "done",
+                    "payload": {
+                        "step": step_count + 1,
+                        "action_count": len(action_records),
+                    },
+                }
+            )
+            await data.async_emit("OBSERVE")
             return
 
         prompt = _build_react_prompt(
@@ -338,6 +379,34 @@ You are in a reason→act→observe loop. At each step:
 Respond with JSON only."""
 
 
+def _can_delegate_action_round(
+    context: Any,
+    allowed_tools: list[str] | None,
+    allowed_actions: list[str] | None,
+) -> bool:
+    if not callable(getattr(context, "async_execute_action_round", None)):
+        return False
+    return bool(allowed_tools or allowed_actions)
+
+
+def _build_action_runtime_prompt(
+    *,
+    task: str,
+    step: int,
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "task": task,
+        "react_step": step + 1,
+        "observation_history": history[-10:],
+        "instruction": (
+            "Plan and execute the next useful action for this Skills react loop. "
+            "Use available action schemas exactly. If no more action is needed, "
+            "respond without action calls."
+        ),
+    }
+
+
 def _build_single_spec(decision: dict[str, Any]) -> dict[str, Any]:
     """Build a single action spec from a decision dict."""
     tool_kwargs = decision.get("next_kwargs") or {}
@@ -387,6 +456,20 @@ def _normalize_action_runtime_result(
     return {
         "act_type": spec.get("type", "tool"),
         "name": result.get("action_id") or result.get("tool_name") or spec.get("name", ""),
+        "result": result.get("result", result.get("data", result)),
+        "error": error,
+        "action_result": result,
+    }
+
+
+def _normalize_action_runtime_record(result: dict[str, Any]) -> dict[str, Any]:
+    status = result.get("status")
+    error = result.get("error")
+    if status not in {None, "success"} and not error:
+        error = str(status)
+    return {
+        "act_type": "action",
+        "name": result.get("action_id") or result.get("tool_name") or "action_runtime",
         "result": result.get("result", result.get("data", result)),
         "error": error,
         "action_result": result,

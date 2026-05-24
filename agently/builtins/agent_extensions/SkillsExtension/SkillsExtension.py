@@ -79,6 +79,20 @@ class SkillsExtension(BaseAgent):
             self.__session_skills_pack_selectors.append({"selector": _copy_public(item), "mode": mode})
         return self
 
+    def _skills_prompt_defaults(
+        self,
+        task: str | None,
+        semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+    ) -> tuple[str, Any, Literal["json", "flat_markdown", "hybrid", "auto"]]:
+        prompt_defaults = self._dynamic_task_prompt_defaults(task)
+        resolved_task = task if task is not None and prompt_defaults["target"] is None else prompt_defaults["target"]
+        if not resolved_task:
+            raise ValueError("Skills execution requires task=... or a configured agent.input(...).")
+        resolved_outputs = semantic_outputs if semantic_outputs is not None else prompt_defaults["output_schema"]
+        resolved_format = output_format or cast(Any, prompt_defaults["output_format"]) or "auto"
+        return str(resolved_task), resolved_outputs, cast(Any, resolved_format)
+
     async def async_resolve_skills_plan(
         self,
         task: str | None = None,
@@ -87,8 +101,13 @@ class SkillsExtension(BaseAgent):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ) -> SkillExecutionPlan:
+        task, semantic_outputs, output_format = self._skills_prompt_defaults(
+            task,
+            semantic_outputs=semantic_outputs,
+            output_format=output_format,
+        )
         selectors = self._collect_skill_selectors(skills=skills, mode=mode)
         skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=skills_packs, mode=mode)
         context = create_agent_skills_runtime_context(self)
@@ -110,7 +129,7 @@ class SkillsExtension(BaseAgent):
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ) -> SkillExecutionPlan:
         return FunctionShifter.syncify(self.async_resolve_skills_plan)(
             task,
@@ -123,16 +142,22 @@ class SkillsExtension(BaseAgent):
 
     async def async_run_skills_task(
         self,
-        task: str,
+        task: str | None = None,
         *,
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":
+        task, semantic_outputs, output_format = self._skills_prompt_defaults(
+            task,
+            semantic_outputs=semantic_outputs,
+            output_format=output_format,
+        )
+        self.request.prompt.clear()
         plan = await self.async_resolve_skills_plan(
             task,
             skills=skills,
@@ -153,13 +178,13 @@ class SkillsExtension(BaseAgent):
 
     def run_skills_task(
         self,
-        task: str,
+        task: str | None = None,
         *,
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":

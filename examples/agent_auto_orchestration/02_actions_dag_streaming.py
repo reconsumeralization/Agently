@@ -15,7 +15,9 @@ drafts a reply, and reviews quality — all as a DAG with dependencies.
 Data flow between nodes uses the current Dynamic Task scheme: each node is a
 ``kind="local"`` callable handler (keys end in ``_handler``) wired through
 ``use_dynamic_task(..., handlers=...)``. Direct runtime wiring uses submitted
-DAG placeholders such as ``${INPUT.ticket}`` and ``${DEPS.task_id.path}``;
+DAG placeholders such as ``${INIT.ticket}`` and ``${DEPS.task_id.path}``;
+advanced executor integrations can inspect the raw TriggerFlow payload through
+``${TRIGGER.result}``;
 richer joins read upstream values from ``context.dependency_results``.
 
 Expected key output from one real DeepSeek run:
@@ -273,7 +275,7 @@ async def main() -> None:
                 "id": "classify",
                 "kind": "local",
                 "binding": "classify_handler",
-                "inputs": {"kwargs": {"ticket": "${INPUT.ticket}"}},
+                "inputs": {"kwargs": {"ticket": "${INIT.ticket}"}},
             },
             {
                 "id": "analyze",
@@ -286,7 +288,7 @@ async def main() -> None:
                 "kind": "local",
                 "binding": "draft_handler",
                 "depends_on": ["analyze"],
-                "inputs": {"kwargs": {"ticket": "${INPUT.ticket}"}},
+                "inputs": {"kwargs": {"ticket": "${INIT.ticket}"}},
             },
             {
                 "id": "review",
@@ -314,7 +316,7 @@ async def main() -> None:
 
     execution = (
         agent
-        # In the Agent route, submitted-DAG ${INPUT.x} placeholders read the
+        # In the Agent route, submitted-DAG ${INIT.x} placeholders read the
         # execution prompt snapshot input slot unless graph_input= is explicit.
         .use_dynamic_task(mode="submitted", plan=graph, handlers=DAG_HANDLERS)
         .input({"ticket": ticket_str})

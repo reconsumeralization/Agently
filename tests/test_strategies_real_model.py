@@ -18,6 +18,8 @@ import textwrap
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -25,6 +27,14 @@ if str(ROOT) not in sys.path:
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))
+
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.skipif(
+        not os.getenv("DEEPSEEK_API_KEY"),
+        reason="DEEPSEEK_API_KEY is required for real-model strategy tests.",
+    ),
+]
 
 from agently import Agently
 from agently.types.data import SkillExecutionPlan

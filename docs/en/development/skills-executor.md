@@ -89,6 +89,10 @@ Skills. By default, execution is `single_shot`: Agently injects the selected
 `SKILL.md` guidance, decision cards, resource summaries, and the task into one
 model request. Skills that declare `execution: staged` or `allowed-tools` can
 run through the TriggerFlow-backed `staged` and `react` strategies.
+When actions are available, `react` delegates tool/action planning and
+execution to the Agent ActionRuntime, so kwargs schemas, MCP tools, policy,
+approvals, concurrency, and execution-environment handling stay on the Action
+layer instead of being reimplemented by Skills.
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -113,6 +117,26 @@ execution = await agent.async_run_skills_task(
     semantic_outputs={"decision": (str, "go or no-go", True)},
 )
 ```
+
+Agent prompt methods are also supported for explicit Skills execution. The
+Skill run consumes the current prompt snapshot, uses rendered prompt text as the
+task, and maps the `output` / `output_format` slots to `semantic_outputs` /
+`output_format`:
+
+```python
+execution = await (
+    agent
+    .info({"release": "4.1.2.x"})
+    .input("Write a release decision.")
+    .output({"decision": (str, "go or no-go", True)}, format="json")
+    .async_run_skills_task(skills=["release-review"], mode="required")
+)
+```
+
+`set_agent_prompt(...)` values are inherited and kept for later turns.
+`set_request_prompt(...)` / quick prompt values are frozen into the Skill run
+and then cleared from the pending request. Explicit `semantic_outputs=` and
+`output_format=` arguments override prompt-derived defaults.
 
 `output_format=` selects how that model response is controlled. Leave it as
 `"auto"` for ordinary Skill answers. Auto is structural: it chooses
@@ -184,6 +208,10 @@ execution = await agent.async_run_skills_task(
     effort="normal",
 )
 ```
+
+`reason_key` is a symbolic model-pool key. If it is not mapped in
+`model_pool`, Agently leaves the request on the agent's inherited model instead
+of sending the symbolic key as a provider model name.
 
 When Skills are selected through Agent auto-orchestration, model field stream
 items are bridged to stable paths like `skills.model.fields.<field_path>`.

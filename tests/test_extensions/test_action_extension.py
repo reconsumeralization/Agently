@@ -190,6 +190,25 @@ def test_action_extension_enable_python_registers_run_python_action():
     assert Agently.execution_environment.list(scope="action_call") == []
 
 
+def test_action_extension_default_introspection_includes_agent_scoped_actions():
+    agent = Agently.create_agent()
+    action_id = f"agent_visible_probe_{ agent.name }"
+    agent.register_action(
+        name=action_id,
+        desc="Agent-scoped action visible through default introspection.",
+        kwargs={"value": (int, "value to echo")},
+        func=lambda value: value,
+    )
+
+    action_info = agent.action.get_action_info()
+    tool_info = agent.action.get_tool_info()
+
+    assert action_id in action_info
+    assert action_info[action_id]["kwargs"] == {"value": (int, "value to echo")}
+    assert action_id in tool_info
+    assert tool_info[action_id]["kwargs"] == {"value": (int, "value to echo")}
+
+
 def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     agent = Agently.create_agent()
     agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="test_run_bash", desc="Only inspect the cwd.")

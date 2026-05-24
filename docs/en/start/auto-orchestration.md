@@ -60,7 +60,7 @@ The execution object follows the same consumption style as model responses:
 ## Submitted Dynamic Task Input
 
 Submitted Dynamic Task DAGs keep using DAG runtime placeholders such as
-`${INPUT.ticket}` and `${DEPS.lookup}` inside task `inputs`. Under an Agent
+`${INIT.ticket}` and `${DEPS.lookup}` inside task `inputs`. Under an Agent
 route, the graph input source is resolved in this order:
 
 ```text

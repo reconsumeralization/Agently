@@ -144,10 +144,53 @@ class AgentSkillsRuntimeContext:
         )
         return [dict(item) for item in results]
 
+    async def async_execute_action_round(
+        self,
+        *,
+        prompt: Any,
+        allowed_tools: list[str] | None = None,
+        allowed_actions: list[str] | None = None,
+        concurrency: int | None = None,
+        max_rounds: int = 1,
+        planning_protocol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Delegate one react reason+act round to the Agent ActionRuntime.
+
+        The ActionRuntime owns action/tool planning prompts, kwargs schemas,
+        native tool-call support, execution, policy, and MCP-backed actions. The
+        Skills react strategy supplies the loop context and allowed names only.
+        """
+        allowed_names = {
+            str(name)
+            for name in [*(allowed_tools or []), *(allowed_actions or [])]
+            if str(name).strip()
+        }
+        agent_tag = f"agent-{ self.agent.name }"
+        action_list = self.agent.action.get_action_list(tags=[agent_tag])
+        if allowed_names:
+            action_list = [
+                item for item in action_list
+                if str(item.get("action_id") or item.get("name") or "") in allowed_names
+            ]
+        if not action_list:
+            return []
+
+        request = self.agent.create_temp_request().input(prompt)
+        results = await self.agent.action.async_plan_and_execute(
+            prompt=request.prompt,
+            settings=self.agent.settings,
+            action_list=action_list,
+            agent_name=self.agent.name,
+            max_rounds=max(1, max_rounds),
+            concurrency=concurrency,
+            planning_protocol=planning_protocol,
+        )
+        return [dict(item) for item in results]
+
     # ── Progressive disclosure ──
 
     async def async_read_resource(
-        self, *, skill_id: str, path: str, max_bytes: int = 65536
+        self, *, skill_id: str, path: str, max_bytes: int = 262144
     ) -> str:
         if self._resource_reader is None:
             raise RuntimeError(

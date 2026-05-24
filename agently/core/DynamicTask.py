@@ -94,6 +94,8 @@ class DynamicTask:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        initial_graph_input: Any = None,
     ):
         if not target:
             raise ValueError("DynamicTask requires non-empty target.")
@@ -108,6 +110,8 @@ class DynamicTask:
         self.handlers = dict(handlers or {})
         self.output_schema = output_schema
         self.ensure_keys = ensure_keys
+        self.output_format = output_format
+        self.initial_graph_input = initial_graph_input
         self.name = name if name is not None else "DynamicTask"
         self.settings = Settings(
             name=f"{ self.name }-Settings",
@@ -209,13 +213,25 @@ class DynamicTask:
         output_schema = task_options.get("output_schema", task_options.get("output"))
         if output_schema is None and should_apply_default_contract:
             output_schema = self.output_schema
+        default_output_format = self.output_format if self.output_format is not None else "auto"
         output_format = self._normalize_model_output_format(
-            task_options.get("output_format", "auto"),
+            task_options.get("output_format", default_output_format),
             task_id=context.task.id,
         )
         ensure_keys = task_options.get("ensure_keys")
         if ensure_keys is None and should_apply_default_contract:
             ensure_keys = self.ensure_keys
+        # The host-supplied output_schema/ensure_keys define a structured frontstage
+        # contract on the semantic-output node. A model-planned `flat_markdown`
+        # format cannot carry a multi-field structured object, so its ensure_keys
+        # could never be satisfied. Let the structural auto-selector pick a
+        # compatible format instead of honoring the incompatible planner choice.
+        if (
+            should_apply_default_contract
+            and output_format == "flat_markdown"
+            and (self._is_structured_contract(output_schema) or self._is_structured_contract(ensure_keys))
+        ):
+            output_format = "auto"
         max_retries = task_options.get("max_retries")
 
         prepared_request = (
@@ -330,6 +346,19 @@ class DynamicTask:
         return task_ids
 
     @staticmethod
+    def _is_structured_contract(schema: Any) -> bool:
+        """True when a schema/ensure_keys describes a multi-field structured object.
+
+        A flat_markdown response can carry a single free-text field but not a
+        multi-key object; such a contract requires json/hybrid output.
+        """
+        if isinstance(schema, Mapping):
+            return len(schema) > 1
+        if isinstance(schema, (list, tuple, set)):
+            return len([item for item in schema if item is not None]) > 1
+        return False
+
+    @staticmethod
     def _normalize_ensure_keys(ensure_keys: Any) -> list[str] | None:
         if ensure_keys is None:
             return None
@@ -340,7 +369,11 @@ class DynamicTask:
         return [str(ensure_keys)]
 
     def _graph_input(self, graph_input: Any = None):
-        return graph_input if graph_input is not None else {"target": self.target}
+        if graph_input is not None:
+            return graph_input
+        if self.initial_graph_input is not None:
+            return self.initial_graph_input
+        return {"target": self.target}
 
     async def async_plan(
         self,

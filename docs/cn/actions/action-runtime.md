@@ -113,6 +113,11 @@ print(calculate("3333+6666=?"))
 | `agent.get_action_result()` | 请求后取 action 调用记录 |
 | `extra.action_logs` | action loop 期间产生的结构化日志 |
 
+`agent.action.get_action_info()` 和 `agent.action.get_tool_info()` 默认返回该
+agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
+`agent.use_mcp(...)` 挂载的 MCP tools，以及 `enable_*` component helpers。只有需要
+窄范围子集时才传显式 `tags=[...]`。
+
 应用代码要给模型开放 Python、shell、workspace 等常见能力时，优先使用
 `enable_*` helpers。只有在开发自定义 Action 后端时，才需要使用
 `register_action(..., executor=..., execution_environments=[...])`。

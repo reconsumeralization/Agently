@@ -80,14 +80,14 @@ class ActionArtifactManager:
         return any(keyword in lowered for keyword in cls._SENSITIVE_KEYWORDS)
 
     @staticmethod
-    def _compact_text(value: Any, *, limit: int = 700) -> str:
+    def _compact_text(value: Any, *, limit: int = 4000) -> str:
         text = str(value)
         if len(text) <= limit:
             return text
         return f"{text[:limit]}... [truncated {len(text) - limit} chars]"
 
     @classmethod
-    def _compact_value(cls, value: Any, *, limit: int = 700, depth: int = 0) -> Any:
+    def _compact_value(cls, value: Any, *, limit: int = 4000, depth: int = 0) -> Any:
         if cls._is_sensitive_key(value) and depth < 0:
             return "[REDACTED]"
         if isinstance(value, dict):
@@ -95,7 +95,7 @@ class ActionArtifactManager:
                 return f"[dict keys={list(value.keys())[:8]}]"
             compact: dict[str, Any] = {}
             for index, (key, item) in enumerate(value.items()):
-                if index >= 12:
+                if index >= 40:
                     compact["..."] = f"{len(value) - index} more keys"
                     break
                 if cls._is_sensitive_key(key):
@@ -105,9 +105,9 @@ class ActionArtifactManager:
             return compact
         if isinstance(value, (list, tuple, set)):
             items = list(value)
-            compact_items = [cls._compact_value(item, limit=limit, depth=depth + 1) for item in items[:8]]
-            if len(items) > 8:
-                compact_items.append(f"... {len(items) - 8} more items")
+            compact_items = [cls._compact_value(item, limit=limit, depth=depth + 1) for item in items[:40]]
+            if len(items) > 40:
+                compact_items.append(f"... {len(items) - 40} more items")
             return compact_items
         if isinstance(value, str):
             return cls._compact_text(value, limit=limit)
@@ -168,7 +168,7 @@ class ActionArtifactManager:
     ) -> ActionArtifact:
         artifact_id = f"act_art_{uuid.uuid4().hex}"
         safe_value = self._redact_value(value)
-        preview = self._compact_value(safe_value, limit=500)
+        preview = self._compact_value(safe_value, limit=4000)
         size = self._safe_json_size(safe_value)
         stored = {
             "artifact_id": artifact_id,
@@ -188,7 +188,7 @@ class ActionArtifactManager:
             "label": label,
             "media_type": media_type,
             "preview": preview,
-            "truncated": size > 500,
+            "truncated": size > 4000,
             "full_value_available": True,
             "available": True,
             "size": size,
@@ -226,9 +226,9 @@ class ActionArtifactManager:
             if key in kwargs:
                 return {
                     "kind": key,
-                    "preview": self._compact_value(kwargs.get(key), limit=900),
+                    "preview": self._compact_value(kwargs.get(key), limit=6000),
                 }
-        return self._compact_value(kwargs, limit=500)
+        return self._compact_value(kwargs, limit=4000)
 
     def _build_execution_digest(
         self,
@@ -246,12 +246,12 @@ class ActionArtifactManager:
             "success": bool(record.get("success", record.get("ok", False))),
             "executor_type": record.get("executor_type", ""),
             "instruction": self._summarize_action_instruction(record),
-            "result_preview": self._compact_value(data, limit=900),
+            "result_preview": self._compact_value(data, limit=8000),
             "artifact_refs": artifact_refs,
         }
         error = record.get("error", "")
         if isinstance(error, str) and error:
-            digest["error"] = self._compact_text(error, limit=700)
+            digest["error"] = self._compact_text(error, limit=4000)
         if redaction_report:
             digest["redaction_report"] = redaction_report
         return digest

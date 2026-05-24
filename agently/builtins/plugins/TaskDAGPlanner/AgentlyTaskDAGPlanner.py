@@ -185,7 +185,7 @@ class AgentlyTaskDAGPlanner(TaskDAGPlanner):
             "Use stable task ids that match letters, digits, underscore, dot, or dash.",
             "Reference dependencies only by upstream task id in depends_on.",
             "Keep depends_on empty for root tasks and never create dependency cycles.",
-            "Do not copy dependency result values into task.inputs. For direct runtime wiring use placeholders such as ${INPUT.foo}, ${DEPS.task_id.path}, or ${STATE.task_id.path}; otherwise read dependency_results in the task handler/model prompt.",
+            "Do not copy dependency result values into task.inputs. For direct runtime wiring use placeholders such as ${INIT.foo} for the initial graph input, ${DEPS.task_id.path} for dependency results, ${STATE.task_results.task_id.path} for execution state, or ${TRIGGER.result} for the raw TriggerFlow trigger payload; otherwise read dependency_results in the task handler/model prompt.",
             "Use semantic_outputs to map each final deliverable role to a source task id.",
             "Declare side_effect_policy for network, local_write, external_write, or credential_usage tasks.",
             "Add approval.required=true for side-effect tasks when graph policy requires approval.",

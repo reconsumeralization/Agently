@@ -324,6 +324,29 @@ def test_run_skills_task_passes_output_format_to_model_request(tmp_path):
     assert output["html"] == "<section>OK</section>"
 
 
+def test_run_skills_task_consumes_agent_prompt_output_contract(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill", body="Draft a render-ready HTML fragment.")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    agent = _create_agent()
+    execution = (
+        agent
+        .set_agent_prompt("info", {"product": "Agently"})
+        .input("render release HTML")
+        .output({"html": (str, "render-ready HTML", True)}, format="flat_markdown")
+        .run_skills_task(skills=["alpha-skill"], mode="required")
+    )
+
+    assert execution.status == "success"
+    assert execution.plan.get("expected_result_format") == "flat_markdown"
+    assert "product" in MockSkillsRequester.requests[-1]
+    assert "Required sections" in MockSkillsRequester.requests[-1]
+    output = cast(dict[str, Any], execution.output)
+    assert output["html"] == "<section>OK</section>"
+    assert agent.request.prompt.get(inherit=False) == {}
+    assert agent.agent_prompt.get("info") == {"product": "Agently"}
+
+
 def test_run_skills_task_sync_accepts_stream_handler(tmp_path):
     _skill(tmp_path / "alpha", name="Alpha Skill")
     Agently.skills_executor.install_skills(tmp_path / "alpha")

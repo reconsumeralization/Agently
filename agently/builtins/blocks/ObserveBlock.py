@@ -33,7 +33,7 @@ class ObserveBlock(FlowBlock):
 
     name = "ObserveBlock"
 
-    def __init__(self, *, artifact_inline_limit: int = 4096):
+    def __init__(self, *, artifact_inline_limit: int = 65536):
         self._artifact_inline_limit = artifact_inline_limit
 
     # ── Direct execution ──
@@ -90,8 +90,8 @@ class ObserveBlock(FlowBlock):
 
         # Large artifact: summarize
         sha = hashlib.sha256(result_str.encode("utf-8")).hexdigest()[:16]
-        head = result_str[:500]
-        tail = result_str[-200:] if result_bytes > 700 else ""
+        head = result_str[:4000]
+        tail = result_str[-1000:] if result_bytes > 5000 else ""
 
         return {
             "act_type": observation.get("act_type"),

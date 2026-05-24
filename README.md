@@ -48,7 +48,7 @@ Agently is a good fit when you care about:
 - **Common model-app patterns should be composable** - router, To-Do/dependency execution, planning, reflection, evaluator/reviser, and multi-agent collaboration can be built from the same request/action/signal primitives. Read [Playbooks](docs/en/playbooks/overview.md), [TriggerFlow Model Integration](docs/en/triggerflow/model-integration.md), and [`examples/step_by_step/`](examples/step_by_step/).
 - **Services should keep clean project boundaries** - async APIs, FastAPI helpers, settings files, prompt files, DevTools observation, and companion coding-agent skills fit non-trivial projects. Read [Project Framework](docs/en/start/project-framework.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [Observability](docs/en/observability/overview.md).
 
-Current framework version: `4.1.2.4`.
+Current framework version: `4.1.2.5`.
 
 Python: `>=3.10`.
 
@@ -148,7 +148,7 @@ Prompts are composed from named slots. That keeps application intent, constraint
 response = (
     agent
     .role("You are a concise release-note writer.")
-    .info({"version": "4.1.2.4", "audience": "framework users"})
+    .info({"version": "4.1.2.5", "audience": "framework users"})
     .instruct("Return only facts grounded in the input.")
     .input("Summarize this release line for an engineering changelog.")
     .output({
@@ -380,7 +380,7 @@ pip install agently-devtools
 agently-devtools init my_project
 ```
 
-Agently 4.1.2.4 recommends `agently-devtools >=0.1.4,<0.2.0`.
+Agently 4.1.2.5 recommends `agently-devtools >=0.1.5,<0.2.0`.
 
 ## Architecture
 
@@ -536,7 +536,7 @@ Agently-Skills gives coding agents current Agently implementation guidance.
 - Repository: https://github.com/AgentEra/Agently-Skills
 - Current catalog generation: `v2`
 - Recommended bundle: `app`
-- Agently 4.1.2.4 compatibility: Skills authoring protocol `agently-skills.authoring.v1`
+- Agently 4.1.2.5 compatibility: Skills authoring protocol `agently-skills.authoring.v2`
 
 Use it when asking Codex, Claude Code, Cursor, or another coding agent to implement Agently patterns.
 
@@ -610,8 +610,8 @@ Use the async request APIs directly or wrap agents, requests, generators, Trigge
 
 ## Compatibility Notes
 
-- The current package version is `4.1.2.4`.
-- The current release manifest is `compatibility/releases/4.1.2.4.json`.
+- The current package version is `4.1.2.5`.
+- The current release manifest is `compatibility/releases/4.1.2.5.json`.
 - Development-line planning belongs in `compatibility/in-development.json`; do not treat planned future versions as released.
 - README examples use the current Action and TriggerFlow close-snapshot paths.
 - Deprecated APIs emit warnings once per Python process unless `runtime.show_deprecation_warnings` is disabled.

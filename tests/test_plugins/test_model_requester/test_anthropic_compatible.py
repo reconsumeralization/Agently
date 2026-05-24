@@ -88,7 +88,7 @@ def test_generate_request_uses_messages_path_and_default_model():
     assert request["request_url"] == "https://api.anthropic.example/v1/messages"
     assert request["request_options"]["model"] == "claude-sonnet-4-20250514"
     assert request["request_options"]["stream"] is True
-    assert request["request_options"]["max_tokens"] == 4096
+    assert request["request_options"]["max_tokens"] == 8192
     assert request["headers"]["anthropic-version"] == "2023-06-01"
     assert request["data"]["messages"] == [{"role": "user", "content": "hello"}]
 
