@@ -26,14 +26,12 @@ if TYPE_CHECKING:
 class HybridRoutePlanner:
     """Candidate-driven route planner for one Agent execution."""
 
-    def __init__(self, agent: "BaseAgent"):
+    def __init__(self, agent: "BaseAgent", *, prompt_snapshot: dict[str, Any] | None = None):
         self.agent = agent
+        self.prompt_snapshot = dict(prompt_snapshot or {})
 
     def task_target(self) -> str:
-        try:
-            value = self.agent.request.prompt.get("input", default=None)
-        except Exception:
-            value = None
+        value = self.prompt_snapshot.get("input")
         if isinstance(value, str) and value.strip():
             return value
         if value is not None:

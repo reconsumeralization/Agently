@@ -156,14 +156,19 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
 
     compiled = task.compile(graph)
     dag_execution = compiled.create_execution(auto_close=False)
-    graph_input = candidate.get("graph_input", {"target": target})
+    graph_input, graph_input_source = _resolve_dynamic_task_graph_input(execution, candidate, target)
 
     async def runner():
         try:
             await dag_execution.async_start(graph_input)
             return await dag_execution.async_close(timeout=candidate.get("timeout", 30))
-        except BaseException:
+        except BaseException as error:
             await dag_execution.async_stop_stream()
+            if _is_input_placeholder_error(error):
+                raise ValueError(
+                    f"{ error } Agent Dynamic Task route resolved graph_input from "
+                    f"{ graph_input_source }."
+                ) from error
             raise
 
     run_task = asyncio.create_task(runner())
@@ -189,3 +194,23 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
     execution.close_snapshot = close_snapshot
     execution.logs = {"task_dag": close_snapshot}
     return task_result
+
+
+def _resolve_dynamic_task_graph_input(
+    execution: "AgentExecution",
+    candidate: dict[str, Any],
+    target: str,
+) -> tuple[Any, str]:
+    if candidate.get("graph_input_provided", False):
+        return candidate.get("graph_input"), "use_dynamic_task(graph_input=...)"
+
+    prompt_snapshot = getattr(execution, "prompt_snapshot", {})
+    if isinstance(prompt_snapshot, dict) and "input" in prompt_snapshot and prompt_snapshot.get("input") is not None:
+        return prompt_snapshot.get("input"), "execution prompt snapshot input slot"
+
+    return {"target": target}, "fallback target"
+
+
+def _is_input_placeholder_error(error: BaseException) -> bool:
+    message = str(error)
+    return "input placeholder" in message and "${INPUT" in message

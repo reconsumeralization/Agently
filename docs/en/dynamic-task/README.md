@@ -72,6 +72,12 @@ dependency results; `${STATE...}` is a compatibility alias for the same
 dependency-results namespace. Missing runtime paths fail closed during task
 execution instead of staying as unresolved strings.
 
+When a submitted DAG runs through `agent.use_dynamic_task(...).create_execution()`,
+`${INPUT...}` first reads an explicit `use_dynamic_task(graph_input=...)` value.
+If that argument is omitted, it reads the execution prompt snapshot `input` slot
+captured by `create_execution()`. Only when neither source exists does the Agent
+route fall back to `{"target": task_target}`.
+
 Submitted plans can also be kept as YAML or JSON config artifacts. Load the
 config into `TaskDAG`, then pass it through the same facade:
 

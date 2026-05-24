@@ -376,6 +376,103 @@ async def test_agent_execution_runs_submitted_dynamic_task_and_streams_process()
     assert any(item.path == "task_dag.tasks.extract.complete" for item in stream_items)
 
 
+def _agent_input_placeholder_graph() -> dict[str, Any]:
+    return {
+        "graph_id": "agent-input-placeholder",
+        "task_schema_version": "task_dag/v1",
+        "tasks": [
+            {
+                "id": "echo",
+                "kind": "local",
+                "binding": "echo_handler",
+                "inputs": {"kwargs": {"ticket": "${INPUT.ticket}"}},
+            }
+        ],
+        "semantic_outputs": {"final": "echo"},
+    }
+
+
+async def _echo_dynamic_task_kwargs(context):
+    return dict((context.task.inputs or {}).get("kwargs") or {})
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_uses_prompt_input_as_graph_input():
+    agent = Agently.create_agent("execution-dag-prompt-input-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan=_agent_input_placeholder_graph(),
+            handlers={"echo_handler": _echo_dynamic_task_kwargs},
+        )
+        .input({"ticket": "TICKET-OK"})
+        .create_execution()
+    )
+
+    data = await execution.async_get_data()
+
+    assert data["semantic_outputs"]["final"]["result"]["ticket"] == "TICKET-OK"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_explicit_graph_input_wins():
+    agent = Agently.create_agent("execution-dag-explicit-graph-input-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan=_agent_input_placeholder_graph(),
+            handlers={"echo_handler": _echo_dynamic_task_kwargs},
+            graph_input={"ticket": "GRAPH-INPUT"},
+        )
+        .input({"ticket": "PROMPT-INPUT"})
+        .create_execution()
+    )
+
+    data = await execution.async_get_data()
+
+    assert data["semantic_outputs"]["final"]["result"]["ticket"] == "GRAPH-INPUT"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_uses_frozen_prompt_snapshot():
+    agent = Agently.create_agent("execution-dag-prompt-snapshot-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan=_agent_input_placeholder_graph(),
+            handlers={"echo_handler": _echo_dynamic_task_kwargs},
+        )
+        .input({"ticket": "SNAPSHOT-INPUT"})
+        .create_execution()
+    )
+    agent.input({"ticket": "MUTATED-INPUT"})
+
+    data = await execution.async_get_data()
+
+    assert data["semantic_outputs"]["final"]["result"]["ticket"] == "SNAPSHOT-INPUT"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_missing_input_path_names_graph_input_source():
+    agent = Agently.create_agent("execution-dag-missing-prompt-input-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan=_agent_input_placeholder_graph(),
+            handlers={"echo_handler": _echo_dynamic_task_kwargs},
+        )
+        .input({"account": "Acme"})
+        .create_execution()
+    )
+
+    with pytest.raises(ValueError, match=r"\$\{INPUT\.ticket\}.*execution prompt snapshot input slot"):
+        await asyncio.wait_for(execution.async_get_data(), timeout=2)
+
+
 @pytest.mark.asyncio
 async def test_agent_execution_dynamic_task_failure_terminates_stream():
     async def boom_handler(_context):

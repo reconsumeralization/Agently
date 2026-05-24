@@ -53,6 +53,34 @@ meta = await execution.async_get_meta()
 execution 对象沿用模型 response 的消费风格：`get_data`、`get_text`、
 `get_meta`、`get_generator` 以及对应 async 方法。
 
+## 提交式 Dynamic Task 输入
+
+提交式 Dynamic Task DAG 的 task `inputs` 继续使用 DAG 运行时占位符，例如
+`${INPUT.ticket}` 和 `${DEPS.lookup}`。在 Agent route 里，graph input 按以下顺序
+解析：
+
+```text
+use_dynamic_task(graph_input=...)
+> execution prompt snapshot 的 input slot
+> {"target": task_target}
+```
+
+因此普通 Agent prompt 写法可以直接喂给提交式 DAG，而不需要另造一套映射面：
+
+```python
+execution = (
+    agent
+    .use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+    .input({"ticket": "TICKET-OK"})
+    .create_execution()
+)
+```
+
+prompt snapshot 在 `create_execution()` 时冻结。后续再调用
+`agent.input(...)` 不会改变已经创建的 execution。只有当 DAG 输入需要区别于
+Agent prompt input，或调用方想显式声明优先级时，才传
+`graph_input=...`。
+
 ## Skills 语义
 
 `agent.use_skills(...)` 和 `agent.use_skills_packs(...)` 注册 route candidates。

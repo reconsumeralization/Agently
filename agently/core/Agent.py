@@ -157,7 +157,7 @@ class BaseAgent:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
-        graph_input: Any = None,
+        graph_input: Any = _UNSET,
         timeout: float | None = None,
         max_retries: int = 3,
     ):
@@ -165,6 +165,7 @@ class BaseAgent:
             raise ValueError("Dynamic Task mode must be one of: 'auto', 'submitted'.")
         if mode == "submitted" and plan is None:
             raise ValueError("use_dynamic_task(mode='submitted') requires plan=.")
+        graph_input_provided = graph_input is not _UNSET
         self._dynamic_task_candidates.append(
             {
                 "mode": mode,
@@ -178,7 +179,8 @@ class BaseAgent:
                 "max_tasks": max_tasks,
                 "output_schema": output_schema,
                 "ensure_keys": ensure_keys,
-                "graph_input": graph_input,
+                "graph_input": graph_input if graph_input_provided else None,
+                "graph_input_provided": graph_input_provided,
                 "timeout": timeout,
                 "max_retries": max_retries,
             }

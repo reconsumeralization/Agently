@@ -57,6 +57,35 @@ meta = await execution.async_get_meta()
 The execution object follows the same consumption style as model responses:
 `get_data`, `get_text`, `get_meta`, `get_generator`, and async equivalents.
 
+## Submitted Dynamic Task Input
+
+Submitted Dynamic Task DAGs keep using DAG runtime placeholders such as
+`${INPUT.ticket}` and `${DEPS.lookup}` inside task `inputs`. Under an Agent
+route, the graph input source is resolved in this order:
+
+```text
+use_dynamic_task(graph_input=...)
+> the execution prompt snapshot input slot
+> {"target": task_target}
+```
+
+This lets ordinary Agent prompt code feed a submitted DAG without inventing a
+second mapping surface:
+
+```python
+execution = (
+    agent
+    .use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+    .input({"ticket": "TICKET-OK"})
+    .create_execution()
+)
+```
+
+The prompt snapshot is captured by `create_execution()`. Later changes to
+`agent.input(...)` do not alter an already-created execution. Use
+`graph_input=...` when the DAG input must be different from the Agent prompt
+input, or when you want that precedence to be explicit.
+
 ## Skills Semantics
 
 `agent.use_skills(...)` and `agent.use_skills_packs(...)` register route

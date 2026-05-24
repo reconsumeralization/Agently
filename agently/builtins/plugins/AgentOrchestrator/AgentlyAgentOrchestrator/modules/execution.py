@@ -44,11 +44,13 @@ class AgentExecution:
         self.logs: dict[str, Any] = {}
         self.result: Any = None
         self.status = "created"
+        prompt_snapshot = agent.request.prompt.get()
+        self.prompt_snapshot: dict[str, Any] = prompt_snapshot if isinstance(prompt_snapshot, dict) else {}
 
         self._started = False
         self._completed = False
         self._start_lock = asyncio.Lock()
-        self.route_planner = HybridRoutePlanner(agent)
+        self.route_planner = HybridRoutePlanner(agent, prompt_snapshot=self.prompt_snapshot)
         self.stream = AgentExecutionStream()
         self._error: BaseException | None = None
 

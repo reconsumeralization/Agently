@@ -64,6 +64,12 @@ plan = {
 
 `${INPUT}` 指向提交 DAG 时传入的 graph input。`${DEPS...}` 指向已完成的上游依赖结果；`${STATE...}` 是同一个 dependency-results 命名空间的兼容别名。运行时路径缺失会在任务执行时 fail closed，而不是把未解析字符串继续传给 handler。
 
+当提交式 DAG 通过 `agent.use_dynamic_task(...).create_execution()` 运行时，
+`${INPUT...}` 会优先读取显式传入的 `use_dynamic_task(graph_input=...)`。如果没有
+传这个参数，则读取 `create_execution()` 时冻结的 execution prompt snapshot 的
+`input` slot。只有两者都不存在时，Agent route 才回退到
+`{"target": task_target}`。
+
 提交式计划也可以保存成 YAML 或 JSON 配置。先把配置加载成 `TaskDAG`，再走同一个
 facade：
 
