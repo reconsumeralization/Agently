@@ -110,7 +110,7 @@ task. Each model task may also set `inputs.output_format`:
   SQL, templates, or report sections.
 - `hybrid`: explicit opt-in for long prose with structured lists, tables,
   citations, metadata, or nested evidence when retry latency is acceptable.
-- `auto`: conservative schema-driven selection when retry latency is acceptable.
+- `auto`: structural schema-driven selection when retry latency is acceptable.
 
 ```python
 task = Agently.create_dynamic_task(

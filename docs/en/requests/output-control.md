@@ -16,10 +16,10 @@ For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leave
 
 `.output(...)` defaults to `format="auto"`. Auto chooses the simplest structured
 format from the schema shape: flat string-only dicts become `flat_markdown`;
-boolean, numeric, nested, mixed, all-complex, and non-dict schemas stay `json`.
-Use `hybrid` as an explicit opt-in when prose/code scalar fields are mixed with
-structured records. If downstream code relies on a specific wire shape, set the
-format explicitly.
+dicts that mix string fields with complex list/object fields become `hybrid`;
+boolean/numeric control fields, all-complex, and non-dict schemas stay `json`.
+Auto does not inspect business meaning in field names or descriptions. If
+downstream code relies on a specific wire shape, set the format explicitly.
 
 | Mode | Use When | Avoid When |
 |---|---|---|
@@ -58,10 +58,10 @@ Treat these as observed compatibility data, not a mathematical guarantee:
 
 | Mode / Scenario Set | Observed Result | Selection Implication |
 |---|---|---|
-| `auto` overall | The 2026-05-23 run passed 72/72 under the previous broader auto matrix. Current auto is narrower: flat string-only dicts may resolve to `flat_markdown`; control, numeric, nested, and mixed schemas resolve to `json`. | Good default when the application consumes final parsed data and can tolerate retry latency, but use explicit format when compatibility matters. |
+| `auto` overall | The 2026-05-23 run passed 72/72 under the previous broader auto matrix. Current auto is structural: flat string-only dicts may resolve to `flat_markdown`; string-plus-complex dicts may resolve to `hybrid`; boolean/numeric control fields, all-complex, and non-dict schemas resolve to `json`. | Good default when the application consumes final parsed data and can tolerate retry latency, but use explicit format when compatibility matters. |
 | `flat_markdown` native parsing | Earlier flat-markdown scenarios showed header adherence risk, especially pure numeric fields and some ERNIE/GLM runs. Current auto avoids booleans/numbers. | Good for large text/code fields; avoid for all-number scalar schemas or models known to ignore section headers. |
 | `json` nested structures | In the 2026-05-24 smoke run, nested EDA netlists and nested model-judge arrays passed on DeepSeek V4 Flash, Qwen3.6-35B-A3B, and GLM-4.5-Air except no JSON failure was observed. | Do not avoid complex nested structures categorically. Prefer JSON for dense nested records, judges, booleans, numbers, and machine contracts. |
-| `hybrid` nested structures | A prompt-contract gap was found and fixed: complex hybrid sections now include their JSON sub-schema. After the fix, EDA hybrid passed first-attempt on DeepSeek V4 Flash and Qwen3.6-35B-A3B; GLM-4.5-Air hit a 360s request failure with no progress events. | Use hybrid for prose/code plus records after verifying the target provider. For reasoning or large MoE models, use a 360s+ timeout and observe streaming/meta events before declaring failure. |
+| `hybrid` nested structures | A prompt-contract gap was found and fixed: complex hybrid sections now include their JSON sub-schema. After the fix, EDA hybrid passed first-attempt on DeepSeek V4 Flash and Qwen3.6-35B-A3B; GLM-4.5-Air hit a 360s request failure with no progress events. | Auto may select hybrid for string fields plus records. Use explicit `json` when a dense nested machine contract is preferred. For reasoning or large MoE models, use a 360s+ timeout and observe streaming/meta events before declaring failure. |
 | `instant` sampled scenarios | Instant was included for flat scalar output (S8) and hybrid mixed output (S11) across the provider set. | Supported for UI/progress, but final business decisions should consume the completed parsed result because streaming events are provisional. |
 
 Typical usage:

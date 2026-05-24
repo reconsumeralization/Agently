@@ -115,14 +115,12 @@ execution = await agent.async_run_skills_task(
 ```
 
 `output_format=` selects how that model response is controlled. Leave it as
-`"auto"` for ordinary Skill answers. Auto is conservative: it chooses
-`"flat_markdown"` only for flat string-only schemas, and chooses `"json"` for
-boolean, numeric, nested, or mixed schemas. Use `"flat_markdown"` explicitly for
-flat string fields that contain long HTML, Markdown, code, SQL, or templates;
-use `"hybrid"` explicitly when long prose also needs structured lists, tables,
-citations, or metadata and the extra parse/retry cost is acceptable; use
-`"json"` for compact machine-readable results, judges, booleans, numbers, and
-deeply nested arrays or objects.
+`"auto"` for ordinary Skill answers. Auto is structural: it chooses
+`"flat_markdown"` for flat string-only schemas, `"hybrid"` for top-level dicts
+that combine string fields with complex list/object fields, and `"json"` for
+boolean/numeric control fields, all-complex schemas, and non-dict outputs. Use
+explicit `"json"` for compact machine-readable results, judges, booleans,
+numbers, or downstream JSON-only contracts.
 
 ```python
 execution = await agent.async_run_skills_task(

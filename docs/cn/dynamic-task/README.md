@@ -97,7 +97,7 @@ task = agent.create_dynamic_task(target="review policy")
 - `json`：紧凑的机器控制输出、Action 参数、路由标记、数字/布尔事实、model judge、密集嵌套数组/对象、严格抽取。
 - `flat_markdown`：扁平字符串字段，且包含较长 HTML、Markdown、代码、SVG、SQL、模板或报告章节。
 - `hybrid`：显式 opt-in，用于长文本同时需要结构化 list、table、citation、metadata 或嵌套 evidence，且可接受重试耗时。
-- `auto`：接受保守的 schema 自动选择输出格式，并且可以接受重试延迟。
+- `auto`：接受结构化 schema 自动选择输出格式，并且可以接受重试延迟。
 
 ```python
 task = Agently.create_dynamic_task(

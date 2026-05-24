@@ -149,15 +149,35 @@ def _is_string_field_spec(field_spec: Any) -> bool:
     return field_spec is str
 
 
+def _is_non_string_scalar_field_spec(field_spec: Any) -> bool:
+    if isinstance(field_spec, tuple) and field_spec:
+        return isinstance(field_spec[0], type) and field_spec[0] in (int, float, bool)
+    return field_spec in (int, float, bool)
+
+
+def _should_auto_use_hybrid(output: Mapping[str, Any]) -> bool:
+    has_complex_field = False
+    has_string_field = False
+    for field_spec in output.values():
+        if _is_non_string_scalar_field_spec(field_spec):
+            return False
+        if _is_string_field_spec(field_spec):
+            has_string_field = True
+            continue
+        has_complex_field = True
+    return has_complex_field and has_string_field
+
+
 def _resolve_auto_format(output: Any) -> Literal["json", "flat_markdown", "hybrid"]:
     """Determine the best output format from schema shape.
 
     ===================== =============================================
     Schema shape           Format chosen
     ===================== =============================================
-    Flat dict, all strings ``"flat_markdown"``
-    Control / nested data  ``"json"``
-    All complex / non-dict ``"json"``
+    Flat dict, all strings       ``"flat_markdown"``
+    String fields + complex data ``"hybrid"``
+    Control / dense nested data  ``"json"``
+    All complex / non-dict       ``"json"``
     ===================== =============================================
     """
     if not isinstance(output, Mapping) or not output:
@@ -165,6 +185,8 @@ def _resolve_auto_format(output: Any) -> Literal["json", "flat_markdown", "hybri
 
     if all(_is_string_field_spec(value) for value in output.values()):
         return "flat_markdown"
+    if _should_auto_use_hybrid(output):
+        return "hybrid"
     return "json"
 PromptOutputStructure: TypeAlias = Mapping[str, Any] | list[Any]
 PromptStandardSlot = Literal[

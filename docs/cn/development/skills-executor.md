@@ -108,9 +108,10 @@ execution = await agent.async_run_skills_task(
 ```
 
 `output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认
-`"auto"`。Auto 是保守策略：只有扁平且全是字符串字段时才会选择
-`"flat_markdown"`；布尔、数字、嵌套结构或混合结构默认选择 `"json"`。扁平字符串字段包含较长 HTML、Markdown、代码、SQL 或模板时可以显式用
-`"flat_markdown"`；长文本同时需要结构化 list、table、citation 或 metadata，且能接受额外解析/重试成本时，显式用 `"hybrid"`；紧凑机器可读结果、judge、布尔、数字、深层数组或对象用 `"json"`。
+`"auto"`。Auto 是结构规则：扁平且全是字符串字段时选择
+`"flat_markdown"`；顶层 dict 同时包含字符串字段和复杂 list/object 字段时选择
+`"hybrid"`；布尔/数字控制字段、全复杂结构和非 dict 输出选择 `"json"`。紧凑机器
+可读结果、judge、布尔、数字或下游 JSON-only 契约应显式用 `"json"`。
 
 ```python
 execution = await agent.async_run_skills_task(

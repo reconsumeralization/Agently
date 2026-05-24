@@ -5,6 +5,7 @@ from agently.types.data.prompt import (
     _is_scalar_field_spec,
     _classify_field_spec,
     _resolve_auto_format,
+    _should_auto_use_hybrid,
     PromptModel,
 )
 from agently.builtins.plugins.ResponseParser.modules.hybrid import (
@@ -58,11 +59,11 @@ class TestResolveAutoFormat:
         """Non-string scalar control fields stay on JSON in auto mode."""
         assert _resolve_auto_format({"name": (str,), "age": (int,), "active": (bool,)}) == "json"
 
-    def test_mixed_scalar_complex_json(self):
-        assert _resolve_auto_format({"summary": (str,), "items": [(str,)]}) == "json"
+    def test_string_scalar_plus_complex_hybrid(self):
+        assert _resolve_auto_format({"summary": (str,), "items": [(str,)]}) == "hybrid"
 
     def test_eda_schema_hybrid(self):
-        """EDA-like: scalar fields + complex lists."""
+        """String fields plus complex records resolve to hybrid."""
         schema = {
             "intent": (str, "must be exactly 'create_schematic'"),
             "title": (str, "short circuit title"),
@@ -70,7 +71,34 @@ class TestResolveAutoFormat:
             "components": [{"refdes": (str,), "query": (str,)}],
             "nets": [{"name": (str,), "connections": [{"refdes": (str,)}]}],
         }
+        assert _resolve_auto_format(schema) == "hybrid"
+
+    def test_dense_eda_schema_with_string_fields_hybrid(self):
+        """Auto uses only structure, not field names or business meaning."""
+        schema = {
+            "intent": (str, "must be exactly 'create_schematic'"),
+            "title": (str, "short circuit title"),
+            "components": [{"refdes": (str,), "query": (str,)}],
+            "nets": [{"name": (str,), "connections": [{"refdes": (str,)}]}],
+        }
+        assert _resolve_auto_format(schema) == "hybrid"
+
+    def test_judge_schema_json_even_with_reason_fields(self):
+        schema = {
+            "rule_results": [{
+                "rule_id": (str, "Stable rule id", True),
+                "reason": (str, "Concise rationale", True),
+                "passed": (bool, "Final boolean", True),
+            }],
+            "overall_reason": (str, "Concise summary", True),
+            "passes": (bool, "Final pass/fail", True),
+        }
         assert _resolve_auto_format(schema) == "json"
+
+    def test_auto_hybrid_requires_text_hint_and_complex_field(self):
+        assert _should_auto_use_hybrid({"label": (str,), "items": [(str,)]}) is True
+        assert _should_auto_use_hybrid({"summary": (str,), "items": [(str,)], "count": (int,)}) is False
+        assert _should_auto_use_hybrid({"items": [(str,)]}) is False
 
     def test_all_complex_json(self):
         assert _resolve_auto_format({"items": [(str,)]}) == "json"
@@ -88,9 +116,14 @@ class TestResolveAutoFormat:
 
 
 class TestPromptModelAuto:
-    def test_auto_with_mixed_sets_json_and_flag(self):
+    def test_auto_with_string_and_complex_fields_sets_hybrid_and_flag(self):
+        m = PromptModel(output={"analysis": (str,), "items": [(str,)]}, output_format="auto")
+        assert m.output_format == "hybrid"
+        assert m.output_format_resolved_from_auto is True
+
+    def test_auto_with_generic_mixed_sets_hybrid_and_flag(self):
         m = PromptModel(output={"name": (str,), "items": [(str,)]}, output_format="auto")
-        assert m.output_format == "json"
+        assert m.output_format == "hybrid"
         assert m.output_format_resolved_from_auto is True
 
     def test_auto_with_string_fields_sets_flat_markdown_and_flag(self):
