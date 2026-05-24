@@ -69,6 +69,7 @@ $ensure_all_keys: true
 .request:
   instruct: Classify the ticket text.
   output:
+    $format: json
     severity:
       $type: str
       $desc: One of P0/P1/P2/P3
@@ -94,6 +95,11 @@ result = (
 `load_json_prompt(...)` is the same API for JSON. Both accept either a path or a raw string body. Pick one config file per prompt or stack multiple prompts with `prompt_key_path="demo.output_control"` to select inside a multi-prompt file.
 
 `$ensure_all_keys: true` at the top makes all leaves required regardless of per-leaf `$ensure`. Use it when the entire schema must come back complete.
+
+`$format` on the `output` block maps to the same output format setting as
+`.output(..., format=...)`. Supported values are `auto`, `json`,
+`flat_markdown`, and `hybrid`. You can also use `.format`, `$output_format`, or
+`.output_format` when a config file needs a more explicit key.
 
 ## Round-tripping
 

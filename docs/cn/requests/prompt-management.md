@@ -69,6 +69,7 @@ $ensure_all_keys: true
 .request:
   instruct: 对工单文本分类。
   output:
+    $format: json
     severity:
       $type: str
       $desc: P0/P1/P2/P3 之一
@@ -94,6 +95,10 @@ result = (
 `load_json_prompt(...)` 是 JSON 版本的同一 API。两者都接受路径或原始字符串。可以一份配置一个 prompt，也可以用 `prompt_key_path="demo.output_control"` 在多 prompt 文件里挑一个。
 
 顶层 `$ensure_all_keys: true` 会强制所有叶子都必填，覆盖每叶子的 `$ensure`。整个 schema 必须完整返回时使用。
+
+`output` 块里的 `$format` 会映射到 `.output(..., format=...)` 同一个输出格式设置。
+支持 `auto`、`json`、`flat_markdown`、`hybrid`。如果配置文件需要更明确的 key，
+也可以写 `.format`、`$output_format` 或 `.output_format`。
 
 ## 往返转换
 
