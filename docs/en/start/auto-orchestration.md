@@ -87,6 +87,9 @@ item.graph_id
 Executor routes bridge TriggerFlow runtime stream and ModelRequest instant
 checkpoints so services can stream route decisions, plan/graph readiness,
 task/action progress, selected model field deltas, and final semantic outputs.
+If a TriggerFlow-backed route fails, the Agent execution stream is closed and
+the original error is raised to the consumer instead of leaving
+`get_async_generator(...)` waiting for more items.
 
 For Dynamic Task model nodes, structured output fields stream under stable paths:
 

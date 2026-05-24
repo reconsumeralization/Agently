@@ -82,6 +82,8 @@ item.graph_id
 Executor route 会桥接 TriggerFlow runtime stream 和 ModelRequest instant
 checkpoint，让服务能流式输出 route decision、plan/graph readiness、
 task/action 进度、选定模型字段 delta 和最终 semantic outputs。
+如果 TriggerFlow-backed route 失败，Agent execution stream 会关闭，并把原始
+错误抛给消费者，而不是让 `get_async_generator(...)` 一直等待后续 item。
 
 Dynamic Task 的 model 节点会把结构化输出字段映射到稳定 path：
 

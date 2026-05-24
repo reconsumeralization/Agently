@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any, cast
 
@@ -373,6 +374,42 @@ async def test_agent_execution_runs_submitted_dynamic_task_and_streams_process()
     assert any(item.path == "route.dynamic_task.graph" for item in stream_items)
     assert any(item.path == "task_dag.tasks.extract.start" for item in stream_items)
     assert any(item.path == "task_dag.tasks.extract.complete" for item in stream_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_failure_terminates_stream():
+    async def boom_handler(_context):
+        raise RuntimeError("intentional handler failure")
+
+    agent = Agently.create_agent("execution-dag-failure-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-execution-dag-failure",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [{"id": "explode", "kind": "local", "binding": "boom_handler"}],
+                "semantic_outputs": {"final": "explode"},
+            },
+            handlers={"boom_handler": boom_handler},
+        )
+        .input("run failing graph")
+        .create_execution()
+    )
+
+    stream_items = []
+
+    async def consume_stream():
+        async for item in execution.get_async_generator(type="instant"):
+            stream_items.append(item)
+
+    with pytest.raises(RuntimeError, match="intentional handler failure"):
+        await asyncio.wait_for(consume_stream(), timeout=2)
+
+    assert execution.status == "error"
+    assert any(item.path == "error" for item in stream_items)
+    assert any(item.path == "task_dag.tasks.explode.fail" for item in stream_items)
 
 
 @pytest.mark.asyncio

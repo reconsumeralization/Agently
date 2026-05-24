@@ -156,16 +156,35 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
 
     compiled = task.compile(graph)
     dag_execution = compiled.create_execution(auto_close=False)
-    stream = dag_execution.get_async_runtime_stream(timeout=None)
+    graph_input = candidate.get("graph_input", {"target": target})
 
     async def runner():
-        await dag_execution.async_start(candidate.get("graph_input", {"target": target}))
-        return await dag_execution.async_close(timeout=candidate.get("timeout", 30))
+        try:
+            await dag_execution.async_start(graph_input)
+            return await dag_execution.async_close(timeout=candidate.get("timeout", 30))
+        except BaseException:
+            await dag_execution.async_stop_stream()
+            raise
 
     run_task = asyncio.create_task(runner())
-    async for item in stream:
-        await execution.bridge_task_dag_stream_item(item, route="dynamic_task")
-    close_snapshot = await run_task
+    while not getattr(dag_execution, "_started", False) and not run_task.done():
+        await asyncio.sleep(0)
+    if not getattr(dag_execution, "_started", False):
+        close_snapshot = await run_task
+        task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
+        execution.close_snapshot = close_snapshot
+        execution.logs = {"task_dag": close_snapshot}
+        return task_result
+    stream = dag_execution.get_async_runtime_stream(timeout=None)
+    try:
+        async for item in stream:
+            await execution.bridge_task_dag_stream_item(item, route="dynamic_task")
+        close_snapshot = await run_task
+    except BaseException:
+        if not run_task.done():
+            run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+        raise
     task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
     execution.close_snapshot = close_snapshot
     execution.logs = {"task_dag": close_snapshot}
