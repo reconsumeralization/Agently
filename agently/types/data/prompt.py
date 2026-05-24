@@ -143,31 +143,27 @@ def _classify_field_spec(field_spec: Any) -> Literal["scalar", "complex"]:
     return "scalar" if _is_scalar_field_spec(field_spec) else "complex"
 
 
+def _is_string_field_spec(field_spec: Any) -> bool:
+    if isinstance(field_spec, tuple) and field_spec:
+        return field_spec[0] is str
+    return field_spec is str
+
+
 def _resolve_auto_format(output: Any) -> Literal["json", "flat_markdown", "hybrid"]:
     """Determine the best output format from schema shape.
 
     ===================== =============================================
     Schema shape           Format chosen
     ===================== =============================================
-    Flat dict, all scalar  ``"flat_markdown"`` (str/int/bool/float)
-    Mixed scalar + complex ``"hybrid"``
+    Flat dict, all strings ``"flat_markdown"``
+    Control / nested data  ``"json"``
     All complex / non-dict ``"json"``
     ===================== =============================================
     """
     if not isinstance(output, Mapping) or not output:
         return "json"
 
-    has_scalar = False
-    has_complex = False
-    for value in output.values():
-        if _classify_field_spec(value) == "scalar":
-            has_scalar = True
-        else:
-            has_complex = True
-        if has_scalar and has_complex:
-            return "hybrid"
-
-    if has_scalar:
+    if all(_is_string_field_spec(value) for value in output.values()):
         return "flat_markdown"
     return "json"
 PromptOutputStructure: TypeAlias = Mapping[str, Any] | list[Any]

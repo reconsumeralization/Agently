@@ -25,13 +25,14 @@ from __future__ import annotations
 import re
 from typing import Any, AsyncGenerator, Mapping
 
-import json5
-
 from agently.types.data.prompt import _classify_field_spec
 from agently.types.data.response import StreamingData
 from agently.utils import DataLocator
 
-from .code_fence import strip_enclosing_code_fence
+from .section_value import (
+    normalize_complex_section_value,
+    normalize_scalar_section_value,
+)
 
 
 def _extract_json_block(content: str) -> str | None:
@@ -41,7 +42,7 @@ def _extract_json_block(content: str) -> str | None:
     :func:`DataLocator.locate_output_json`.
     """
     # Try markdown code block first
-    m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", content, flags=re.DOTALL)
+    m = re.search(r"```(?:json)?[ \t]*\n(.*?)\n?```", content, flags=re.DOTALL)
     if m:
         return m.group(1).strip()
     return None
@@ -87,28 +88,19 @@ def parse_hybrid_output(text: str, output_schema: Mapping[str, Any]) -> dict[str
             json_text = _extract_json_block(content)
             if json_text is None:
                 json_text = DataLocator.locate_output_json(content, {field_name: field_spec})
-            if json_text:
-                try:
-                    result[field_name] = json5.loads(json_text)
-                except Exception:
-                    result[field_name] = content
-            else:
-                result[field_name] = content
+            ok, value = normalize_complex_section_value(
+                json_text if json_text is not None else content,
+                field_name=field_name,
+            )
         else:
-            # Scalar field. If the model JSON-encoded the value as a string,
-            # decode it so quotes/escapes resolve; otherwise unwrap any single
-            # enclosing code fence (```html, ```svg, ``` ...) and store the raw
-            # artifact. Content that is not wholly a fence is left untouched.
             json_text = _extract_json_block(content)
-            decoded_string: str | None = None
-            if json_text is not None:
-                try:
-                    parsed = json5.loads(json_text)
-                    if isinstance(parsed, str):
-                        decoded_string = parsed
-                except Exception:
-                    decoded_string = None
-            result[field_name] = decoded_string if decoded_string is not None else strip_enclosing_code_fence(content)
+            ok, value = normalize_scalar_section_value(
+                json_text if json_text is not None else content,
+                field_name=field_name,
+            )
+        if not ok:
+            return None
+        result[field_name] = value
 
     return result if result else None
 

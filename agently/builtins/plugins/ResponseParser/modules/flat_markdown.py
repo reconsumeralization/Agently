@@ -22,9 +22,13 @@ from __future__ import annotations
 import re
 from typing import Any, AsyncGenerator, Mapping
 
+from agently.types.data.prompt import _classify_field_spec
 from agently.types.data.response import StreamingData
 
-from .code_fence import strip_enclosing_code_fence
+from .section_value import (
+    normalize_complex_section_value,
+    normalize_scalar_section_value,
+)
 
 
 def parse_flat_markdown_output(text: str, output_schema: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -62,7 +66,20 @@ def parse_flat_markdown_output(text: str, output_schema: Mapping[str, Any]) -> d
     for i in range(1, len(sections), 2):
         field_name = sections[i].strip()
         content = sections[i + 1].strip() if i + 1 < len(sections) else ""
-        result[field_name] = strip_enclosing_code_fence(content)
+        field_spec = output_schema.get(field_name)
+        if _classify_field_spec(field_spec) == "complex":
+            ok, value = normalize_complex_section_value(
+                content,
+                field_name=field_name,
+            )
+        else:
+            ok, value = normalize_scalar_section_value(
+                content,
+                field_name=field_name,
+            )
+        if not ok:
+            return None
+        result[field_name] = value
 
     return result if result else None
 

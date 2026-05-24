@@ -54,12 +54,12 @@ class TestResolveAutoFormat:
     def test_all_str_flat_markdown(self):
         assert _resolve_auto_format({"html": (str, "HTML"), "notes": (str, "Notes")}) == "flat_markdown"
 
-    def test_mixed_scalar_types_flat_markdown(self):
-        """All scalars (str + int + bool) are flat_markdown, not just str."""
-        assert _resolve_auto_format({"name": (str,), "age": (int,), "active": (bool,)}) == "flat_markdown"
+    def test_mixed_scalar_types_json(self):
+        """Non-string scalar control fields stay on JSON in auto mode."""
+        assert _resolve_auto_format({"name": (str,), "age": (int,), "active": (bool,)}) == "json"
 
-    def test_mixed_scalar_complex_hybrid(self):
-        assert _resolve_auto_format({"summary": (str,), "items": [(str,)]}) == "hybrid"
+    def test_mixed_scalar_complex_json(self):
+        assert _resolve_auto_format({"summary": (str,), "items": [(str,)]}) == "json"
 
     def test_eda_schema_hybrid(self):
         """EDA-like: scalar fields + complex lists."""
@@ -70,7 +70,7 @@ class TestResolveAutoFormat:
             "components": [{"refdes": (str,), "query": (str,)}],
             "nets": [{"name": (str,), "connections": [{"refdes": (str,)}]}],
         }
-        assert _resolve_auto_format(schema) == "hybrid"
+        assert _resolve_auto_format(schema) == "json"
 
     def test_all_complex_json(self):
         assert _resolve_auto_format({"items": [(str,)]}) == "json"
@@ -88,14 +88,19 @@ class TestResolveAutoFormat:
 
 
 class TestPromptModelAuto:
-    def test_auto_with_mixed_sets_hybrid_and_flag(self):
+    def test_auto_with_mixed_sets_json_and_flag(self):
         m = PromptModel(output={"name": (str,), "items": [(str,)]}, output_format="auto")
-        assert m.output_format == "hybrid"
+        assert m.output_format == "json"
         assert m.output_format_resolved_from_auto is True
 
-    def test_auto_with_all_scalar_sets_flat_markdown_and_flag(self):
-        m = PromptModel(output={"name": (str,), "age": (int,)}, output_format="auto")
+    def test_auto_with_string_fields_sets_flat_markdown_and_flag(self):
+        m = PromptModel(output={"name": (str,), "notes": (str,)}, output_format="auto")
         assert m.output_format == "flat_markdown"
+        assert m.output_format_resolved_from_auto is True
+
+    def test_auto_with_nonstr_scalar_sets_json_and_flag(self):
+        m = PromptModel(output={"name": (str,), "age": (int,)}, output_format="auto")
+        assert m.output_format == "json"
         assert m.output_format_resolved_from_auto is True
 
     def test_auto_with_all_complex_sets_json_and_flag(self):
@@ -163,17 +168,13 @@ class TestParseHybridOutput:
         assert result["name"] == "Alice"
         assert result["age"] == "30"
 
-    def test_missing_json_block_fallback_to_raw(self):
+    def test_missing_json_block_fails_parse(self):
         text = "### items\nsome raw content without json\n"
-        result = parse_hybrid_output(text, {"items": [(str,)]})
-        assert result is not None
-        assert result["items"] == "some raw content without json"
+        assert parse_hybrid_output(text, {"items": [(str,)]}) is None
 
-    def test_malformed_json_fallback_to_raw(self):
+    def test_malformed_json_fails_parse(self):
         text = "### items\n```json\n{broken json!!!\n```\n"
-        result = parse_hybrid_output(text, {"items": [{"id": (int,)}]})
-        assert result is not None
-        assert isinstance(result["items"], str)
+        assert parse_hybrid_output(text, {"items": [{"id": (int,)}]}) is None
 
     def test_empty_schema_returns_none(self):
         assert parse_hybrid_output("### x\ntext", {}) is None
@@ -192,6 +193,15 @@ class TestParseHybridOutput:
         )
         result = parse_hybrid_output(text, {"summary": (str,), "items": [(str,)]})
         assert result == {"summary": "A summary paragraph.", "items": ["one", "two"]}
+
+    def test_unwraps_scalar_same_field_json_wrapper(self):
+        text = '### passes\n```json\n{"passes": false}\n```'
+        result = parse_hybrid_output(text, {"passes": (bool,)})
+        assert result == {"passes": False}
+
+    def test_rejects_complex_placeholder_scaffold(self):
+        text = "### rule_results\n<!-- (JSON) <per-rule evidence list> -->"
+        assert parse_hybrid_output(text, {"rule_results": [{"passed": (bool,)}]}) is None
 
 
 class TestHybridStreamingParser:

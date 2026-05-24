@@ -136,6 +136,32 @@ class TestParseFlatMarkdownOutput:
         result = parse_flat_markdown_output(text, TEST_SCHEMA)
         assert result == {"html": "<div>ok</div>", "notes": "summary"}
 
+    def test_unwraps_same_field_json_wrapper(self):
+        from agently.builtins.plugins.ResponseParser.modules.flat_markdown import (
+            parse_flat_markdown_output,
+        )
+
+        text = '### passes\n{"passes": false}'
+        result = parse_flat_markdown_output(text, {"passes": (bool,)})
+        assert result == {"passes": False}
+
+    def test_rejects_placeholder_scaffold(self):
+        from agently.builtins.plugins.ResponseParser.modules.flat_markdown import (
+            parse_flat_markdown_output,
+        )
+
+        text = "### non_investment_advice\n<!-- (text) <disclaimer description> -->"
+        result = parse_flat_markdown_output(text, {"non_investment_advice": (str,)})
+        assert result is None
+
+    def test_rejects_complex_raw_text(self):
+        from agently.builtins.plugins.ResponseParser.modules.flat_markdown import (
+            parse_flat_markdown_output,
+        )
+
+        text = "### items\nsome raw content without json"
+        assert parse_flat_markdown_output(text, {"items": [(str,)]}) is None
+
 
 # ── flat_markdown streaming parser ──────────────────────────────────────────────
 
