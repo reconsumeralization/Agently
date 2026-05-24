@@ -115,10 +115,14 @@ execution = await agent.async_run_skills_task(
 ```
 
 `output_format=` selects how that model response is controlled. Leave it as
-`"auto"` for ordinary Skill answers; use `"flat_markdown"` for flat scalar
-schemas that contain long HTML, Markdown, code, SQL, or templates; use
-`"hybrid"` when long prose also needs structured lists, tables, citations, or
-metadata; use `"json"` for compact machine-readable results.
+`"auto"` for ordinary Skill answers. Auto is conservative: it chooses
+`"flat_markdown"` only for flat string-only schemas, and chooses `"json"` for
+boolean, numeric, nested, or mixed schemas. Use `"flat_markdown"` explicitly for
+flat string fields that contain long HTML, Markdown, code, SQL, or templates;
+use `"hybrid"` explicitly when long prose also needs structured lists, tables,
+citations, or metadata and the extra parse/retry cost is acceptable; use
+`"json"` for compact machine-readable results, judges, booleans, numbers, and
+deeply nested arrays or objects.
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -129,6 +133,33 @@ execution = await agent.async_run_skills_task(
     output_format="flat_markdown",
 )
 ```
+
+For fixed required fields, prefer the third tuple element in the schema:
+
+```python
+semantic_outputs = {
+    "rules": [
+        {
+            "rule_id": (str, "Stable rule id", True),
+            "passed": (bool, "Whether this rule passed", True),
+            "evidence": (str, "Concise evidence; empty string is allowed", False),
+        }
+    ],
+    "passes": (bool, "Overall pass/fail", True),
+}
+```
+
+Use runtime `ensure_keys=` only for paths that are conditional or decided at
+runtime. `max_retries=3` means Agently can make up to three additional model
+attempts when parsing, required keys, strict output validation, or custom
+validators fail. Retries often recover ordinary omissions, markdown header
+mistakes, and auto-format degradation to JSON. They can still fail after all
+attempts when a model repeatedly echoes placeholder scaffolding, returns prose
+for boolean or numeric fields, produces malformed nested arrays, truncates a
+large prompt, or must fill many wildcard paths such as
+`rule_results[*].evidence`. For model judges with many rules, prefer
+`output_format="json"`, keep the schema shallow when possible, and split very
+large rule sets into smaller judge calls.
 
 Direct Skills execution streams runtime items through `stream_handler`:
 

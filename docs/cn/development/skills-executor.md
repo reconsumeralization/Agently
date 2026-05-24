@@ -108,9 +108,9 @@ execution = await agent.async_run_skills_task(
 ```
 
 `output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认
-`"auto"`；扁平标量 schema 且字段包含较长 HTML、Markdown、代码、SQL 或模板时用
-`"flat_markdown"`；长文本同时需要结构化 list、table、citation 或 metadata 时用
-`"hybrid"`；紧凑的机器可读结果用 `"json"`。
+`"auto"`。Auto 是保守策略：只有扁平且全是字符串字段时才会选择
+`"flat_markdown"`；布尔、数字、嵌套结构或混合结构默认选择 `"json"`。扁平字符串字段包含较长 HTML、Markdown、代码、SQL 或模板时可以显式用
+`"flat_markdown"`；长文本同时需要结构化 list、table、citation 或 metadata，且能接受额外解析/重试成本时，显式用 `"hybrid"`；紧凑机器可读结果、judge、布尔、数字、深层数组或对象用 `"json"`。
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -121,6 +121,29 @@ execution = await agent.async_run_skills_task(
     output_format="flat_markdown",
 )
 ```
+
+固定必填字段优先写在 schema 元组第三项：
+
+```python
+semantic_outputs = {
+    "rules": [
+        {
+            "rule_id": (str, "Stable rule id", True),
+            "passed": (bool, "Whether this rule passed", True),
+            "evidence": (str, "Concise evidence; empty string is allowed", False),
+        }
+    ],
+    "passes": (bool, "Overall pass/fail", True),
+}
+```
+
+运行时 `ensure_keys=` 只用于条件路径或运行时才决定的路径。`max_retries=3`
+表示解析失败、必填 key 缺失、严格输出校验失败或自定义 validator 失败时，Agently
+最多还会发起三次额外模型尝试。普通遗漏、markdown header 错误、auto format
+降级到 JSON 通常能靠重试恢复；但模型持续回显占位符脚手架、用散文填布尔/数字字段、生成畸形嵌套数组、长 prompt 被截断，或需要填很多
+`rule_results[*].evidence` 这类 wildcard 路径时，三次重试后仍可能失败。多规则
+model judge 建议显式 `output_format="json"`，schema 尽量浅，规则过多时拆成多次
+judge。
 
 直接执行 Skills 时，`stream_handler` 会收到 runtime items：
 
