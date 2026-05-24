@@ -389,6 +389,73 @@ async def test_task_dag_executor_resolver_factory_can_bind_by_task():
     assert snapshot["task_results"] == {"one": "one:1", "two": "two:2"}
 
 
+@pytest.mark.asyncio
+async def test_task_dag_executor_resolves_input_placeholders():
+    async def local_task(context):
+        if context.task.id == "lookup":
+            return {
+                "ticket": {"id": "T-42", "priority": "high"},
+                "message": "lookup complete",
+            }
+        return {
+            "task_inputs": context.task.inputs,
+            "task_input_inputs": context.task_input["inputs"],
+        }
+
+    graph = {
+        "graph_id": "placeholder-demo",
+        "tasks": [
+            {"id": "lookup", "kind": "local"},
+            {
+                "id": "draft",
+                "kind": "local",
+                "depends_on": ["lookup"],
+                "inputs": {
+                    "ticket": "${DEPS.lookup.ticket}",
+                    "summary": "Account ${INPUT.account} ticket ${STATE.lookup.ticket.id}",
+                    "raw_input": "${INPUT}",
+                },
+            },
+        ],
+    }
+
+    snapshot = await TaskDAGExecutor({"local": local_task}).async_run(
+        graph,
+        graph_input={"account": "Acme"},
+        timeout=1,
+    )
+
+    draft = snapshot["task_results"]["draft"]
+    assert draft["task_inputs"] == draft["task_input_inputs"]
+    assert draft["task_inputs"]["ticket"] == {"id": "T-42", "priority": "high"}
+    assert draft["task_inputs"]["summary"] == "Account Acme ticket T-42"
+    assert draft["task_inputs"]["raw_input"] == {"account": "Acme"}
+
+
+@pytest.mark.asyncio
+async def test_task_dag_executor_fails_closed_for_missing_input_placeholder():
+    async def local_task(context):
+        return context.task.inputs
+
+    graph = {
+        "graph_id": "missing-placeholder-demo",
+        "tasks": [
+            {
+                "id": "draft",
+                "kind": "local",
+                "inputs": {"summary": "Ticket ${INPUT.ticket_id}"},
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="input placeholder"):
+        await TaskDAGExecutor({"local": local_task}).async_run(
+            graph,
+            graph_input={"account": "Acme"},
+            timeout=1,
+        )
+
+
 def test_task_dag_validator_prunes_unknown_optional_handler():
     graph = {
         "graph_id": "optional-prune",

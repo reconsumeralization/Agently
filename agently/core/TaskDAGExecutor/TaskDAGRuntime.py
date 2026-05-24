@@ -15,13 +15,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from agently.types.data import TaskDAG, TaskDAGNode
 from agently.types.trigger_flow import TriggerFlowRuntimeData
-from agently.utils import FunctionShifter
+from agently.utils import DataLocator, FunctionShifter
 
 from .TaskDAGHelpers import (
     _approval_payload,
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
 
 
 _DYNAMIC_CACHE_ATTR = "_task_dag_executor_cache"
+_INPUT_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 
 
 @dataclass
@@ -206,31 +209,38 @@ def _make_task_runner(
         graph_input = data.get_state("graph_input")
         task_results = dict(data.get_state("task_results", {}) or {})
         dependency_results = {dependency: task_results[dependency] for dependency in task.depends_on}
+        resolved_inputs = _resolve_task_input_placeholders(
+            task.inputs,
+            graph_input=graph_input,
+            dependency_results=dependency_results,
+            task_id=task.id,
+        )
+        resolved_task = replace(task, inputs=resolved_inputs)
         task_input = {
-            "task_id": task.id,
-            "task": task.to_dict(),
+            "task_id": resolved_task.id,
+            "task": resolved_task.to_dict(),
             "graph_id": graph.graph_id,
             "graph_input": graph_input,
-            "inputs": task.inputs,
+            "inputs": resolved_inputs,
             "deps": dependency_results,
             "dependency_payload": data.value,
         }
-        await _put_task_event(data, graph, task, "start", input=task_input)
+        await _put_task_event(data, graph, resolved_task, "start", input=task_input)
 
         try:
-            if _approval_required(task) and not data.is_resume:
-                await _put_task_event(data, graph, task, "approval_required", input=task_input)
+            if _approval_required(resolved_task) and not data.is_resume:
+                await _put_task_event(data, graph, resolved_task, "approval_required", input=task_input)
                 return await data.async_pause_for(
-                    type=_approval_type(task),
-                    payload=_approval_payload(task, task_input),
-                    interrupt_id=f"task:{ graph.graph_id }:{ task.id }",
+                    type=_approval_type(resolved_task),
+                    payload=_approval_payload(resolved_task, task_input),
+                    interrupt_id=f"task:{ graph.graph_id }:{ resolved_task.id }",
                     resume_to="self",
                 )
-            output = data.resume.value if _is_approval_task(task) and data.is_resume else None
-            if not _is_approval_task(task):
+            output = data.resume.value if _is_approval_task(resolved_task) and data.is_resume else None
+            if not _is_approval_task(resolved_task):
                 context = DynamicTaskContext(
                     graph=graph,
-                    task=task,
+                    task=resolved_task,
                     task_input=task_input,
                     graph_input=graph_input,
                     dependency_results=dependency_results,
@@ -238,23 +248,127 @@ def _make_task_runner(
                     resources=data.resources.to_dict(),
                     runtime_data=data,
                 )
-                handler = resolver.resolve(task)
+                handler = resolver.resolve(resolved_task)
                 output = await _execute_handler(handler, context)
         except Exception as error:
-            await _record_task_failure(data, graph, task, error, result_lock=result_lock)
-            await _put_task_event(data, graph, task, "fail", error=str(error))
-            if _fallback_action(task) == "skip":
+            await _record_task_failure(data, graph, resolved_task, error, result_lock=result_lock)
+            await _put_task_event(data, graph, resolved_task, "fail", error=str(error))
+            if _fallback_action(resolved_task) == "skip":
                 output = {"status": "skipped", "reason": str(error)}
-                await _record_task_success(data, graph, task, output, result_lock=result_lock)
-                await _put_task_event(data, graph, task, "skipped", output=output)
+                await _record_task_success(data, graph, resolved_task, output, result_lock=result_lock)
+                await _put_task_event(data, graph, resolved_task, "skipped", output=output)
                 return output
             raise
 
-        await _record_task_success(data, graph, task, output, result_lock=result_lock)
-        await _put_task_event(data, graph, task, "complete", output=output)
+        await _record_task_success(data, graph, resolved_task, output, result_lock=result_lock)
+        await _put_task_event(data, graph, resolved_task, "complete", output=output)
         return output
 
     return run_task
+
+
+def _resolve_task_input_placeholders(
+    value: Any,
+    *,
+    graph_input: Any,
+    dependency_results: Mapping[str, Any],
+    task_id: str,
+) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _resolve_task_input_placeholders(
+                item,
+                graph_input=graph_input,
+                dependency_results=dependency_results,
+                task_id=task_id,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _resolve_task_input_placeholders(
+                item,
+                graph_input=graph_input,
+                dependency_results=dependency_results,
+                task_id=task_id,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _resolve_task_input_placeholders(
+                item,
+                graph_input=graph_input,
+                dependency_results=dependency_results,
+                task_id=task_id,
+            )
+            for item in value
+        )
+    if not isinstance(value, str):
+        return value
+
+    matches = list(_INPUT_PLACEHOLDER_RE.finditer(value))
+    if not matches:
+        return value
+
+    if len(matches) == 1 and matches[0].span() == (0, len(value)):
+        return _resolve_single_task_placeholder(
+            matches[0].group(1),
+            graph_input=graph_input,
+            dependency_results=dependency_results,
+            task_id=task_id,
+        )
+
+    def replace_match(match: re.Match[str]) -> str:
+        resolved = _resolve_single_task_placeholder(
+            match.group(1),
+            graph_input=graph_input,
+            dependency_results=dependency_results,
+            task_id=task_id,
+        )
+        return _stringify_placeholder_value(resolved)
+
+    return _INPUT_PLACEHOLDER_RE.sub(replace_match, value)
+
+
+def _resolve_single_task_placeholder(
+    expression: str,
+    *,
+    graph_input: Any,
+    dependency_results: Mapping[str, Any],
+    task_id: str,
+) -> Any:
+    parts = expression.strip().split(".", 1)
+    root_name = parts[0].strip().upper()
+    path = parts[1].strip() if len(parts) > 1 else ""
+
+    if root_name == "INPUT":
+        root = graph_input
+    elif root_name in {"DEPS", "STATE"}:
+        root = dependency_results
+    else:
+        raise ValueError(
+            f"Dynamic task '{ task_id }' has unsupported input placeholder '${{{ expression }}}'. "
+            "Use ${INPUT...}, ${DEPS...}, or ${STATE...}."
+        )
+
+    if not path:
+        return root
+
+    missing = object()
+    value = DataLocator.locate_path_in_dict(root, path, "dot", default=missing)
+    if value is missing:
+        raise ValueError(
+            f"Dynamic task '{ task_id }' input placeholder '${{{ expression }}}' "
+            f"does not match an available runtime path."
+        )
+    return value
+
+
+def _stringify_placeholder_value(value: Any) -> str:
+    if isinstance(value, (Mapping, list, tuple)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 def _make_finalize_handler(graph: TaskDAG):

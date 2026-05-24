@@ -39,6 +39,31 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=10)
 ```
 
+提交式 DAG 的 `inputs` 可以用占位符引用运行时数据。整个字符串就是占位符时会保留原始值类型；占位符嵌在普通字符串里时会渲染成字符串。Slot 名大小写不敏感，但文档推荐大写：
+
+```python
+plan = {
+    "graph_id": "review",
+    "task_schema_version": "task_dag/v1",
+    "tasks": [
+        {"id": "lookup", "kind": "local", "binding": "local_handler"},
+        {
+            "id": "final",
+            "kind": "local",
+            "binding": "local_handler",
+            "depends_on": ["lookup"],
+            "inputs": {
+                "account": "${INPUT.account}",
+                "ticket": "${DEPS.lookup.ticket}",
+                "summary": "Ticket ${STATE.lookup.ticket.id} for ${INPUT.account}",
+            },
+        },
+    ],
+}
+```
+
+`${INPUT}` 指向提交 DAG 时传入的 graph input。`${DEPS...}` 指向已完成的上游依赖结果；`${STATE...}` 是同一个 dependency-results 命名空间的兼容别名。运行时路径缺失会在任务执行时 fail closed，而不是把未解析字符串继续传给 handler。
+
 提交式计划也可以保存成 YAML 或 JSON 配置。先把配置加载成 `TaskDAG`，再走同一个
 facade：
 
@@ -69,10 +94,10 @@ task = agent.create_dynamic_task(target="review policy")
 需要独立契约，可以在该节点的 `inputs.output_schema` 覆盖。每个模型任务也可以设置
 `inputs.output_format`：
 
-- `json`：紧凑的机器控制输出、Action 参数、路由标记、数字/布尔事实、严格抽取。
-- `flat_markdown`：扁平标量字段，且包含较长 HTML、Markdown、代码、SVG、SQL、模板或报告章节。
-- `hybrid`：长文本同时需要结构化 list、table、citation、metadata 或嵌套 evidence。
-- `auto`：接受由 schema 自动选择输出格式，并且可以接受重试延迟。
+- `json`：紧凑的机器控制输出、Action 参数、路由标记、数字/布尔事实、model judge、密集嵌套数组/对象、严格抽取。
+- `flat_markdown`：扁平字符串字段，且包含较长 HTML、Markdown、代码、SVG、SQL、模板或报告章节。
+- `hybrid`：显式 opt-in，用于长文本同时需要结构化 list、table、citation、metadata 或嵌套 evidence，且可接受重试耗时。
+- `auto`：接受保守的 schema 自动选择输出格式，并且可以接受重试延迟。
 
 ```python
 task = Agently.create_dynamic_task(

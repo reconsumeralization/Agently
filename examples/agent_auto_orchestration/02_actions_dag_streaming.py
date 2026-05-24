@@ -14,9 +14,9 @@ drafts a reply, and reviews quality — all as a DAG with dependencies.
 
 Data flow between nodes uses the current Dynamic Task scheme: each node is a
 ``kind="local"`` callable handler (keys end in ``_handler``) wired through
-``use_dynamic_task(..., handlers=...)``, and reads its upstream inputs from
-``context.dependency_results["<task_id>"]``. (There is no ``${state.X}`` kwargs
-templating — a node consuming an upstream result must read it from ``context``.)
+``use_dynamic_task(..., handlers=...)``. Direct runtime wiring uses submitted
+DAG placeholders such as ``${INPUT.ticket}`` and ``${DEPS.task_id.path}``;
+richer joins read upstream values from ``context.dependency_results``.
 
 Expected key output from one real DeepSeek run:
     selected_route=dynamic_task
@@ -273,7 +273,7 @@ async def main() -> None:
                 "id": "classify",
                 "kind": "local",
                 "binding": "classify_handler",
-                "inputs": {"kwargs": {"ticket": ticket_str}},
+                "inputs": {"kwargs": {"ticket": "${INPUT.ticket}"}},
             },
             {
                 "id": "analyze",
@@ -286,7 +286,7 @@ async def main() -> None:
                 "kind": "local",
                 "binding": "draft_handler",
                 "depends_on": ["analyze"],
-                "inputs": {"kwargs": {"ticket": ticket_str}},
+                "inputs": {"kwargs": {"ticket": "${INPUT.ticket}"}},
             },
             {
                 "id": "review",
@@ -315,7 +315,7 @@ async def main() -> None:
     execution = (
         agent
         .use_dynamic_task(mode="submitted", plan=graph, handlers=DAG_HANDLERS)
-        .input("Run support triage graph.")
+        .input({"request": "Run support triage graph.", "ticket": ticket_str})
         .create_execution()
     )
 
