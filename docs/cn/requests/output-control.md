@@ -15,9 +15,10 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 ## 选择输出格式
 
 `.output(...)` 默认是 `format="auto"`。Auto 会根据 schema 形态选择最简单的
-结构化格式：全标量 dict 走 `flat_markdown`，标量与 list/dict 混合走
-`hybrid`，全复杂结构或非 dict 输出仍走 `json`。如果下游代码依赖固定的原始
-输出形态，应显式指定格式。
+结构化格式：扁平纯字符串 dict 走 `flat_markdown`；布尔、数字、嵌套、混合、
+全复杂结构或非 dict 输出仍走 `json`。`hybrid` 作为显式 opt-in 使用，适合
+prose/code 标量字段和结构化 records 混合出现的场景。如果下游代码依赖固定的
+原始输出形态，应显式指定格式。
 
 | 模式 | 适用场景 | 不适合 |
 |---|---|---|
@@ -47,14 +48,17 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 2026-05-23 的 cross-model 验收覆盖了 6 个 provider、12 个场景（共 72 个
 检查），包括 DeepSeek、Qwen、Qianfan ERNIE、MiniMax、GLM 和本地 Qwen2.5。
-这些是已观察到的兼容性数据，不是数学保证：
+2026-05-24 追加的结构化输出稳定性 smoke run 覆盖了 DeepSeek V4 Flash、
+Qwen3.6-35B-A3B、GLM-4.5-Air，场景包括扁平字符串、标量控制字段、嵌套
+EDA netlist、hybrid EDA netlist 和 model-judge 数组。这些是已观察到的兼容性
+数据，不是数学保证：
 
 | 模式 / 场景集合 | 观察结果 | 选择含义 |
 |---|---|---|
-| `auto` overall | 72/72 通过。Auto degradation 会在解析失败后用 JSON 重试并救回结果。 | 应用消费最终解析数据、且可接受重试延迟时，适合作为默认。 |
-| `hybrid` native parsing | 24/24 原生解析成功，0 次降级。 | 在 prose + structured fields 混合场景里，观察到的风险最低。 |
-| `flat_markdown` native parsing | flat_markdown 场景中有 9 次 auto 降级，全部由 JSON retry 救回。主要原因是模型漏掉 `### field` header，尤其纯数字字段以及部分 ERNIE/GLM 运行。 | 适合大段文本/代码字段；不太适合全数字标量 schema 或已知不稳定遵循章节标题的模型。如果不能接受重试延迟，显式用 `json`。 |
-| `json` scenarios | JSON 形态场景在同一轮验收中通过；JSON 也是 auto 降级后的成功 fallback。 | 当严格互通比可读性和大文本 ergonomics 更重要时优先使用。 |
+| `auto` overall | 2026-05-23 旧的 broader auto 矩阵 72/72 通过。当前 auto 更保守：扁平纯字符串 dict 可走 `flat_markdown`；控制字段、数字、布尔、嵌套和混合结构走 `json`。 | 应用消费最终解析数据、且可接受重试延迟时，适合作为默认；需要兼容固定线协议时显式指定格式。 |
+| `flat_markdown` native parsing | 早期 flat_markdown 场景暴露过 header 遵循风险，尤其纯数字字段以及部分 ERNIE/GLM 运行。当前 auto 不再把数字/布尔字段放进 flat_markdown。 | 适合大段文本/代码字段；不适合全数字标量 schema 或已知不稳定遵循章节标题的模型。 |
+| `json` 嵌套结构 | 2026-05-24 smoke run 中，嵌套 EDA netlist 和嵌套 model-judge 数组在 DeepSeek V4 Flash、Qwen3.6-35B-A3B、GLM-4.5-Air 上未观察到 JSON 输出失败。 | 不要一刀切禁用复杂嵌套结构。dense nested records、judge、布尔、数字和机器契约优先用 JSON。 |
+| `hybrid` 嵌套结构 | 实验中发现并修复了一个 prompt contract 缺口：复杂 hybrid section 现在会包含自己的 JSON 子结构。修复后 EDA hybrid 在 DeepSeek V4 Flash 和 Qwen3.6-35B-A3B 上首轮通过；GLM-4.5-Air 在该 hybrid 场景 360s 无 progress request failure。 | prose/code + records 混合时可用 hybrid，但要针对目标 provider 实测。reasoning 或大型 MoE 档位建议 360s+ timeout，并监听 streaming/meta 事件后再判断失败。 |
 | `instant` sampled scenarios | Instant 覆盖了 flat scalar 输出（S8）和 hybrid 混合输出（S11），并在 provider 集合中验收。 | 支持 UI/进度展示，但业务决策与持久化应消费完成后的最终解析结果；streaming event 是临时状态。 |
 
 典型用法：
@@ -71,6 +75,13 @@ agent.input("Extract invoice fields.").output({
     "vendor": (str, "vendor name", True),
     "line_items": [{"sku": (str,), "amount": (float,)}],
 }, format="json").start()
+
+# prose 加结构化 records 都有价值时，显式使用 hybrid。
+agent.input("Create an EDA netlist with design notes.").output({
+    "analysis": (str, "one paragraph design rationale", True),
+    "components": [{"refdes": (str, "reference designator", True), "value": (str, "part value", True)}],
+    "nets": [{"name": (str, "net name", True), "connections": [{"refdes": (str, "refdes", True), "pin": (str, "pin", True)}]}],
+}, format="hybrid").start()
 
 # 纯文本：一个成品文档，不走结构化 parser。
 html = agent.input("Write a complete landing page as HTML.").start()

@@ -15,9 +15,10 @@ For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leave
 ## Choosing An Output Format
 
 `.output(...)` defaults to `format="auto"`. Auto chooses the simplest structured
-format from the schema shape: all-scalar dicts become `flat_markdown`, mixed
-scalar-plus-list/dict schemas become `hybrid`, and all-complex or non-dict
-schemas stay `json`. If downstream code relies on a specific wire shape, set the
+format from the schema shape: flat string-only dicts become `flat_markdown`;
+boolean, numeric, nested, mixed, all-complex, and non-dict schemas stay `json`.
+Use `hybrid` as an explicit opt-in when prose/code scalar fields are mixed with
+structured records. If downstream code relies on a specific wire shape, set the
 format explicitly.
 
 | Mode | Use When | Avoid When |
@@ -50,15 +51,17 @@ events.
 
 The 2026-05-23 cross-model acceptance run covered 6 providers and 12 scenarios
 (72 total checks) using DeepSeek, Qwen, Qianfan ERNIE, MiniMax, GLM, and local
-Qwen2.5. Treat these as observed compatibility data, not a mathematical
-guarantee:
+Qwen2.5. A follow-up 2026-05-24 structured-output stability smoke run covered
+DeepSeek V4 Flash, Qwen3.6-35B-A3B, and GLM-4.5-Air on flat strings, scalar
+controls, nested EDA netlists, hybrid EDA netlists, and model-judge arrays.
+Treat these as observed compatibility data, not a mathematical guarantee:
 
 | Mode / Scenario Set | Observed Result | Selection Implication |
 |---|---|---|
-| `auto` overall | 72/72 passed. Auto degradation rescued parse failures by retrying as JSON. | Good default when the application consumes final parsed data and can tolerate retry latency. |
-| `hybrid` native parsing | 24/24 native successes, 0 degradations. | Lowest observed risk for mixed prose plus structured fields. |
-| `flat_markdown` native parsing | 9 auto degradations among flat-markdown scenarios, all recovered by JSON retry. Most failures were models omitting `### field` headers, especially pure numeric fields and some ERNIE/GLM runs. | Good for large text/code fields; less ideal for all-number scalar schemas or models known to ignore section headers. Use explicit `json` if retry latency is unacceptable. |
-| `json` scenarios | JSON-shaped scenarios passed in the same acceptance run; JSON also served as the successful fallback for degraded auto cases. | Prefer when strict interop matters more than readability or large text ergonomics. |
+| `auto` overall | The 2026-05-23 run passed 72/72 under the previous broader auto matrix. Current auto is narrower: flat string-only dicts may resolve to `flat_markdown`; control, numeric, nested, and mixed schemas resolve to `json`. | Good default when the application consumes final parsed data and can tolerate retry latency, but use explicit format when compatibility matters. |
+| `flat_markdown` native parsing | Earlier flat-markdown scenarios showed header adherence risk, especially pure numeric fields and some ERNIE/GLM runs. Current auto avoids booleans/numbers. | Good for large text/code fields; avoid for all-number scalar schemas or models known to ignore section headers. |
+| `json` nested structures | In the 2026-05-24 smoke run, nested EDA netlists and nested model-judge arrays passed on DeepSeek V4 Flash, Qwen3.6-35B-A3B, and GLM-4.5-Air except no JSON failure was observed. | Do not avoid complex nested structures categorically. Prefer JSON for dense nested records, judges, booleans, numbers, and machine contracts. |
+| `hybrid` nested structures | A prompt-contract gap was found and fixed: complex hybrid sections now include their JSON sub-schema. After the fix, EDA hybrid passed first-attempt on DeepSeek V4 Flash and Qwen3.6-35B-A3B; GLM-4.5-Air hit a 360s request failure with no progress events. | Use hybrid for prose/code plus records after verifying the target provider. For reasoning or large MoE models, use a 360s+ timeout and observe streaming/meta events before declaring failure. |
 | `instant` sampled scenarios | Instant was included for flat scalar output (S8) and hybrid mixed output (S11) across the provider set. | Supported for UI/progress, but final business decisions should consume the completed parsed result because streaming events are provisional. |
 
 Typical usage:
@@ -75,6 +78,13 @@ agent.input("Extract invoice fields.").output({
     "vendor": (str, "vendor name", True),
     "line_items": [{"sku": (str,), "amount": (float,)}],
 }, format="json").start()
+
+# Explicit hybrid when prose plus records are both useful.
+agent.input("Create an EDA netlist with design notes.").output({
+    "analysis": (str, "one paragraph design rationale", True),
+    "components": [{"refdes": (str, "reference designator", True), "value": (str, "part value", True)}],
+    "nets": [{"name": (str, "net name", True), "connections": [{"refdes": (str, "refdes", True), "pin": (str, "pin", True)}]}],
+}, format="hybrid").start()
 
 # Plain text: one artifact, no structured parser.
 html = agent.input("Write a complete landing page as HTML.").start()

@@ -392,6 +392,35 @@ assistant:"""
     assert output_by_name["priority"] == TicketPriority.HIGH
 
 
+def test_hybrid_prompt_marks_sanitized_scalar_fields_as_text():
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.set(
+        "output",
+        {
+            "analysis": (str, "One paragraph analysis.", True),
+            "items": [{"name": (str, "Item name.", True)}],
+        },
+    )
+    prompt.set("output_format", "hybrid")
+
+    text = prompt.to_text()
+
+    assert "### analysis\n<!-- (text) One paragraph analysis. -->\n(your content here)" in text
+    assert (
+        "### items\n"
+        "<!-- (JSON) -->\n"
+        "```json\n"
+        "[\n"
+        "  {\n"
+        "    \"name\": <str> // Item name.\n"
+        "  },\n"
+        "  ...\n"
+        "]\n"
+        "```"
+    ) in text
+
+
 def test_rich_prompt():
     Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
     prompt = Prompt(Agently.plugin_manager, Agently.settings)

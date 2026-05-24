@@ -71,6 +71,8 @@ class AgentlyPromptGenerator(PromptGenerator):
         "output": "OUTPUT",
         "attachment": "ATTACHMENT",
     }
+
+    _SANITIZED_SCALAR_TYPE_NAMES = {"str", "int", "float", "bool"}
     _PROMPT_SLOT_ALIASES = {
         "instruction": "instruct",
         "instructions": "instruct",
@@ -325,7 +327,7 @@ class AgentlyPromptGenerator(PromptGenerator):
         lines.append("Required sections:")
         lines.append("")
         for field_name, field_spec in output.items():
-            kind = _classify_field_spec(field_spec)
+            kind = self._classify_hybrid_field_spec(field_spec)
             kind_note = "(text)" if kind == "scalar" else "(JSON)"
             desc = ""
             if isinstance(field_spec, tuple) and len(field_spec) >= 2 and field_spec[1]:
@@ -339,10 +341,20 @@ class AgentlyPromptGenerator(PromptGenerator):
                 lines.append("(your content here)")
             else:
                 lines.append("```json")
-                lines.append("(your JSON content here)")
+                lines.append(self._generate_json_output_prompt(field_spec, title_mapping=title_mapping))
                 lines.append("```")
             lines.append("")
         return lines
+
+    @classmethod
+    def _classify_hybrid_field_spec(cls, field_spec: Any):
+        if isinstance(field_spec, tuple) and field_spec:
+            first = field_spec[0]
+            if isinstance(first, str) and first in cls._SANITIZED_SCALAR_TYPE_NAMES:
+                return "scalar"
+        if isinstance(field_spec, str) and field_spec in cls._SANITIZED_SCALAR_TYPE_NAMES:
+            return "scalar"
+        return _classify_field_spec(field_spec)
 
     def _generate_yaml_prompt_list(self, title: str, prompt_part: Any) -> list[str]:
         title_mapping = cast(dict[str, str], self.settings.get("prompt.prompt_title_mapping", {}))
