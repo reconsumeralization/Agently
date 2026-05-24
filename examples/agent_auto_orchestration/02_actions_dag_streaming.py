@@ -314,11 +314,10 @@ async def main() -> None:
 
     execution = (
         agent
-        # ${INPUT.x} placeholders resolve against the DAG graph_input, which in
-        # the agent route comes from use_dynamic_task(graph_input=...), NOT from
-        # .input() (that sets the agent prompt, surfacing as {"target": ...}).
-        .use_dynamic_task(mode="submitted", plan=graph, handlers=DAG_HANDLERS, graph_input={"ticket": ticket_str})
-        .input("Run support triage graph.")
+        # In the Agent route, submitted-DAG ${INPUT.x} placeholders read the
+        # execution prompt snapshot input slot unless graph_input= is explicit.
+        .use_dynamic_task(mode="submitted", plan=graph, handlers=DAG_HANDLERS)
+        .input({"ticket": ticket_str})
         .create_execution()
     )
 
