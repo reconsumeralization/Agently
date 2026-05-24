@@ -269,6 +269,7 @@ class SkillExecutor:
                 settings=self.registry.settings,
                 step_budget=step_budget,
                 model_key=model_key,
+                semantic_outputs=_ensure_dict(plan.get("expected_result_shape")),
                 artifact_inline_limit=artifact_inline_limit,
             )
         except Exception as error:

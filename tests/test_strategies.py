@@ -155,6 +155,40 @@ class TestStagedStrategy:
         # Third prompt should reference both prior outputs
         assert "output from step" in str(step_prompts[2])
 
+    @pytest.mark.asyncio
+    async def test_staged_applies_semantic_outputs_at_finalize(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.staged import run_staged_execution
+
+        ctx = MockStrategyContext()
+        calls: list[dict[str, Any]] = []
+
+        async def dynamic_response(**kwargs):
+            calls.append(kwargs)
+            if kwargs.get("output_schema"):
+                return {"decision": "ship", "reason": "all checks passed"}
+            return "step output"
+
+        ctx.async_request_model = dynamic_response
+        semantic_outputs = {
+            "decision": (str, "final decision", True),
+            "reason": (str, "short reason", True),
+        }
+        plan = {
+            "execution_stages": [{"description": "Review the implementation"}],
+        }
+
+        result = await run_staged_execution(
+            task="test",
+            plan=plan,
+            context=ctx,
+            semantic_outputs=semantic_outputs,
+        )
+
+        assert result == {"decision": "ship", "reason": "all checks passed"}
+        finalize_calls = [call for call in calls if call.get("output_schema")]
+        assert len(finalize_calls) == 1
+        assert finalize_calls[0]["output_schema"] == semantic_outputs
+
 
 class TestReactStrategy:
     @pytest.mark.asyncio

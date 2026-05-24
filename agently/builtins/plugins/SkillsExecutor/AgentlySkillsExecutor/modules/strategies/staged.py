@@ -39,6 +39,7 @@ async def run_staged_execution(
     settings: Settings | None = None,
     step_budget: int = 12,
     model_key: str = "reason",
+    semantic_outputs: dict[str, Any] | None = None,
     artifact_inline_limit: int = 4096,
     allow_escalation: bool = False,
     escalation_tools: list[str] | None = None,
@@ -214,7 +215,10 @@ async def run_staged_execution(
     # ── Finalize handler: assemble terminal output ──
     async def finalize(data: Any) -> None:
         step_outputs = data.get_state("step_outputs", [])
-        finalize_block = FinalizeBlock(model_key=data.get_state("model_key", model_key))
+        finalize_block = FinalizeBlock(
+            model_key=data.get_state("model_key", model_key),
+            semantic_outputs=semantic_outputs,
+        )
         result = await finalize_block.execute(
             context=context,
             collected_outputs={"steps": step_outputs, "task": task},

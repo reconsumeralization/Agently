@@ -95,7 +95,10 @@ class FinalizeBlock(FlowBlock):
         block_id = f"finalize-block-{uuid.uuid4().hex[:8]}"
         event_start = f"{block_id}.start"
 
-        block = self
+        block = FinalizeBlock(
+            model_key=model_key,
+            semantic_outputs=semantic_outputs,
+        )
 
         async def handler(data: Any) -> Any:
             collected = data.value if isinstance(data.value, dict) else {}
