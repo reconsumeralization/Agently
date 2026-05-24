@@ -73,6 +73,43 @@ assistant:"""
     )
 
 
+def test_prompt_slot_reference_placeholders_point_to_titles():
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.update(
+        {
+            "input": {"customer": "Acme", "ticket": "T-42"},
+            "info": {"policy": "Enterprise policy"},
+            "instruct": "Use ${INPUT.customer} and ${INFO.policy}; obey ${OUTPUT}. Keep ${unknown} literal.",
+            "output": {
+                "reply": (str, "Answer using ${INSTRUCT} and ${INPUT.ticket}"),
+            },
+            "output_format": "json",
+        }
+    )
+
+    text = prompt.to_text()
+
+    assert "Use [INPUT > customer] and [INFO > policy]; obey [OUTPUT REQUIREMENT]." in text
+    assert "Keep ${unknown} literal." in text
+    assert '"reply": <str> // Answer using [INSTRUCT] and [INPUT > ticket]' in text
+
+
+def test_prompt_slot_references_do_not_break_explicit_mappings():
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.set("input", "Hello")
+    prompt.set(
+        "instruct",
+        "Hello ${name}; see ${input.foo}.",
+        mappings={"name": "Alice"},
+    )
+
+    text = prompt.to_text()
+
+    assert "Hello Alice; see [INPUT > foo]." in text
+
+
 def test_to_text_complex():
     Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
     prompt = Prompt(Agently.plugin_manager, Agently.settings)

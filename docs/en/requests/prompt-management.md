@@ -116,6 +116,12 @@ Inside any prompt slot, `{name}` references another slot by key, and `${name}` i
 
 - `instruct: "Reply {input} politely."` — pulls the request `input` into the instruct text.
 - `${ENV.OPENAI_API_KEY}` in *settings* (not prompts) is replaced by the env var; prompts use `${name}` with explicit mappings.
+- `${INPUT.customer}`, `${INFO.policy}`, and `${INSTRUCT.step}` are render-time
+  slot references. They become prompt section pointers such as
+  `[INPUT > customer]` instead of copying slot values into another slot. Slot
+  names are case-insensitive; docs use uppercase. The path after the slot name
+  is not validated because it is only a model-facing reference label.
+- `${OUTPUT}` is an alias for `[OUTPUT REQUIREMENT]`.
 
 To trigger placeholder substitution while loading, pass `mappings=...` explicitly:
 
