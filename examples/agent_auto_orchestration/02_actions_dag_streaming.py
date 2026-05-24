@@ -314,8 +314,11 @@ async def main() -> None:
 
     execution = (
         agent
-        .use_dynamic_task(mode="submitted", plan=graph, handlers=DAG_HANDLERS)
-        .input({"request": "Run support triage graph.", "ticket": ticket_str})
+        # ${INPUT.x} placeholders resolve against the DAG graph_input, which in
+        # the agent route comes from use_dynamic_task(graph_input=...), NOT from
+        # .input() (that sets the agent prompt, surfacing as {"target": ...}).
+        .use_dynamic_task(mode="submitted", plan=graph, handlers=DAG_HANDLERS, graph_input={"ticket": ticket_str})
+        .input("Run support triage graph.")
         .create_execution()
     )
 
