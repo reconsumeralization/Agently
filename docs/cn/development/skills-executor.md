@@ -77,9 +77,11 @@ plan = await agent.async_resolve_skills_plan(
 
 ## 执行
 
-当任务必须通过 selected Skills 回答时，用 `run_skills_task(...)`。执行是
-prompt-first：Agently 会把 selected Skills 的完整 `SKILL.md` guidance、
-decision cards、资源摘要和任务放进一次模型请求。
+当任务必须通过 selected Skills 回答时，用 `run_skills_task(...)`。默认执行策略是
+`single_shot`：Agently 会把 selected Skills 的 `SKILL.md` guidance、
+decision cards、资源摘要和任务放进一次模型请求。声明了 `execution: staged`
+或 `allowed-tools` 的 Skill 可以走 TriggerFlow 支撑的 `staged` / `react`
+策略。
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -125,6 +127,25 @@ execution = await agent.async_run_skills_task(
 - `skills.prompt_only.start`
 - `skills.model_stream`，包含 `path`、`value`、`delta`、`is_complete`
 - `skills.prompt_only.done`
+- 选中多步策略时，还会收到 `skills.staged.*`、`skills.react.*` 和
+  `block.*` 事件
+
+可以用 `effort=` 配合 `agent.set_settings("effort_presets", {...})`，把调用方
+看到的质量/成本档位映射到策略、model key、step budget 和 artifact inline limit：
+
+```python
+agent.set_settings("effort_presets", {
+    "fast": {"strategy": "single_shot", "reason_key": "reason_fast", "step_budget": 1},
+    "normal": {"strategy": "staged", "reason_key": "reason", "step_budget": 5},
+})
+
+execution = await agent.async_run_skills_task(
+    "Draft a release decision.",
+    skills=["release-review"],
+    mode="required",
+    effort="normal",
+)
+```
 
 通过 Agent 自动编排选中 Skills route 时，模型字段流会桥接到稳定路径，例如
 `skills.model.fields.<field_path>`。
@@ -133,9 +154,11 @@ execution = await agent.async_run_skills_task(
 
 ## 配置
 
-builtin Skills Executor plugin 不发布 stage/action 执行默认配置。标准 Skills
-执行是 prompt-first，Skill 的适用性来自 `SKILL.md`；Agently 的 `.agently/`
-文件只是描述性的安装元数据。
+Skill 的适用性来自 `SKILL.md`；Agently 的 `.agently/` 文件只是描述性的安装元数据。
+多步 Skills 执行应组合 Agently 已有的 TriggerFlow、Action 和
+ExecutionEnvironment 边界；人工审批或持久 wait/resume 应通过 TriggerFlow
+`pause_for(...)` / `continue_with(...)`，或 Action / ExecutionEnvironment
+审批策略表达，不应通过修改已关闭的 `SkillExecution` snapshot 来伪装恢复。
 
 框架级 `skills.*` 配置仍可调整宿主行为，例如普通 prompt 是否披露可选 Skill
 候选的完整 guidance。有 plugin defaults 时会先加载 plugin defaults，框架配置

@@ -121,3 +121,4 @@ class SkillExecutionDict(TypedDict, total=False):
     action_logs: list[dict[str, Any]]
     intervention_records: list[dict[str, Any]]
     close_snapshot: dict[str, Any]
+    effort: str | None

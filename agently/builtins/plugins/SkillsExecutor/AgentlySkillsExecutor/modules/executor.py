@@ -46,12 +46,34 @@ class SkillExecution:
         self.action_logs = data.get("action_logs", [])
         self.intervention_records = data.get("intervention_records", [])
         self.close_snapshot = data.get("close_snapshot", {})
+        self.effort = data.get("effort")
 
     def to_dict(self) -> SkillExecutionDict:
         return _copy_public(self.data)
 
+    # ── Snapshot durability (E5) ──
+
+    def save_snapshot(self, path: str) -> None:
+        """Persist execution snapshot to a JSON file for later resume."""
+        import json as _json
+        snapshot = self.to_dict()
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(snapshot, f, ensure_ascii=False, indent=2, default=str)
+
+    @classmethod
+    def load_snapshot(cls, path: str) -> "SkillExecution":
+        """Load a previously saved execution snapshot from a JSON file."""
+        import json as _json
+        with open(path, encoding="utf-8") as f:
+            data = _json.load(f)
+        return cls(cast(SkillExecutionDict, data))
+
     def get_pending_waits(self) -> list[dict[str, Any]]:
-        return []
+        """Return pending intervention records that need human input."""
+        return [
+            r for r in self.intervention_records
+            if r.get("status") == "pending"
+        ]
 
     def save(self) -> SkillExecutionDict:
         return self.to_dict()
@@ -62,7 +84,23 @@ class SkillExecution:
 
     async def async_resume_wait(self, wait_id: str, payload: Any = None) -> "SkillExecution":
         del payload
-        raise KeyError(f"Skill wait '{ wait_id }' not found. Standard SKILL.md execution does not create framework waits.")
+        raise KeyError(
+            f"Skill wait '{wait_id}' is not resumable from a closed SkillExecution snapshot. "
+            "Use the underlying TriggerFlow execution continue_with(...) lifecycle for active waits."
+        )
+
+
+class _RuntimeStreamCaptureContext:
+    def __init__(self, context: SkillsExecutionContext, runtime_stream: list[dict[str, Any]]):
+        self._context = context
+        self._runtime_stream = runtime_stream
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._context, name)
+
+    async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
+        self._runtime_stream.append(_copy_public(item))
+        await self._context.async_emit_runtime_stream(item)
 
 
 class SkillExecutor:
@@ -76,6 +114,7 @@ class SkillExecutor:
         task: str,
         plan: SkillExecutionPlan,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        effort: str | None = None,
     ) -> SkillExecution:
         execution_id = uuid.uuid4().hex
         runtime_stream: list[dict[str, Any]] = []
@@ -93,6 +132,7 @@ class SkillExecutor:
                     "rejected_skills": plan.get("rejected_skills", []),
                     "rejected_skills_packs": plan.get("rejected_skills_packs", []),
                 },
+                effort=effort,
             )
         if not plan.get("selected_skills"):
             return self._build_execution(
@@ -102,15 +142,20 @@ class SkillExecutor:
                 runtime_stream=runtime_stream,
                 skill_logs=skill_logs,
                 output=None,
+                effort=effort,
             )
 
-        strategy = plan.get("execution_strategy", "single_shot")
+        # Resolve effort preset overrides
+        effort_config = self._resolve_effort(context, effort)
+        strategy = effort_config.get("strategy") or plan.get("execution_strategy", "single_shot")
         if strategy == "staged":
             return await self._execute_staged(
                 context=context,
                 task=task,
                 plan=plan,
                 execution_id=execution_id,
+                effort_config=effort_config,
+                effort=effort,
             )
         if strategy == "react":
             return await self._execute_react(
@@ -118,6 +163,8 @@ class SkillExecutor:
                 task=task,
                 plan=plan,
                 execution_id=execution_id,
+                effort_config=effort_config,
+                effort=effort,
             )
 
         # ── single_shot (existing prompt-only path) ──
@@ -164,6 +211,8 @@ class SkillExecutor:
                 runtime_stream=runtime_stream,
                 skill_logs=skill_logs,
                 output={"error": str(error)},
+                effort=effort,
+                execution_mode="single_shot",
             )
 
         for selection in _ensure_list(plan.get("selected_skills")):
@@ -191,6 +240,8 @@ class SkillExecutor:
             runtime_stream=runtime_stream,
             skill_logs=skill_logs,
             output=_copy_public(result),
+            effort=effort,
+            execution_mode="single_shot",
         )
 
     async def _execute_staged(
@@ -200,16 +251,21 @@ class SkillExecutor:
         task: str,
         plan: SkillExecutionPlan,
         execution_id: str,
+        effort_config: dict[str, Any] | None = None,
+        effort: str | None = None,
     ) -> SkillExecution:
-        step_budget = _to_int(self.registry.settings.get("skills.staged_max_steps", 12), 12)
-        model_key = str(plan.get("model_key") or "reason")
-        artifact_inline_limit = _to_int(self.registry.settings.get("skills.artifact_inline_limit", 4096), 4096)
+        ec = effort_config or {}
+        step_budget = _to_int(ec.get("step_budget") or self.registry.settings.get("skills.staged_max_steps", 12), 12)
+        model_key = str(ec.get("reason_key") or plan.get("model_key") or "reason")
+        artifact_inline_limit = _to_int(ec.get("artifact_inline_limit") or self.registry.settings.get("skills.artifact_inline_limit", 4096), 4096)
+        runtime_stream: list[dict[str, Any]] = []
+        capture_context = _RuntimeStreamCaptureContext(context, runtime_stream)
 
         try:
             result = await run_staged_execution(
                 task=task,
                 plan=dict(plan),
-                context=context,
+                context=capture_context,
                 settings=self.registry.settings,
                 step_budget=step_budget,
                 model_key=model_key,
@@ -220,18 +276,22 @@ class SkillExecutor:
                 execution_id=execution_id,
                 status="error",
                 plan=plan,
-                runtime_stream=[],
+                runtime_stream=runtime_stream,
                 skill_logs=[],
                 output={"error": str(error)},
+                effort=effort,
+                execution_mode="staged",
             )
 
         return self._build_execution(
             execution_id=execution_id,
             status="success",
             plan=plan,
-            runtime_stream=[],
+            runtime_stream=runtime_stream,
             skill_logs=[],
             output=_copy_public(result),
+            effort=effort,
+            execution_mode="staged",
         )
 
     async def _execute_react(
@@ -241,10 +301,15 @@ class SkillExecutor:
         task: str,
         plan: SkillExecutionPlan,
         execution_id: str,
+        effort_config: dict[str, Any] | None = None,
+        effort: str | None = None,
     ) -> SkillExecution:
-        step_budget = _to_int(self.registry.settings.get("skills.react_max_steps", 30), 30)
-        model_key = str(plan.get("model_key") or "reason")
-        artifact_inline_limit = _to_int(self.registry.settings.get("skills.artifact_inline_limit", 4096), 4096)
+        ec = effort_config or {}
+        step_budget = _to_int(ec.get("step_budget") or self.registry.settings.get("skills.react_max_steps", 30), 30)
+        model_key = str(ec.get("reason_key") or plan.get("model_key") or "reason")
+        artifact_inline_limit = _to_int(ec.get("artifact_inline_limit") or self.registry.settings.get("skills.artifact_inline_limit", 4096), 4096)
+        runtime_stream: list[dict[str, Any]] = []
+        capture_context = _RuntimeStreamCaptureContext(context, runtime_stream)
 
         allowed_tools, allowed_actions, allow_scripts = self._extract_react_affordances(plan)
 
@@ -252,7 +317,7 @@ class SkillExecutor:
             result = await run_react_execution(
                 task=task,
                 plan=dict(plan),
-                context=context,
+                context=capture_context,
                 settings=self.registry.settings,
                 step_budget=step_budget,
                 model_key=model_key,
@@ -266,19 +331,48 @@ class SkillExecutor:
                 execution_id=execution_id,
                 status="error",
                 plan=plan,
-                runtime_stream=[],
+                runtime_stream=runtime_stream,
                 skill_logs=[],
                 output={"error": str(error)},
+                effort=effort,
+                execution_mode="react",
             )
 
         return self._build_execution(
             execution_id=execution_id,
             status="success",
             plan=plan,
-            runtime_stream=[],
+            runtime_stream=runtime_stream,
             skill_logs=[],
             output=_copy_public(result),
+            effort=effort,
+            execution_mode="react",
         )
+
+    def _resolve_effort(
+        self,
+        context: SkillsExecutionContext,
+        effort: str | None,
+    ) -> dict[str, Any]:
+        """Resolve an effort preset name into concrete execution overrides.
+
+        Returns a dict with optional keys: strategy, reason_key, step_budget,
+        artifact_inline_limit. Empty dict means no overrides (use plan defaults).
+        """
+        if not effort:
+            return {}
+        presets = context.get_setting("effort_presets", None)
+        if presets is None:
+            presets = self.registry.settings.get("effort_presets") or {}
+        if not isinstance(presets, dict):
+            return {}
+        preset = presets.get(effort)
+        if not isinstance(preset, dict):
+            return {}
+        return {
+            k: v for k, v in preset.items()
+            if k in {"strategy", "reason_key", "step_budget", "artifact_inline_limit"}
+        }
 
     def _extract_react_affordances(
         self,
@@ -379,11 +473,16 @@ class SkillExecutor:
         runtime_stream: list[dict[str, Any]],
         skill_logs: list[dict[str, Any]],
         output: Any,
+        effort: str | None = None,
+        execution_mode: str | None = None,
     ) -> SkillExecution:
+        strategy = execution_mode or str(plan.get("execution_strategy", "single_shot"))
         close_snapshot = {
             "status": status,
-            "execution_mode": "prompt_only",
+            "execution_mode": strategy,
             "skill_count": len(_ensure_list(plan.get("selected_skills"))),
+            "plan_id": str(plan.get("plan_id", "")),
+            "effort": effort,
         }
         data = SkillExecutionDict({
             "execution_id": execution_id,
@@ -397,5 +496,6 @@ class SkillExecutor:
             "action_logs": [],
             "intervention_records": [],
             "close_snapshot": close_snapshot,
+            "effort": effort,
         })
         return SkillExecution(data)

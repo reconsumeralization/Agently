@@ -140,7 +140,7 @@ async def test_staged_strategy_real():
         plan = agent.resolve_skills_plan(task, skills=[skill_id], mode="required")
 
         strategy = plan.get("execution_strategy")
-        stages = plan.get("execution_stages")
+        stages = plan.get("execution_stages") or []
         print(f"Plan strategy: {strategy}")
         print(f"Plan status: {plan.get('status')}")
         print(f"Stages ({len(stages)}):")

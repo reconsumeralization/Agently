@@ -57,6 +57,9 @@ async def run_react_execution(
     """
     allowed_tools = allowed_tools or []
     allowed_actions = allowed_actions or []
+    action_concurrency = settings.get("skills.react_action_concurrency", None) if settings is not None else None
+    if not isinstance(action_concurrency, int) or action_concurrency <= 0:
+        action_concurrency = None
 
     await context.async_emit_runtime_stream(
         {
@@ -107,12 +110,26 @@ async def run_react_execution(
             stream_bridge=True,
         )
 
+        # Use output_schema so the framework parses and validates the JSON response
+        decision_schema = {
+            "next_action": (str, "Natural language description of the next action."),
+            "next_tool": ((str, type(None)), "Tool name if a tool call is needed, otherwise None."),
+            "next_kwargs": ((dict, type(None)), "Dict of arguments for the tool, or None/empty dict."),
+            "next_actions": ((list, type(None)), "Array of parallel tool calls, or None."),
+            "next_type": ((str, type(None)), "Optional type hint: tool/action/script."),
+            "final": (bool, "True if the task is complete."),
+        }
+
         try:
-            decision = await reason_block.execute(prompt=prompt, context=context)
+            decision = await reason_block.execute(
+                prompt=prompt,
+                context=context,
+                output_schema=decision_schema,
+            )
         except Exception as exc:
             decision = {"next_action": f"error: {exc}", "final": True}
 
-        # Parse JSON string responses (model may return raw JSON text)
+        # Parse JSON string responses (safety net if output_schema parsing didn't fire)
         if isinstance(decision, str):
             try:
                 decision = json.loads(decision)
@@ -125,34 +142,26 @@ async def run_react_execution(
 
         await data.async_set_state("current_decision", decision)
 
-        # If decision requires tool/action, go through ACT; otherwise OBSERVE
+        # Dispatch: parallel actions, single action, or direct observe
+        next_actions = decision.get("next_actions")
         next_tool = decision.get("next_tool")
-        if next_tool:
+        if isinstance(next_actions, list) and next_actions:
+            await data.async_emit("ACT")
+        elif next_tool:
             await data.async_emit("ACT")
         else:
             await data.async_emit("OBSERVE")
 
-    # ── Act handler: execute the decided action ──
+    # ── Act handler: execute the decided action(s) ──
     async def act(data: Any) -> None:
         decision = data.get_state("current_decision", {})
 
-        # Build kwargs: prefer next_kwargs, fall back to stripping known fields
-        tool_kwargs = decision.get("next_kwargs") or {}
-        if not isinstance(tool_kwargs, dict):
-            tool_kwargs = {}
-        if not tool_kwargs:
-            # Auto-extract: anything that isn't a known decision field is a kwarg
-            known_keys = {"next_action", "next_tool", "next_type", "next_kwargs", "final"}
-            tool_kwargs = {
-                k: v for k, v in decision.items()
-                if k not in known_keys and v is not None
-            }
-
-        action_spec = {
-            "type": decision.get("next_type", "tool"),
-            "name": decision.get("next_tool", ""),
-            "kwargs": tool_kwargs,
-        }
+        # Build action specs — single or parallel
+        next_actions = decision.get("next_actions")
+        if isinstance(next_actions, list) and next_actions:
+            action_specs = _build_parallel_specs(next_actions, decision)
+        else:
+            action_specs = [_build_single_spec(decision)]
 
         act_block = ActBlock(
             allowed_tools=set(allowed_tools),
@@ -162,49 +171,69 @@ async def run_react_execution(
             default_deny=True,
         )
 
-        try:
-            act_result = await act_block.execute(
-                action_spec=action_spec,
-                context=context,
-            )
-        except Exception as exc:
-            act_result = {"name": action_spec.get("name", "unknown"), "error": str(exc)}
+        async def _execute_one(spec: dict[str, Any]) -> dict[str, Any]:
+            try:
+                return await act_block.execute(action_spec=spec, context=context)
+            except Exception as exc:
+                return {"name": spec.get("name", "unknown"), "error": str(exc)}
 
-        await data.async_set_state("current_act_result", act_result)
+        if len(action_specs) == 1:
+            act_results = [await _execute_one(action_specs[0])]
+        elif hasattr(context, "async_execute_action_specs") and all(
+            spec.get("type", "tool") in {"tool", "action"} for spec in action_specs
+        ):
+            raw_results = await context.async_execute_action_specs(
+                action_specs,
+                concurrency=action_concurrency,
+            )
+            act_results = [
+                _normalize_action_runtime_result(spec, raw)
+                for spec, raw in zip(action_specs, raw_results)
+            ]
+        else:
+            act_results = []
+            for spec in action_specs:
+                act_results.append(await _execute_one(spec))
+
+        await data.async_set_state("current_act_results", act_results)
         await data.async_emit("OBSERVE")
 
-    # ── Observe handler: fold result, check stop conditions ──
+    # ── Observe handler: fold result(s), check stop conditions ──
     async def observe(data: Any) -> None:
         decision = data.get_state("current_decision", {})
-        act_result = data.get_state("current_act_result", {})
+        act_results = data.get_state("current_act_results") or [data.get_state("current_act_result", {})]
+        act_results = [r for r in act_results if isinstance(r, dict)]
         step_count = data.get_state("step_count", 0) + 1
         budget = data.get_state("step_budget", step_budget)
         history = data.get_state("observation_history", [])
 
         await data.async_set_state("step_count", step_count)
 
-        # Build observation — use `or` to handle None/null values correctly
-        obs_name = act_result.get("name") or decision.get("next_tool") or "reason"
-        obs_result = act_result.get("result") if "result" in act_result else decision.get("next_action", "")
-
-        observation: dict[str, Any] = {
-            "name": obs_name,
-            "result": obs_result,
-            "error": act_result.get("error"),
-        }
-
         observe_block = ObserveBlock(artifact_inline_limit=artifact_inline_limit)
-        folded = await observe_block.execute(
-            observation=observation,
-            context=context,
-        )
 
-        history.append(folded)
+        # Fold each action result into the observation history
+        for act_result in act_results:
+            obs_name = act_result.get("name") or decision.get("next_tool") or "reason"
+            obs_result = act_result.get("result") if "result" in act_result else decision.get("next_action", "")
+
+            observation: dict[str, Any] = {
+                "name": obs_name,
+                "result": obs_result,
+                "error": act_result.get("error"),
+            }
+
+            folded = await observe_block.execute(
+                observation=observation,
+                context=context,
+            )
+            history.append(folded)
+
         await data.async_set_state("observation_history", history)
 
         # Clear per-step state for next iteration
         await data.async_set_state("current_decision", {})
         await data.async_set_state("current_act_result", {})
+        await data.async_set_state("current_act_results", [])
 
         # Check stop conditions
         is_final = decision.get("final", False)
@@ -283,6 +312,12 @@ def _build_react_prompt(
             for i, h in enumerate(history[-10:])  # keep last 10 for context window
         )
 
+    parallel_hint = ""
+    if allowed_tools and len(allowed_tools) > 1:
+        parallel_hint = (
+            "- \"next_actions\": array of {{next_tool, next_kwargs}} for parallel independent tool calls\n"
+        )
+
     return f"""## Task
 {task}
 
@@ -295,9 +330,64 @@ You are in a reason→act→observe loop. At each step:
    - "next_tool": tool name if a tool call is needed, otherwise null
    - "next_kwargs": dict of arguments for the tool, or empty dict {{}}
    - "final": true if the task is complete, false to continue
-
+{parallel_hint}
 {history_text}
 
 ## Current Step: {step + 1}
 
 Respond with JSON only."""
+
+
+def _build_single_spec(decision: dict[str, Any]) -> dict[str, Any]:
+    """Build a single action spec from a decision dict."""
+    tool_kwargs = decision.get("next_kwargs") or {}
+    if not isinstance(tool_kwargs, dict):
+        tool_kwargs = {}
+    if not tool_kwargs:
+        known_keys = {"next_action", "next_tool", "next_actions", "next_type", "next_kwargs", "final"}
+        tool_kwargs = {
+            k: v for k, v in decision.items()
+            if k not in known_keys and v is not None
+        }
+    return {
+        "type": decision.get("next_type", "tool"),
+        "name": decision.get("next_tool", ""),
+        "kwargs": tool_kwargs,
+    }
+
+
+def _build_parallel_specs(
+    next_actions: list[dict[str, Any]],
+    decision: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build action specs for parallel (fan-out) execution."""
+    specs = []
+    for item in next_actions:
+        if not isinstance(item, dict):
+            continue
+        kwargs = item.get("next_kwargs") or {}
+        if not isinstance(kwargs, dict):
+            kwargs = {}
+        specs.append({
+            "type": item.get("next_type", decision.get("next_type", "tool")),
+            "name": item.get("next_tool", ""),
+            "kwargs": kwargs,
+        })
+    return specs
+
+
+def _normalize_action_runtime_result(
+    spec: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    status = result.get("status")
+    error = result.get("error")
+    if status not in {None, "success"} and not error:
+        error = str(status)
+    return {
+        "act_type": spec.get("type", "tool"),
+        "name": result.get("action_id") or result.get("tool_name") or spec.get("name", ""),
+        "result": result.get("result", result.get("data", result)),
+        "error": error,
+        "action_result": result,
+    }

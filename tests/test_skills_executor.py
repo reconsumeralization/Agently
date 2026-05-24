@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
+from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import create_agent_skills_runtime_context
 from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import AgentExecutionStream
 from agently.builtins.plugins.SkillsExecutor import SkillInstallError, SkillNormalizationError
 from agently.core import PluginManager
@@ -338,6 +339,61 @@ def test_run_skills_task_sync_accepts_stream_handler(tmp_path):
     assert execution.status == "success"
     assert stream_items[0]["type"] == "skills.prompt_only.start"
     assert stream_items[-1]["type"] == "skills.prompt_only.done"
+
+
+@pytest.mark.asyncio
+async def test_skills_runtime_context_executes_action_specs_through_action_flow():
+    agent = _create_agent()
+    agent.action.register_action(
+        action_id="alpha_lookup",
+        desc="Return alpha data.",
+        kwargs={"value": (str, "value")},
+        func=lambda value: {"alpha": value},
+    )
+    agent.action.register_action(
+        action_id="beta_lookup",
+        desc="Return beta data.",
+        kwargs={"value": (str, "value")},
+        func=lambda value: {"beta": value},
+    )
+    context = create_agent_skills_runtime_context(agent)
+
+    results = await context.async_execute_action_specs(
+        [
+            {"type": "tool", "name": "alpha_lookup", "kwargs": {"value": "a"}},
+            {"type": "tool", "name": "beta_lookup", "kwargs": {"value": "b"}},
+        ],
+        concurrency=2,
+    )
+
+    assert [item["status"] for item in results] == ["success", "success"]
+    assert results[0]["result"] == {"alpha": "a"}
+    assert results[1]["result"] == {"beta": "b"}
+
+
+@pytest.mark.asyncio
+async def test_execute_skills_plans_uses_triggerflow_orchestration(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    _skill(tmp_path / "beta", name="Beta Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    Agently.skills_executor.install_skills(tmp_path / "beta")
+    agent = _create_agent()
+    alpha_plan = agent.resolve_skills_plan("handle release", skills=["alpha-skill"], mode="required")
+    beta_plan = agent.resolve_skills_plan("handle release", skills=["beta-skill"], mode="required")
+
+    concurrent = await agent.async_execute_skills_plans(
+        "handle release",
+        plans=[alpha_plan, beta_plan],
+        mode="concurrent",
+    )
+    sequential = await agent.async_execute_skills_plans(
+        "handle release",
+        plans=[alpha_plan, beta_plan],
+        mode="sequential",
+    )
+
+    assert [item.status for item in concurrent] == ["success", "success"]
+    assert [item.status for item in sequential] == ["success", "success"]
 
 
 @pytest.mark.asyncio

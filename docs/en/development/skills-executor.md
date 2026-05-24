@@ -85,9 +85,10 @@ plan = await agent.async_resolve_skills_plan(
 ## Execute
 
 Use `run_skills_task(...)` when the task must be answered through selected
-Skills. Execution is prompt-first: Agently injects the full selected
-`SKILL.md` guidance, the decision cards, resource summaries, and the task into
-one model request.
+Skills. By default, execution is `single_shot`: Agently injects the selected
+`SKILL.md` guidance, decision cards, resource summaries, and the task into one
+model request. Skills that declare `execution: staged` or `allowed-tools` can
+run through the TriggerFlow-backed `staged` and `react` strategies.
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -134,6 +135,26 @@ Direct Skills execution streams runtime items through `stream_handler`:
 - `skills.prompt_only.start`
 - `skills.model_stream` with `path`, `value`, `delta`, and `is_complete`
 - `skills.prompt_only.done`
+- `skills.staged.*`, `skills.react.*`, and `block.*` events when a multi-step
+  strategy is selected
+
+Use `effort=` with `agent.set_settings("effort_presets", {...})` to map a
+caller-facing quality/cost profile to strategy, model key, step budget, and
+artifact inline limit:
+
+```python
+agent.set_settings("effort_presets", {
+    "fast": {"strategy": "single_shot", "reason_key": "reason_fast", "step_budget": 1},
+    "normal": {"strategy": "staged", "reason_key": "reason", "step_budget": 5},
+})
+
+execution = await agent.async_run_skills_task(
+    "Draft a release decision.",
+    skills=["release-review"],
+    mode="required",
+    effort="normal",
+)
+```
 
 When Skills are selected through Agent auto-orchestration, model field stream
 items are bridged to stable paths like `skills.model.fields.<field_path>`.
@@ -144,10 +165,13 @@ Environment paths chosen by the host application.
 
 ## Settings
 
-The builtin Skills Executor plugin does not publish stage/action execution
-defaults. Standard Skills execution is prompt-first, so Skill applicability
-comes from `SKILL.md`; Agently's `.agently/` files are descriptive install
-metadata only.
+Skill applicability comes from `SKILL.md`; Agently's `.agently/` files are
+descriptive install metadata only. Multi-step Skills execution composes
+Agently's existing TriggerFlow, Action, and ExecutionEnvironment boundaries;
+human approval or durable wait/resume flows should be modeled through
+TriggerFlow `pause_for(...)` / `continue_with(...)` or Action /
+ExecutionEnvironment approval policies, not by mutating a closed
+`SkillExecution` snapshot.
 
 Framework-level `skills.*` settings may still tune host behavior, such as
 whether optional Skill candidates disclose full guidance in ordinary prompts.

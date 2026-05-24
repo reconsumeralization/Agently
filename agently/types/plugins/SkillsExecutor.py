@@ -50,6 +50,12 @@ class SkillsExecutionContext(SkillsPlanningContext, Protocol):
 
     async def async_call_tool(self, name: str, /, **kwargs: Any) -> Any: ...
     async def async_call_action(self, name: str, /, **kwargs: Any) -> Any: ...
+    async def async_execute_action_specs(
+        self,
+        action_specs: list[dict[str, Any]],
+        *,
+        concurrency: int | None = None,
+    ) -> list[dict[str, Any]]: ...
 
     # ── Progressive disclosure over resource_index ──
 
@@ -139,4 +145,5 @@ class SkillsExecutor(Protocol):
         task: str,
         plan: SkillExecutionPlan,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        effort: str | None = None,
     ) -> Any: ...

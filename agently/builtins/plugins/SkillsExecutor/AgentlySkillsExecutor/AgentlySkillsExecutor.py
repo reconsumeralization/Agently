@@ -145,10 +145,12 @@ class AgentlySkillsExecutor(SkillsExecutor):
         task: str,
         plan: SkillExecutionPlan,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        effort: str | None = None,
     ):
         return await SkillExecutor(self.registry).execute(
             context=context,
             task=task,
             plan=plan,
             output_format=output_format,
+            effort=effort,
         )

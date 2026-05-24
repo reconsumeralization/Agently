@@ -1,12 +1,13 @@
 # Skills Executor Examples
 
 These examples use `Agently.skills_executor` and the **standard `SKILL.md`**
-model: a Skill is guidance only (frontmatter `name` / `description` / optional
-`keywords` + a Markdown body). There is no `skill.yaml`, no stages, and no
-actions embedded in a Skill. Running a Skill is a single prompt-only model
-request; structured output is shaped with `semantic_outputs=`. Side effects
-(disk writes, network/tool calls, package deps) and any multi-step orchestration
-live in **host code**, not in the Skill.
+model: a Skill is guidance plus optional execution metadata in frontmatter
+(`execution: staged`, `allowed-tools`, `stages`, `max-steps`). There is no
+`skill.yaml` and no custom stage schema. The default strategy is `single_shot`;
+`staged` and `react` run on TriggerFlow and tool/action calls delegate through
+Action / ActionRuntime. Side effects such as file writes, network calls, package
+installation, and durable approvals remain owned by host code, Action,
+ExecutionEnvironment, or TriggerFlow.
 
 Configure the registry once with the public API:
 
@@ -23,17 +24,18 @@ Agently.skills_executor.configure(registry_root=..., allowed_trust_levels=["loca
 | `05_combo_skillpack_diagnostics.py` | Combo Skill Pack diagnostics across five realcase packs (education, stock, travel, research-to-briefing, webapp acceptance). |
 | `06_executable_education_course_pack.py` | A prompt-only Course Pack Designer Skill produces structured course content; the **host** writes real .docx/.pdf/.pptx/.xlsx/.json artifacts (libraries host-managed, skipped if missing). |
 | `07_agently_skills_availability_check.py` | Developer pre-flight: install the local `../Agently-Skills` catalog and verify explicit-selection eligibility. |
-| `08_architecture_diagram_skill.py` | A prompt-only architecture-diagram Skill renders a self-contained dark-themed HTML+SVG diagram; the host writes the file. |
+| `08_architecture_diagram_skill.py` | A prompt-first architecture-diagram Skill renders a self-contained dark-themed HTML+SVG diagram; the host writes the file. |
+| `09_staged_effort_strategy.py` | Real-model staged execution demo: `execution: staged` plus `effort_presets` maps caller-facing effort to `single_shot` or TriggerFlow-backed staged execution. |
 
 ## The new-standard shape
 
 ```python
-# 1. Skill = SKILL.md guidance only (no skill.yaml, no stages, no actions)
+# 1. Skill = SKILL.md guidance plus optional standard frontmatter
 Agently.skills_executor.configure(registry_root=reg_dir, allowed_trust_levels=["local"])
 contract = Agently.skills_executor.install_skills(skill_dir, trust_level="local", update=True)
 skill_id = contract["skill_id"]          # slug of the frontmatter `name`
 
-# 2. One prompt-only request; structured output via semantic_outputs
+# 2. Default single_shot request; structured output via semantic_outputs
 execution = await agent.async_run_skills_task(
     task,
     skills=[skill_id],
@@ -42,7 +44,7 @@ execution = await agent.async_run_skills_task(
     stream_handler=on_stream,             # optional: field-level streaming
 )
 
-# 3. Host owns side effects + orchestration
+# 3. Host owns side effects; TriggerFlow/Action own orchestration/acting paths
 result = execution.output
 write_file(result["summary"])             # persistence is host code
 ```
@@ -54,6 +56,8 @@ write_file(result["summary"])             # persistence is host code
   `"release-notes-generator"`).
 - To stream field-level progress, use `async_run_skills_task(..., stream_handler=...)`
   and filter items where `type == "skills.model_stream"` and `is_complete`.
+- To select quality/cost profiles, configure `agent.set_settings("effort_presets", {...})`
+  and pass `effort="fast" | "normal" | ...` to `async_run_skills_task(...)`.
 
 ## Minimal business shape — host tool + prompt-only Skill
 
@@ -107,6 +111,7 @@ python examples/skills_executor/05_combo_skillpack_diagnostics.py --fetch-missin
 python examples/skills_executor/06_executable_education_course_pack.py
 python examples/skills_executor/07_agently_skills_availability_check.py
 python examples/skills_executor/08_architecture_diagram_skill.py
+python examples/skills_executor/09_staged_effort_strategy.py
 ```
 
 Skills test suite:

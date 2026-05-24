@@ -13,34 +13,51 @@ class MockStrategyContext:
     execution_environment: Any = None
 
     def __init__(self):
-        self.model_calls: list[dict] = []
-        self.resource_reads: list[dict] = []
-        self.stream_events: list[dict] = []
-        self._model_response = "mock result"
+        self.model_calls: list[dict[str, Any]] = []
+        self.resource_reads: list[dict[str, Any]] = []
+        self.stream_events: list[dict[str, Any]] = []
+        self._model_response: Any = "mock result"
         self.tool_results: dict[str, Any] = {}
         self.action_results: dict[str, Any] = {}
+        self.action_spec_batches: list[dict[str, Any]] = []
 
-    async def async_request_model(self, **kwargs):
+    async def async_request_model(self, **kwargs: Any) -> Any:
         self.model_calls.append(kwargs)
         sh = kwargs.get("stream_handler")
         if sh:
             await sh({"delta": "mock", "path": "output"})
         return self._model_response
 
-    async def async_read_resource(self, *, skill_id, path, max_bytes=65536):
+    async def async_read_resource(self, *, skill_id: str, path: str, max_bytes: int = 65536) -> str:
         self.resource_reads.append({"skill_id": skill_id, "path": path, "max_bytes": max_bytes})
         return f"content of {path} (max {max_bytes} bytes)"
 
-    async def async_emit_runtime_stream(self, item):
+    async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
         self.stream_events.append(item)
 
-    async def async_call_tool(self, name, **kwargs):
+    async def async_call_tool(self, name: str, **kwargs: Any) -> Any:
         self.tool_results[name] = kwargs
         return {"status": "ok", "tool": name}
 
-    async def async_call_action(self, name, **kwargs):
+    async def async_call_action(self, name: str, **kwargs: Any) -> Any:
         self.action_results[name] = kwargs
         return {"status": "ok", "action": name}
+
+    async def async_execute_action_specs(
+        self,
+        action_specs: list[dict[str, Any]],
+        *,
+        concurrency: int | None = None,
+    ) -> list[dict[str, Any]]:
+        self.action_spec_batches.append({"specs": action_specs, "concurrency": concurrency})
+        return [
+            {
+                "status": "success",
+                "action_id": spec["name"],
+                "result": {"status": "ok", "tool": spec["name"]},
+            }
+            for spec in action_specs
+        ]
 
 
 class TestStagedStrategy:
@@ -246,3 +263,36 @@ class TestReactStrategy:
         )
 
         assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_react_parallel_tools_use_action_runtime_surface(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = MockStrategyContext()
+        call_count = [0]
+
+        async def dynamic_response(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {
+                    "next_action": "look up independent facts",
+                    "next_actions": [
+                        {"next_tool": "search", "next_kwargs": {"q": "alpha"}},
+                        {"next_tool": "lookup", "next_kwargs": {"id": "beta"}},
+                    ],
+                    "final": False,
+                }
+            return {"next_action": "done", "final": True}
+
+        ctx.async_request_model = dynamic_response
+
+        await run_react_execution(
+            task="test",
+            plan={},
+            context=ctx,
+            allowed_tools=["search", "lookup"],
+        )
+
+        assert len(ctx.action_spec_batches) == 1
+        assert [spec["name"] for spec in ctx.action_spec_batches[0]["specs"]] == ["search", "lookup"]
+        assert ctx.tool_results == {}

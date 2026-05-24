@@ -117,19 +117,20 @@ class ActBlock(FlowBlock):
     async def _authorize(
         self, act_type: str, act_name: str, context: Any
     ) -> None:
+        """Check authorization for an action."""
+        # Quick pass: no gating
         if not self._default_deny:
             return
 
+        # Check affordance allowlists first (hard deny)
         if act_type == "tool" and act_name not in self._allowed_tools:
             raise PermissionError(
                 f"Tool '{act_name}' is not in allowed_tools for this execution."
             )
-
         if act_type == "action" and act_name not in self._allowed_actions:
             raise PermissionError(
                 f"Action '{act_name}' is not in allowed_actions for this execution."
             )
-
         if act_type == "script" and not self._allow_scripts:
             raise PermissionError(
                 "Script execution is not allowed for this execution."

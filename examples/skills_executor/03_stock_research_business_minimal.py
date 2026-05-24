@@ -34,6 +34,7 @@ import csv
 from datetime import datetime, timedelta, timezone
 import json
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -94,16 +95,25 @@ def install_demo_skills_pack() -> None:
     """Example setup: create and install one local Skill Pack."""
 
     skill_dir = RUNTIME_ROOT / "skills_pack" / "equity-research-brief"
+    # Start from a clean Skill dir: a standard SKILL.md must be the *only*
+    # capability definition. Any stale legacy manifest (e.g. a skill.yaml left
+    # by an older example version) would make the framework reject the Skill.
+    if skill_dir.exists():
+        shutil.rmtree(skill_dir)
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(EQUITY_RESEARCH_SKILL, encoding="utf-8")
 
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
-    Agently.skills_executor.install_skills_pack(
+    pack_result = Agently.skills_executor.install_skills_pack(
         skill_dir.parent,
         name=SKILLS_PACK_NAME,
         trust_level="local",
         update=True,
     )
+    # Surface install-time rejections early instead of failing cryptically at
+    # plan time with "required pack had no installed standard Skills".
+    if not (pack_result or {}).get("installed_skills"):
+        raise RuntimeError(f"Skill Pack install produced no Skills: {pack_result}")
 
 
 def _extract_tickers(task: str) -> list[str]:

@@ -98,9 +98,9 @@ async def main():
         #  Demo: exercise all four new Protocol members
         # ═══════════════════════════════════════════════════════════
 
-        # 1. async_call_tool — delegates to agent.tool.async_call_action
+        # 1. async_call_tool — delegates to the Action tool compatibility surface
         print("\n── 1. async_call_tool ──")
-        print("   -> delegates to: agent.tool.async_call_action(name, kwargs)")
+        print("   -> delegates to: agent.action.async_call_tool(name, kwargs)")
         # We don't call it here because there's no registered tool in
         # this no-model smoke test. The important thing is the method
         # EXISTS on the context and routes to the Agent.

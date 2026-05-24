@@ -5,16 +5,15 @@ mock business data.
 
 Two execution shapes appear here:
 
-- **Skills examples** (01, 03, 04, 07–17) use the **standard `SKILL.md`** model:
-  a Skill is guidance only (no `skill.yaml`, no stages, no embedded actions).
-  Running it is a single prompt-only request; structured output is shaped with
-  `semantic_outputs=`. Side effects (disk writes, network/tool calls) and any
-  multi-step or iterative orchestration live in **host code** — registered
-  Actions, host functions, and host loops. Configure the registry with the public
-  `Agently.skills_executor.configure(registry_root=..., allowed_trust_levels=[...])`.
-- **Actions / Dynamic-Task DAG examples** (02, 05, 06) show TriggerFlow /
-  Dynamic Task DAG execution with `kind="model"` nodes, parallel branches, and
-  field-level delta streaming. These do not use Skills.
+- **Skills examples** (01, 03, 04, 07–17) use standard `SKILL.md` packages.
+  The examples in this folder intentionally keep their Skills on the default
+  `single_shot` path and put side effects (disk writes, web fetches, scans,
+  adaptive loops) in host code. The wider Skills Executor also supports
+  `execution: staged`, `allowed-tools`, and `effort=`; those are demonstrated in
+  `examples/skills_executor/09_staged_effort_strategy.py`.
+- **Dynamic Task DAG examples** (02, 05, 06) show submitted DAG execution:
+  local handlers, model nodes, parallel branches, and field-level delta
+  streaming. These do not use Skills.
 
 **Model calls are real.** **Business data is mocked** (commit logs, CRM tickets,
 product analytics, market signals) — representing what real systems would provide.
@@ -44,9 +43,9 @@ python examples/agent_auto_orchestration/17_self_reflective_research.py
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` is the canonical reference for the
-new pattern (Skill = guidance, host = orchestration via TriggerFlow).
+single-shot Skill + host orchestration pattern.
 
-## Skills examples (standard SKILL.md, prompt-only)
+## Skills examples (standard SKILL.md, default single_shot)
 
 - **01 — Release Notes Generator.** From a mock commit log, one prompt-only Skill
   classifies changes, writes summaries, drafts an announcement, and assesses
@@ -95,10 +94,12 @@ new pattern (Skill = guidance, host = orchestration via TriggerFlow).
 
 ## Actions / Dynamic-Task DAG examples (not Skills)
 
-### 02 — Customer Support Triage (Actions + DAG streaming)
+### 02 — Customer Support Triage (Dynamic-Task DAG streaming)
 A P1 enterprise ticket flows through four DAG nodes (classify → analyze → draft →
 review) with dependency edges, each making real model calls. Mocked CRM ticket;
-real urgency classification, root-cause analysis, reply drafting, QA.
+real urgency classification, root-cause analysis, reply drafting, QA. Nodes are
+`kind="local"` callable handlers wired via `use_dynamic_task(..., handlers=...)`;
+each reads its upstream inputs from `context.dependency_results[...]`.
 Key assertions: `selected_route=dynamic_task`, four task stream events.
 
 ### 05 — Operator-visible Field Delta Streaming

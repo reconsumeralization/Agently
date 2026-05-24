@@ -21,6 +21,8 @@ are folded into subsequent prompts.
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from typing import Any
 
@@ -38,12 +40,18 @@ async def run_staged_execution(
     step_budget: int = 12,
     model_key: str = "reason",
     artifact_inline_limit: int = 4096,
+    allow_escalation: bool = False,
+    escalation_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute a skill using the staged strategy on TriggerFlow.
 
     *plan* must contain ``execution_stages`` (from frontmatter). Each stage
     dict has ``description`` (the ReasonBlock prompt) and optionally
     ``resources`` (list of ``{skill_id, path}`` for ReadBlock).
+
+    When *allow_escalation* is True, the strategy detects tool-use requests in
+    step outputs and dynamically escalates to react mode, carrying forward the
+    accumulated step outputs as observation history.
 
     Returns the assembled output from FinalizeBlock.
     """
@@ -78,6 +86,8 @@ async def run_staged_execution(
         await data.async_set_state("artifact_inline_limit", artifact_inline_limit)
         await data.async_set_state("step_outputs", [])
         await data.async_set_state("step_index", 0)
+        await data.async_set_state("step_budget", step_budget)
+        await data.async_set_state("escalated_to_react", False)
         data.emit_nowait("STEP")
 
     # ── Step handler: run one ReasonBlock + optional ReadBlock ──
@@ -144,7 +154,62 @@ async def run_staged_execution(
             }
         )
 
-        data.emit_nowait("STEP")
+        # E2: Check for dynamic escalation to react
+        if allow_escalation and _detect_tool_need(step_result, escalation_tools):
+            await context.async_emit_runtime_stream(
+                {
+                    "type": "skills.staged.escalate",
+                    "action": "escalate",
+                    "payload": {
+                        "from_strategy": "staged",
+                        "to_strategy": "react",
+                        "at_step": idx,
+                        "reason": "Model output indicates tool use is needed.",
+                    },
+                }
+            )
+            data.emit_nowait("ESCALATE")
+        else:
+            data.emit_nowait("STEP")
+
+    # ── Escalate handler: transition from staged to react ──
+    async def escalate(data: Any) -> None:
+        step_outputs = data.get_state("step_outputs", [])
+        remaining_budget = data.get_state("step_budget", step_budget) - len(step_outputs)
+
+        # Build observation history from prior step outputs
+        history: list[dict[str, Any]] = []
+        for so in step_outputs:
+            history.append({
+                "name": f"stage-{so.get('step_index', '?')}",
+                "result": str(so.get("output", ""))[:artifact_inline_limit],
+            })
+
+        await context.async_emit_runtime_stream(
+            {
+                "type": "skills.staged.escalated",
+                "action": "escalated",
+                "payload": {
+                    "history_carried": len(history),
+                    "remaining_budget": max(1, remaining_budget),
+                },
+            }
+        )
+
+        from .react import run_react_execution
+
+        react_result = await run_react_execution(
+            task=task,
+            plan=plan,
+            context=context,
+            settings=settings,
+            step_budget=max(1, remaining_budget),
+            model_key=data.get_state("model_key", model_key),
+            allowed_tools=escalation_tools or [],
+            artifact_inline_limit=artifact_inline_limit,
+        )
+        await data.async_set_state("result", react_result)
+        await data.async_set_state("escalated_to_react", True)
 
     # ── Finalize handler: assemble terminal output ──
     async def finalize(data: Any) -> None:
@@ -158,6 +223,7 @@ async def run_staged_execution(
 
     flow.to(start)
     flow.when("STEP").to(run_step)
+    flow.when("ESCALATE").to(escalate)
     flow.when("FINALIZE").to(finalize)
 
     execution = flow.create_execution(auto_close=False)
@@ -201,3 +267,37 @@ def _build_step_prompt(
             )
         )
     return "\n\n".join(parts)
+
+
+_TOOL_REQUEST_PATTERNS = [
+    re.compile(r"I need (?:to|a)\s+\w*\s*(?:search|look.?up|find|calculate|compute|fetch|query|retrieve|call|run|execute)", re.IGNORECASE),
+    re.compile(r"(?:let me|I will|I'll|I must|I have to)\s+\w*\s*(?:search|look.?up|find|calculate|compute|fetch|query|retrieve)", re.IGNORECASE),
+    re.compile(r"\"next_tool\"\s*:", re.IGNORECASE),
+]
+
+
+def _detect_tool_need(
+    step_result: Any,
+    escalation_tools: list[str] | None = None,
+) -> bool:
+    """Detect if a staged step output indicates tool use is needed."""
+    text = str(step_result)
+    if not text.strip():
+        return False
+    # Check if any tool name from escalation_tools appears in the output
+    if escalation_tools:
+        for tool_name in escalation_tools:
+            if tool_name.lower() in text.lower():
+                return True
+    # Check regex patterns for tool request language
+    for pattern in _TOOL_REQUEST_PATTERNS:
+        if pattern.search(text):
+            return True
+    # Check if output contains JSON-like next_tool pattern
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("next_tool"):
+            return True
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return False

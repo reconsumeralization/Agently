@@ -1,8 +1,8 @@
-"""TEMPLATE — Standard SKILL.md guidance + host-side orchestration.
+"""TEMPLATE — Standard SKILL.md single_shot + host-side orchestration.
 
-This file is the canonical "new pattern" reference for the Skills rewrite. It is
-NOT numbered and NOT meant to be a polished demo; it exists so the new layering
-is unambiguous before the numbered examples are migrated to it.
+This file is the canonical reference for the default single_shot Skill pattern.
+It is NOT numbered and NOT meant to be a polished demo; it exists so the
+host-owned orchestration boundary is unambiguous.
 
 Run:
     python examples/agent_auto_orchestration/_TEMPLATE_standard_skill_orchestration.py
@@ -19,22 +19,27 @@ OLD model (deprecated): a Skill was an executable workflow. `skill.yaml` declare
 an `action` stage reached back into the host to save a file / call a tool. The
 host and the Skill were entangled.
 
-NEW model (standard): a Skill is ONLY guidance.
+CURRENT model (standard): a Skill is SKILL.md guidance plus optional standard
+execution metadata.
   * The capability is defined by SKILL.md alone: frontmatter `name` / `description`
-    (+ optional `keywords`) and a markdown body of instructions. No `skill.yaml`,
-    no stages, no embedded actions. A root-level skill.yaml/skill.json now makes
-    install FAIL on purpose.
-  * Running a Skill is a SINGLE model request: the full SKILL.md body is injected
-    as instructions and the model produces a structured result in one shot. There
-    is no per-stage DAG inside the Skill anymore.
-  * Orchestration — side effects, persistence, tool/Action calls, waiting and
-    approval — lives in the HOST (TriggerFlow / DynamicTask / register_action /
-    ExecutionEnvironment policy), never inside the Skill.
+    (+ optional `keywords`, `execution`, `stages`, `allowed-tools`) and a markdown
+    body of instructions. No `skill.yaml`; a root-level skill.yaml/skill.json now
+    makes install FAIL on purpose.
+  * The default execution path is `single_shot`: the SKILL.md body is injected as
+    instructions and the model produces a structured result in one request.
+    `execution: staged` and `react` are TriggerFlow-backed strategies, not
+    custom Skills-local workflow engines.
+  * Side effects, persistence, durable waiting/resume, and approval policy stay
+    with the owning Agently layer: host code, TriggerFlow, Action /
+    ActionRuntime, and ExecutionEnvironment.
 
-So the migration recipe for every old staged Skill is:
+So the migration recipe for every old `skill.yaml` staged Skill is:
   1. Move the stage `purpose` prose into the SKILL.md body as plain guidance.
-  2. Express the structured output you want via `semantic_outputs=` on the run.
-  3. Lift every `action` stage OUT of the Skill into a host TriggerFlow chunk.
+  2. Use `semantic_outputs=` for simple single_shot results, or standard
+     `execution: staged` metadata when the Skill genuinely needs model-side
+     decomposition.
+  3. Lift side-effecting `action` stages OUT of the Skill into host code,
+     Action/ActionRuntime, ExecutionEnvironment, or TriggerFlow chunks.
 ────────────────────────────────────────────────────────────────────────────────
 """
 
@@ -56,11 +61,12 @@ from examples.dynamic_task._shared import configure_model
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. The Skill IS the SKILL.md — guidance only.
+# 1. The Skill IS the SKILL.md. This template intentionally uses guidance only.
 #    Note the frontmatter: `name` (canonical display name; the skill_id is its
 #    slug -> "incident-response-planner"), `description` (drives the decision card
 #    and model_decision routing), and `keywords`. The body is what the model reads.
-#    There is deliberately NO skill.yaml and NO stages/actions here.
+#    There is deliberately NO skill.yaml and NO execution metadata here because
+#    this template demonstrates the default single_shot path.
 # ═══════════════════════════════════════════════════════════════════════════════
 SKILL_MD = """\
 ---
@@ -130,7 +136,7 @@ def save_runbook(output_dir: Path, incident_id: str, plan: str, runbook: str) ->
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. Compose Skill (guidance) + host step (side effect) with TriggerFlow.
-#    Chunk A: run the Skill as a single prompt-only request, shaping the result
+#    Chunk A: run the Skill as a single_shot request, shaping the result
 #             with semantic_outputs (this replaces the old per-stage output_schema).
 #    Chunk B: take the structured result and run the host persistence step.
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -186,7 +192,7 @@ async def main() -> None:
 
     print("=" * 60)
     print("installed skill_id:", skill_id)
-    print("route: skills (mode=required) -> single prompt-only request")
+    print("route: skills (mode=required) -> single_shot request")
     execution = flow.create_execution()
     await execution.async_start(alert)
     state = await execution.async_close()
@@ -203,7 +209,7 @@ if __name__ == "__main__":
 # ────────────────────────────────────────────────────────────────────────────────
 # Expected key output from a real run (shape; lengths vary by model):
 #   installed skill_id: incident-response-planner
-#   route: skills (mode=required) -> single prompt-only request
+#   route: skills (mode=required) -> single_shot request
 #   skill status: success
 #   plan length: ~3,000-5,000 chars
 #   runbook length: ~2,000-4,000 chars
@@ -211,5 +217,5 @@ if __name__ == "__main__":
 #
 # Compare with the old 12_model_plan_incident_response.py: the three stages
 # (analyze_incident / generate_runbook / save_runbook) are gone. analyze + generate
-# collapsed into ONE prompt-only Skill request; save moved into the host TriggerFlow.
+# collapsed into ONE single_shot Skill request; save moved into the host TriggerFlow.
 # ────────────────────────────────────────────────────────────────────────────────

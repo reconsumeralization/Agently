@@ -24,13 +24,14 @@ class MockContext:
     execution_environment: Any = None
 
     def __init__(self):
-        self.model_calls: list[dict] = []
-        self.resource_reads: list[dict] = []
-        self.stream_events: list[dict] = []
-        self._model_response = "mock result"
+        self.model_calls: list[dict[str, Any]] = []
+        self.resource_reads: list[dict[str, Any]] = []
+        self.stream_events: list[dict[str, Any]] = []
+        self.tool_results: dict[str, Any] = {}
+        self._model_response: Any = "mock result"
         self.execution_environment = None
 
-    async def async_request_model(self, **kwargs):
+    async def async_request_model(self, **kwargs: Any) -> Any:
         self.model_calls.append(kwargs)
         # If stream_handler is provided, simulate a stream event
         sh = kwargs.get("stream_handler")
@@ -38,12 +39,16 @@ class MockContext:
             await sh({"delta": "mock", "path": "output"})
         return self._model_response
 
-    async def async_read_resource(self, *, skill_id, path, max_bytes=65536):
+    async def async_read_resource(self, *, skill_id: str, path: str, max_bytes: int = 65536) -> str:
         self.resource_reads.append({"skill_id": skill_id, "path": path, "max_bytes": max_bytes})
         return f"content of {path} (max {max_bytes} bytes)"
 
-    async def async_emit_runtime_stream(self, item):
+    async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
         self.stream_events.append(item)
+
+    async def async_call_tool(self, name: str, **kwargs: Any) -> Any:
+        self.tool_results[name] = kwargs
+        return {"status": "ok"}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -540,4 +545,3 @@ class TestObserveBlock:
 
         # The execution state should have been updated
         assert True  # no exception raised
-

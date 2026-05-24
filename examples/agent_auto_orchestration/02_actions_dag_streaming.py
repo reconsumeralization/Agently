@@ -1,4 +1,4 @@
-"""Customer support triage — Actions + DAG streaming with real model calls.
+"""Customer support triage — Dynamic Task DAG streaming with real model calls.
 
 Run:
     python examples/agent_auto_orchestration/02_actions_dag_streaming.py
@@ -11,6 +11,12 @@ Scenario: A high-value enterprise customer reports payment failures after a
 deployment. The mocked CRM context below represents what a real support system
 would attach to a ticket. The model classifies urgency, analyzes root cause,
 drafts a reply, and reviews quality — all as a DAG with dependencies.
+
+Data flow between nodes uses the current Dynamic Task scheme: each node is a
+``kind="local"`` callable handler (keys end in ``_handler``) wired through
+``use_dynamic_task(..., handlers=...)``, and reads its upstream inputs from
+``context.dependency_results["<task_id>"]``. (There is no ``${state.X}`` kwargs
+templating — a node consuming an upstream result must read it from ``context``.)
 
 Expected key output from one real DeepSeek run:
     selected_route=dynamic_task
@@ -85,8 +91,13 @@ MOCK_TICKET = {
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-async def classify_urgency(ticket: str = "") -> dict:
-    """Classify support ticket urgency and category via model call."""
+async def classify_handler(context) -> dict:
+    """Classify support ticket urgency and category via model call.
+
+    Upstream data is consumed through ``context`` (the current dynamic-task
+    scheme): the ticket text arrives via the node's declared ``inputs.kwargs``.
+    """
+    ticket = ((context.task.inputs or {}).get("kwargs") or {}).get("ticket", "")
     print("  → 从 CRM 加载客户上下文（模拟请求延时）...")
     await asyncio.sleep(0.3)  # simulated I/O: fetching CRM data, SLA checks
     print("  → 分类工单紧急度与类别（模型请求中）...")
@@ -112,10 +123,11 @@ async def classify_urgency(ticket: str = "") -> dict:
     return result
 
 
-async def analyze_issue(classified: object = None) -> dict:
+async def analyze_handler(context) -> dict:
     """Analyze root cause and suggest resolution path via model call."""
     await asyncio.sleep(0.3)  # simulated I/O: pulling deployment logs, recent changes
     print("  → 分析根因与解决方案（模型请求中）...")
+    classified = context.dependency_results.get("classify")
     data = classified if isinstance(classified, dict) else {}
     result = await (
         Agently.create_agent("triage-analyze")
@@ -145,11 +157,13 @@ async def analyze_issue(classified: object = None) -> dict:
     return result
 
 
-async def draft_reply(analyzed: object = None, ticket: str = "") -> dict:
+async def draft_handler(context) -> dict:
     """Draft a customer-facing reply via model call."""
     await asyncio.sleep(0.2)  # simulated I/O: loading reply templates, customer preferences
     print("  → 草拟客户回复（模型请求中）...")
+    analyzed = context.dependency_results.get("analyze")
     data = analyzed if isinstance(analyzed, dict) else {}
+    ticket = ((context.task.inputs or {}).get("kwargs") or {}).get("ticket", "")
     result = await (
         Agently.create_agent("triage-draft")
         .input({
@@ -180,10 +194,16 @@ async def draft_reply(analyzed: object = None, ticket: str = "") -> dict:
     return result
 
 
-async def review_quality(draft: object = None, analyzed: object = None) -> dict:
-    """Review response quality and completeness via model call."""
+async def review_handler(context) -> dict:
+    """Review response quality and completeness via model call.
+
+    This node depends on two upstream tasks (``draft`` and ``analyze``); both
+    results are read from ``context.dependency_results``.
+    """
     await asyncio.sleep(0.2)  # simulated I/O: QA checklist, style guide
     print("  → 质检审查回复质量（模型请求中）...")
+    draft = context.dependency_results.get("draft")
+    analyzed = context.dependency_results.get("analyze")
     dr = draft if isinstance(draft, dict) else {}
     an = analyzed if isinstance(analyzed, dict) else {}
     result = await (
@@ -216,37 +236,12 @@ async def review_quality(draft: object = None, analyzed: object = None) -> dict:
     return result
 
 
-def register_actions(agent) -> None:
-    agent.register_action(
-        name="classify_urgency",
-        desc="Classify ticket urgency and category using AI.",
-        kwargs={"ticket": (str, "Full ticket text.")},
-        func=classify_urgency,
-    )
-    agent.register_action(
-        name="analyze_issue",
-        desc="Analyze root cause and propose resolution using AI.",
-        kwargs={"classified": (object, "Output from classify_urgency.")},
-        func=analyze_issue,
-    )
-    agent.register_action(
-        name="draft_reply",
-        desc="Draft a professional customer-facing reply using AI.",
-        kwargs={
-            "analyzed": (object, "Output from analyze_issue."),
-            "ticket": (str, "Original ticket text."),
-        },
-        func=draft_reply,
-    )
-    agent.register_action(
-        name="review_quality",
-        desc="Review response quality using AI.",
-        kwargs={
-            "draft": (object, "Output from draft_reply."),
-            "analyzed": (object, "Output from analyze_issue."),
-        },
-        func=review_quality,
-    )
+DAG_HANDLERS = {
+    "classify_handler": classify_handler,
+    "analyze_handler": analyze_handler,
+    "draft_handler": draft_handler,
+    "review_handler": review_handler,
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -266,7 +261,6 @@ async def main() -> None:
     print(f"Model provider: {provider}\n")
 
     agent = Agently.create_agent("support-triage-demo")
-    register_actions(agent)
 
     import json
     ticket_str = json.dumps(MOCK_TICKET, ensure_ascii=False, indent=2)
@@ -277,40 +271,28 @@ async def main() -> None:
         "tasks": [
             {
                 "id": "classify",
-                "kind": "action",
-                "binding": "classify_urgency",
+                "kind": "local",
+                "binding": "classify_handler",
                 "inputs": {"kwargs": {"ticket": ticket_str}},
             },
             {
                 "id": "analyze",
-                "kind": "action",
-                "binding": "analyze_issue",
+                "kind": "local",
+                "binding": "analyze_handler",
                 "depends_on": ["classify"],
-                "inputs": {"kwargs": {"classified": "${state.classify}"}},
             },
             {
                 "id": "draft",
-                "kind": "action",
-                "binding": "draft_reply",
+                "kind": "local",
+                "binding": "draft_handler",
                 "depends_on": ["analyze"],
-                "inputs": {
-                    "kwargs": {
-                        "analyzed": "${state.analyze}",
-                        "ticket": ticket_str,
-                    }
-                },
+                "inputs": {"kwargs": {"ticket": ticket_str}},
             },
             {
                 "id": "review",
-                "kind": "action",
-                "binding": "review_quality",
+                "kind": "local",
+                "binding": "review_handler",
                 "depends_on": ["draft", "analyze"],
-                "inputs": {
-                    "kwargs": {
-                        "draft": "${state.draft}",
-                        "analyzed": "${state.analyze}",
-                    }
-                },
             },
         ],
         "semantic_outputs": {"final_reply": "draft", "quality_report": "review"},
@@ -332,8 +314,7 @@ async def main() -> None:
 
     execution = (
         agent
-        .use_actions(["classify_urgency", "analyze_issue", "draft_reply", "review_quality"])
-        .use_dynamic_task(mode="submitted", plan=graph)
+        .use_dynamic_task(mode="submitted", plan=graph, handlers=DAG_HANDLERS)
         .input("Run support triage graph.")
         .create_execution()
     )

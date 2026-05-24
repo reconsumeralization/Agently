@@ -60,7 +60,7 @@ def main():
         print(f"install_status=ok")
         print(f"skill_id={skill_id}")
 
-        # Inspect the normalized contract (guidance-only, no stages).
+        # Inspect the normalized contract (guidance-only, no execution metadata).
         inspected = Agently.skills_executor.inspect_skills(skill_id)
         guidance = str(inspected.get("guidance", {}).get("content", ""))
 

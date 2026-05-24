@@ -131,6 +131,7 @@ class SkillsExtension(BaseAgent):
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        effort: str | None = None,
     ) -> "SkillExecution":
         plan = await self.async_resolve_skills_plan(
             task,
@@ -145,6 +146,7 @@ class SkillsExtension(BaseAgent):
             plan=plan,
             output_format=output_format,
             stream_handler=stream_handler,
+            effort=effort,
         )
         self.__skill_execution_logs.append(execution.to_dict())
         return execution
@@ -159,6 +161,7 @@ class SkillsExtension(BaseAgent):
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        effort: str | None = None,
     ) -> "SkillExecution":
         return FunctionShifter.syncify(self.async_run_skills_task)(
             task,
@@ -168,6 +171,7 @@ class SkillsExtension(BaseAgent):
             semantic_outputs=semantic_outputs,
             output_format=output_format,
             stream_handler=stream_handler,
+            effort=effort,
         )
 
     async def async_execute_skills_plan(
@@ -177,6 +181,7 @@ class SkillsExtension(BaseAgent):
         plan: SkillExecutionPlan,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        effort: str | None = None,
     ) -> "SkillExecution":
         context = create_agent_skills_runtime_context(
             self,
@@ -190,7 +195,115 @@ class SkillsExtension(BaseAgent):
             task=task,
             plan=plan,
             output_format=output_format,
+            effort=effort,
         )
+
+    async def async_execute_skills_plans(
+        self,
+        task: str,
+        *,
+        plans: list[SkillExecutionPlan],
+        mode: Literal["concurrent", "sequential"] = "concurrent",
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        effort: str | None = None,
+    ) -> list[Any]:
+        """Execute multiple skill plans concurrently or sequentially.
+
+        In *concurrent* mode, plans execute through TriggerFlow batch fan-out and
+        results are returned in the same order as *plans*.
+
+        In *sequential* mode, TriggerFlow executes each plan in order and folds
+        the previous result into the next task context.
+        """
+        from agently.core.TriggerFlow import TriggerFlow
+
+        if mode == "sequential":
+            flow = TriggerFlow(name="skills-plans-sequential")
+
+            async def init(data: Any):
+                await data.async_set_state("results", [])
+                await data.async_set_state("task", task)
+                return task
+
+            chain = flow.to(init)
+
+            for i, plan in enumerate(plans):
+                async def run_plan(data: Any, *, index: int = i, current_plan: SkillExecutionPlan = plan):
+                    results = list(data.get_state("results", []) or [])
+                    accumulated = data.get_state("task", task)
+                    if index > 0 and results:
+                        prev = results[-1]
+                        prev_output = getattr(prev, "output", prev) if hasattr(prev, "output") else prev
+                        accumulated = f"{task}\n\n[Prior result from skill {index}]: {str(prev_output)[:2000]}"
+                        await data.async_set_state("task", accumulated)
+                    ctx = create_agent_skills_runtime_context(
+                        self,
+                        runtime_stream_handler=stream_handler,
+                        resource_reader=lambda sid, path, mb: self.skills_executor.read_resource(
+                            sid, path, max_bytes=mb
+                        ),
+                    )
+                    exec_result = await self.skills_executor.async_execute_plan(
+                        context=ctx,
+                        task=accumulated,
+                        plan=current_plan,
+                        output_format=output_format,
+                        effort=effort,
+                    )
+                    results.append(exec_result)
+                    self.__skill_execution_logs.append(exec_result.to_dict())
+                    await data.async_set_state("results", results)
+                    return exec_result
+
+                chain = chain.to(run_plan)
+
+            execution = flow.create_execution(auto_close=False)
+            await execution.async_start(task)
+            state = await execution.async_close()
+            return list(state.get("results", []) or [])
+
+        # concurrent mode — TriggerFlow owns fan-out / collect
+        chunks = []
+        for i, plan in enumerate(plans):
+            async def run_one(data: Any, *, index: int = i, current_plan: SkillExecutionPlan = plan):
+                ctx = create_agent_skills_runtime_context(
+                    self,
+                    runtime_stream_handler=stream_handler,
+                    resource_reader=lambda sid, path, mb: self.skills_executor.read_resource(
+                        sid, path, max_bytes=mb
+                    ),
+                )
+                exec_result = await self.skills_executor.async_execute_plan(
+                    context=ctx,
+                    task=task,
+                    plan=current_plan,
+                    output_format=output_format,
+                    effort=effort,
+                )
+                self.__skill_execution_logs.append(exec_result.to_dict())
+                return {"index": index, "execution": exec_result}
+
+            chunks.append((f"plan_{i}", run_one))
+
+        flow = TriggerFlow(name="skills-plans-concurrent")
+
+        async def collect(data: Any):
+            keyed_results = data.value if isinstance(data.value, dict) else {}
+            ordered: list[Any] = [None] * len(plans)
+            for item in keyed_results.values():
+                if isinstance(item, dict):
+                    index = item.get("index")
+                    if isinstance(index, int) and 0 <= index < len(ordered):
+                        ordered[index] = item.get("execution")
+            await data.async_set_state("results", ordered)
+            return ordered
+
+        flow.batch(*chunks).to(collect)
+        execution = flow.create_execution(auto_close=False)
+        await execution.async_start(task)
+        state = await execution.async_close()
+        return list(state.get("results", []) or [])
 
     def get_skills_execution_logs(self) -> list[dict[str, Any]]:
         return _copy_public(self.__skill_execution_logs)

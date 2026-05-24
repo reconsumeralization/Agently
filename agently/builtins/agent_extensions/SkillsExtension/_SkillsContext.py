@@ -88,10 +88,61 @@ class AgentSkillsRuntimeContext:
     # ── Acting surface ──
 
     async def async_call_tool(self, name: str, /, **kwargs: Any) -> Any:
-        return await self.agent.action.async_call_action(name, kwargs)
+        return await self.agent.action.async_call_tool(name, kwargs)
 
     async def async_call_action(self, name: str, /, **kwargs: Any) -> Any:
         return await self.agent.action.async_call_action(name, kwargs)
+
+    async def async_execute_action_specs(
+        self,
+        action_specs: list[dict[str, Any]],
+        *,
+        concurrency: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Execute Skills action specs through the agent's ActionRuntime."""
+        action_calls: list[dict[str, Any]] = []
+        for spec in action_specs:
+            if not isinstance(spec, dict):
+                continue
+            action_name = str(spec.get("name", "")).strip()
+            if not action_name:
+                continue
+            action_kwargs = spec.get("kwargs", {}) or {}
+            if not isinstance(action_kwargs, dict):
+                action_kwargs = {}
+            action_calls.append(
+                {
+                    "action_id": action_name,
+                    "tool_name": action_name,
+                    "action_input": action_kwargs,
+                    "tool_kwargs": action_kwargs,
+                    "purpose": str(spec.get("purpose") or spec.get("next_action") or f"Use {action_name}"),
+                    "source_protocol": "skills_react",
+                }
+            )
+
+        if not action_calls:
+            return []
+
+        async def _use_prebuilt_action_calls(_context: dict[str, Any], _request: dict[str, Any]):
+            return {
+                "next_action": "execute",
+                "use_action": True,
+                "action_calls": action_calls,
+                "tool_commands": action_calls,
+                "execution_commands": action_calls,
+            }
+
+        results = await self.agent.action.async_plan_and_execute(
+            prompt=self.agent.request.prompt,
+            settings=self.agent.settings,
+            action_list=self.agent.action.get_action_list(),
+            agent_name=self.agent.name,
+            planning_handler=_use_prebuilt_action_calls,
+            max_rounds=1,
+            concurrency=concurrency,
+        )
+        return [dict(item) for item in results]
 
     # ── Progressive disclosure ──
 

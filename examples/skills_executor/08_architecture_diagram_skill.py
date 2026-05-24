@@ -1,4 +1,4 @@
-"""Standard SKILL.md skill that generates an architecture diagram (prompt-only).
+"""Standard SKILL.md skill that generates an architecture diagram (single_shot).
 
 Run:
     python examples/skills_executor/08_architecture_diagram_skill.py
@@ -9,21 +9,21 @@ Environment:
 
 What this demonstrates
 ----------------------
-A real task driven entirely by the rewritten, prompt-first SkillsExecutor:
+A real task driven by the default single_shot SkillsExecutor path:
 
     * The capability is a single standard ``SKILL.md`` (frontmatter ``name`` /
-      ``description`` / ``keywords`` + a Markdown design system). No ``skill.yaml``,
-      no stages, no embedded actions.
+      ``description`` / ``keywords`` + a Markdown design system). This example
+      intentionally declares no ``execution`` metadata, so it stays single_shot.
     * ``agent.use_skills(["architecture-diagram"], mode="required")`` selects it.
       (``mode`` defaults to ``"model_decision"``; we force it here because we know
       exactly which skill must run.)
-    * ``run_skills_task(...)`` issues ONE structured model request that injects the
+    * ``run_skills_task(...)`` issues one structured model request that injects the
       full SKILL.md body as instructions and returns a structured result shaped by
       ``semantic_outputs``.
     * The HOST owns the side effect: it writes the returned HTML to disk. The skill
       never touches the filesystem.
 
-The task: draw a real architecture diagram for the latest Agently version. The
+The task: draw a real architecture diagram for the current Agently development line. The
 architecture brief below is grounded in this repository (agently/core +
 agently/builtins), so the diagram describes the actual framework, not a guess.
 
@@ -96,9 +96,9 @@ outside the HTML.
 """
 
 
-# ── The task: a repo-grounded brief of the latest Agently architecture ──────
+# ── The task: a repo-grounded brief of the current Agently architecture ──────
 AGENTLY_ARCHITECTURE_BRIEF = """\
-Draw the architecture of the Agently framework (version 4.1.2.x). Agently is
+Draw the architecture of the current Agently framework development line. Agently is
 layered execution & development infrastructure. Show these layers as bands,
 top to bottom, with the listed components:
 
@@ -112,7 +112,8 @@ top to bottom, with the listed components:
    ExecutionEnvironment, Action, Tool, SkillsExecutor, PluginManager, EventCenter.
 4. Plugins / Providers (plugin colour, from agently/builtins/plugins):
    ModelRequester (OpenAICompatible), PromptGenerator, ResponseParser,
-   AgentOrchestrator, SkillsExecutor (SKILL.md prompt-only), TaskDAGPlanner,
+   AgentOrchestrator, SkillsExecutor (SKILL.md single_shot / staged / react),
+   TaskDAGPlanner,
    ActionExecutor, ActionFlow, ActionRuntime, ExecutionEnvironmentProvider,
    ToolManager.
 5. Execution Environment Manager & Capabilities (capability colour): Sandbox,
@@ -127,7 +128,8 @@ Key principle to convey: the separation rule
 "core contract -> plugin/provider impl -> built-in capability Action ->
 agent extension -> business application".
 
-Title it "Agently Framework Architecture" with subtitle noting v4.1.2.x.
+Title it "Agently Framework Architecture" with subtitle noting the current
+development line.
 """
 
 
