@@ -41,6 +41,51 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=10)
 ```
 
+Submitted DAG `inputs` may reference runtime data with placeholders. A whole
+string placeholder preserves the original value type; embedded placeholders are
+rendered into the surrounding string. Slot names are case-insensitive, but docs
+use uppercase:
+
+```python
+plan = {
+    "graph_id": "review",
+    "task_schema_version": "task_dag/v1",
+    "tasks": [
+        {"id": "lookup", "kind": "local", "binding": "local_handler"},
+        {
+            "id": "final",
+            "kind": "local",
+            "binding": "local_handler",
+            "depends_on": ["lookup"],
+            "inputs": {
+                "account": "${INIT.account}",
+                "ticket": "${DEPS.lookup.ticket}",
+                "summary": "Ticket ${STATE.task_results.lookup.ticket.id} for ${INIT.account}",
+            },
+        },
+    ],
+}
+```
+
+`${INIT}` points at the submitted graph input / initial execution input.
+`${DEPS...}` points at completed dependency results. `${STATE...}` reads
+execution state, for example `${STATE.task_results.lookup}`. `${TRIGGER...}`
+points at the raw TriggerFlow trigger payload (`data.value`) and is mainly for
+advanced debugging or executor-level integrations. Missing runtime paths fail
+closed during task execution instead of staying as unresolved strings.
+
+When a submitted DAG runs through `agent.use_dynamic_task(...).create_execution()`,
+`${INIT...}` first reads an explicit `use_dynamic_task(graph_input=...)` value.
+If that argument is omitted, it reads the execution prompt snapshot `input` slot
+captured by `create_execution()`. Only when neither source exists does the Agent
+route fall back to `{"target": task_target}`.
+
+If `create_dynamic_task(..., output_schema=..., ensure_keys=...)` supplies the
+frontstage contract for a semantic-output model node, that host contract wins
+over an incompatible planner-chosen node format. For multi-field structured
+contracts, a planner's `inputs.output_format="flat_markdown"` is coerced back to
+`auto` so the output parser can choose a compatible structured format.
+
 Submitted plans can also be kept as YAML or JSON config artifacts. Load the
 config into `TaskDAG`, then pass it through the same facade:
 
@@ -67,10 +112,45 @@ Agent instances expose the same facade:
 task = agent.create_dynamic_task(target="review policy")
 ```
 
+Agent prompt methods are configuration. `agent.create_dynamic_task()` consumes
+the same prompt snapshot as `agent.start()` / `agent.create_execution()`:
+
+```python
+task = (
+    agent
+    .info({"customer": "Acme"})
+    .instruct("Focus on renewal risk and account-team actions.")
+    .input({"account": "Acme", "ticket": "T-42"})
+    .output({
+        "summary": (str, "risk summary", True),
+        "risks": ([str], "risk bullets", True),
+    }, format="json")
+    .create_dynamic_task()
+)
+```
+
+The prompt snapshot is rendered through the normal Prompt generator to become
+the Dynamic Task target. The `output` slot becomes the facade-level
+`output_schema`, and `output_format` becomes the default model-task format.
+`set_agent_prompt(...)` / `always=True` values are inherited; request prompt
+values from `set_request_prompt(...)` / quick prompt calls are frozen into the
+new task and then cleared from the pending request. Explicit
+`create_dynamic_task(target=..., output_schema=..., output_format=...)`
+arguments override prompt-derived defaults.
+
 For model tasks, use Agently's request output pipeline instead of parsing model
 text in handlers or examples. `output_schema` applies to semantic output model
 tasks; node-level `inputs.output_schema` can override it for a specific model
-task.
+task. Each model task may also set `inputs.output_format`:
+
+- `json`: compact machine-control outputs, action arguments, routing flags,
+  numeric or boolean facts, model judges, dense nested arrays/objects, and
+  strict extraction.
+- `flat_markdown`: flat string fields with long HTML, Markdown, code, SVG,
+  SQL, templates, or report sections.
+- `hybrid`: explicit opt-in for long prose with structured lists, tables,
+  citations, metadata, or nested evidence when retry latency is acceptable.
+- `auto`: structural schema-driven selection when retry latency is acceptable.
 
 ```python
 task = Agently.create_dynamic_task(
@@ -84,6 +164,28 @@ snapshot = await task.async_start(timeout=120)
 _, output = next(iter(snapshot["semantic_outputs"].items()))
 brief = output["result"]["brief"]
 ```
+
+For submitted DAGs, put the task-specific strategy on the model task itself:
+
+```python
+{
+    "id": "render_html",
+    "kind": "model",
+    "inputs": {
+        "output_schema": {"html": (str, "render-ready HTML", True)},
+        "output_format": "flat_markdown",
+    },
+}
+```
+
+Submitted DAG placeholders use the same uppercase naming style as Prompt
+references, but they are a TriggerFlow runtime namespace rather than Prompt
+slot references. `${INIT.foo}` points at initial input, `${DEPS.task.path}`
+points at completed dependency results, `${STATE.task_results.task.path}` points
+at execution state, and `${TRIGGER.result}` points at the raw TriggerFlow
+trigger payload. In DAG task `inputs`, whole-string placeholders preserve the
+original runtime value type; embedded placeholders stringify into the
+surrounding text.
 
 ## Architecture
 

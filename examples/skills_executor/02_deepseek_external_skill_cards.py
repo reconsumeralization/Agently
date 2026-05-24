@@ -24,11 +24,11 @@ Expected key output from a real DeepSeek run:
 
 How it works:
     External SKILL.md folders are installed as guidance-heavy skill contracts.
-    agent.use_skills(..., mode="model_decision", scope="request") exposes their
-    SkillCards to the request; DeepSeek decides how to use the card in its answer.
+    agent.use_skills(..., mode="model_decision") exposes their SkillCards to the
+    request; DeepSeek decides how to use the card in its answer.
     The Anthropic scripts remain package assets. They are not executed as arbitrary
-    Python handlers; executable work should be bound through Actions in a
-    declarative SkillContract when required.
+    Python handlers; executable work should be bound through host Actions when
+    required.
 
 Flow:
     local skill dir / cloned upstream skill dir
@@ -151,8 +151,7 @@ def _resolve_source(case: dict[str, str], anthropic_repo: Path) -> Path:
 def _install_targets() -> list[str]:
     anthropic_repo = _ensure_anthropic_repo()
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(registry_root=str(RUNTIME_ROOT / "registry"), allowed_trust_levels=["local"])
 
     installed_ids = []
     for case in CASES:
@@ -182,8 +181,8 @@ def _run_case(case: dict[str, str]) -> dict[str, Any]:
     agent = _create_agent()
     selector = case["selector"]
     task = case["task"]
-    agent.use_skills([selector], mode="model_decision", scope="request")
-    plan = agent.resolve_skills_plan(task, skills=[selector], mode="model_decision", scope="request")
+    agent.use_skills([selector], mode="model_decision")
+    plan = agent.resolve_skills_plan(task, skills=[selector], mode="model_decision")
     result = (
         agent.input(
             {

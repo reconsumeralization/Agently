@@ -1,4 +1,7 @@
+import asyncio
 import logging
+from typing import Any, cast
+
 import pytest
 import yaml
 from agently import Agently
@@ -7,6 +10,8 @@ from agently.compatibility import (
     get_devtools_compatibility_manifest,
     get_skills_compatibility_manifest,
 )
+from agently.types.data import StreamingData
+from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import HybridRoutePlanner
 
 
 _RUNTIME_LOG_KEYS = (
@@ -87,6 +92,14 @@ def test_dynamic_task_plugin_registered():
     assert "local_handler" in task.resolver.keys()
 
 
+def test_skills_executor_plugin_has_no_stage_action_resolution_defaults():
+    assert Agently.settings.get("plugins.SkillsExecutor.AgentlySkillsExecutor.action_resolution") is None
+    framework_default = Agently.settings.get("skills.action_resolution")
+    assert isinstance(framework_default, dict)
+    aliases = cast(list[Any], framework_default.get("bash_action_aliases", []))
+    assert "bash" in aliases
+
+
 def test_agent_can_create_dynamic_task():
     agent = Agently.create_agent("graph-agent")
     task = agent.create_dynamic_task(
@@ -100,6 +113,85 @@ def test_agent_can_create_dynamic_task():
 
     assert task.name == "graph-agent-DynamicTask"
     assert task.settings.parent is agent.settings
+
+
+@pytest.mark.asyncio
+async def test_hybrid_route_planner_uses_model_when_optional_candidates_are_ambiguous():
+    class FakeRequest:
+        def __init__(self):
+            self.payload: dict[str, Any] = {}
+            self.output_format = None
+
+        def input(self, payload):
+            self.payload = payload
+            return self
+
+        def output(self, _schema, *, format="auto"):
+            self.output_format = format
+            return self
+
+        async def async_start(self, **_kwargs):
+            assert len(self.payload["route_candidates"]) == 3
+            assert self.output_format == "json"
+            return {"selected_route": "skills", "reason": "installed Skill is more specific"}
+
+    class FakeAction:
+        def get_action_list(self, tags=None):
+            return [{"name": "lookup_release"}]
+
+    class FakePrompt:
+        def get(self, _key, default=None):
+            return "prepare release notes"
+
+    class FakeAgent:
+        name = "fake-route-agent"
+        action = FakeAction()
+
+        def __init__(self):
+            self.request = type("Request", (), {"prompt": FakePrompt()})()
+            self._dynamic_task_candidates = [{"mode": "auto", "name": "planner"}]
+
+        def _collect_skill_selectors(self, *, skills, mode):
+            return ["release-checklist"] if mode == "model_decision" else []
+
+        def _collect_skills_pack_selectors(self, *, skills_packs, mode):
+            return []
+
+        def create_temp_request(self):
+            return FakeRequest()
+
+    route, meta = await HybridRoutePlanner(cast(Any, FakeAgent())).select_route()
+
+    assert route == "skills"
+    assert meta["mode"] == "model_decision"
+    assert meta["selected_by"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_route_planner_keeps_required_routes_deterministic():
+    class FakePrompt:
+        def get(self, _key, default=None):
+            return "prepare release notes"
+
+    class FakeAgent:
+        name = "fake-route-agent"
+        action = None
+
+        def __init__(self):
+            self.request = type("Request", (), {"prompt": FakePrompt()})()
+            self._dynamic_task_candidates = [{"mode": "auto", "name": "planner"}]
+
+        def _collect_skill_selectors(self, *, skills, mode):
+            return ["release-checklist"] if mode == "required" else []
+
+        def _collect_skills_pack_selectors(self, *, skills_packs, mode):
+            return []
+
+    route, meta = await HybridRoutePlanner(cast(Any, FakeAgent())).select_route()
+
+    assert route == "skills"
+    assert meta["mode"] == "required"
+    assert meta["selected_by"] == "deterministic"
 
 
 @pytest.mark.asyncio
@@ -139,6 +231,7 @@ async def test_dynamic_task_model_output_schema_uses_agently_request_pipeline():
     class FakeModelRequest:
         def __init__(self):
             self.output_schema = None
+            self.output_format = None
             self.start_kwargs = None
 
         def input(self, value):
@@ -147,8 +240,9 @@ async def test_dynamic_task_model_output_schema_uses_agently_request_pipeline():
         def instruct(self, value):
             return self
 
-        def output(self, value):
+        def output(self, value, *, format="auto"):
             self.output_schema = value
+            self.output_format = format
             return self
 
         async def async_start(self, **kwargs):
@@ -172,8 +266,60 @@ async def test_dynamic_task_model_output_schema_uses_agently_request_pipeline():
     snapshot = await task.async_run(timeout=1)
 
     assert request.output_schema == schema
+    assert request.output_format == "auto"
     assert request.start_kwargs == {"ensure_keys": ["brief", "next_update"]}
     assert snapshot["semantic_outputs"]["frontstage"]["result"]["brief"] == "Latency is resolved."
+
+
+@pytest.mark.asyncio
+async def test_dynamic_task_model_task_can_select_output_format():
+    schema = {"html": (str, "render-ready HTML", True)}
+
+    class FakeModelRequest:
+        def __init__(self):
+            self.output_schema = None
+            self.output_format = None
+
+        def input(self, _value):
+            return self
+
+        def instruct(self, _value):
+            return self
+
+        def output(self, value, *, format="auto"):
+            self.output_schema = value
+            self.output_format = format
+            return self
+
+        async def async_start(self, **_kwargs):
+            return {"html": "<section>OK</section>"}
+
+    request = FakeModelRequest()
+    task = Agently.create_dynamic_task(
+        "render a fragment",
+        plan={
+            "graph_id": "model-output-format",
+            "task_schema_version": "task_dag/v1",
+            "tasks": [
+                {
+                    "id": "render_html",
+                    "kind": "model",
+                    "inputs": {
+                        "output_schema": schema,
+                        "output_format": "flat_markdown",
+                    },
+                }
+            ],
+            "semantic_outputs": {"fragment": "render_html"},
+        },
+        model=request,
+    )
+
+    snapshot = await task.async_run(timeout=1)
+
+    assert request.output_schema == schema
+    assert request.output_format == "flat_markdown"
+    assert snapshot["semantic_outputs"]["fragment"]["result"]["html"] == "<section>OK</section>"
 
 
 def test_dynamic_task_can_be_created_without_explicit_model_source():
@@ -189,6 +335,308 @@ def test_dynamic_task_exposes_actions_only_when_explicit():
 
     assert "action" in task.resolver.keys()
     assert task.planner.available_bindings == ("model", "action")
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_runs_submitted_dynamic_task_and_streams_process():
+    async def run_task(context):
+        return {"task_id": context.task.id, "value": context.graph_input["value"]}
+
+    agent = Agently.create_agent("execution-dag-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-execution-dag",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [{"id": "extract", "kind": "local", "binding": "local_handler"}],
+                "semantic_outputs": {"final": "extract"},
+            },
+            handlers={"local_handler": run_task},
+            graph_input={"value": "ok"},
+        )
+        .input("run submitted graph")
+        .create_execution()
+    )
+
+    stream_items = []
+    async for item in execution.get_async_generator(type="instant"):
+        if item.is_complete:
+            stream_items.append(item)
+
+    data = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+
+    assert data["semantic_outputs"]["final"]["result"]["value"] == "ok"
+    assert meta["route_plan"]["selected_route"] == "dynamic_task"
+    assert any(item.path == "route.selected" and item.route == "dynamic_task" for item in stream_items)
+    assert any(item.path == "route.dynamic_task.graph" for item in stream_items)
+    assert any(item.path == "task_dag.tasks.extract.start" for item in stream_items)
+    assert any(item.path == "task_dag.tasks.extract.complete" for item in stream_items)
+
+
+def _agent_input_placeholder_graph() -> dict[str, Any]:
+    return {
+        "graph_id": "agent-input-placeholder",
+        "task_schema_version": "task_dag/v1",
+        "tasks": [
+            {
+                "id": "echo",
+                "kind": "local",
+                "binding": "echo_handler",
+                "inputs": {"kwargs": {"ticket": "${INIT.ticket}"}},
+            }
+        ],
+        "semantic_outputs": {"final": "echo"},
+    }
+
+
+async def _echo_dynamic_task_kwargs(context):
+    return dict((context.task.inputs or {}).get("kwargs") or {})
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_uses_prompt_input_as_graph_input():
+    agent = Agently.create_agent("execution-dag-prompt-input-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan=_agent_input_placeholder_graph(),
+            handlers={"echo_handler": _echo_dynamic_task_kwargs},
+        )
+        .input({"ticket": "TICKET-OK"})
+        .create_execution()
+    )
+
+    data = await execution.async_get_data()
+
+    assert data["semantic_outputs"]["final"]["result"]["ticket"] == "TICKET-OK"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_explicit_graph_input_wins():
+    agent = Agently.create_agent("execution-dag-explicit-graph-input-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan=_agent_input_placeholder_graph(),
+            handlers={"echo_handler": _echo_dynamic_task_kwargs},
+            graph_input={"ticket": "GRAPH-INPUT"},
+        )
+        .input({"ticket": "PROMPT-INPUT"})
+        .create_execution()
+    )
+
+    data = await execution.async_get_data()
+
+    assert data["semantic_outputs"]["final"]["result"]["ticket"] == "GRAPH-INPUT"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_uses_frozen_prompt_snapshot():
+    agent = Agently.create_agent("execution-dag-prompt-snapshot-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan=_agent_input_placeholder_graph(),
+            handlers={"echo_handler": _echo_dynamic_task_kwargs},
+        )
+        .input({"ticket": "SNAPSHOT-INPUT"})
+        .create_execution()
+    )
+    agent.input({"ticket": "MUTATED-INPUT"})
+
+    data = await execution.async_get_data()
+
+    assert data["semantic_outputs"]["final"]["result"]["ticket"] == "SNAPSHOT-INPUT"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_missing_input_path_names_graph_input_source():
+    agent = Agently.create_agent("execution-dag-missing-prompt-input-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan=_agent_input_placeholder_graph(),
+            handlers={"echo_handler": _echo_dynamic_task_kwargs},
+        )
+        .input({"account": "Acme"})
+        .create_execution()
+    )
+
+    with pytest.raises(ValueError, match=r"\$\{INIT\.ticket\}.*execution prompt snapshot input slot"):
+        await asyncio.wait_for(execution.async_get_data(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_failure_terminates_stream():
+    async def boom_handler(_context):
+        raise RuntimeError("intentional handler failure")
+
+    agent = Agently.create_agent("execution-dag-failure-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-execution-dag-failure",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [{"id": "explode", "kind": "local", "binding": "boom_handler"}],
+                "semantic_outputs": {"final": "explode"},
+            },
+            handlers={"boom_handler": boom_handler},
+        )
+        .input("run failing graph")
+        .create_execution()
+    )
+
+    stream_items = []
+
+    async def consume_stream():
+        async for item in execution.get_async_generator(type="instant"):
+            stream_items.append(item)
+
+    with pytest.raises(RuntimeError, match="intentional handler failure"):
+        await asyncio.wait_for(consume_stream(), timeout=2)
+
+    assert execution.status == "error"
+    assert any(item.path == "error" for item in stream_items)
+    assert any(item.path == "task_dag.tasks.explode.fail" for item in stream_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_can_use_action_candidates():
+    def classify_ticket(text: str):
+        return {"priority": "high", "text": text}
+
+    agent = Agently.create_agent("execution-action-dag-agent")
+    agent.register_action(
+        name="classify_ticket",
+        desc="Classify support ticket.",
+        kwargs={"text": (str, "ticket text")},
+        func=classify_ticket,
+    )
+    execution = (
+        agent
+        .use_actions(["classify_ticket"])
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-action-dag",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [
+                    {
+                        "id": "classify",
+                        "kind": "action",
+                        "binding": "classify_ticket",
+                        "inputs": {"kwargs": {"text": "payment failed"}},
+                    }
+                ],
+                "semantic_outputs": {"final": "classify"},
+            },
+        )
+        .input("run action graph")
+        .create_execution()
+    )
+
+    data = await execution.async_get_data()
+
+    assert data["semantic_outputs"]["final"]["result"]["priority"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_streams_model_field_deltas():
+    schema = {
+        "prethinking": (str, "operator-visible process note", True),
+        "reply": (str, "customer-facing reply", True),
+    }
+
+    class FakeModelResponse:
+        async def get_async_generator(self, type="instant", **_kwargs):
+            assert type == "instant"
+            yield StreamingData(path="prethinking", value="Check", delta="Check", event_type="delta")
+            yield StreamingData(path="prethinking", value="Check billing", delta=" billing", event_type="delta")
+            yield StreamingData(path="reply", value="We are", delta="We are", event_type="delta")
+            yield StreamingData(path="reply", value="We are investigating.", delta=" investigating.", event_type="delta")
+            yield StreamingData(path="prethinking", value="Check billing", event_type="done", is_complete=True)
+            yield StreamingData(path="reply", value="We are investigating.", event_type="done", is_complete=True)
+
+        async def async_get_data(self, **kwargs):
+            assert kwargs == {"ensure_keys": ["prethinking", "reply"]}
+            return {
+                "prethinking": "Check billing",
+                "reply": "We are investigating.",
+            }
+
+    class FakeModelRequest:
+        def __init__(self):
+            self.output_schema = None
+            self.output_format = None
+
+        def input(self, _value):
+            return self
+
+        def instruct(self, _value):
+            return self
+
+        def output(self, value, *, format="auto"):
+            self.output_schema = value
+            self.output_format = format
+            return self
+
+        def get_response(self, **_kwargs):
+            return FakeModelResponse()
+
+        async def async_start(self, **_kwargs):  # pragma: no cover - get_response path owns streaming
+            raise AssertionError("streaming model tasks should use get_response()")
+
+    request = FakeModelRequest()
+    agent = Agently.create_agent("execution-model-field-stream-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-model-field-stream",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [
+                    {
+                        "id": "draft",
+                        "kind": "model",
+                        "inputs": {
+                            "output_schema": schema,
+                            "ensure_keys": ["prethinking", "reply"],
+                        },
+                    }
+                ],
+                "semantic_outputs": {"final": "draft"},
+            },
+            model=request,
+        )
+        .input("draft a transparent support reply")
+        .create_execution()
+    )
+
+    streamed = []
+    async for item in execution.get_async_generator(type="instant"):
+        if item.event_type == "delta":
+            streamed.append((item.path, item.delta, item.is_complete))
+
+    data = await execution.async_get_data()
+
+    assert streamed[:4] == [
+        ("task_dag.tasks.draft.fields.prethinking", "Check", False),
+        ("task_dag.tasks.draft.fields.prethinking", " billing", False),
+        ("task_dag.tasks.draft.fields.reply", "We are", False),
+        ("task_dag.tasks.draft.fields.reply", " investigating.", False),
+    ]
+    assert request.output_format == "auto"
+    assert data["semantic_outputs"]["final"]["result"]["reply"] == "We are investigating."
 
 
 def test_deprecated_action_manager_aliases_warn():

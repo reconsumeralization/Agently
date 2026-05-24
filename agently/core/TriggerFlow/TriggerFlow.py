@@ -180,6 +180,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         lease_ttl: float | None = None,
         intervention_mode: Literal["planned", "auto"] | None = _INTERVENTION_MODE_DEFAULT,
         intervention_policy: Any = None,
+        resume_handle_exposed: bool = True,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
         execution_id = uuid.uuid4().hex
         skip_exceptions = skip_exceptions if skip_exceptions is not None else self._skip_exceptions
@@ -212,6 +213,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             execution_environments=execution_environments,
             intervention_mode=intervention_mode,
             intervention_policy=intervention_policy,
+            resume_handle_exposed=resume_handle_exposed,
         )
         if runtime_resources:
             execution.update_runtime_resources(runtime_resources)
@@ -425,6 +427,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         lease_ttl: float | None = None,
         intervention_mode: Literal["planned", "auto"] | None = _INTERVENTION_MODE_DEFAULT,
         intervention_policy: Any = None,
+        resume_handle_exposed: bool = True,
     ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
         if wait_for_result is not False:
             DeprecationWarnings.warn_deprecated_once(
@@ -446,6 +449,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             execution_environments=execution_environments,
             intervention_mode=intervention_mode,
             intervention_policy=intervention_policy,
+            resume_handle_exposed=resume_handle_exposed,
         )
         await execution._async_run_start(initial_value)
         return execution
@@ -666,6 +670,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             auto_close_timeout=effective_auto_close_timeout,
             owner_id=owner_id,
             lease_ttl=lease_ttl,
+            resume_handle_exposed=False,
         )
         return await execution._async_wait_for_close_snapshot()
 
@@ -685,6 +690,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             run_context=run_context,
             parent_run_context=parent_run_context,
             auto_close_timeout=0.0,
+            resume_handle_exposed=False,
         )
         return execution.get_async_runtime_stream(
             initial_value,
@@ -707,6 +713,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             run_context=run_context,
             parent_run_context=parent_run_context,
             auto_close_timeout=0.0,
+            resume_handle_exposed=False,
         )
         return execution.get_runtime_stream(
             initial_value,

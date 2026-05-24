@@ -6,15 +6,18 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
-from agently.builtins.plugins.SkillsExecutor import SkillInstallError
+from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import create_agent_skills_runtime_context
+from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import AgentExecutionStream
+from agently.builtins.plugins.SkillsExecutor import SkillInstallError, SkillNormalizationError
 from agently.core import PluginManager
 from agently.types.data import AgentlyRequestData
 from agently.utils import Settings
 
 
-class MockSkillsChainRequester:
-    name = "MockSkillsChainRequester"
+class MockSkillsRequester:
+    name = "MockSkillsRequester"
     DEFAULT_SETTINGS: dict[str, object] = {}
+    requests: list[str] = []
 
     def __init__(self, prompt, settings):
         self.prompt = prompt
@@ -22,7 +25,7 @@ class MockSkillsChainRequester:
 
     @staticmethod
     def _on_register():
-        pass
+        MockSkillsRequester.requests = []
 
     @staticmethod
     def _on_unregister():
@@ -32,21 +35,24 @@ class MockSkillsChainRequester:
         return AgentlyRequestData(
             client_options={},
             headers={},
-            data={
-                "messages": self.prompt.to_messages(),
-                "info": self.prompt.get("info"),
-            },
+            data={"messages": self.prompt.to_messages(), "info": self.prompt.get("info")},
             request_options={"stream": True},
-            request_url="mock://skills-chain-requester",
+            request_url="mock://skills",
         )
 
     async def request_model(self, request_data: AgentlyRequestData):
-        info_text = json.dumps(request_data.data.get("info"), ensure_ascii=False)
-        response = {
-            "has_skill_cards": "skill_cards" in info_text,
-            "has_primary_guidance": "Follow the release checklist" in info_text,
-            "reply": "skills-visible" if "release-checklist" in info_text else "skills-missing",
-        }
+        request_text = json.dumps(request_data.data, ensure_ascii=False)
+        MockSkillsRequester.requests.append(request_text)
+        if "candidate_skill_cards" in request_text:
+            response = {"selected_skill_ids": ["beta-skill", "alpha-skill"], "reason": "Beta fits first."}
+        elif "### html" in request_text:
+            yield "message", "### html\n<section>OK</section>"
+            return
+        else:
+            response = {
+                "response": "Applied selected SKILL.md guidance.",
+                "skill_trace": ["beta-skill", "alpha-skill"],
+            }
         yield "message", json.dumps(response, ensure_ascii=False)
 
     async def broadcast_response(
@@ -60,349 +66,387 @@ class MockSkillsChainRequester:
         yield "done", response_text
 
 
+def _create_agent():
+    settings = Settings(name="SkillsTestSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="SkillsTestPluginManager")
+    plugin_manager.register("ModelRequester", MockSkillsRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name="skills-test-agent")
+
+
 def _write(path: Path, content: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
-def _create_skill(root: Path, *, skill_id: str = "release-checklist", action: str = "record_release_note"):
-    _write(
-        root / "skill.yaml",
-        f"""
-skill_id: { skill_id }
-version: 0.1.0
-display_name: Release Checklist
-purpose: Check release readiness and record a release note.
-trust_level: local
-activation:
-  keywords: [release, rollback]
-kind: workflow
-card:
-  stage_roles: [record, validate]
-  consumes:
-    - role: task_request
-      type: text
-  produces:
-    - role: release_note
-      type: json
-  artifact_types: [json]
-  side_effects:
-    - kind: local_record
-      policy: allowed
-  required_capabilities: [{ action }]
-  complements: [repo-review]
-  failure_modes: [missing_action]
-  composition_hints: [run before release summary]
-semantic_outputs:
-  release_note:
-    type: json
-requires:
-  actions: [{ action }]
-stages:
-  - id: record_note
-    kind: action
-    action: { action }
-    input:
-      text: "${{task}}"
-  - id: validate_note
-    kind: validate
-    validation:
-      required_state: [record_note]
-completion:
-  output:
-    release_ready: bool
-""",
-    )
+def _skill(root: Path, *, name: str = "Alpha Skill", description: str = "Use for alpha release review.", body: str = "Alpha guidance full sentence."):
+    desc_line = f"description: {description}\n" if description else ""
     _write(
         root / "SKILL.md",
-        """---
-name: Release Checklist
-description: Use for release and rollback review.
-keywords:
+        f"""---
+name: {name}
+{desc_line}keywords:
   - release
 ---
 
-Follow the release checklist before publishing.
+# {name}
+
+{body}
 """,
-    )
-
-
-def _create_shell_skill(root: Path):
-    _write(
-        root / "skill.yaml",
-        """
-skill_id: shell-inspector
-version: 0.1.0
-display_name: Shell Inspector
-purpose: Inspect the current workspace through a controlled Bash action.
-trust_level: local
-requires:
-  actions: [run_bash]
-stages:
-  - id: inspect_workspace
-    kind: action
-    action: run_bash
-    input:
-      cmd: pwd
-""",
-    )
-    _write(
-        root / "SKILL.md",
-        """---
-name: Shell Inspector
-description: Use controlled shell inspection.
-keywords:
-  - shell
----
-
-Inspect the workspace with a controlled shell command.
-""",
-    )
-
-
-def _create_chain_test_agent():
-    settings = Settings(name="SkillsChainTestSettings", parent=Agently.settings)
-    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="SkillsChainTestPluginManager")
-    plugin_manager.register("ModelRequester", MockSkillsChainRequester, activate=True)
-    return Agently.AgentType(
-        plugin_manager,
-        parent_settings=settings,
-        name="skills-chain-agent",
     )
 
 
 @pytest.fixture(autouse=True)
 def isolated_skills(tmp_path):
-    Agently.settings.set("skills.registry.root", str(tmp_path / "skills-registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(
+        registry_root=tmp_path / "skills-registry",
+        allowed_trust_levels=["local"],
+    )
+    MockSkillsRequester.requests = []
 
 
-def test_global_skills_install_list_inspect_remove(tmp_path):
-    assert not hasattr(Agently, "skills")
-    skill_root = tmp_path / "release-skill"
-    _create_skill(skill_root)
+def test_install_standard_skill_preserves_root_structure_and_writes_agently_metadata(tmp_path):
+    source = tmp_path / "source"
+    _skill(source, name="Release Review", body="Review release readiness.")
+    _write(source / "scripts" / "skill.json", '{"ok": true}')
 
-    installed = Agently.skills_executor.install_skills(skill_root)
-    assert installed.get("skill_id") == "release-checklist"
-    assert installed.get("card", {}).get("display_name") == "Release Checklist"
-    assert installed.get("action_requirements") == ["record_release_note"]
-    assert installed.get("declarative_stages", [])[0].get("stage_id") == "record_note"
-    assert installed.get("kind") == "workflow"
-    assert installed.get("semantic_outputs", {}).get("release_note", {}).get("type") == "json"
-    card = installed.get("card", {})
-    assert card.get("stage_roles") == ["record", "validate"]
-    assert card.get("consumes") == [{"role": "task_request", "type": "text"}]
-    assert card.get("produces") == [{"role": "release_note", "type": "json"}]
-    assert card.get("artifact_types") == ["json"]
-    assert card.get("side_effects") == [{"kind": "local_record", "policy": "allowed"}]
-    assert card.get("required_capabilities") == ["record_release_note"]
-    assert card.get("complements") == ["repo-review"]
-    assert card.get("failure_modes") == ["missing_action"]
+    contract = Agently.skills_executor.install_skills(source)
 
-    listed = Agently.skills_executor.list_skills()
-    assert [item["skill_id"] for item in listed] == ["release-checklist"]
-
-    inspected = Agently.skills_executor.inspect_skills("release-checklist")
-    assert inspected.get("assets", {}).get("guidance_assets", [])[0].get("asset_id") == "primary-guidance"
-
-    assert Agently.skills_executor.remove_skills("release-checklist") == {"removed": True, "skill_id": "release-checklist"}
-    with pytest.raises(SkillInstallError):
-        Agently.skills_executor.inspect_skills("release-checklist")
+    assert contract["skill_id"] == "release-review"
+    installed = Path(contract["source"]["installed_path"])
+    assert (installed / "SKILL.md").is_file()
+    assert (installed / "scripts" / "skill.json").is_file()
+    assert not (installed / "content").exists()
+    assert (installed / ".agently" / "install.json").is_file()
+    assert (installed / ".agently" / "decision_card.json").is_file()
+    assert (installed / ".agently" / "resource_index.json").is_file()
+    assert (installed / ".agently" / "checksums.json").is_file()
+    assert contract["decision_card"]["description"] == "Use for alpha release review."
 
 
-def test_install_skills_pack_records_pack_and_selects_by_skills_pack_name(tmp_path):
-    pack_root = tmp_path / "release-pack"
-    _create_skill(pack_root / "release-skill")
-    _create_skill(pack_root / "rollback-skill", skill_id="rollback-checklist")
+def test_skills_executor_configure_sets_public_registry_options(tmp_path):
+    registry_root = tmp_path / "configured-registry"
 
-    report = Agently.skills_executor.install_skills_pack(pack_root, name="release-pack", trust_level="local")
-
-    assert report["skills_pack_id"] == "release-pack"
-    assert report["name"] == "release-pack"
-    assert set(report["installed_skills"]) == {"release-checklist", "rollback-checklist"}
-    assert Agently.skills_executor.inspect_skills_pack("release-pack")["status"] == "success"
-    assert Agently.skills_executor.inspect_skills("release-checklist")["source"]["skills_pack_id"] == "release-pack"
-
-    calls = []
-
-    def record_release_note(text: str):
-        calls.append(text)
-        return {"recorded": text}
-
-    agent = Agently.create_agent("skills-pack-agent")
-    agent.register_action(
-        name="record_release_note",
-        desc="Record release note.",
-        kwargs={"text": (str, "Release note text.")},
-        func=record_release_note,
+    result = Agently.skills_executor.configure(
+        registry_root=registry_root,
+        allowed_trust_levels=["local"],
     )
 
-    execution = agent.run_skills_task(
-        "prepare release rollback notes",
-        skills_packs=["release-pack"],
+    assert result is Agently.skills_executor
+    assert Agently.settings.get("skills.registry.root") == str(registry_root)
+    assert Agently.settings.get("skills.allowed_trust_levels") == ["local"]
+
+
+def test_skill_id_slug_and_conflict_rules(tmp_path):
+    source = tmp_path / "source"
+    _skill(source, name="  QA ++ Release Skill  ")
+
+    contract = Agently.skills_executor.install_skills(source)
+    assert contract["skill_id"] == "qa-release-skill"
+
+    with pytest.raises(SkillInstallError):
+        Agently.skills_executor.install_skills(source)
+
+    updated = Agently.skills_executor.install_skills(source, update=True)
+    assert updated["skill_id"] == "qa-release-skill"
+
+
+def test_empty_slug_fails(tmp_path):
+    source = tmp_path / "source"
+    _skill(source, name="+++")
+
+    with pytest.raises(SkillNormalizationError):
+        Agently.skills_executor.install_skills(source)
+
+
+def test_root_non_standard_manifest_fails_but_nested_skill_json_is_allowed(tmp_path):
+    bad = tmp_path / "bad"
+    _skill(bad)
+    _write(bad / "skill.json", "{}")
+
+    with pytest.raises(SkillInstallError):
+        Agently.skills_executor.install_skills(bad)
+
+    good = tmp_path / "good"
+    _skill(good, name="Nested Json Skill")
+    _write(good / "scripts" / "skill.json", "{}")
+    contract = Agently.skills_executor.install_skills(good)
+    assert contract["skill_id"] == "nested-json-skill"
+
+
+def test_missing_description_installs_with_diagnostic(tmp_path):
+    source = tmp_path / "source"
+    _skill(source, name="No Description", description="")
+
+    contract = Agently.skills_executor.install_skills(source)
+
+    assert contract["card"]["description"] == ""
+    assert contract["diagnostics"][0]["code"] == "missing_description"
+
+
+def test_decision_card_can_be_rebuilt_and_cannot_gate_availability(tmp_path):
+    source = tmp_path / "source"
+    _skill(source, name="Repairable Skill")
+    contract = Agently.skills_executor.install_skills(source)
+    installed = Path(contract["source"]["installed_path"])
+    card_path = installed / ".agently" / "decision_card.json"
+
+    card_path.unlink()
+    inspected = Agently.skills_executor.inspect_skills("repairable-skill")
+    assert inspected["decision_card"]["skill_id"] == "repairable-skill"
+
+    card = json.loads(card_path.read_text(encoding="utf-8"))
+    card["only_when"] = ["too narrow"]
+    card_path.write_text(json.dumps(card), encoding="utf-8")
+    inspected = Agently.skills_executor.inspect_skills("repairable-skill")
+    assert "only_when" not in inspected["decision_card"]
+
+
+def test_install_skills_pack_records_standard_skills_and_failed_non_standard_dirs(tmp_path):
+    pack = tmp_path / "pack"
+    _skill(pack / "alpha", name="Alpha Skill")
+    _skill(pack / "bad", name="Bad Skill")
+    _write(pack / "bad" / "skill.yaml", "stages: []")
+
+    report = Agently.skills_executor.install_skills_pack(pack, name="demo-pack")
+
+    assert report["status"] == "partial"
+    assert report["installed_skills"] == ["alpha-skill"]
+    assert report["failed_skills"][0]["path"].endswith("bad")
+
+
+def test_required_plan_preserves_user_order(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    _skill(tmp_path / "beta", name="Beta Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    Agently.skills_executor.install_skills(tmp_path / "beta")
+
+    plan = _create_agent().resolve_skills_plan(
+        "handle release",
+        skills=["alpha-skill", "beta-skill"],
         mode="required",
-        planner_mode="deterministic",
     )
 
-    assert execution.status == "success"
-    assert execution.plan.get("selected_skills_packs", [])[0].get("skills_pack_id") == "release-pack"
-    assert {item.get("skills_pack_id") for item in execution.plan.get("selected_skills", [])} == {"release-pack"}
-    assert calls == ["prepare release rollback notes", "prepare release rollback notes"]
-
-
-def test_install_skills_pack_name_and_skills_pack_id_conflict_fails(tmp_path):
-    pack_root = tmp_path / "release-pack"
-    _create_skill(pack_root / "release-skill")
-
-    with pytest.raises(SkillInstallError):
-        Agently.skills_executor.install_skills_pack(pack_root, name="release-pack", skills_pack_id="other-pack")
-
-
-def test_model_decision_use_skills_discloses_cards_without_forcing_execution(tmp_path):
-    skill_root = tmp_path / "release-skill"
-    _create_skill(skill_root)
-    Agently.skills_executor.install_skills(skill_root)
-
-    agent = Agently.create_agent("skills-card-agent")
-    agent.use_skills(["release-checklist"], mode="model_decision")
-
-    import asyncio
-
-    for async_prefix in agent.extension_handlers.get("request_prefixes", []) or []:
-        asyncio.run(async_prefix(agent.request.prompt, agent.settings))
-
-    info_json = json.dumps(agent.request.prompt.get("info"), ensure_ascii=False)
-    assert "skill_cards" in info_json
-    assert "release-checklist" in info_json
-    assert "optional behavior-loop candidates" in info_json
-    assert "skill_guidance" in info_json
-    assert "Follow the release checklist" in info_json
-
-
-def test_chain_style_use_skills_discloses_cards_to_request(tmp_path):
-    skill_root = tmp_path / "release-skill"
-    _create_skill(skill_root)
-    Agently.skills_executor.install_skills(skill_root)
-
-    result = (
-        _create_chain_test_agent()
-        .use_skills(["release-checklist"])
-        .input("Should this release be blocked?")
-        .instruct("Use installed skills only if they fit the task.")
-        .output(
-            {
-                "has_skill_cards": (bool,),
-                "has_primary_guidance": (bool,),
-                "reply": (str,),
-            }
-        )
-        .start()
-    )
-
-    assert result["has_skill_cards"] is True
-    assert result["has_primary_guidance"] is True
-    assert result["reply"] == "skills-visible"
-
-
-def test_model_decision_plan_can_select_matching_skill(tmp_path):
-    calls = []
-
-    def record_release_note(text: str):
-        calls.append(text)
-        return {"recorded": text}
-
-    skill_root = tmp_path / "release-skill"
-    _create_skill(skill_root)
-    Agently.skills_executor.install_skills(skill_root)
-
-    agent = Agently.create_agent("skills-plan-agent")
-    agent.register_action(
-        name="record_release_note",
-        desc="Record release note.",
-        kwargs={"text": (str, "Release note text.")},
-        func=record_release_note,
-    )
-
-    plan = agent.resolve_skills_plan("prepare release rollback notes", mode="model_decision")
+    selected_skills = cast(list[dict[str, Any]], plan.get("selected_skills", []))
+    assert [item["skill_id"] for item in selected_skills] == ["alpha-skill", "beta-skill"]
     assert plan.get("status") == "resolved"
-    assert plan.get("selected_skills", [])[0].get("skill_id") == "release-checklist"
-    assert plan.get("composed_stage_graph", [])[0].get("stage_id") == "record_note"
 
 
-def test_required_mode_fails_closed_for_missing_action(tmp_path):
-    skill_root = tmp_path / "release-skill"
-    _create_skill(skill_root, action="missing_release_action")
-    Agently.skills_executor.install_skills(skill_root)
+def test_required_plan_can_select_by_display_name(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
 
-    agent = Agently.create_agent("skills-required-agent")
-    execution = agent.run_skills_task(
-        "prepare release notes",
-        skills=["release-checklist"],
+    plan = _create_agent().resolve_skills_plan(
+        "handle release",
+        skills=["Alpha Skill"],
         mode="required",
     )
 
-    assert execution.status == "blocked"
-    assert execution.plan.get("status") == "blocked"
-    assert execution.plan.get("rejected_skills", [])[0].get("reason_code") == "missing_action"
-    output = cast(dict[str, Any], execution.output)
-    assert "could not complete" in output["user_message"]
-    assert "controlled substitute" in output["user_message"]
-    assert output["resolution_suggestions"]
+    selected_skills = cast(list[dict[str, Any]], plan.get("selected_skills", []))
+    assert [item["skill_id"] for item in selected_skills] == ["alpha-skill"]
 
 
-def test_required_mode_auto_binds_controlled_bash_action_for_shell_skill(tmp_path):
-    skill_root = tmp_path / "shell-skill"
-    _create_shell_skill(skill_root)
-    Agently.skills_executor.install_skills(skill_root)
+def test_planner_skips_unreadable_entries_when_scanning_registry(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    registry_root = Path(str(Agently.settings.get("skills.registry.root")))
+    broken_root = registry_root / "broken-skill"
+    broken_root.mkdir(parents=True)
+    index_path = registry_root / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["skills"]["broken-skill"] = {
+        "skill_id": "broken-skill",
+        "display_name": "Broken Skill",
+        "installed_path": str(broken_root),
+    }
+    index_path.write_text(json.dumps(index), encoding="utf-8")
 
-    agent = Agently.create_agent("skills-auto-bash-agent")
-    execution = agent.run_skills_task(
-        "inspect workspace with shell",
-        skills=["shell-inspector"],
+    plan = _create_agent().resolve_skills_plan("handle release", mode="model_decision")
+
+    selected_skills = cast(list[dict[str, Any]], plan.get("selected_skills", []))
+    assert [item["skill_id"] for item in selected_skills] == ["alpha-skill"]
+    diagnostics = cast(list[dict[str, Any]], plan.get("diagnostics", []))
+    assert diagnostics[0]["code"] == "skill_unreadable"
+    assert diagnostics[0]["skill_id"] == "broken-skill"
+
+
+def test_model_decision_orders_multiple_candidates_with_model(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    _skill(tmp_path / "beta", name="Beta Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    Agently.skills_executor.install_skills(tmp_path / "beta")
+
+    plan = _create_agent().resolve_skills_plan(
+        "handle release",
+        skills=["alpha-skill", "beta-skill"],
+        mode="model_decision",
+        output_format="hybrid",
+    )
+
+    selected_skills = cast(list[dict[str, Any]], plan.get("selected_skills", []))
+    assert [item["skill_id"] for item in selected_skills] == ["beta-skill", "alpha-skill"]
+    assert plan.get("expected_result_format") == "hybrid"
+    assert "candidate_skill_cards" in MockSkillsRequester.requests[-1]
+
+
+def test_run_skills_task_uses_full_skill_guidance_not_only_decision_card(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill", body="Alpha guidance full sentence with detailed operating procedure.")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    execution = _create_agent().run_skills_task(
+        "handle release",
+        skills=["alpha-skill"],
         mode="required",
     )
 
     assert execution.status == "success"
-    assert execution.action_logs[0].get("action_id") == "run_bash"
-    action_data = cast(dict[str, Any], execution.action_logs[0].get("data"))
-    assert action_data["ok"] is True
-    assert action_data["stdout"].strip()
+    output = cast(dict[str, Any], execution.output)
+    assert output["response"] == "Applied selected SKILL.md guidance."
+    assert "Alpha guidance full sentence with detailed operating procedure." in MockSkillsRequester.requests[-1]
+    assert execution.skill_logs[0]["execution_mode"] == "prompt_only"
 
 
-def test_run_skills_task_executes_action_stage_and_preserves_logs(tmp_path):
-    calls = []
+def test_run_skills_task_passes_output_format_to_model_request(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill", body="Draft a render-ready HTML fragment.")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
 
-    def record_release_note(text: str):
-        calls.append(text)
-        return {"recorded": text, "ready": True}
-
-    skill_root = tmp_path / "release-skill"
-    _create_skill(skill_root)
-    Agently.skills_executor.install_skills(skill_root)
-
-    agent = Agently.create_agent("skills-exec-agent")
-    agent.register_action(
-        name="record_release_note",
-        desc="Record release note.",
-        kwargs={"text": (str, "Release note text.")},
-        func=record_release_note,
-    )
-
-    execution = agent.run_skills_task(
-        "prepare release notes",
-        skills=["release-checklist"],
+    execution = _create_agent().run_skills_task(
+        "render release HTML",
+        skills=["alpha-skill"],
         mode="required",
+        semantic_outputs={"html": (str, "render-ready HTML", True)},
+        output_format="flat_markdown",
     )
 
     assert execution.status == "success"
-    assert calls == ["prepare release notes"]
+    assert execution.plan.get("expected_result_format") == "flat_markdown"
+    assert "Required sections" in MockSkillsRequester.requests[-1]
     output = cast(dict[str, Any], execution.output)
-    assert output["record_note"] == {"recorded": "prepare release notes", "ready": True}
-    assert execution.action_logs[0].get("action_id") == "record_release_note"
-    assert execution.skill_logs[0]["kind"] == "action"
-    assert execution.close_snapshot["status"] == "success"
-    assert execution.plan.get("dynamic_task_graph", {}).get("tasks")
-    task_dag = execution.close_snapshot["task_dag"]
-    assert task_dag["task_results"]
-    assert task_dag["semantic_outputs"]["record_note"]["task_id"]
-    assert any(item.get("type") == "task_dag.task" for item in execution.runtime_stream)
+    assert output["html"] == "<section>OK</section>"
+
+
+def test_run_skills_task_consumes_agent_prompt_output_contract(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill", body="Draft a render-ready HTML fragment.")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    agent = _create_agent()
+    execution = (
+        agent
+        .set_agent_prompt("info", {"product": "Agently"})
+        .input("render release HTML")
+        .output({"html": (str, "render-ready HTML", True)}, format="flat_markdown")
+        .run_skills_task(skills=["alpha-skill"], mode="required")
+    )
+
+    assert execution.status == "success"
+    assert execution.plan.get("expected_result_format") == "flat_markdown"
+    assert "product" in MockSkillsRequester.requests[-1]
+    assert "Required sections" in MockSkillsRequester.requests[-1]
+    output = cast(dict[str, Any], execution.output)
+    assert output["html"] == "<section>OK</section>"
+    assert agent.request.prompt.get(inherit=False) == {}
+    assert agent.agent_prompt.get("info") == {"product": "Agently"}
+
+
+def test_run_skills_task_sync_accepts_stream_handler(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    stream_items: list[dict[str, Any]] = []
+
+    execution = _create_agent().run_skills_task(
+        "handle release",
+        skills=["alpha-skill"],
+        mode="required",
+        stream_handler=stream_items.append,
+    )
+
+    assert execution.status == "success"
+    assert stream_items[0]["type"] == "skills.prompt_only.start"
+    assert stream_items[-1]["type"] == "skills.prompt_only.done"
+
+
+@pytest.mark.asyncio
+async def test_skills_runtime_context_executes_action_specs_through_action_flow():
+    agent = _create_agent()
+    agent.action.register_action(
+        action_id="alpha_lookup",
+        desc="Return alpha data.",
+        kwargs={"value": (str, "value")},
+        func=lambda value: {"alpha": value},
+    )
+    agent.action.register_action(
+        action_id="beta_lookup",
+        desc="Return beta data.",
+        kwargs={"value": (str, "value")},
+        func=lambda value: {"beta": value},
+    )
+    context = create_agent_skills_runtime_context(agent)
+
+    results = await context.async_execute_action_specs(
+        [
+            {"type": "tool", "name": "alpha_lookup", "kwargs": {"value": "a"}},
+            {"type": "tool", "name": "beta_lookup", "kwargs": {"value": "b"}},
+        ],
+        concurrency=2,
+    )
+
+    assert [item["status"] for item in results] == ["success", "success"]
+    assert results[0]["result"] == {"alpha": "a"}
+    assert results[1]["result"] == {"beta": "b"}
+
+
+@pytest.mark.asyncio
+async def test_execute_skills_plans_uses_triggerflow_orchestration(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    _skill(tmp_path / "beta", name="Beta Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    Agently.skills_executor.install_skills(tmp_path / "beta")
+    agent = _create_agent()
+    alpha_plan = agent.resolve_skills_plan("handle release", skills=["alpha-skill"], mode="required")
+    beta_plan = agent.resolve_skills_plan("handle release", skills=["beta-skill"], mode="required")
+
+    concurrent = await agent.async_execute_skills_plans(
+        "handle release",
+        plans=[alpha_plan, beta_plan],
+        mode="concurrent",
+    )
+    sequential = await agent.async_execute_skills_plans(
+        "handle release",
+        plans=[alpha_plan, beta_plan],
+        mode="sequential",
+    )
+
+    assert [item.status for item in concurrent] == ["success", "success"]
+    assert [item.status for item in sequential] == ["success", "success"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stream_bridge_maps_prompt_only_skill_model_fields():
+    stream = AgentExecutionStream()
+
+    await stream.bridge_task_dag_item(
+        {
+            "type": "skills.model_stream",
+            "action": "delta",
+            "path": "response",
+            "value": "partial",
+            "delta": "partial",
+            "is_complete": False,
+        },
+        route="skills",
+    )
+
+    assert stream.items[0].path == "skills.model.fields.response"
+    assert stream.items[0].route == "skills"
+    assert stream.items[0].source == "model_request"
+    assert stream.items[0].event_type == "delta"
+    assert stream.items[0].is_complete is False
+
+
+def test_no_matching_skill_returns_no_match(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill", description="Use for alpha-only work.")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    execution = _create_agent().run_skills_task("unrelated billing issue", mode="model_decision")
+
+    assert execution.status == "no_match"
+    assert execution.output is None

@@ -14,13 +14,70 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
-from agently.types.data import SkillContract, SkillsPackRecord
+from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
 
 
-class SkillsExecutorPlugin(Protocol):
+@runtime_checkable
+class SkillsPlanningContext(Protocol):
+    """Agent-owned services exposed to Skills Executor planning."""
+
+    def get_setting(self, key: str, default: Any = None) -> Any: ...
+
+    async def async_request_model(
+        self,
+        *,
+        prompt: Any,
+        model_key: str | None = None,
+        output_schema: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        ensure_keys: list[str] | None = None,
+        max_retries: int = 3,
+        stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
+    ) -> Any: ...
+
+
+@runtime_checkable
+class SkillsExecutionContext(SkillsPlanningContext, Protocol):
+    """Agent-owned services exposed to Skills Executor execution."""
+
+    async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None: ...
+
+    # ── Acting surface (bound only when granted by the plan) ──
+
+    async def async_call_tool(self, name: str, /, **kwargs: Any) -> Any: ...
+    async def async_call_action(self, name: str, /, **kwargs: Any) -> Any: ...
+    async def async_execute_action_specs(
+        self,
+        action_specs: list[dict[str, Any]],
+        *,
+        concurrency: int | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    # ── Progressive disclosure over resource_index ──
+
+    async def async_read_resource(
+        self, *, skill_id: str, path: str, max_bytes: int = 262144
+    ) -> str: ...
+
+    # ── Controlled side effects; None when not granted ──
+
+    @property
+    def execution_environment(self) -> Any | None: ...
+
+
+@runtime_checkable
+class SkillsRuntimeContext(SkillsExecutionContext, Protocol):
+    """Full Agent component adapter surface used by the builtin plugin."""
+
+    agent: Any
+
+
+@runtime_checkable
+class SkillsExecutor(Protocol):
     name: str
     DEFAULT_SETTINGS: dict[str, Any]
 
@@ -32,6 +89,13 @@ class SkillsExecutorPlugin(Protocol):
         trust_level: str | None = None,
         update: bool = False,
     ) -> SkillContract: ...
+
+    def configure(
+        self,
+        *,
+        registry_root: str | Path | None = None,
+        allowed_trust_levels: list[str] | None = None,
+    ) -> "SkillsExecutor": ...
 
     def install_skills_pack(
         self,
@@ -47,3 +111,39 @@ class SkillsExecutorPlugin(Protocol):
         resolver_mode: str = "deterministic",
         resolver_agent: Any = None,
     ) -> SkillsPackRecord: ...
+
+    def list_skills(self) -> list[dict[str, Any]]: ...
+
+    def list_skills_packs(self) -> list[SkillsPackRecord]: ...
+
+    def inspect_skills(self, skill_id: str) -> SkillContract: ...
+
+    def inspect_skills_pack(self, skills_pack_id: str) -> SkillsPackRecord: ...
+
+    def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 262144) -> str: ...
+
+    def remove_skills(self, skill_id: str) -> dict[str, Any]: ...
+
+    def remove_skills_pack(self, skills_pack_id: str, *, remove_skills: bool = False) -> dict[str, Any]: ...
+
+    async def async_resolve_plan(
+        self,
+        *,
+        context: SkillsPlanningContext,
+        task: str | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        mode: SkillMode = "model_decision",
+        semantic_outputs: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+    ) -> SkillExecutionPlan: ...
+
+    async def async_execute_plan(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        task: str,
+        plan: SkillExecutionPlan,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        effort: str | None = None,
+    ) -> Any: ...

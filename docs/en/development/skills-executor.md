@@ -1,344 +1,261 @@
 ---
 title: Skills Executor
-description: Planner-selected declarative behavior loops exposed through Agent APIs.
-keywords: Agently, Skills Executor, skills, behavior loop, run_skills_task, use_skills
+description: Standard SKILL.md packages installed and executed through Agently.
+keywords: Agently, Skills Executor, SKILL.md, skills, run_skills_task, use_skills
 ---
 
 # Skills Executor
 
 > Languages: **English** · [中文](../../cn/development/skills-executor.md)
 
-Skills Executor lets an Agently app install declarative skill packages and use
-them as planner-selected behavior loops.
+Agently Skills follow the standard Skills layout: `SKILL.md` is the capability
+definition, with optional `scripts/`, `references/`, and `assets/` resources.
+Agently does not define a separate Skill authoring manifest.
 
-It is separate from the `Agently-Skills` companion repository:
+```markdown
+---
+name: release-review
+description: Use when checking release readiness and rollback risk.
+---
 
-- **Skills Executor** is framework runtime capability inside Agently.
-- **Agently-Skills** is companion guidance for external coding agents such as
-  Codex, Claude Code, and Cursor.
+# Release Review
 
-## Current Status
-
-This feature is being implemented on `feature/skills-executor`.
-
-The current implementation provides:
-
-- `Agently.skills_executor.install_skills(...)`, `install_skills_pack(...)`,
-  `list_skills()`, `list_skills_packs()`, `inspect_skills()`,
-  `inspect_skills_pack()`, `remove_skills()`, and `remove_skills_pack()`
-- `agent.use_skills(...)` for optional model-decision skill card disclosure
-- bounded primary `SKILL.md` guidance disclosure for selected candidate skills
-- `agent.resolve_skills_plan(...)` for producing a `SkillExecutionPlan`
-- `agent.run_skills_task(...)` for explicit skill task execution
-- SkillCard composition metadata such as `stage_roles`, `consumes`,
-  `produces`, `artifact_types`, `side_effects`, `required_capabilities`,
-  `complements`, and `failure_modes`
-- semantic output contracts through `semantic_outputs`, so realcase tests
-  validate deliverable role/type coverage instead of hard-coded filenames
-- model-composed multi-skill planning through `planner_mode="model"` with a
-  bounded evaluate/repair loop controlled by `planner_max_revisions`
-- declarative `action`, `model`, `validate`, and `emit` stage handling
-- Dynamic Task DAG execution underneath `run_skills_task(...)`, so
-  `SkillExecution.close_snapshot` preserves the compiled task graph result
-  alongside skill/action logs
-
-The current implementation keeps model-owned planning behind the
-`SkillExecutionPlan` contract. The planner can select and combine multiple
-candidate skills, describe stage switching, approval gates, fallback paths,
-intermediate artifacts, side-effect boundaries, and expected semantic outputs.
-
-The retained framework layering is:
-
-```text
-core/SkillsExecutor.py
-  -> active SkillsExecutor plugin
-  -> builtins/plugins/SkillsExecutor/
-  -> builtins/agent_extensions/SkillsExtension.py
+Follow this checklist before recommending a release or rollback...
 ```
 
-`Agently.skills_executor` is the only global facade for this development-line
-feature. The feature has not shipped yet, so no `Agently.skills` compatibility
-alias is retained.
+## Install
 
-## User Mental Model
-
-A Skill is not a `skill.run()` function and it is not an `ActionExecutor`.
+`install_skills(...)` copies the standard Skill directory into the local
+registry. The installed Skill root still contains `SKILL.md` directly. Agently
+adds its own management files under `.agently/` inside the installed copy.
 
 ```text
-Agent API
-  -> skill cards and policy filtering
-  -> SkillExecutionPlan
-  -> Dynamic Task DAG
-  -> SkillExecution
-  -> Actions for atomic work
+.agently/skills/release-review/
+|-- SKILL.md
+|-- scripts/
+|-- references/
+|-- assets/
+`-- .agently/
+    |-- install.json
+    |-- decision_card.json
+    |-- resource_index.json
+    `-- checksums.json
 ```
 
-Action calls remain atomic capabilities. Skills compose those capabilities into
-a behavior loop.
+The `.agently/` files speed up routing and inspection. They are not Skill
+capability definitions. If a derived file is missing or stale, Agently rebuilds
+or falls back to reading `SKILL.md`.
 
-## Optional Skills
+`skill_id` is derived from the `SKILL.md` frontmatter `name`: lowercase,
+whitespace becomes `-`, and only `a-z0-9._-` remains. Use the returned
+`contract["skill_id"]` when wiring later calls.
 
-Use `use_skills(...)` when skills are optional candidates for normal agent
-requests.
+```python
+contract = Agently.skills_executor.install_skills("./release-review")
+agent.use_skills([contract["skill_id"]], mode="model_decision")
+```
+
+Root-level non-standard manifests such as `skill.yaml`, `skill.json`, or
+`agently.skill.yaml` are rejected. Files with those names inside `scripts/`,
+`references/`, or `assets/` are treated as ordinary resources.
+
+## Select
+
+Use `use_skills(...)` to expose installed Skills as optional route candidates.
+The model sees concise decision cards first; full guidance is used only when the
+Skills route executes.
 
 ```python
 agent = Agently.create_agent("ops-assistant")
-
-agent.use_skills(
-    ["release-checklist", "incident-triage"],
-    mode="model_decision",
-)
-
-response = await (
-    agent
-    .input("Should this production issue trigger rollback?")
-    .get_response()
-    .async_get_text()
-)
+agent.use_skills(["release-review"], mode="model_decision")
 ```
 
-This discloses skill cards. It does not force the agent to execute a skill.
-For SKILL.md packages, the primary guidance body is also disclosed with a
-per-skill character limit so the model can use checklist details without
-loading arbitrary scripts or resource folders.
-
-The same behavior works with Agently's chain style. Installed skills behave like
-model-decision capabilities, similar to actions/tools: they are disclosed to the
-request and the model decides whether they fit.
+Use `resolve_skills_plan(...)` when you need to inspect which Skills would be
+used. Required Skills keep the caller-provided order. Multiple optional
+candidates are ordered by the model.
 
 ```python
-result = (
-    agent
-    .use_skills(["release-checklist"])
-    .input("Should this release be blocked?")
-    .instruct("Use installed skills only if they fit the task.")
-    .output({"reply": (str,)})
-    .start()
+plan = await agent.async_resolve_skills_plan(
+    "Should this release be blocked?",
+    skills=["release-review", "incident-triage"],
+    mode="model_decision",
 )
 ```
 
-## Required Skill Task
+## Execute
 
-Use `run_skills_task(...)` when a task must be handled through a skill loop.
+Use `run_skills_task(...)` when the task must be answered through selected
+Skills. By default, execution is `single_shot`: Agently injects the selected
+`SKILL.md` guidance, decision cards, resource summaries, and the task into one
+model request. Skills that declare `execution: staged` or `allowed-tools` can
+run through the TriggerFlow-backed `staged` and `react` strategies.
+When actions are available, `react` delegates tool/action planning and
+execution to the Agent ActionRuntime, so kwargs schemas, MCP tools, policy,
+approvals, concurrency, and execution-environment handling stay on the Action
+layer instead of being reimplemented by Skills.
 
 ```python
 execution = await agent.async_run_skills_task(
-    "prepare release notes",
-    skills=["release-checklist"],
+    "Review this release and give a go/no-go recommendation.",
+    skills=["release-review"],
     mode="required",
 )
 
 print(execution.status)
 print(execution.output)
-print(execution.action_logs)
+print(execution.skill_logs)
 ```
 
-In `required` mode, requested skills must be selected. Missing dependencies,
-denied permissions, or unavailable actions fail closed.
-
-For combo Skill Packs, pass expected deliverables as a semantic contract and
-ask the model planner to compose the behavior loop:
+`semantic_outputs=` uses the same schema grammar as `.output(...)`; it is the
+structured-output schema for the Skill run:
 
 ```python
 execution = await agent.async_run_skills_task(
-    "Design a 4-week B1 business English course package.",
-    skills=[
-        "learner-profile-intake",
-        "backwards-design-unit-planner",
-        "retrieval-practice-generator",
-        "formative-assessment-generator",
-        "docx",
-        "pdf",
-        "pptx",
-        "xlsx",
-    ],
-    mode="model_decision",
-    semantic_outputs=[
-        "course_plan.json",
-        "teacher_guide.docx",
-        "student_handout.pdf",
-        "lesson_slides.pptx",
-        "progress_tracker.xlsx",
-        "skill_trace.json",
-    ],
-    planner_mode="model",
-    planner_max_revisions=2,
+    "Write a release decision.",
+    skills=["release-review"],
+    mode="required",
+    semantic_outputs={"decision": (str, "go or no-go", True)},
 )
-
-print(execution.plan["selected_skills"])
-print(execution.plan["stage_plan"])
-print(execution.plan["planner_evaluation"])
-print(execution.close_snapshot["task_dag"]["semantic_outputs"])
 ```
 
-`semantic_outputs` accepts file-like names for convenience or explicit
-deliverable dictionaries. The executor normalizes them into roles and artifact
-types, so an output can pass as long as the plan covers the required meaning.
-Filename normalization is an executor concern; it is not the user's contract.
+Agent prompt methods are also supported for explicit Skills execution. The
+Skill run consumes the current prompt snapshot, uses rendered prompt text as the
+task, and maps the `output` / `output_format` slots to `semantic_outputs` /
+`output_format`:
 
-## Minimal Skill Package
-
-```yaml
-skill_id: release-checklist
-display_name: Release Checklist
-purpose: Check release readiness and record a release note.
-trust_level: local
-activation:
-  keywords: [release, rollback]
-requires:
-  actions: [record_release_note]
-stages:
-  - id: record_note
-    kind: action
-    action: record_release_note
-    input:
-      text: "${task}"
-  - id: validate_note
-    kind: validate
-    validation:
-      required_state: [record_note]
+```python
+execution = await (
+    agent
+    .info({"release": "4.1.2.x"})
+    .input("Write a release decision.")
+    .output({"decision": (str, "go or no-go", True)}, format="json")
+    .async_run_skills_task(skills=["release-review"], mode="required")
+)
 ```
 
-## Composition Metadata
+`set_agent_prompt(...)` values are inherited and kept for later turns.
+`set_request_prompt(...)` / quick prompt values are frozen into the Skill run
+and then cleared from the pending request. Explicit `semantic_outputs=` and
+`output_format=` arguments override prompt-derived defaults.
 
-Real Skill Packs should describe how they compose with other Skills. These
-fields are preserved in `SkillCard` and disclosed to the planner.
+`output_format=` selects how that model response is controlled. Leave it as
+`"auto"` for ordinary Skill answers. Auto is structural: it chooses
+`"flat_markdown"` for flat string-only schemas, `"hybrid"` for top-level dicts
+that combine string fields with complex list/object fields, and `"json"` for
+boolean/numeric control fields, all-complex schemas, and non-dict outputs. Use
+explicit `"json"` for compact machine-readable results, judges, booleans,
+numbers, or downstream JSON-only contracts.
 
-```yaml
-card:
-  stage_roles: [intake, action, validation]
-  consumes:
-    - role: task_request
-      type: text
-  produces:
-    - role: release_note
-      type: json
-  artifact_types: [json]
-  side_effects:
-    - kind: local_record
-      policy: allowed
-  required_capabilities: [record_release_note]
-  complements: [repo-review]
-  failure_modes: [missing_action]
+```python
+execution = await agent.async_run_skills_task(
+    "Draft a release announcement as HTML.",
+    skills=["release-review"],
+    mode="required",
+    semantic_outputs={"html": (str, "render-ready HTML", True)},
+    output_format="flat_markdown",
+)
 ```
 
-## Boundaries
+For fixed required fields, prefer the third tuple element in the schema:
 
-- Scripts and helpers must run through controlled Actions, not arbitrary Skill
-  Python handlers.
-- Third-party Skill scripts are installed as inert assets by default, but the
-  executor owns capability resolution. It should try controlled replacements
-  such as built-in Actions, sandbox-backed Bash/Python/Node actions, MCP/API
-  bindings, or declared fallback branches before blocking the run.
-- If a Skill requires a Bash/shell-style action and no action is bound, the
-  executor may auto-bind a controlled Bash sandbox with the configured command
-  allowlist and workspace boundary. It must not silently run arbitrary package
-  scripts.
-- If no controlled replacement is available, the execution should fail closed
-  with a natural-language `user_message` and resolution suggestions instead of
-  leaving application code to interpret internal error codes.
-- Guidance disclosure is prompt context, not code execution.
-- MCP, browser, sandbox, process, and credential resources belong to Execution
-  Environment.
-- Long-running workflow behavior should be represented by TriggerFlow-backed
-  skill execution, not hidden inside a Skill package.
-
-## Tested External Skill Packages
-
-`examples/skills_executor/02_deepseek_external_skill_cards.py` installs and tests:
-
-- `../Agently-Skills/skills/agently-runtime`
-- `anthropics/skills/skills/xlsx`
-- `anthropics/skills/skills/webapp-testing`
-
-The example verifies that DeepSeek receives the selected skill card and bounded
-primary guidance in `model_decision` mode, while package scripts remain inert
-assets unless the app binds them through Actions.
-
-`examples/skills_executor/04_dynamic_todo_triggerflow_realcase.py` is the
-diagnostic realcase variant. It installs `Agently-Skills`, exposes
-`agently-playbook`, `agently-request`, and `agently-triggerflow` to DeepSeek
-through `agent.use_skills(...)`, then asks DeepSeek to generate both the Todo
-DAG and a complete Python TriggerFlow executor module. The prompt intentionally
-does not spell out TriggerFlow API details; the host script evaluates whether
-the model-generated module used real Agently APIs and whether it ran. The
-diagnostic prints pass/fail and exits successfully by default for interactive
-use; pass `--strict-exit` to make evaluator failure exit nonzero in CI.
-
-`examples/skills_executor/03_stock_research_business_minimal.py` is the
-business-facing minimal example. It installs a local Skill Pack with
-`Agently.skills_executor.install_skills_pack(..., name="equity-research-demo")`,
-attaches the pack through `agent.use_skills_packs(...)`, then sends a stock
-research task to DeepSeek or local Ollama. Before model analysis, the executor
-runs a controlled `fetch_equity_market_data` Action stage to retrieve current
-public quote data from Stooq's CSV endpoint. The provider timestamps may be
-delayed and are not exchange-direct realtime ticks, but the result is fetched
-at runtime rather than supplied as sample data. Transient 503/504 and timeout
-errors are retried; if the provider remains unavailable, the Action degrades to
-the last successful local quote cache and marks the data status as degraded, or
-returns the affected ticker as unavailable when no cache exists.
-
-`examples/skills_executor/05_combo_skillpack_diagnostics.py` is the combo Skill
-Pack benchmark. It validates realcase orchestration pressure points across:
-
-- education course pack generation
-- stock research pack generation
-- travel planning with approval before external writes
-- research report to spreadsheet, document, deck, and PDF
-- web app acceptance testing evidence packs
-
-The combo benchmark uses real local `SKILL.md` packages when available and
-skips missing public sources rather than substituting mock skills. It can fetch
-the referenced public repositories with `--fetch-missing`. The benchmark now
-runs through `agent.run_skills_task(..., semantic_outputs=...,
-planner_mode="model")`. The model receives optional SkillCards plus bounded
-primary guidance; the executor turns the model-composed plan into a Dynamic
-Task DAG; the host evaluator checks skill selection, stage switching,
-intermediate artifacts, side-effect boundaries, approval gates, fallbacks, and
-semantic output coverage.
-
-The full DeepSeek benchmark adds a content-level Agently model judge after the
-deterministic gate. The judge output schema puts evidence and concise rationale
-before each rule's final boolean, and puts the overall `passes` boolean last, so
-the final judgment is conditioned by the preceding structured facts.
-
-The benchmark is intentionally a plan/contract and Dynamic Task execution
-acceptance gate. It does not claim that third-party document skills have
-executed arbitrary package scripts or written final `.docx`, `.pdf`, `.pptx`,
-or `.xlsx` files. Those effects must be supplied by controlled Actions and
-Execution Environment bindings.
-
-`examples/skills_executor/06_executable_education_course_pack.py` is the first
-execution-grade benchmark. It uses the same external Skill Pack planning path,
-then runs a local dependency-installer Skill through the Skills Executor. That
-Skill calls a controlled `ensure_python_packages` Action to install missing
-artifact-writer libraries (`python-docx`, `openpyxl`, `python-pptx`,
-`reportlab`, `pypdf`) before file generation. Missing local libraries are not a
-fallback condition; they must be repaired by an Action or the execution fails
-closed. The benchmark then writes real `docx`, `pdf`, `pptx`, `xlsx`, and
-`json` artifacts, runs deterministic file checks, and uses an
-output-controlled Agently model judge for semantic content judgment.
-
-The same five combo cases are also pytest benchmarks:
-
-```bash
-PYTHONPATH=. python -m pytest -q tests/test_skills_executor_combo_benchmarks.py
-
-AGENTLY_RUN_SKILLS_BENCHMARKS=1 \
-PYTHONPATH=. python -m pytest -q tests/test_skills_executor_combo_benchmarks.py -m skills_benchmark
-
-AGENTLY_RUN_SKILLS_REAL_EXECUTION=1 \
-PYTHONPATH=. python -m pytest -q tests/test_skills_executor_real_execution_benchmarks.py -m skills_real_execution
+```python
+semantic_outputs = {
+    "rules": [
+        {
+            "rule_id": (str, "Stable rule id", True),
+            "passed": (bool, "Whether this rule passed", True),
+            "evidence": (str, "Concise evidence; empty string is allowed", False),
+        }
+    ],
+    "passes": (bool, "Overall pass/fail", True),
+}
 ```
 
-The first command validates source discovery and installability without model
-calls. The second command is the full DeepSeek-backed planning benchmark. The
-third command is the real execution benchmark and should be treated as the
-acceptance gate for artifact-producing Skills.
+Use runtime `ensure_keys=` only for paths that are conditional or decided at
+runtime. `max_retries=3` means Agently can make up to three additional model
+attempts when parsing, required keys, strict output validation, or custom
+validators fail. Retries often recover ordinary omissions, markdown header
+mistakes, and auto-format degradation to JSON. They can still fail after all
+attempts when a model repeatedly echoes placeholder scaffolding, returns prose
+for boolean or numeric fields, produces malformed nested arrays, truncates a
+large prompt, or must fill many wildcard paths such as
+`rule_results[*].evidence`. For model judges with many rules, prefer
+`output_format="json"`, keep the schema shallow when possible, and split very
+large rule sets into smaller judge calls.
 
-## See Also
+Direct Skills execution streams runtime items through `stream_handler`:
 
-- [Coding Agents](coding-agents.md)
-- [Action Runtime](../actions/action-runtime.md)
-- [Execution Environment](../actions/execution-environment.md)
-- [TriggerFlow Overview](../triggerflow/overview.md)
+- `skills.prompt_only.start`
+- `skills.model_stream` with `path`, `value`, `delta`, and `is_complete`
+- `skills.prompt_only.done`
+- `skills.staged.*`, `skills.react.*`, and `block.*` events when a multi-step
+  strategy is selected
+
+Use `effort=` with `agent.set_settings("effort_presets", {...})` to map a
+caller-facing quality/cost profile to strategy, model key, step budget, and
+artifact inline limit:
+
+```python
+agent.set_settings("effort_presets", {
+    "fast": {"strategy": "single_shot", "reason_key": "reason_fast", "step_budget": 1},
+    "normal": {"strategy": "staged", "reason_key": "reason", "step_budget": 5},
+})
+
+execution = await agent.async_run_skills_task(
+    "Draft a release decision.",
+    skills=["release-review"],
+    mode="required",
+    effort="normal",
+)
+```
+
+`reason_key` is a symbolic model-pool key. If it is not mapped in
+`model_pool`, Agently leaves the request on the agent's inherited model instead
+of sending the symbolic key as a provider model name.
+
+When Skills are selected through Agent auto-orchestration, model field stream
+items are bridged to stable paths like `skills.model.fields.<field_path>`.
+
+Bundled scripts and resources are never executed just because a Skill is
+installed. They can only be used through explicit Action or Execution
+Environment paths chosen by the host application.
+
+## Settings
+
+Skill applicability comes from `SKILL.md`; Agently's `.agently/` files are
+descriptive install metadata only. Multi-step Skills execution composes
+Agently's existing TriggerFlow, Action, and ExecutionEnvironment boundaries;
+human approval or durable wait/resume flows should be modeled through
+TriggerFlow `pause_for(...)` / `continue_with(...)` or Action /
+ExecutionEnvironment approval policies, not by mutating a closed
+`SkillExecution` snapshot.
+
+Framework-level `skills.*` settings may still tune host behavior, such as
+whether optional Skill candidates disclose full guidance in ordinary prompts.
+Plugin defaults load first when present; framework settings are the final
+application-level defaults. Neither setting layer can replace `SKILL.md` as the
+Skill capability definition.
+
+Use the public Skills Executor configuration helper for local registry options:
+
+```python
+Agently.skills_executor.configure(
+    registry_root="./.agently/skills-dev",
+    allowed_trust_levels=["local"],
+)
+```
+
+## API Summary
+
+- `Agently.skills_executor.install_skills(...)`
+- `Agently.skills_executor.install_skills_pack(...)`
+- `Agently.skills_executor.configure(...)`
+- `Agently.skills_executor.inspect_skills(...)`
+- `agent.use_skills(...)`
+- `agent.use_skills_packs(...)`
+- `agent.resolve_skills_plan(...)`
+- `agent.run_skills_task(...)`
+
+`SkillContract` describes the installed standard Skill, Agently install
+metadata, decision card, resource index, and checksums. It does not contain
+framework-authored stage declarations.

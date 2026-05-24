@@ -199,3 +199,20 @@ class StreamingData(BaseModel):
     def set_wildcard_path(cls, data: dict[str, Any]):
         data["wildcard_path"], data["indexes"] = StreamingData._process_path(data["path"])
         return data
+
+
+class AgentExecutionStreamData(StreamingData):
+    """Process-stream item for an Agent execution route.
+
+    The type keeps the same path/value/is_complete shape as model instant
+    streams, then adds route metadata for Actions, Skills, Dynamic Task, and
+    TriggerFlow-backed process events.
+    """
+
+    source: str | None = None
+    route: str | None = None
+    stage_id: str | None = None
+    task_id: str | None = None
+    action_id: str | None = None
+    graph_id: str | None = None
+    meta: dict[str, Any] | None = None

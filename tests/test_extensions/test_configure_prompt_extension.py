@@ -88,3 +88,79 @@ def test_load_yaml_prompt_rejects_positional_mappings():
 
     with pytest.raises(TypeError):
         getattr(agent, "load_yaml_prompt")(yaml_prompt, {"name": "Alice"})
+
+
+def test_load_yaml_prompt_output_accepts_format_metadata():
+    agent = Agently.create_agent()
+    yaml_prompt = """
+.request:
+  output:
+    $format: flat_markdown
+    reply:
+      $type: str
+      $desc: final reply
+      $ensure: true
+"""
+
+    agent.load_yaml_prompt(yaml_prompt)
+
+    assert agent.request_prompt.get("output_format", inherit=False) == "flat_markdown"
+    output = agent.request_prompt.get("output", inherit=False)
+    assert isinstance(output, dict)
+    assert "$format" not in output
+    assert agent.request_prompt.to_prompt_object().output_format == "flat_markdown"
+
+
+def test_load_json_prompt_output_accepts_output_format_metadata():
+    agent = Agently.create_agent()
+    json_prompt = json.dumps(
+        {
+            ".request": {
+                "output": {
+                    "$output_format": "hybrid",
+                    "summary": {"$type": "str", "$ensure": True},
+                    "items": [{"name": {"$type": "str"}}],
+                }
+            }
+        }
+    )
+
+    agent.load_json_prompt(json_prompt)
+
+    assert agent.request_prompt.get("output_format", inherit=False) == "hybrid"
+    output = agent.request_prompt.get("output", inherit=False)
+    assert isinstance(output, dict)
+    assert "$output_format" not in output
+    assert agent.request_prompt.to_prompt_object().output_format == "hybrid"
+
+
+def test_agent_level_output_format_metadata_is_inherited_by_request():
+    agent = Agently.create_agent()
+    yaml_prompt = """
+$output:
+  .format: json
+  reply:
+    $type: str
+    $ensure: true
+"""
+
+    agent.load_yaml_prompt(yaml_prompt)
+
+    assert agent.agent_prompt.get("output_format", inherit=False) == "json"
+    assert agent.request_prompt.to_prompt_object().output_format == "json"
+
+
+def test_output_format_metadata_supports_mappings():
+    agent = Agently.create_agent()
+    yaml_prompt = """
+.request:
+  output:
+    $format: ${format_name}
+    html:
+      $type: str
+      $desc: complete HTML
+"""
+
+    agent.load_yaml_prompt(yaml_prompt, mappings={"format_name": "flat_markdown"})
+
+    assert agent.request_prompt.get("output_format", inherit=False) == "flat_markdown"

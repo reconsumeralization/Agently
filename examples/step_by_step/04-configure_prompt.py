@@ -29,6 +29,7 @@ def load_yaml_prompt():
     # .request:
     #   input: Say hello.
     #   output:
+    #     $format: auto
     #     thinking:
     #       $type:
     #         - $type: str
@@ -86,6 +87,7 @@ def load_json_prompt():
     #   ".request": {
     #     "input": "Say hello.",
     #     "output": {
+    #       "$format": "auto",
     #       "thinking": {
     #         "$type": [{"$type": "str", "$desc": "one step of plan"}],
     #         "$desc": "plans to response",

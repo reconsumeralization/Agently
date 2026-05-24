@@ -144,6 +144,9 @@ old_*
 demo/
 demo_*
 
+# Generated artifacts (comparison experiments, etc.)
+_artifacts/
+
 # DB
 *.db
 
@@ -161,6 +164,8 @@ node_modules
 
 # local spec workspace, managed by its own nested git repository
 /spec/
+# private spec documents belong under /spec/, not public docs/
+/docs/specs/
 AGENTS.md
 
 # Hidden directories at repo root, except .github

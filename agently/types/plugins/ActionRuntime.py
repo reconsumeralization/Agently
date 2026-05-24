@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 from typing_extensions import Self
 
 from .base import AgentlyPlugin
@@ -53,6 +53,7 @@ StandardActionExecutionHandler = Callable[
 ]
 
 
+@runtime_checkable
 class ActionRuntime(AgentlyPlugin, Protocol):
     """
     Action planning and execution runtime plugin.

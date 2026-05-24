@@ -19,7 +19,7 @@ def test_to_prompt_object():
     prompt["output"] = {"reply": (str, "your reply")}
     po3 = prompt.to_prompt_object().model_dump()
     assert po3["output"] == {"reply": (str, "your reply")}
-    assert po3.get("output_format") == "json"  # Be automatically changed by `output`
+    assert po3.get("output_format") == "flat_markdown"  # Be automatically resolved by `output`
     prompt["output_format"] = "yaml"
     po4 = prompt.to_prompt_object().model_dump()
     assert po4["output"] == {"reply": (str, "your reply")}
@@ -45,6 +45,7 @@ def test_to_text():
                 "thinking": (str, "describe how will you plan to reply?"),
                 "reply": (str, "your final reply"),
             },
+            "output_format": "json",
         }
     )
     assert (
@@ -72,6 +73,43 @@ assistant:"""
     )
 
 
+def test_prompt_slot_reference_placeholders_point_to_titles():
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.update(
+        {
+            "input": {"customer": "Acme", "ticket": "T-42"},
+            "info": {"policy": "Enterprise policy"},
+            "instruct": "Use ${INPUT.customer} and ${INFO.policy}; obey ${OUTPUT}. Keep ${unknown} literal.",
+            "output": {
+                "reply": (str, "Answer using ${INSTRUCT} and ${INPUT.ticket}"),
+            },
+            "output_format": "json",
+        }
+    )
+
+    text = prompt.to_text()
+
+    assert "Use [INPUT > customer] and [INFO > policy]; obey [OUTPUT REQUIREMENT]." in text
+    assert "Keep ${unknown} literal." in text
+    assert '"reply": <str> // Answer using [INSTRUCT] and [INPUT > ticket]' in text
+
+
+def test_prompt_slot_references_do_not_break_explicit_mappings():
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.set("input", "Hello")
+    prompt.set(
+        "instruct",
+        "Hello ${name}; see ${input.foo}.",
+        mappings={"name": "Alice"},
+    )
+
+    text = prompt.to_text()
+
+    assert "Hello Alice; see [INPUT > foo]." in text
+
+
 def test_to_text_complex():
     Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
     prompt = Prompt(Agently.plugin_manager, Agently.settings)
@@ -84,6 +122,7 @@ def test_to_text_complex():
                 "thinking": (str, "describe how will you plan to reply?"),
                 "reply": (str, "your final reply"),
             },
+            "output_format": "json",
         }
     )
     prompt.set(
@@ -191,6 +230,7 @@ def test_message_prompt():
                 "thinking": (str, "describe how will you plan to reply?"),
                 "reply": (str, "your final reply"),
             },
+            "output_format": "json",
         }
     )
     prompt.set(
@@ -350,6 +390,35 @@ assistant:"""
     output_by_name = OutputModel.model_validate({"status": "OPEN", "priority": "HIGH"}).model_dump()
     assert output_by_name["status"] == TicketStatus.OPEN
     assert output_by_name["priority"] == TicketPriority.HIGH
+
+
+def test_hybrid_prompt_marks_sanitized_scalar_fields_as_text():
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.set(
+        "output",
+        {
+            "analysis": (str, "One paragraph analysis.", True),
+            "items": [{"name": (str, "Item name.", True)}],
+        },
+    )
+    prompt.set("output_format", "hybrid")
+
+    text = prompt.to_text()
+
+    assert "### analysis\n<!-- (text) One paragraph analysis. -->\n(your content here)" in text
+    assert (
+        "### items\n"
+        "<!-- (JSON) -->\n"
+        "```json\n"
+        "[\n"
+        "  {\n"
+        "    \"name\": <str> // Item name.\n"
+        "  },\n"
+        "  ...\n"
+        "]\n"
+        "```"
+    ) in text
 
 
 def test_rich_prompt():

@@ -230,8 +230,6 @@ class AgentlyToolManager(ToolManager):
                     continue
                 if expose_only and spec.get("expose_to_model", True) is not True:
                     continue
-                if any(tag.startswith("agent-") for tag in self.action_registry.get_tags(action_id)):
-                    continue
                 collected.append(action_id)
             return collected
 

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import re
 import warnings
 import yaml
 from enum import Enum
@@ -42,6 +43,7 @@ from pydantic import (
 
 from agently.types.plugins import PromptGenerator
 from agently.types.data import PromptModel, ChatMessageContent, TextMessageContent
+from agently.types.data.prompt import _classify_field_spec
 from agently.utils import SettingsNamespace, DataFormatter, DataPathBuilder, TimeInfo
 
 if TYPE_CHECKING:
@@ -53,6 +55,31 @@ if TYPE_CHECKING:
 
 class AgentlyPromptGenerator(PromptGenerator):
     name = "AgentlyPromptGenerator"
+
+    _SLOT_REFERENCE_RE = re.compile(r"\$\{([^}]+)\}")
+    _PROMPT_SLOT_TITLE_DEFAULTS = {
+        "system": "SYSTEM",
+        "developer": "DEVELOPER DIRECTIONS",
+        "chat_history": "CHAT HISTORY",
+        "info": "INFO",
+        "tools": "TOOLS",
+        "action_results": "ACTION RESULTS",
+        "instruct": "INSTRUCT",
+        "examples": "EXAMPLES",
+        "input": "INPUT",
+        "output_requirement": "OUTPUT REQUIREMENT",
+        "output": "OUTPUT",
+        "attachment": "ATTACHMENT",
+    }
+
+    _SANITIZED_SCALAR_TYPE_NAMES = {"str", "int", "float", "bool"}
+    _PROMPT_SLOT_ALIASES = {
+        "instruction": "instruct",
+        "instructions": "instruct",
+        "output": "output_requirement",
+        "output_requirement": "output_requirement",
+        "outputrequirement": "output_requirement",
+    }
 
     DEFAULT_SETTINGS = {
         "$global": {
@@ -134,10 +161,57 @@ class AgentlyPromptGenerator(PromptGenerator):
                 "Prompt requires at least one of 'input', 'info', 'instruct', 'output', 'attachment' or customize extra prompt keys to be provided."
             )
 
+    def _replace_slot_references(
+        self,
+        value: Any,
+        title_mapping: dict[str, str] | None = None,
+    ) -> Any:
+        if isinstance(value, str):
+            return self._SLOT_REFERENCE_RE.sub(
+                lambda match: self._render_slot_reference(
+                    match.group(1),
+                    original=match.group(0),
+                    title_mapping=title_mapping,
+                ),
+                value,
+            )
+        if isinstance(value, Mapping):
+            return {
+                key: self._replace_slot_references(item, title_mapping)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._replace_slot_references(item, title_mapping) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._replace_slot_references(item, title_mapping) for item in value)
+        return value
+
+    def _render_slot_reference(
+        self,
+        expression: str,
+        *,
+        original: str,
+        title_mapping: dict[str, str] | None = None,
+    ) -> str:
+        slot_expr, _, path = expression.strip().partition(".")
+        slot_key = slot_expr.strip().lower().replace("-", "_")
+        slot_key = self._PROMPT_SLOT_ALIASES.get(slot_key, slot_key)
+        if slot_key not in self._PROMPT_SLOT_TITLE_DEFAULTS:
+            return original
+        title = str(
+            (title_mapping or {}).get(
+                slot_key,
+                self._PROMPT_SLOT_TITLE_DEFAULTS[slot_key],
+            )
+        )
+        path = path.strip()
+        return f"[{ title } > { path }]" if path else f"[{ title }]"
+
     def _generate_json_output_prompt(
         self,
         output: Any,
         layer: int = 0,
+        title_mapping: dict[str, str] | None = None,
     ) -> str:
         indent = "  " * layer
         next_indent = "  " * (layer + 1)
@@ -148,12 +222,12 @@ class AgentlyPromptGenerator(PromptGenerator):
             lines = ["{"]
             items = list(output.items())
             for i, (key, value) in enumerate(items):
-                value_str = self._generate_json_output_prompt(value, layer + 1)
+                value_str = self._generate_json_output_prompt(value, layer + 1, title_mapping)
                 desc_str = ""
                 if isinstance(value, tuple) and len(value) > 1:
                     desc_str = " //"
                     if len(value) >= 2 and value[1]:
-                        desc_str += f" {value[1]}"
+                        desc_str += f" {self._replace_slot_references(value[1], title_mapping)}"
                 comma = "," if i < len(items) - 1 else ""
                 lines.append(f'{next_indent}"{key}": {value_str}{comma}{desc_str}')
             lines.append(f"{indent}}}")
@@ -165,10 +239,10 @@ class AgentlyPromptGenerator(PromptGenerator):
             lines = ["["]
             items = list(output)
             for i, item in enumerate(items):
-                item_str = self._generate_json_output_prompt(item, layer + 1)
+                item_str = self._generate_json_output_prompt(item, layer + 1, title_mapping)
                 desc_str = ""
                 if isinstance(item, tuple) and len(item) > 1 and item[1]:
-                    desc_str += f" // {item[1]}"
+                    desc_str += f" // {self._replace_slot_references(item[1], title_mapping)}"
                 if i < len(items):
                     lines.append(f"{next_indent}{item_str},{desc_str}")
             lines.append(f"{next_indent}...")
@@ -177,7 +251,7 @@ class AgentlyPromptGenerator(PromptGenerator):
 
         if isinstance(output, tuple) and len(output) >= 1:
             if isinstance(output[0], (dict, list, set)):
-                return self._generate_json_output_prompt(output[0], layer + 1)
+                return self._generate_json_output_prompt(output[0], layer + 1, title_mapping)
             return f"<{str(output[0])}>"
 
         if isinstance(output, type):
@@ -185,8 +259,110 @@ class AgentlyPromptGenerator(PromptGenerator):
 
         return f"<{str(output)}>"
 
+    def _generate_flat_markdown_output_prompt(
+        self,
+        output: dict[str, Any],
+        *,
+        ensure_all_keys: bool = False,
+        title_mapping: dict[str, str] | None = None,
+    ) -> list[str]:
+        lines: list[str] = [
+            f"[{ (title_mapping or {}).get('output_requirement', 'OUTPUT REQUIREMENT') }]:",
+            "Data Format: Structured Markdown",
+            "",
+            "Respond in clearly separated sections. Each section MUST start with the exact",
+            "markdown header shown below (### field_name). Write your content after the header.",
+            "Separate sections with a blank line.",
+        ]
+        if ensure_all_keys:
+            lines.extend([
+                "",
+                "All defined fields are required. Every section header listed below MUST appear",
+                "in your response exactly as specified.",
+            ])
+        lines.append("")
+        lines.append("Required sections:")
+        lines.append("")
+        for field_name, field_spec in output.items():
+            desc = ""
+            if isinstance(field_spec, tuple) and len(field_spec) >= 2 and field_spec[1]:
+                desc = f"<!-- {self._replace_slot_references(field_spec[1], title_mapping)} -->"
+            lines.append(f"### {field_name}")
+            if desc:
+                lines.append(desc)
+            lines.append("(your content here)")
+            lines.append("")
+        return lines
+
+    def _generate_hybrid_output_prompt(
+        self,
+        output: dict[str, Any],
+        *,
+        ensure_all_keys: bool = False,
+        title_mapping: dict[str, str] | None = None,
+    ) -> list[str]:
+        lines: list[str] = [
+            f"[{ (title_mapping or {}).get('output_requirement', 'OUTPUT REQUIREMENT') }]:",
+            "Data Format: Structured Markdown with JSON blocks",
+            "",
+            "Respond in clearly separated sections. Each section MUST start with the exact",
+            "markdown header shown below (### field_name).",
+            "",
+            "Sections marked [text] expect plain text content. Write your content directly",
+            "after the header.",
+            "",
+            "Sections marked [JSON] expect valid JSON inside a ```json code block.",
+            "Write the opening ```json on its own line, then your JSON content, then",
+            "the closing ``` on its own line.",
+            "",
+            "Separate sections with a blank line.",
+        ]
+        if ensure_all_keys:
+            lines.extend([
+                "",
+                "All defined fields are required. Every section header listed below MUST appear",
+                "in your response exactly as specified.",
+            ])
+        lines.append("")
+        lines.append("Required sections:")
+        lines.append("")
+        for field_name, field_spec in output.items():
+            kind = self._classify_hybrid_field_spec(field_spec)
+            kind_note = "(text)" if kind == "scalar" else "(JSON)"
+            desc = ""
+            if isinstance(field_spec, tuple) and len(field_spec) >= 2 and field_spec[1]:
+                desc = f"{self._replace_slot_references(field_spec[1], title_mapping)}"
+            lines.append(f"### {field_name}")
+            if desc:
+                lines.append(f"<!-- {kind_note} {desc} -->")
+            else:
+                lines.append(f"<!-- {kind_note} -->")
+            if kind == "scalar":
+                lines.append("(your content here)")
+            else:
+                lines.append("```json")
+                lines.append(self._generate_json_output_prompt(field_spec, title_mapping=title_mapping))
+                lines.append("```")
+            lines.append("")
+        return lines
+
+    @classmethod
+    def _classify_hybrid_field_spec(cls, field_spec: Any):
+        if isinstance(field_spec, tuple) and field_spec:
+            first = field_spec[0]
+            if isinstance(first, str) and first in cls._SANITIZED_SCALAR_TYPE_NAMES:
+                return "scalar"
+        if isinstance(field_spec, str) and field_spec in cls._SANITIZED_SCALAR_TYPE_NAMES:
+            return "scalar"
+        return _classify_field_spec(field_spec)
+
     def _generate_yaml_prompt_list(self, title: str, prompt_part: Any) -> list[str]:
-        sanitized_part = DataFormatter.sanitize(prompt_part)
+        title_mapping = cast(dict[str, str], self.settings.get("prompt.prompt_title_mapping", {}))
+        if not isinstance(title_mapping, dict):
+            title_mapping = {}
+        sanitized_part = DataFormatter.sanitize(
+            self._replace_slot_references(prompt_part, title_mapping)
+        )
         return [
             f"[{ title }]:",
             (
@@ -199,6 +375,8 @@ class AgentlyPromptGenerator(PromptGenerator):
 
     def _generate_main_prompt(self, prompt_object: PromptModel):
         prompt_title_mapping = cast(dict[str, str], self.settings.get("prompt.prompt_title_mapping", {}))
+        if not isinstance(prompt_title_mapping, dict):
+            prompt_title_mapping = {}
         prompt_text_list = []
         # tools
         if prompt_object.tools and isinstance(prompt_object.tools, list):
@@ -209,10 +387,12 @@ class AgentlyPromptGenerator(PromptGenerator):
                     for key, value in tool_info.items():
                         if key in ("kwargs", "returns"):
                             prompt_text_list.append(
-                                f"{ key }: {self._generate_json_output_prompt(DataFormatter.sanitize(value))}"
+                                f"{ key }: {self._generate_json_output_prompt(DataFormatter.sanitize(value), title_mapping=prompt_title_mapping)}"
                             )
                         else:
-                            prompt_text_list.append(f"{ key }: { value }")
+                            prompt_text_list.append(
+                                f"{ key }: { self._replace_slot_references(value, prompt_title_mapping) }"
+                            )
                     prompt_text_list.append("]")
 
         # action_results
@@ -234,13 +414,22 @@ class AgentlyPromptGenerator(PromptGenerator):
             prompt_text_list.append(f"[{ prompt_title_mapping.get('info', 'INFO') }]:")
             if isinstance(prompt_object.info, Mapping):
                 for title, content in prompt_object.info.items():
-                    prompt_text_list.append(f"- { title }: { DataFormatter.sanitize(content) }")
+                    prompt_text_list.append(
+                        f"- { title }: { DataFormatter.sanitize(self._replace_slot_references(content, prompt_title_mapping)) }"
+                    )
             elif isinstance(prompt_object.info, Sequence) and not isinstance(prompt_object.info, str):
                 prompt_text_list.extend(
-                    [f"- { DataFormatter.sanitize(info_line) }" for info_line in prompt_object.info]
+                    [
+                        f"- { DataFormatter.sanitize(self._replace_slot_references(info_line, prompt_title_mapping)) }"
+                        for info_line in prompt_object.info
+                    ]
                 )
             else:
-                prompt_text_list.append(DataFormatter.sanitize(prompt_object.info))
+                prompt_text_list.append(
+                    DataFormatter.sanitize(
+                        self._replace_slot_references(prompt_object.info, prompt_title_mapping)
+                    )
+                )
             prompt_text_list.append("")
 
         # extra
@@ -308,9 +497,25 @@ class AgentlyPromptGenerator(PromptGenerator):
                                 else []
                             ),
                             "Data Structure:",
-                            self._generate_json_output_prompt(final_output),
+                            self._generate_json_output_prompt(final_output, title_mapping=prompt_title_mapping),
                             "",
                         ]
+                    )
+                case "flat_markdown":
+                    prompt_text_list.extend(
+                        self._generate_flat_markdown_output_prompt(
+                            DataFormatter.sanitize(prompt_object.output),
+                            ensure_all_keys=getattr(prompt_object, "ensure_all_keys", False),
+                            title_mapping=prompt_title_mapping,
+                        )
+                    )
+                case "hybrid":
+                    prompt_text_list.extend(
+                        self._generate_hybrid_output_prompt(
+                            DataFormatter.sanitize(prompt_object.output),
+                            ensure_all_keys=getattr(prompt_object, "ensure_all_keys", False),
+                            title_mapping=prompt_title_mapping,
+                        )
                     )
                 case "markdown":
                     prompt_text_list.extend(
@@ -335,7 +540,12 @@ class AgentlyPromptGenerator(PromptGenerator):
         role_mapping: dict[str, str],
     ) -> dict[str, str]:
         role = str(role_mapping[role]) if role in role_mapping else role
-        sanitized_part = DataFormatter.sanitize(prompt_part)
+        title_mapping = cast(dict[str, str], self.settings.get("prompt.prompt_title_mapping", {}))
+        if not isinstance(title_mapping, dict):
+            title_mapping = {}
+        sanitized_part = DataFormatter.sanitize(
+            self._replace_slot_references(prompt_part, title_mapping)
+        )
         return {
             "role": role,
             "content": (
@@ -416,7 +626,9 @@ class AgentlyPromptGenerator(PromptGenerator):
                     content = [content_adapter.validate_python(message_content) for message_content in content]
                     for one_content in content:
                         if one_content.type == "text":
-                            chat_history_lines.append(f"[{ role }]:{ str(one_content.text) }")
+                            chat_history_lines.append(
+                                f"[{ role }]:{ self._replace_slot_references(str(one_content.text), prompt_title_mapping) }"
+                            )
                         else:
                             warnings.warn(
                                 f"Skipped content: unable to convert type '{one_content.type}' to text. "
@@ -424,7 +636,9 @@ class AgentlyPromptGenerator(PromptGenerator):
                                 stacklevel=2,
                             )
                 else:
-                    chat_history_lines.append(f"[{ role }]:{ DataFormatter.sanitize(content) }")
+                    chat_history_lines.append(
+                        f"[{ role }]:{ DataFormatter.sanitize(self._replace_slot_references(content, prompt_title_mapping)) }"
+                    )
             prompt_text_list.extend(chat_history_lines)
             prompt_text_list.append("")
 
@@ -586,7 +800,14 @@ class AgentlyPromptGenerator(PromptGenerator):
         ):
             role = merged_role_mapping["user"] if "user" in merged_role_mapping else "user"
             prompt_messages.append(
-                {"role": role, "content": _prepend_current_time_text(DataFormatter.sanitize(prompt_object.input))}
+                {
+                    "role": role,
+                    "content": _prepend_current_time_text(
+                        DataFormatter.sanitize(
+                            self._replace_slot_references(prompt_object.input, prompt_title_mapping)
+                        )
+                    ),
+                }
             )
         # special occasion: only attachment
         elif (
@@ -609,7 +830,9 @@ class AgentlyPromptGenerator(PromptGenerator):
                         prompt_messages.append(
                             {
                                 "role": role,
-                                "content": _prepend_current_time_text(one_content.text),
+                                "content": _prepend_current_time_text(
+                                    self._replace_slot_references(one_content.text, prompt_title_mapping)
+                                ),
                             }
                         )
                     else:
@@ -650,7 +873,10 @@ class AgentlyPromptGenerator(PromptGenerator):
                             prompt_messages.append(
                                 {
                                     "role": role,
-                                    "content": one_content.text,
+                                    "content": self._replace_slot_references(
+                                        one_content.text,
+                                        prompt_title_mapping,
+                                    ),
                                 }
                             )
                         else:
@@ -739,11 +965,6 @@ class AgentlyPromptGenerator(PromptGenerator):
                     desc = field_type_schema[1] if len(field_type_schema) > 1 else ""
                     third_value = field_type_schema[2] if len(field_type_schema) > 2 else None
                     ensure_marker = self._is_ensure_marker(third_value)
-                    if len(field_type_schema) > 2 and not ensure_marker:
-                        raise TypeError(
-                            f"Agently output leaf tuple third slot only supports ensure markers (True/1), "
-                            f"got {third_value!r} for field '{field_name}'."
-                        )
                     field_required = strict_output or ensure_marker
                     if field_required:
                         default_value = ...
@@ -917,10 +1138,6 @@ class AgentlyPromptGenerator(PromptGenerator):
                         third_value = output_prompt_part[2]
                         if self._is_ensure_marker(third_value):
                             result["$ensure"] = True
-                        else:
-                            raise TypeError(
-                                "Agently output leaf tuple third slot only supports ensure markers (True/1)."
-                            )
                         return result
             else:
                 return list(output_prompt_part)

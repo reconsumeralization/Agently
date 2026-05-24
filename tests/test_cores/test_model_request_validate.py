@@ -141,7 +141,7 @@ def _create_agent(requester_cls: type[Any], name: str):
 async def test_request_validate_chain_and_runtime_handler_order():
     MockValidateJSONRequester.reset([{"answer": "ok"}])
     request = _create_request(MockValidateJSONRequester, "validate-order")
-    request.output({"answer": (str,)})
+    request.output({"answer": (str,)}, format="json")
 
     seen: list[tuple[str, dict[str, Any], int]] = []
 
@@ -169,7 +169,7 @@ async def test_request_validate_chain_and_runtime_handler_order():
 async def test_agent_validate_failure_retries_and_emits_runtime_events():
     MockValidateJSONRequester.reset([{"status": "draft"}, {"status": "ready"}])
     agent = _create_agent(MockValidateJSONRequester, "validate-agent")
-    agent.output({"status": (str,)})
+    agent.output({"status": (str,)}, format="json")
     agent.validate(lambda result, context: result["status"] == "ready")
 
     captured = []
@@ -204,7 +204,7 @@ async def test_agent_validate_failure_retries_and_emits_runtime_events():
 async def test_validate_no_retry_can_return_last_result_when_raise_disabled():
     MockValidateJSONRequester.reset([{"status": "draft"}])
     request = _create_request(MockValidateJSONRequester, "validate-no-retry")
-    request.output({"status": (str,)})
+    request.output({"status": (str,)}, format="json")
 
     data = await request.async_start(
         validate_handler=lambda result, context: {
@@ -224,7 +224,7 @@ async def test_validate_no_retry_can_return_last_result_when_raise_disabled():
 async def test_validate_stop_raises_without_retry():
     MockValidateJSONRequester.reset([{"status": "draft"}])
     request = _create_request(MockValidateJSONRequester, "validate-stop")
-    request.output({"status": (str,)})
+    request.output({"status": (str,)}, format="json")
 
     with pytest.raises(ValueError, match="stop immediately"):
         await request.async_start(
@@ -243,7 +243,7 @@ async def test_validate_stop_raises_without_retry():
 async def test_validate_raise_value_stops_with_explicit_exception():
     MockValidateJSONRequester.reset([{"status": "draft"}])
     request = _create_request(MockValidateJSONRequester, "validate-raise")
-    request.output({"status": (str,)})
+    request.output({"status": (str,)}, format="json")
 
     with pytest.raises(RuntimeError, match="fatal validation"):
         await request.async_start(
@@ -261,7 +261,7 @@ async def test_validate_raise_value_stops_with_explicit_exception():
 async def test_validate_handler_exception_retries_and_emits_validation_error():
     MockValidateJSONRequester.reset([{"answer": "ok"}, {"answer": "ok"}])
     request = _create_request(MockValidateJSONRequester, "validate-error")
-    request.output({"answer": (str,)})
+    request.output({"answer": (str,)}, format="json")
 
     attempts: list[int] = []
 
@@ -298,7 +298,7 @@ async def test_validate_handler_exception_retries_and_emits_validation_error():
 async def test_validate_returns_latest_result_when_retries_exhausted_and_raise_disabled():
     MockValidateJSONRequester.reset([{"status": "draft"}, {"status": "still-draft"}])
     request = _create_request(MockValidateJSONRequester, "validate-latest")
-    request.output({"status": (str,)})
+    request.output({"status": (str,)}, format="json")
 
     data = await request.async_start(
         validate_handler=lambda result, context: False,
@@ -348,7 +348,8 @@ async def test_validate_runs_once_per_response_and_context_exposes_result_object
         {
             "status": (str,),
             "priority": (int,),
-        }
+        },
+        format="json",
     )
 
     calls: list[dict[str, Any]] = []

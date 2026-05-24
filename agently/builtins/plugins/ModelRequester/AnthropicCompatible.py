@@ -76,7 +76,7 @@ class AnthropicCompatible(ModelRequester):
         "strict_role_orders": False,
         "anthropic_version": "2023-06-01",
         "anthropic_beta": None,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "timeout": {
             "connect": 30.0,
             "read": 600.0,
@@ -639,7 +639,7 @@ class AnthropicCompatible(ModelRequester):
                 value_format="serializable",
                 default_value={},
             )
-        max_tokens_config = self.plugin_settings.get("max_tokens", 4096)
+        max_tokens_config = self.plugin_settings.get("max_tokens", 8192)
         max_tokens = int(max_tokens_config) if isinstance(max_tokens_config, (int, float, str)) else 4096
 
         request_options.update(

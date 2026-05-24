@@ -9,6 +9,7 @@
     ".request": {
         "input": "Say hello.",
         "output": {
+            "$format": "auto",
             "thinking": {
                 "$type": [{
                     "$type": "str",

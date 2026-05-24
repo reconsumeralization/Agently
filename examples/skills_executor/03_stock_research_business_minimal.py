@@ -21,10 +21,11 @@ Expected key output from a real DeepSeek run on 2026-05-21:
     risk_items=3
 
 This is intentionally the shortest business-facing shape: install a local
-skills pack, attach that pack to the agent, send business inputs, and receive a
-structured research brief. Current quote data is fetched by a controlled Skills
-Executor Action stage before the model writes the analysis. No third-party Skill
-package scripts are executed.
+skills pack of one standard ``SKILL.md`` and run it prompt-only to receive a
+structured research brief. The controlled side effect — fetching current quote
+data — runs in the HOST before the model analysis, not inside the Skill. The
+fetched data is passed to the prompt-only Skill as task context. No third-party
+Skill package scripts are executed.
 """
 
 from __future__ import annotations
@@ -33,7 +34,9 @@ import csv
 from datetime import datetime, timedelta, timezone
 import json
 import re
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -53,32 +56,6 @@ RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor" / "stock_research_b
 SKILLS_PACK_NAME = "equity-research-demo"
 QUOTE_CACHE_PATH = RUNTIME_ROOT / "quote_cache.json"
 TRANSIENT_HTTP_STATUS = {429, 500, 502, 503, 504}
-
-EQUITY_RESEARCH_SKILL_YAML = """
-skill_id: equity-research-brief
-display_name: Equity Research Brief
-purpose: Fetch current public-market quote data and produce research-only company comparison briefs.
-trust_level: local
-requires:
-  actions: [fetch_equity_market_data]
-card:
-  stage_roles: [market_data_fetch, equity_research, risk_review]
-  artifact_types: [json]
-  side_effects:
-    - kind: external_read
-      policy: allowed
-  required_capabilities: [fetch_equity_market_data]
-  composition_hints:
-    - Run the market data fetch before model-owned analysis.
-    - Preserve provider timestamps and data boundaries exactly.
-failure_modes: [market_data_source_unavailable, missing_quote]
-stages:
-  - id: fetch_current_market_data
-    kind: action
-    action: fetch_equity_market_data
-    input:
-      task: "${task}"
-"""
 
 EQUITY_RESEARCH_SKILL = """---
 name: equity-research-brief
@@ -118,18 +95,25 @@ def install_demo_skills_pack() -> None:
     """Example setup: create and install one local Skill Pack."""
 
     skill_dir = RUNTIME_ROOT / "skills_pack" / "equity-research-brief"
+    # Start from a clean Skill dir: a standard SKILL.md must be the *only*
+    # capability definition. Any stale legacy manifest (e.g. a skill.yaml left
+    # by an older example version) would make the framework reject the Skill.
+    if skill_dir.exists():
+        shutil.rmtree(skill_dir)
     skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "skill.yaml").write_text(EQUITY_RESEARCH_SKILL_YAML, encoding="utf-8")
     (skill_dir / "SKILL.md").write_text(EQUITY_RESEARCH_SKILL, encoding="utf-8")
 
-    Agently.settings.set("skills.registry.root", str(RUNTIME_ROOT / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
-    Agently.skills_executor.install_skills_pack(
+    Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
+    pack_result = Agently.skills_executor.install_skills_pack(
         skill_dir.parent,
         name=SKILLS_PACK_NAME,
         trust_level="local",
         update=True,
     )
+    # Surface install-time rejections early instead of failing cryptically at
+    # plan time with "required pack had no installed standard Skills".
+    if not (pack_result or {}).get("installed_skills"):
+        raise RuntimeError(f"Skill Pack install produced no Skills: {pack_result}")
 
 
 def _extract_tickers(task: str) -> list[str]:
@@ -308,77 +292,62 @@ def fetch_equity_market_data(task: str) -> dict[str, Any]:
     }
 
 
+ANALYSIS_OUTPUTS: dict[str, Any] = {
+    "input_boundary": (str, "Copy market_data.data_boundary exactly.", True),
+    "comparison_basis": [(str, "Evidence dimensions used before the final summary.", True)],
+    "company_views": [
+        (
+            {
+                "ticker": (str, "Company ticker.", True),
+                "relative_strengths": [(str, "Evidence-backed strength.", True)],
+                "key_risks": [(str, "Evidence-backed risk.", True)],
+                "watch_indicators": [(str, "Metric or event to monitor.", True)],
+            },
+            "Per-company research view.",
+            True,
+        )
+    ],
+    "cross_company_takeaways": [(str, "Cross-company synthesis point.", True)],
+    "risk_watchlist": [(str, "Portfolio-level or sector-level risk to monitor.", True)],
+    "non_investment_advice": (bool, "True when no buy/sell/hold/order guidance is provided.", True),
+    "client_summary": (str, "Final concise business-facing summary.", True),
+}
+
+
 def build_stock_research_brief() -> dict[str, Any]:
     install_demo_skills_pack()
     provider = configure_model(temperature=0.0)
     agent = Agently.create_agent("stock-research-demo")
-    agent.register_action(
-        name="fetch_equity_market_data",
-        desc="Fetch current public quote data for stock tickers from a controlled market-data source.",
-        kwargs={"task": (str, "Task text containing ticker symbols.")},
-        func=fetch_equity_market_data,
+
+    # Controlled side effect runs in the HOST, before model analysis — not inside
+    # the Skill. The Skill is pure guidance and never touches the network.
+    market_data = fetch_equity_market_data("Fetch current market quote data for NVDA, AMD, and AVGO.")
+
+    task = (
+        "Analyze NVDA, AMD, and AVGO for an internal research memo. Compare recent "
+        "performance, valuation context, financial quality, earnings-call themes, "
+        "SEC-style risks, and analyst sentiment. Do not give investment advice.\n\n"
+        "Base the answer ONLY on the fetched market data below. Copy "
+        "market_data.data_boundary EXACTLY into input_boundary and preserve all dates "
+        "exactly. If data_status is degraded, explain which quotes used cache or are "
+        "unavailable. Do not invent SEC filings, earnings-call facts, analyst ratings, "
+        "or valuation metrics not present; when a requested category is unavailable, say "
+        "so and put it in watch indicators.\n\n"
+        f"market_data (JSON):\n{ json.dumps(market_data, ensure_ascii=False, indent=2) }"
     )
 
-    quote_execution = agent.run_skills_task(
-        "Fetch current market quote data for NVDA, AMD, and AVGO.",
+    execution = agent.run_skills_task(
+        task,
         skills_packs=[SKILLS_PACK_NAME],
         mode="required",
+        semantic_outputs=ANALYSIS_OUTPUTS,
     )
-    if quote_execution.status != "success":
-        raise RuntimeError(f"Market data Skill execution failed: { quote_execution.to_dict() }")
-    market_data = cast(dict[str, Any], quote_execution.output)["fetch_current_market_data"]
+    if execution.status != "success":
+        raise RuntimeError(f"Equity research Skill execution failed: { execution.to_dict() }")
 
-    result = (
-        agent
-        .use_skills_packs([SKILLS_PACK_NAME], mode="model_decision", scope="request")
-        .input(
-            {
-                "task": (
-                    "Analyze NVDA, AMD, and AVGO for an internal research memo. "
-                    "Compare recent performance, valuation context, financial quality, "
-                    "earnings-call themes, SEC-style risks, and analyst sentiment. "
-                    "Do not give investment advice."
-                ),
-                "market_data": market_data,
-                "deliverable": "Concise equity research comparison for a non-trading internal briefing.",
-            }
-        )
-        .instruct(
-            "Use the disclosed equity research skill if it fits. "
-            "Base the answer on the provided fetched market data. "
-            "Copy market_data.data_boundary exactly into input_boundary and preserve all dates exactly. "
-            "If market_data.data_status is degraded, explain which quotes used cache or are unavailable. "
-            "Do not invent SEC filings, earnings-call facts, analyst ratings, or valuation metrics that are not present. "
-            "When a requested data category is unavailable, say it is unavailable in the provided data and put it in watch indicators. "
-            "Return research conclusions, risks, and watch indicators only."
-        )
-        .output(
-            {
-                "input_boundary": (str, "Copy market_data.data_boundary exactly.", True),
-                "comparison_basis": [(str, "Evidence dimensions used before the final summary.", True)],
-                "company_views": [
-                    (
-                        {
-                            "ticker": (str, "Company ticker.", True),
-                            "relative_strengths": [(str, "Evidence-backed strength.", True)],
-                            "key_risks": [(str, "Evidence-backed risk.", True)],
-                            "watch_indicators": [(str, "Metric or event to monitor.", True)],
-                        },
-                        "Per-company research view.",
-                        True,
-                    )
-                ],
-                "cross_company_takeaways": [(str, "Cross-company synthesis point.", True)],
-                "risk_watchlist": [(str, "Portfolio-level or sector-level risk to monitor.", True)],
-                "non_investment_advice": (bool, "True when no buy/sell/hold/order guidance is provided.", True),
-                "client_summary": (str, "Final concise business-facing summary.", True),
-            }
-        )
-        .start(max_retries=1, raise_ensure_failure=False)
-    )
+    result = cast(dict[str, Any], dict(execution.output or {}))
     result["_provider"] = provider
     result["_market_data"] = market_data
-    result["_quote_execution"] = quote_execution.to_dict()
     return result
 
 

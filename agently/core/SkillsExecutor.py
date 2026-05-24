@@ -14,11 +14,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
-    from agently.types.plugins import SkillsExecutorPlugin
     from agently.utils import Settings
 
 
@@ -42,6 +42,18 @@ class SkillsExecutor:
     @property
     def registry(self):
         return self._impl.registry
+
+    def configure(
+        self,
+        *,
+        registry_root: str | Path | None = None,
+        allowed_trust_levels: list[str] | None = None,
+    ) -> "SkillsExecutor":
+        if registry_root is not None:
+            self.settings.set("skills.registry.root", str(registry_root))
+        if allowed_trust_levels is not None:
+            self.settings._set_item_by_dot_path("skills.allowed_trust_levels", list(allowed_trust_levels), cover=True)
+        return self
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._impl, name)

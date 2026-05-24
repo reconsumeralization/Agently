@@ -25,6 +25,8 @@ from agently.utils import DataLocator, DataPathBuilder
 
 
 class ConfigurePromptExtension(BaseAgent):
+    _OUTPUT_FORMAT_CONFIG_KEYS = ("$format", ".format", "$output_format", ".output_format")
+
     @staticmethod
     def _is_existing_file_path(path_or_content: str | Path):
         path = Path(path_or_content)
@@ -117,24 +119,47 @@ class ConfigurePromptExtension(BaseAgent):
         else:
             return output_prompt_value
 
+    def _generate_output_config(self, output_prompt_value: Any) -> tuple[Any, Any | None]:
+        output_format = None
+        if isinstance(output_prompt_value, dict):
+            output_without_format = {}
+            for key, value in output_prompt_value.items():
+                if key in self._OUTPUT_FORMAT_CONFIG_KEYS:
+                    if output_format is None:
+                        output_format = value
+                    continue
+                output_without_format[key] = value
+            output_prompt_value = output_without_format
+        return self._generate_output_value(output_prompt_value), output_format
+
+    def _set_configured_prompt_value(
+        self,
+        setter,
+        prompt_key: str,
+        prompt_value: Any,
+        *,
+        mappings: dict[str, Any] | None,
+    ) -> None:
+        if prompt_key == "output":
+            output_value, output_format = self._generate_output_config(prompt_value)
+            setter(prompt_key, output_value, mappings=mappings)
+            if output_format is not None:
+                setter("output_format", output_format, mappings=mappings)
+            return
+        setter(prompt_key, prompt_value, mappings=mappings)
+
     def _execute_prompt_configure(self, prompt: dict[str, Any], variable_mappings: dict[str, Any] | None):
         for prompt_key, prompt_value in prompt.items():
             match prompt_key:
                 case ".agent":
                     if isinstance(prompt_value, dict):
                         for agent_prompt_key, agent_prompt_value in prompt_value.items():
-                            if agent_prompt_key != "output":
-                                self.set_agent_prompt(
-                                    agent_prompt_key,
-                                    agent_prompt_value,
-                                    mappings=variable_mappings,
-                                )
-                            else:
-                                self.set_agent_prompt(
-                                    agent_prompt_key,
-                                    self._generate_output_value(agent_prompt_value),
-                                    mappings=variable_mappings,
-                                )
+                            self._set_configured_prompt_value(
+                                self.set_agent_prompt,
+                                agent_prompt_key,
+                                agent_prompt_value,
+                                mappings=variable_mappings,
+                            )
                     else:
                         self.set_agent_prompt(
                             "system",
@@ -144,18 +169,12 @@ class ConfigurePromptExtension(BaseAgent):
                 case ".request":
                     if isinstance(prompt_value, dict):
                         for request_prompt_key, request_prompt_value in prompt_value.items():
-                            if request_prompt_key != "output":
-                                self.set_request_prompt(
-                                    request_prompt_key,
-                                    request_prompt_value,
-                                    mappings=variable_mappings,
-                                )
-                            else:
-                                self.set_request_prompt(
-                                    request_prompt_key,
-                                    self._generate_output_value(request_prompt_value),
-                                    mappings=variable_mappings,
-                                )
+                            self._set_configured_prompt_value(
+                                self.set_request_prompt,
+                                request_prompt_key,
+                                request_prompt_value,
+                                mappings=variable_mappings,
+                            )
                     else:
                         self.set_request_prompt(
                             "input",
@@ -211,31 +230,19 @@ class ConfigurePromptExtension(BaseAgent):
                 case _:
                     if prompt_key.startswith("$") and not prompt_key.startswith("${"):
                         prompt_key = prompt_key[1:]
-                        if prompt_key != "output":
-                            self.set_agent_prompt(
-                                prompt_key,
-                                prompt_value,
-                                mappings=variable_mappings,
-                            )
-                        else:
-                            self.set_agent_prompt(
-                                prompt_key,
-                                self._generate_output_value(prompt_value),
-                                mappings=variable_mappings,
-                            )
+                        self._set_configured_prompt_value(
+                            self.set_agent_prompt,
+                            prompt_key,
+                            prompt_value,
+                            mappings=variable_mappings,
+                        )
                     else:
-                        if prompt_key != "output":
-                            self.set_request_prompt(
-                                prompt_key,
-                                prompt_value,
-                                mappings=variable_mappings,
-                            )
-                        else:
-                            self.set_request_prompt(
-                                prompt_key,
-                                self._generate_output_value(prompt_value),
-                                mappings=variable_mappings,
-                            )
+                        self._set_configured_prompt_value(
+                            self.set_request_prompt,
+                            prompt_key,
+                            prompt_value,
+                            mappings=variable_mappings,
+                        )
 
     def load_yaml_prompt(
         self,

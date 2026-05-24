@@ -185,12 +185,16 @@ class AgentlyTaskDAGPlanner(TaskDAGPlanner):
             "Use stable task ids that match letters, digits, underscore, dot, or dash.",
             "Reference dependencies only by upstream task id in depends_on.",
             "Keep depends_on empty for root tasks and never create dependency cycles.",
-            "Do not place dependency results inside task.inputs; executor injects dependency_results at runtime.",
+            "Do not copy dependency result values into task.inputs. For direct runtime wiring use placeholders such as ${INIT.foo} for the initial graph input, ${DEPS.task_id.path} for dependency results, ${STATE.task_results.task_id.path} for execution state, or ${TRIGGER.result} for the raw TriggerFlow trigger payload; otherwise read dependency_results in the task handler/model prompt.",
             "Use semantic_outputs to map each final deliverable role to a source task id.",
             "Declare side_effect_policy for network, local_write, external_write, or credential_usage tasks.",
             "Add approval.required=true for side-effect tasks when graph policy requires approval.",
             "Do not mark ordinary model tasks as network side effects only because they call the model provider; the executor manages provider access.",
             "Keep approval empty for read-only model analysis, synthesis, drafting, validation, or final response tasks unless the user explicitly asks for a human approval gate.",
+            "For model tasks, set task.inputs.output_format to json for compact machine-control outputs, action arguments, routing flags, numeric or boolean facts, model judges, dense nested arrays/objects, and strict extraction.",
+            "For model tasks, set task.inputs.output_format to flat_markdown for flat string long text, code, HTML, SVG, Markdown, SQL, or template fields.",
+            "For model tasks, set task.inputs.output_format to hybrid only as an explicit opt-in for long prose plus structured lists, tables, citations, metadata, or nested evidence when retry latency is acceptable.",
+            "Use task.inputs.output_format=auto only when conservative schema-driven format selection and retry latency are acceptable.",
             "Do not invent executor handlers; use only task kinds or binding names that the resolver declares as available.",
         ]
         if self.available_bindings:
@@ -209,6 +213,7 @@ class AgentlyTaskDAGPlanner(TaskDAGPlanner):
             "max_tasks": self.max_tasks,
             "request_contract": {
                 "output_schema": "Task DAG v1 Agently output schema",
+                "output_format": "json",
                 "ensure_keys": self.ensure_keys(),
                 "validate_handler": "validate_output",
                 "retryable": True,
@@ -238,7 +243,7 @@ class AgentlyTaskDAGPlanner(TaskDAGPlanner):
         if hasattr(prepared, "instruct"):
             prepared = prepared.instruct(self.instructions())
         if hasattr(prepared, "output"):
-            prepared = prepared.output(self.output_schema())
+            prepared = prepared.output(self.output_schema(), format="json")
         if hasattr(prepared, "validate"):
             prepared = prepared.validate(self.validate_output)
         return prepared

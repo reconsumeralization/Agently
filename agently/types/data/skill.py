@@ -17,59 +17,30 @@ from __future__ import annotations
 from typing import Any, Literal
 from typing_extensions import TypedDict
 
-from .action import ActionResult
-from .execution_environment import ExecutionEnvironmentRequirement
-
 
 SkillMode = Literal["model_decision", "required"]
-SkillScope = Literal["request", "session", "agent", "execution"]
-SkillStageKind = Literal["model", "action", "branch", "for_each", "wait", "validate", "emit"]
-SkillExecutionStatus = Literal[
-    "created",
-    "planned",
-    "running",
-    "success",
-    "no_match",
-    "approval_required",
-    "blocked",
-    "error",
-]
+SkillExecutionStatus = Literal["created", "running", "success", "no_match", "blocked", "error"]
+ExecutionStrategy = Literal["single_shot", "staged", "react"]
 
 
 class SkillCard(TypedDict, total=False):
     skill_id: str
-    version: str
+    name: str
     display_name: str
+    description: str
     purpose: str
     activation_hints: dict[str, Any]
-    stage_roles: list[str]
-    consumes: list[dict[str, Any]]
-    produces: list[dict[str, Any]]
-    artifact_types: list[str]
-    side_effects: list[dict[str, Any]]
-    required_capabilities: list[str]
-    complements: list[str]
-    task_fit_examples: list[str]
-    input_expectations: str
-    output_expectations: str
-    available_action_summary: list[str]
-    required_permissions: dict[str, Any]
-    risk_profile: str
-    composition_hints: list[str]
-    failure_modes: list[str]
     content_refs: list[str]
 
 
-class SkillStage(TypedDict, total=False):
-    stage_id: str
-    id: str
-    kind: SkillStageKind | str
-    prompt: str
-    action: str
-    input: dict[str, Any]
-    validation: dict[str, Any]
-    emits: list[dict[str, Any]]
-    meta: dict[str, Any]
+class SkillDecisionCard(TypedDict, total=False):
+    skill_id: str
+    name: str
+    description: str
+    keywords: list[str]
+    guidance_excerpt: str
+    resource_summary: list[dict[str, Any]]
+    checksum: str
 
 
 class SkillContract(TypedDict, total=False):
@@ -78,17 +49,13 @@ class SkillContract(TypedDict, total=False):
     source: dict[str, Any]
     trust_level: str
     card: SkillCard
-    kind: str
-    declared_permissions: dict[str, Any]
-    dependencies: list[str]
+    guidance: dict[str, Any]
     assets: dict[str, Any]
-    declarative_stages: list[SkillStage]
-    semantic_outputs: dict[str, Any]
-    action_requirements: list[str]
-    execution_environment_requirements: list[ExecutionEnvironmentRequirement]
-    validation_rules: list[dict[str, Any]]
-    completion_rules: dict[str, Any]
-    extension_slots: dict[str, Any]
+    install_metadata: dict[str, Any]
+    decision_card: SkillDecisionCard
+    resource_index: dict[str, Any]
+    checksums: dict[str, Any]
+    diagnostics: list[dict[str, Any]]
     metadata: dict[str, Any]
 
 
@@ -108,12 +75,13 @@ class SkillPlanSelection(TypedDict, total=False):
     skills_pack_name: str
     version: str
     display_name: str
-    scope: SkillScope
     reason: str
     selected_by: str
     required: bool
     card: SkillCard
-    stages: list[SkillStage]
+    decision_card: SkillDecisionCard
+    guidance: dict[str, Any]
+    resource_index: dict[str, Any]
 
 
 class SkillPlanRejection(TypedDict, total=False):
@@ -131,32 +99,14 @@ class SkillExecutionPlan(TypedDict, total=False):
     selected_skills_packs: list[SkillsPackRecord]
     rejected_skills: list[SkillPlanRejection]
     rejected_skills_packs: list[dict[str, Any]]
-    composed_stage_graph: list[dict[str, Any]]
-    dynamic_task_graph: dict[str, Any]
+    decision_cards: list[SkillDecisionCard]
     prompt_bindings: list[dict[str, Any]]
-    action_bindings: list[dict[str, Any]]
     resource_bindings: list[dict[str, Any]]
-    execution_environment_requirements: list[ExecutionEnvironmentRequirement]
-    approval_requests: list[dict[str, Any]]
-    state_keys: list[str]
-    semantic_outputs: dict[str, Any]
-    artifact_bindings: list[dict[str, Any]]
     expected_result_shape: dict[str, Any]
-    stream_policy: dict[str, Any]
-    fallback_policy: dict[str, Any]
-    cleanup_policy: dict[str, Any]
+    expected_result_format: str
+    execution_strategy: ExecutionStrategy
+    execution_stages: list[dict[str, Any]]
     diagnostics: list[dict[str, Any]]
-    planner_result: dict[str, Any]
-    planner_evaluation: dict[str, Any]
-    stage_plan: list[str]
-    skill_switches: list[str]
-    intermediate_artifacts: list[str]
-    external_side_effects: list[str]
-    approval_gates: list[str]
-    fallbacks: list[str]
-    expected_outputs: list[str]
-    boundary_notes: list[str]
-    risks: list[str]
 
 
 class SkillExecutionDict(TypedDict, total=False):
@@ -168,7 +118,7 @@ class SkillExecutionDict(TypedDict, total=False):
     plan: SkillExecutionPlan
     runtime_stream: list[dict[str, Any]]
     skill_logs: list[dict[str, Any]]
-    action_logs: list[ActionResult]
-    approval_records: list[dict[str, Any]]
+    action_logs: list[dict[str, Any]]
     intervention_records: list[dict[str, Any]]
     close_snapshot: dict[str, Any]
+    effort: str | None

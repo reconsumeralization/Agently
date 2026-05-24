@@ -74,6 +74,14 @@ class FunctionShifter:
         if inspect.iscoroutinefunction(func):
             return func
 
+        call = getattr(func, "__call__", None)
+        if call is not None and inspect.iscoroutinefunction(call):
+            @wraps(func)
+            async def callable_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+                return await func(*args, **kwargs)  # type: ignore[misc]
+
+            return callable_wrapper
+
         @wraps(func)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             if not callable(func):

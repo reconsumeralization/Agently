@@ -309,6 +309,7 @@ class AgentlyMain(Generic[A]):
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ) -> DynamicTask:
         return DynamicTask(
             self.plugin_manager,
@@ -324,6 +325,7 @@ class AgentlyMain(Generic[A]):
             max_tasks=max_tasks,
             output_schema=output_schema,
             ensure_keys=ensure_keys,
+            output_format=output_format,
         )
 
     def create_agent(self, name: str | None = None) -> A:

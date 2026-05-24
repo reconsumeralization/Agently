@@ -1,0 +1,224 @@
+# Copyright 2023-2026 AgentEra(Agently.Tech)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ── Agent → Plugin context adapter ────────────────────────────────────────────
+# AgentSkillsRuntimeContext bridges the Agent's internal API (settings, model
+# requests, runtime stream emission) to the SkillsExecutor plugin protocols
+# (SkillsPlanningContext / SkillsExecutionContext / SkillsRuntimeContext).
+#
+# This adapter pattern keeps the plugin implementation decoupled from concrete
+# Agent internals. When other plugins need Agent-owned services, follow this
+# pattern: define a context protocol in types/plugins/, implement the adapter
+# here or in a sibling module, and provide a factory function.
+# ──────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import inspect
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal
+
+from agently.types.plugins import SkillsRuntimeContext
+
+
+class AgentSkillsRuntimeContext:
+    """Agent component adapter passed into SkillsExecutor plugins."""
+
+    def __init__(
+        self,
+        agent: Any,
+        *,
+        runtime_stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        resource_reader: Callable[
+            [str, str, int], str | Awaitable[str]
+        ] | None = None,
+    ):
+        self.agent = agent
+        self._runtime_stream_handler = runtime_stream_handler
+        self._resource_reader = resource_reader
+
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        return self.agent.settings.get(key, default)
+
+    async def async_request_model(
+        self,
+        *,
+        prompt: Any,
+        model_key: str | None = None,
+        output_schema: Any = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        ensure_keys: list[str] | None = None,
+        max_retries: int = 3,
+        stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
+    ) -> Any:
+        request = self.agent.create_temp_request(model_key=model_key).input(prompt)
+        if output_schema is not None:
+            request = request.output(output_schema, format=output_format)
+        response = request.get_response()
+        if stream_handler is not None:
+            async for item in response.get_async_generator(type="instant"):
+                maybe_awaitable = stream_handler(item)
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+        result = await response.async_get_data(
+            ensure_keys=ensure_keys,
+            max_retries=max(1, max_retries),
+            raise_ensure_failure=False,
+        )
+        return result
+
+    async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
+        if self._runtime_stream_handler is None:
+            return
+        maybe_awaitable = self._runtime_stream_handler(item)
+        if inspect.isawaitable(maybe_awaitable):
+            await maybe_awaitable
+
+    # ── Acting surface ──
+
+    async def async_call_tool(self, name: str, /, **kwargs: Any) -> Any:
+        return await self.agent.action.async_call_tool(name, kwargs)
+
+    async def async_call_action(self, name: str, /, **kwargs: Any) -> Any:
+        return await self.agent.action.async_call_action(name, kwargs)
+
+    async def async_execute_action_specs(
+        self,
+        action_specs: list[dict[str, Any]],
+        *,
+        concurrency: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Execute Skills action specs through the agent's ActionRuntime."""
+        action_calls: list[dict[str, Any]] = []
+        for spec in action_specs:
+            if not isinstance(spec, dict):
+                continue
+            action_name = str(spec.get("name", "")).strip()
+            if not action_name:
+                continue
+            action_kwargs = spec.get("kwargs", {}) or {}
+            if not isinstance(action_kwargs, dict):
+                action_kwargs = {}
+            action_calls.append(
+                {
+                    "action_id": action_name,
+                    "tool_name": action_name,
+                    "action_input": action_kwargs,
+                    "tool_kwargs": action_kwargs,
+                    "purpose": str(spec.get("purpose") or spec.get("next_action") or f"Use {action_name}"),
+                    "source_protocol": "skills_react",
+                }
+            )
+
+        if not action_calls:
+            return []
+
+        async def _use_prebuilt_action_calls(_context: dict[str, Any], _request: dict[str, Any]):
+            return {
+                "next_action": "execute",
+                "use_action": True,
+                "action_calls": action_calls,
+                "tool_commands": action_calls,
+                "execution_commands": action_calls,
+            }
+
+        results = await self.agent.action.async_plan_and_execute(
+            prompt=self.agent.request.prompt,
+            settings=self.agent.settings,
+            action_list=self.agent.action.get_action_list(),
+            agent_name=self.agent.name,
+            planning_handler=_use_prebuilt_action_calls,
+            max_rounds=1,
+            concurrency=concurrency,
+        )
+        return [dict(item) for item in results]
+
+    async def async_execute_action_round(
+        self,
+        *,
+        prompt: Any,
+        allowed_tools: list[str] | None = None,
+        allowed_actions: list[str] | None = None,
+        concurrency: int | None = None,
+        max_rounds: int = 1,
+        planning_protocol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Delegate one react reason+act round to the Agent ActionRuntime.
+
+        The ActionRuntime owns action/tool planning prompts, kwargs schemas,
+        native tool-call support, execution, policy, and MCP-backed actions. The
+        Skills react strategy supplies the loop context and allowed names only.
+        """
+        allowed_names = {
+            str(name)
+            for name in [*(allowed_tools or []), *(allowed_actions or [])]
+            if str(name).strip()
+        }
+        agent_tag = f"agent-{ self.agent.name }"
+        action_list = self.agent.action.get_action_list(tags=[agent_tag])
+        if allowed_names:
+            action_list = [
+                item for item in action_list
+                if str(item.get("action_id") or item.get("name") or "") in allowed_names
+            ]
+        if not action_list:
+            return []
+
+        request = self.agent.create_temp_request().input(prompt)
+        results = await self.agent.action.async_plan_and_execute(
+            prompt=request.prompt,
+            settings=self.agent.settings,
+            action_list=action_list,
+            agent_name=self.agent.name,
+            max_rounds=max(1, max_rounds),
+            concurrency=concurrency,
+            planning_protocol=planning_protocol,
+        )
+        return [dict(item) for item in results]
+
+    # ── Progressive disclosure ──
+
+    async def async_read_resource(
+        self, *, skill_id: str, path: str, max_bytes: int = 262144
+    ) -> str:
+        if self._resource_reader is None:
+            raise RuntimeError(
+                "async_read_resource is not available: no resource_reader was "
+                "provided when constructing the Skills runtime context."
+            )
+        result = self._resource_reader(skill_id, path, max_bytes)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    # ── Execution environment ──
+
+    @property
+    def execution_environment(self) -> Any | None:
+        return getattr(self.agent, "execution_environment", None)
+
+
+def create_agent_skills_runtime_context(
+    agent: Any,
+    *,
+    runtime_stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    resource_reader: Callable[
+        [str, str, int], str | Awaitable[str]
+    ] | None = None,
+) -> SkillsRuntimeContext:
+    return AgentSkillsRuntimeContext(
+        agent,
+        runtime_stream_handler=runtime_stream_handler,
+        resource_reader=resource_reader,
+    )

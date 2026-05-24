@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.2.4",
-  "release_train": "2026-05-4.1.2.4",
-  "notes": "Current public development-line manifest for the next Agently release before publication.",
+  "target_version": "4.1.2.5",
+  "release_train": "2026-05-4.1.2.5",
+  "notes": "Current public development-line manifest aligned with the Agently 4.1.2.5 release line.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
@@ -14,11 +14,12 @@
         "legacy_compatibility": "Agently 4.1.x",
         "replacement_line": "Agently 4.2"
       },
-      "recommended_version_specifier": ">=0.1.4,<0.2.0"
+      "recommended_version_specifier": ">=0.1.5,<0.2.0"
     },
     "skills": {
       "repository": "Agently-Skills",
-      "authoring_protocol": "agently-skills.authoring.v1",
+      "authoring_protocol": "agently-skills.authoring.v2",
+      "authoring_format": "standard SKILL.md only",
       "devtools_guidance_protocol": "agently-skills.devtools-guidance.v1",
       "catalog_generation": "v2",
       "recommended_bundle": "app",

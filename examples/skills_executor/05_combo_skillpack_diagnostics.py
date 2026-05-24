@@ -403,8 +403,7 @@ def _select_group_skill_dirs(group: str, *, limit: int = 12) -> list[Path]:
 
 def _install_available_skills(source_status: dict[str, str], *, registry_root: Path | None = None) -> dict[str, dict[str, Any]]:
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    Agently.settings.set("skills.registry.root", str(registry_root or RUNTIME_ROOT / "registry"))
-    Agently.settings._set_item_by_dot_path("skills.allowed_trust_levels", ["local"], cover=True)
+    Agently.skills_executor.configure(registry_root=str(registry_root or RUNTIME_ROOT / "registry"), allowed_trust_levels=["local"])
     Agently.settings.set("skills.prompt.max_guidance_chars_per_skill", 2400)
 
     installed: dict[str, dict[str, Any]] = {}
@@ -473,10 +472,7 @@ def _run_case(case: ComboCase, candidate_skill_ids: list[str]) -> dict[str, Any]
         case.task,
         skills=candidate_skill_ids,
         mode="model_decision",
-        scope="execution",
         semantic_outputs=case.expected_outputs,
-        planner_mode="model",
-        planner_max_revisions=2,
     )
     plan = execution.plan
     result = dict(plan.get("planner_result") or {})
@@ -718,7 +714,11 @@ def _judge_output_schema() -> dict[str, Any]:
         "case_id": (str, "Case id being judged.", True),
         "rule_results": [({
             "rule_id": (str, "Stable rule identifier such as R1.", True),
-            "evidence": [(str, "Short evidence from the plan or execution snapshot.", True)],
+            # evidence is OPTIONAL: a rule the plan fails legitimately has no
+            # supporting evidence (empty array). Marking it required-nonempty
+            # would make a failing-rule judgment impossible to satisfy and
+            # exhaust the ensure-keys retries.
+            "evidence": [(str, "Short evidence from the plan or execution snapshot; empty when the rule is not satisfied.", False)],
             "missing_or_weak_points": [(str, "Missing or weak points, empty when none.", False)],
             "reason": (str, "Concise rationale for this rule judgment, not verbose hidden reasoning.", True),
             "passed": (bool, "Final boolean judgment for this rule. Keep this field last in each rule item.", True),
@@ -736,6 +736,18 @@ def _judge_case_with_model(
 ) -> dict[str, Any]:
     judge = Agently.create_agent("skills-benchmark-judge")
     rules = _semantic_rules(case)
+    # Pass only the judge-relevant slice of the execution snapshot. The full
+    # SkillExecution.to_dict() embeds the entire runtime_stream (multiple MB for
+    # rich cases), which blows past the judge's context and makes the strict
+    # nested output schema impossible to satisfy. The compact ``result`` view
+    # above already carries the plan/contract the rules are judged against.
+    full_exec = outcome.get("execution") or {}
+    execution_snapshot = {
+        "status": full_exec.get("status"),
+        "output": full_exec.get("output"),
+        "close_snapshot": full_exec.get("close_snapshot"),
+        "skill_logs": full_exec.get("skill_logs"),
+    }
     return judge.input({
         "case_id": case.case_id,
         "task": case.task,
@@ -747,7 +759,7 @@ def _judge_case_with_model(
         ],
         "deterministic_evaluation": deterministic_evaluation,
         "execution_plan": outcome["result"],
-        "execution_snapshot": outcome.get("execution"),
+        "execution_snapshot": execution_snapshot,
     }).instruct(
         "You are the content-level judge for a Skills Executor realcase benchmark. "
         "Evaluate whether the execution plan satisfies the business rules at the plan/contract layer. "
@@ -808,9 +820,19 @@ def main():
 
         outcome = _run_case(case, candidate_skill_ids)
         evaluation = _evaluate_case(case, candidate_skill_ids, outcome["result"])
-        model_judge = _judge_case_with_model(case, candidate_skill_ids, outcome, evaluation)
+        # The model judge requests a strict nested schema. A single case whose
+        # judge call can not satisfy the ensure keys within retries should not
+        # abort the whole multi-case diagnostic — record it and continue.
+        try:
+            model_judge = _judge_case_with_model(case, candidate_skill_ids, outcome, evaluation)
+        except Exception as judge_error:
+            model_judge = {"judge_error": f"{type(judge_error).__name__}: {judge_error}"}
+            print(f"model_judge_error={ model_judge['judge_error'] }")
+        rule_results = model_judge.get("rule_results", [])
+        if not isinstance(rule_results, list):
+            rule_results = []
         model_judge_passed = bool(model_judge.get("passes")) and all(
-            bool(item.get("passed")) for item in model_judge.get("rule_results", [])
+            bool(item.get("passed")) for item in rule_results if isinstance(item, dict)
         )
         print(f"diagnostic_result={ evaluation['diagnostic_result'] }")
         print(f"model_judge_passed={ model_judge_passed }")

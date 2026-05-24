@@ -69,6 +69,7 @@ $ensure_all_keys: true
 .request:
   instruct: Classify the ticket text.
   output:
+    $format: json
     severity:
       $type: str
       $desc: One of P0/P1/P2/P3
@@ -95,6 +96,11 @@ result = (
 
 `$ensure_all_keys: true` at the top makes all leaves required regardless of per-leaf `$ensure`. Use it when the entire schema must come back complete.
 
+`$format` on the `output` block maps to the same output format setting as
+`.output(..., format=...)`. Supported values are `auto`, `json`,
+`flat_markdown`, and `hybrid`. You can also use `.format`, `$output_format`, or
+`.output_format` when a config file needs a more explicit key.
+
 ## Round-tripping
 
 You can convert a Python-built prompt back to YAML/JSON for review or storage:
@@ -116,6 +122,12 @@ Inside any prompt slot, `{name}` references another slot by key, and `${name}` i
 
 - `instruct: "Reply {input} politely."` — pulls the request `input` into the instruct text.
 - `${ENV.OPENAI_API_KEY}` in *settings* (not prompts) is replaced by the env var; prompts use `${name}` with explicit mappings.
+- `${INPUT.customer}`, `${INFO.policy}`, and `${INSTRUCT.step}` are render-time
+  slot references. They become prompt section pointers such as
+  `[INPUT > customer]` instead of copying slot values into another slot. Slot
+  names are case-insensitive; docs use uppercase. The path after the slot name
+  is not validated because it is only a model-facing reference label.
+- `${OUTPUT}` is an alias for `[OUTPUT REQUIREMENT]`.
 
 To trigger placeholder substitution while loading, pass `mappings=...` explicitly:
 

@@ -113,6 +113,12 @@ print(calculate("3333+6666=?"))
 | `agent.get_action_result()` | retrieve action call records after a request |
 | `extra.action_logs` | structured logs produced during the action loop |
 
+`agent.action.get_action_info()` and `agent.action.get_tool_info()` return the
+visible action/tool schemas registered on that agent by default, including
+agent-scoped actions, MCP tools mounted through `agent.use_mcp(...)`, and
+`enable_*` component helpers. Pass explicit `tags=[...]` only when you need a
+narrow subset.
+
 For application code, prefer `enable_*` helpers when the goal is to give the
 model a common capability such as Python, shell, or workspace access. Use
 `register_action(..., executor=..., execution_environments=[...])` when you are

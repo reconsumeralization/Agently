@@ -98,7 +98,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Note: this flow uses `pause_for(...)`. It must be created with `flow.create_execution(...)` (or `flow.start_execution(...)`), **not** `flow.start(...)` — the hidden execution sugar has no handle the outside can use to call `continue_with`.
+Note: this flow uses `pause_for(...)`. It must be created with `flow.create_execution(...)` (or `flow.start_execution(...)`), **not** `flow.start(...)` — the hidden execution sugar has no handle the outside can use to call `continue_with`, so TriggerFlow raises as soon as `pause_for(...)` is reached.
 
 For a document-review example where the model itself decides to interrupt the
 workflow, see `examples/step_by_step/11-triggerflow-19_document_review_pause_resume.py`.
@@ -151,6 +151,12 @@ Pause is the right choice for human-in-the-loop because the chunk's logic depend
 `auto_close=True` does not fire while any `pause_for` is outstanding. Once `continue_with` resolves the last pending interrupt and the execution becomes idle again, the auto-close timer restarts from zero.
 
 If you want the execution to never auto-close while waiting indefinitely, use `auto_close_timeout=None` (and remember to call `close()` explicitly).
+
+`async_close()` refuses to close while interrupts are still waiting. Resume them first, or explicitly cancel the waits:
+
+```python
+snapshot = await execution.async_close(pending_interrupts="cancel")
+```
 
 ## See also
 
