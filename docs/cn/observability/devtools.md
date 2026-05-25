@@ -27,22 +27,38 @@ agently-devtools start
 
 ## ObservationBridge
 
-对应示例是 [`examples/devtools/01_observation_bridge_local.py`](../../../examples/devtools/01_observation_bridge_local.py)。它把 bridge 注册到 `Agently` 上，运行一个 TriggerFlow，然后注销：
+对应示例是 [`examples/devtools/01_observation_bridge_local.py`](../../../examples/devtools/01_observation_bridge_local.py)。它通过 Agently 的 LazyImport helper 创建 bridge，监听全局 runtime，运行一个 TriggerFlow，然后注销：
+
+```python
+from agently import Agently
+
+bridge = Agently.create_observation_bridge(
+    app_id="agently-main-examples",
+    group_id="devtools-local-demo",
+)
+bridge.watch(Agently)
+
+try:
+    ...
+finally:
+    bridge.unregister()
+```
+
+只想上传指定对象时，用 `Agently.create_observation_bridge(target, ...)` 或 `bridge.watch(target)`；见 [`02_observation_bridge_selective_watch.py`](../../../examples/devtools/02_observation_bridge_selective_watch.py)。`bridge.watch(...)` 支持全局 `Agently` 对象、agent、model request/response、TriggerFlow、TriggerFlow execution、Dynamic Task / TaskDAG selector、Skill execution、tool function，或 `{"target_type": ..., "target_name": ...}` mapping。
+
+如果需要一个把 `agently_devtools` import 保持在 Agently LazyImport facade 后面的最小示例，见 [`07_agently_observe_lazy_bridge.py`](../../../examples/devtools/07_agently_observe_lazy_bridge.py)。
+
+也可以直接使用 DevTools 包的构造期绑定：
 
 ```python
 from agently import Agently
 from agently_devtools import ObservationBridge
 
-bridge = ObservationBridge(app_id="agently-main-examples", group_id="devtools-local-demo")
-bridge.register(Agently)
-
-try:
-    ...
-finally:
-    bridge.unregister(Agently)
+bridge = ObservationBridge(Agently)
+bridge.watch(agent)
 ```
 
-只想上传指定 flow 时，用 `auto_watch=False` 加 `bridge.watch(flow)`；见 [`02_observation_bridge_selective_watch.py`](../../../examples/devtools/02_observation_bridge_selective_watch.py)。
+旧的 `bridge = ObservationBridge(...); bridge.register(Agently)` 写法继续兼容，但会发出废弃提示。
 
 `ObservationBridge` 会通过后台队列上传，并在发送到 listener 前合并 `model.streaming` 这类高频 observation event，避免被动观测进入请求/输出的同步路径。短脚本如果在运行结束后马上退出，而你需要确保缓冲事件全部上传，可以在退出前调用 `await bridge.flush()`。
 

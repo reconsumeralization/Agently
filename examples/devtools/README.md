@@ -20,11 +20,13 @@ Examples in this folder:
 
 **ObservationBridge** (Passive monitoring):
 - `01_observation_bridge_local.py`
-  Uses `ObservationBridge()` local defaults to upload one simple TriggerFlow run.
+  Uses `Agently.create_observation_bridge(...).watch(Agently)` to upload one simple TriggerFlow run.
 - `02_observation_bridge_selective_watch.py`
-  Uses `auto_watch=False` and `bridge.watch(...)` so only the selected flow is uploaded.
+  Uses `Agently.create_observation_bridge(watched_flow, ...)` so only the selected flow is uploaded.
 - `03_scenario_evaluations.py`
   Uses `EvaluationBridge` and `EvaluationRunner` to run a small repeatable suite.
+- `07_agently_observe_lazy_bridge.py`
+  Uses `Agently.observe(flow, ...)` to lazily load DevTools and watch one TriggerFlow without importing `agently_devtools` in app code.
 
 **InteractiveWrapper** (Active interaction):
 - `04_interactive_wrapper_basic.py`

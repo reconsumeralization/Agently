@@ -6,10 +6,10 @@ import time
 from collections.abc import Generator
 
 from agently import Agently
-from agently_devtools import ObservationBridge, InteractiveWrapper
+from agently_devtools import InteractiveWrapper
 
-bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-basic")
-bridge.register(Agently)
+bridge = Agently.create_observation_bridge(app_id="agently-main-examples", group_id="interactive-wrapper-basic")
+bridge.watch(Agently)
 
 
 def echo_handler(request_data: dict, **options) -> Generator[str, None, None]:
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     try:
         interactive.wait()
     finally:
-        bridge.unregister(Agently)
+        bridge.unregister()
 
 # Stable expected key output from the declared run:
 # launched example prints the local DevTools or Interactive UI URL and streams/records the declared demo events.
