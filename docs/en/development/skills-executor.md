@@ -23,9 +23,54 @@ description: Use when checking release readiness and rollback risk.
 Follow this checklist before recommending a release or rollback...
 ```
 
-## Install
+## Declare And Install
 
-`install_skills(...)` copies the standard Skill directory into the local
+For normal Agent runtime, declare Skills on the Agent with `use_skills(...)`.
+The Skills Executor treats repository/package selectors like Action candidates:
+it records the source first, performs lightweight `SKILL.md` discovery during
+planning, and installs the full Skill only when the planner selects or requires
+it.
+
+```python
+agent.use_skills(
+    [{"source": "anthropics/skills", "subpath": "skills/docx"}],
+    mode="required",
+)
+```
+
+Use `install_skills_pack(...)` for advanced pool management: prewarming, offline
+mirrors, deterministic CI fixtures, or explicit registry maintenance.
+`install_skills(...)` remains the authoring/smoke-test path for one local Skill
+directory.
+
+When you author a local Skill, keep it in a real standalone directory that
+matches the standard layout. Do not build inline `SKILL.md` strings inside
+business code and do not use root-level YAML manifests such as `skill.yaml`.
+The application should pass the directory path to the executor:
+
+```text
+my-skill/
+|-- SKILL.md
+|-- scripts/
+|-- references/
+`-- assets/
+```
+
+```python
+report = Agently.skills_executor.install_skills_pack(
+    "anthropics/skills",
+    fetch=True,
+    subpath="skills/docx",
+    trust_level="remote",
+)
+```
+
+Remote installs clone the repository into Agently's local registry source cache,
+copy standard `SKILL.md` packages into the registry, and record source URL, ref,
+resolved commit, subpath, trust level, and checksums. Installing a remote Skill
+never executes bundled scripts.
+
+`install_skills(...)` copies a standard local Skill directory into the local
 registry. The installed Skill root still contains `SKILL.md` directly. Agently
 adds its own management files under `.agently/` inside the installed copy.
 
@@ -61,13 +106,14 @@ Root-level non-standard manifests such as `skill.yaml`, `skill.json`, or
 
 ## Select
 
-Use `use_skills(...)` to expose installed Skills as optional route candidates.
-The model sees concise decision cards first; full guidance is used only when the
-Skills route executes.
+Use `use_skills(...)` to expose installed or remote Skills as route candidates.
+The model sees concise decision cards first; full guidance and resources are
+materialized only when the Skills route executes.
 
 ```python
 agent = Agently.create_agent("ops-assistant")
 agent.use_skills(["release-review"], mode="model_decision")
+agent.use_skills([{"source": "anthropics/skills", "subpath": "skills/docx"}], mode="required")
 ```
 
 Use `resolve_skills_plan(...)` when you need to inspect which Skills would be
@@ -106,21 +152,25 @@ print(execution.output)
 print(execution.skill_logs)
 ```
 
-`semantic_outputs=` uses the same schema grammar as `.output(...)`; it is the
-structured-output schema for the Skill run:
+`output=` uses the same schema grammar as `.output(...)`; it is the
+structured-output contract for the Skill run. It describes the business result
+shape the Skill execution must produce, while `output_format=` controls whether
+that result is carried as JSON, flat Markdown, hybrid output, or automatic
+format selection. The older `semantic_outputs=` argument is kept only as a
+deprecated compatibility alias for Skills execution.
 
 ```python
 execution = await agent.async_run_skills_task(
     "Write a release decision.",
     skills=["release-review"],
     mode="required",
-    semantic_outputs={"decision": (str, "go or no-go", True)},
+    output={"decision": (str, "go or no-go", True)},
 )
 ```
 
 Agent prompt methods are also supported for explicit Skills execution. The
 Skill run consumes the current prompt snapshot, uses rendered prompt text as the
-task, and maps the `output` / `output_format` slots to `semantic_outputs` /
+task, and maps the `output` / `output_format` slots to `output` /
 `output_format`:
 
 ```python
@@ -135,7 +185,7 @@ execution = await (
 
 `set_agent_prompt(...)` values are inherited and kept for later turns.
 `set_request_prompt(...)` / quick prompt values are frozen into the Skill run
-and then cleared from the pending request. Explicit `semantic_outputs=` and
+and then cleared from the pending request. Explicit `output=` and
 `output_format=` arguments override prompt-derived defaults.
 
 `output_format=` selects how that model response is controlled. Leave it as
@@ -151,7 +201,7 @@ execution = await agent.async_run_skills_task(
     "Draft a release announcement as HTML.",
     skills=["release-review"],
     mode="required",
-    semantic_outputs={"html": (str, "render-ready HTML", True)},
+    output={"html": (str, "render-ready HTML", True)},
     output_format="flat_markdown",
 )
 ```
@@ -159,7 +209,7 @@ execution = await agent.async_run_skills_task(
 For fixed required fields, prefer the third tuple element in the schema:
 
 ```python
-semantic_outputs = {
+output = {
     "rules": [
         {
             "rule_id": (str, "Stable rule id", True),
@@ -188,17 +238,24 @@ Direct Skills execution streams runtime items through `stream_handler`:
 - `skills.prompt_only.start`
 - `skills.model_stream` with `path`, `value`, `delta`, and `is_complete`
 - `skills.prompt_only.done`
+- `skills.runtime_chain.*` when `effort="normal"` or `effort="max"` selects the
+  built-in planner chain
 - `skills.staged.*`, `skills.react.*`, and `block.*` events when a multi-step
   strategy is selected
 
-Use `effort=` with `agent.set_settings("effort_presets", {...})` to map a
-caller-facing quality/cost profile to strategy, model key, step budget, and
+`effort="fast"` uses the low-overhead single-shot path. `effort="normal"` runs
+the full preflight -> research -> plan -> execute -> verify -> reflect ->
+finalize chain. `effort="max"` uses the same chain with a larger retry budget
+and is the planned hook for Dynamic Task escalation.
+
+Use `agent.set_settings("effort_presets", {...})` when you need to override the
+built-in profile mapping to strategy, model key, step budget, retry count, or
 artifact inline limit:
 
 ```python
 agent.set_settings("effort_presets", {
     "fast": {"strategy": "single_shot", "reason_key": "reason_fast", "step_budget": 1},
-    "normal": {"strategy": "staged", "reason_key": "reason", "step_budget": 5},
+    "normal": {"strategy": "runtime_chain", "reason_key": "reason", "retry_count": 1},
 })
 
 execution = await agent.async_run_skills_task(
@@ -209,16 +266,103 @@ execution = await agent.async_run_skills_task(
 )
 ```
 
-`reason_key` is a symbolic model-pool key. If it is not mapped in
-`model_pool`, Agently leaves the request on the agent's inherited model instead
-of sending the symbolic key as a provider model name.
+For a fully custom action strategy, register an effort strategy handler on the
+Skills Executor and invoke it through `effort=`. The handler receives the Agent
+runtime context, selected Skills plan, resolved effort config, and output
+format; it may request models, call Actions/MCP through the context, emit
+runtime stream items, and return the final output.
+
+The handler follows the `SkillsEffortStrategyHandler` protocol:
+
+```python
+def handler(
+    *,
+    context: SkillsExecutionContext,
+    task: str,
+    plan: SkillExecutionPlan,
+    output_format: str | None = None,
+    effort: str | None = None,
+    effort_config: dict | None = None,
+) -> Awaitable[Any] | Any: ...
+```
+
+The builtin handlers are registered through the same strategy table:
+`single_shot`, `runtime_chain`, `staged`, and `react`. Use
+`Agently.skills_executor.list_effort_strategies()` to inspect the available
+strategy names. A custom handler may replace a builtin only with
+`replace=True`; otherwise duplicate names fail closed. Builtin reference
+implementations live under
+`agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/effort_strategies/`.
+
+```python
+async def audit_plus_strategy(*, context, task, plan, effort_config, **_):
+    await context.async_emit_runtime_stream({
+        "type": "skills.audit_plus.checkpoint",
+        "action": "checkpoint",
+    })
+    return await context.async_request_model(
+        prompt={
+            "task": task,
+            "selected_skills": plan["selected_skills"],
+            "policy": effort_config,
+        },
+        model_key="verifier",
+        output_schema={"decision": (str, "go / no-go", True)},
+        output_format="json",
+    )
+
+Agently.skills_executor.register_effort_strategy(
+    "audit_plus",
+    audit_plus_strategy,
+)
+
+agent.set_settings("effort_presets", {
+    "audit_plus": {"strategy": "audit_plus", "custom_budget": 7},
+})
+
+execution = await agent.async_run_skills_task(
+    "Audit this release.",
+    skills=["release-review"],
+    mode="required",
+    effort="audit_plus",
+)
+```
+
+Skills runtime model calls use symbolic stage keys: `planner`, `research`,
+`reason`, `executor`, `verifier`, `reflector`, and `finalizer`. If a key is not
+mapped in `model_pool`, Agently leaves the request on the agent's inherited
+model instead of sending the symbolic key as a provider model name.
 
 When Skills are selected through Agent auto-orchestration, model field stream
 items are bridged to stable paths like `skills.model.fields.<field_path>`.
 
 Bundled scripts and resources are never executed just because a Skill is
-installed. They can only be used through explicit Action or Execution
-Environment paths chosen by the host application.
+installed. When a selected Skill declares `mcp`, `mcpServers`, `allowed-tools:
+[Bash]`, or `allow-scripts`, the Skills Executor mounts the required runtime
+actions on the current Agent before execution: MCP declarations route through
+`agent.use_mcp(...)`, and Bash/script declarations route through a managed
+`enable_shell(...)` action scoped to the installed Skill directory. Local
+command and script capabilities are high-risk and require `auto_allow=True` or
+an approval handler; remote HTTP MCP can mount without that local-command
+approval.
+
+If a selected Skill declares a missing capability and no existing Action/MCP
+tool matches it, the executor takes one conservative fallback step. Names that
+look like pure in-memory computation, parsing, validation, transformation, or
+format conversion can be synthesized as ephemeral Python sandbox actions.
+Business-system, network, file, messaging, payment, database, browser, or
+otherwise external capabilities are never synthesized; they fail closed with
+`capability_missing` until the host provides a real Action, MCP server, or
+connector package.
+
+## Acceptance Example
+
+`examples/agent_auto_orchestration/19_remote_skills_weather_event_ops.py`
+exercises the 4.1.3 remote-connector path end to end: public remote Skills are
+declared with `agent.use_skills(...)`, a free weather MCP server is registered
+through ActionRuntime, the model generates MCP action calls for real weather
+observations, and Skills Executor lazily materializes the selected Skills before
+running `effort="normal"`.
 
 ## Settings
 
