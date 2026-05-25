@@ -664,6 +664,100 @@ def test_required_plan_can_select_by_display_name(tmp_path):
     assert [item["skill_id"] for item in selected_skills] == ["alpha-skill"]
 
 
+def test_required_plan_defaults_plain_skill_to_single_shot(tmp_path):
+    _skill(tmp_path / "plain", name="Plain Skill")
+    Agently.skills_executor.install_skills(tmp_path / "plain")
+
+    plan = _create_agent().resolve_skills_plan(
+        "handle release",
+        skills=["plain-skill"],
+        mode="required",
+    )
+
+    assert plan.get("execution_strategy") == "single_shot"
+    assert plan.get("execution_stages") == []
+
+
+def test_required_plan_extracts_staged_strategy_and_declared_stages(tmp_path):
+    source = tmp_path / "multi-step-writer"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Multi Step Writer
+description: Complete writing tasks in sequential stages.
+execution: staged
+stages:
+  - Read and analyze the task requirements.
+  - Write a complete first draft.
+  - Review and polish the result.
+---
+
+# Multi Step Writer
+
+Use the declared stages in order.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+
+    plan = _create_agent().resolve_skills_plan(
+        "draft release notes",
+        skills=["multi-step-writer"],
+        mode="required",
+    )
+
+    assert plan.get("execution_strategy") == "staged"
+    assert plan.get("execution_stages") == [
+        {"description": "Read and analyze the task requirements."},
+        {"description": "Write a complete first draft."},
+        {"description": "Review and polish the result."},
+    ]
+
+
+def test_required_plan_prefers_react_when_skill_declares_allowed_tools(tmp_path):
+    staged = tmp_path / "staged"
+    _write(
+        staged / "SKILL.md",
+        """---
+name: Staged Skill
+description: Uses staged execution.
+execution: staged
+stages:
+  - Analyze.
+  - Draft.
+---
+
+# Staged Skill
+
+Use the declared stages.
+""",
+    )
+    react = tmp_path / "react"
+    _write(
+        react / "SKILL.md",
+        """---
+name: Research Assistant
+description: Uses tools when external facts are needed.
+allowed-tools: [search, calculate]
+---
+
+# Research Assistant
+
+Use the declared tools when needed.
+""",
+    )
+    Agently.skills_executor.install_skills(staged)
+    Agently.skills_executor.install_skills(react)
+
+    plan = _create_agent().resolve_skills_plan(
+        "verify a fact and calculate a total",
+        skills=["staged-skill", "research-assistant"],
+        mode="required",
+    )
+
+    assert plan.get("execution_strategy") == "react"
+    assert plan.get("execution_stages") == []
+
+
 def test_planner_skips_unreadable_entries_when_scanning_registry(tmp_path):
     _skill(tmp_path / "alpha", name="Alpha Skill")
     Agently.skills_executor.install_skills(tmp_path / "alpha")
