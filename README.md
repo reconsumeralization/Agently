@@ -1,8 +1,8 @@
 <img width="640" alt="Agently" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4.1 - AI Application Development Framework
+# Agently 4.1.3 - AI Application Runtime Framework
 
-> Build model-powered applications with stable structured outputs, observable actions, service-ready APIs, and durable workflows.
+> Build AI service backends with structured outputs, observable Actions, runtime Skills, MCP capabilities, process streams, and recoverable workflows.
 
 [English](https://github.com/AgentEra/Agently/blob/main/README.md) | [中文介绍](https://github.com/AgentEra/Agently/blob/main/README_CN.md)
 
@@ -32,16 +32,25 @@ Agently is for teams moving from "the model can do it once" to "the application 
 
 The main design question is simple: how do you keep model behavior useful while still giving application code stable contracts, observable execution, and restart-safe workflow boundaries?
 
+Agently 4.1.3 is the release where the 4.1.2 runtime foundation becomes a
+coherent AI application runtime. One Agent turn can now connect model reasoning,
+Actions, remote Skills, MCP tools, Dynamic Task DAGs, process streams, structured
+outputs, and coding-agent guidance through one engineering path. Read the
+[4.1.3 Release Notes](docs/en/development/release-notes-4.1.3.md) for the full
+release story.
+
 ## Why Agently
 
 Many AI frameworks are strong at exploration or at assembling broad integration stacks. Agently is optimized for the engineering layer that makes model applications survive model changes, output drift, streaming UX, action execution, workflow signals, and service boundaries.
 
 Agently is a good fit when you care about:
 
+- **AI services should be runtime executions, not prompt glue** - one Agent turn can declare candidate Actions, Skills, MCP services, Dynamic Task planning, process streams, and output contracts, then execute through the same runtime surface. Read [4.1.3 Release Notes](docs/en/development/release-notes-4.1.3.md), [Agent Auto Orchestration examples](examples/agent_auto_orchestration/), and [Skills Executor examples](examples/skills_executor/).
 - **Model switching should not rewrite business logic** - Agently normalizes provider setup, prompt slots, response parsing, action execution, and response reading into one request/runtime contract. Read [Model Setup](docs/en/start/model-setup.md), [Models Overview](docs/en/models/overview.md), and [Requests Overview](docs/en/requests/overview.md).
 - **Structured output should be a framework guarantee, not only a provider feature** - `.output(...)` schemas, required field extraction, parser feedback, retries, `ensure_keys`, `ensure_all_keys`, and validation handlers work together inside Agently. Read [Schema as Prompt](docs/en/requests/schema-as-prompt.md), [Output Control](docs/en/requests/output-control.md), and examples in [`examples/basic/`](examples/basic/).
 - **Streaming should expose structure before the final token** - `instant` mode lets consumers react to structured fields while the model is still streaming, which is useful for UI updates, SSE routes, and workflow signals. Read [Model Response](docs/en/requests/model-response.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [`examples/fastapi/`](examples/fastapi/).
 - **Actions should be observable and model-portable** - local functions, built-in actions, MCP servers, shell/Python/Node/SQLite/workspace helpers, and custom executors produce structured records and can share one Action Runtime. Read [Action Runtime](docs/en/actions/action-runtime.md), [MCP](docs/en/actions/mcp.md), and [`examples/action_runtime/`](examples/action_runtime/).
+- **Skills should be runtime capabilities, not inline prompt snippets** - `agent.use_skills(...)` can declare local or remote Skill sources; the Skills Executor discovers, installs, selects, mounts MCP/script capabilities, streams diagnostics, and executes only when the planner needs them. Read [Skills Executor](docs/en/development/skills-executor.md) and [`examples/skills_executor/`](examples/skills_executor/).
 - **Execution dependencies should have lifecycle owners** - Execution Environment providers manage reusable resources such as MCP processes, browser sessions, shell/Python/Node runtimes, SQLite handles, and sandboxes. Read [Execution Environment](docs/en/actions/execution-environment.md) and [`examples/execution_environment/`](examples/execution_environment/).
 - **Generated plans should become validated task graphs** - Dynamic Task turns model-generated or app-generated DAG data into validated, observable task execution through `Agently.create_dynamic_task(...)`. Read [Dynamic Task](docs/en/dynamic-task/README.md) and [`examples/dynamic_task/`](examples/dynamic_task/).
 - **Workflows should be signal-driven, not just graph-shaped** - TriggerFlow supports events, fan-out, runtime streams, pause/resume, save/load, sub-flows, and close snapshots; `instant` structured output can become workflow input without waiting for the whole response. Read [TriggerFlow Overview](docs/en/triggerflow/overview.md), [Events and Streams](docs/en/triggerflow/events-and-streams.md), and [`examples/trigger_flow/`](examples/trigger_flow/).
@@ -129,6 +138,30 @@ Agently.set_settings(
     },
 )
 ```
+
+Use a Model Pool when the same application needs multiple models:
+
+```python
+agent.set_settings("model_pool", {
+    "ollama-qwen2.5": "qwen2.5:7b",
+    "deepseek-v4": "deepseek-chat",
+})
+agent.set_settings("key_pool", {
+    "local": "ollama",
+    "deepseek-main": "${ENV.DEEPSEEK_API_KEY}",
+    "deepseek-backup": "${ENV.DEEPSEEK_BACKUP_API_KEY}",
+})
+agent.set_settings("key_pool_strategy", {
+    "qwen2.5:7b": {"mode": "fixed", "pool": ["local"]},
+    "deepseek-chat": {"mode": "round_robin", "pool": ["deepseek-main", "deepseek-backup"]},
+})
+
+agent.activate_model("ollama-qwen2.5")
+```
+
+`activate_model(...)` changes the default model key for subsequent Agent-owned
+requests. Use `agent.create_request(model_key="deepseek-v4")` for a one-off
+override.
 
 For file-backed settings, prefer:
 
@@ -271,7 +304,49 @@ raw = agent.action.read_action_artifact(
 
 The older `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` family remains a compatibility surface, but new examples use actions.
 
-### 5. TriggerFlow Orchestration
+### 5. Runtime Skills
+
+Skills are reusable task guidance and capability packages. In 4.1.3, the
+recommended application surface is `agent.use_skills(...)`: declare candidate
+Skill sources on the Agent and let the Skills Executor perform lightweight
+discovery, planner selection, on-demand materialization, capability mounting,
+and execution diagnostics.
+
+```python
+agent.use_skills(
+    [
+        {"source": "GarethManning/education-agent-skills"},
+        {"source": "anthropics/skills", "subpath": "skills/docx"},
+        {"source": "anthropics/skills", "subpath": "skills/pptx"},
+        {"source": "anthropics/skills", "subpath": "skills/xlsx"},
+    ],
+    mode="model_decision",
+)
+
+execution = await agent.async_run_skills_task(
+    "Create a four-week B1 business English course package.",
+    effort="normal",
+    output={
+        "course_plan": (dict, "course goals and weekly structure", True),
+        "teacher_guide": (str, "teacher-facing guide summary", True),
+        "progress_tracker": ([str], "tracking columns and checkpoints", True),
+    },
+)
+```
+
+Business value: reusable Skills can turn a model call into a deliverable
+business process such as an education package, research memo, QA evidence pack,
+travel plan, or operational review. Application code stays focused on business
+inputs and output contracts instead of cloning remote repositories, parsing
+Skill files, or manually wiring each tool.
+
+Skill-declared MCP, shell, and script capabilities mount through Action Runtime
+and Execution Environment, so side effects remain observable and policy
+controlled. High-risk local execution requires approval or `auto_allow=True`;
+safe pure-computation gaps can be synthesized as sandboxed Python actions, and
+business-system capabilities fail closed unless a real connector is mounted.
+
+### 6. TriggerFlow Orchestration
 
 TriggerFlow is Agently's workflow layer for explicit stages, branching, fan-out, event-driven input, runtime streams, pause/resume, persistence, and restart-safe execution.
 
@@ -324,7 +399,7 @@ TriggerFlow is the right tool when you need:
 | Restart safety | `save(...)`, `load(...)`, close snapshots |
 | Reusable workflow topology | blueprint export/import |
 
-### 6. Dynamic Task
+### 7. Dynamic Task
 
 Dynamic Task is Agently's framework-level surface for executing model-generated or app-generated DAGs. It is an application API, not a TriggerFlow sub-API; internally the executor compiles validated task graphs to TriggerFlow so it can reuse lifecycle, stream, pause/resume, and runtime resource mechanics.
 
@@ -352,7 +427,7 @@ snapshot = await task.async_start(timeout=10)
 
 Use Dynamic Task when the task plan itself is data that needs planning, validation, pruning, and execution. Use TriggerFlow directly when you own a stable workflow topology in code.
 
-### 7. Session Memory
+### 8. Session Memory
 
 Session keeps bounded multi-turn state when the problem is still one conversational thread, not a full workflow:
 
@@ -366,7 +441,7 @@ reply2 = agent.input("What is my name?").start()
 
 For long-running processes, event waits, fan-out, or human approvals, put TriggerFlow above the request layer instead of stretching Session into a workflow store.
 
-### 7. Knowledge, Services, and Observability
+### 9. Knowledge, Services, and Observability
 
 Agently includes integration surfaces around the request and workflow layers:
 
@@ -517,6 +592,8 @@ Useful entry points:
 | Directory | Use it for |
 |---|---|
 | `examples/cookbook/` | model-backed application patterns |
+| `examples/agent_auto_orchestration/` | one Agent turn coordinating Actions, Skills, Dynamic Task, and process streams |
+| `examples/skills_executor/` | remote Skills, effort-aware planning, MCP/script mounting, and model pool examples |
 | `examples/action_runtime/` | function, MCP, sandbox, and plugin action examples |
 | `examples/execution_environment/` | managed Python, shell, Node, SQLite, Browser, and provider lifecycle examples |
 | `examples/dynamic_task/` | validated Dynamic Task DAG planning and execution examples |
