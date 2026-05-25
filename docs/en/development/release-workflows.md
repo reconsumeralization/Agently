@@ -18,6 +18,26 @@ The `docs/_config.yml` file records the Pages/Jekyll settings for this branch so
 
 The old `docs` branch is retired and should not be used as a documentation source. Do not add workflows or release steps that publish documentation from the retired branch.
 
+For every framework release, update and review these public documentation
+surfaces before merging the release PR:
+
+- final release notes in both languages, for example
+  `docs/en/development/release-notes-<version>.md` and
+  `docs/cn/development/release-notes-<version>.md`
+- the root `README.md`
+- the root `README_CN.md`
+
+The README files should keep their existing structure, but they must reflect the
+release's final product positioning, current version number, recommended
+capability entrypoints, example directories, companion compatibility line, and
+business value. Do not leave README updates as a post-release marketing task:
+the root README is also the PyPI long description because `[project].readme`
+points at `README.md`.
+
+Before opening or merging the release PR, compare release notes with both README
+files and check for stale version numbers, outdated companion protocol names,
+removed examples, deprecated recommended APIs, and mismatched business claims.
+
 ## Desktop installers
 
 Desktop installers are not part of the current main-repository release flow.

@@ -18,6 +18,22 @@ GitHub Pages 使用 `main` 分支里的 `docs/` 目录。
 
 旧 `docs` 分支已经废弃，不应再作为文档来源。不要再新增依赖旧 `docs` 分支发布文档的 workflow 或 release 步骤。
 
+每次框架发版都必须在合并 release PR 前更新并核对这些公开文档面：
+
+- 双语最终 release note，例如 `docs/en/development/release-notes-<version>.md`
+  和 `docs/cn/development/release-notes-<version>.md`
+- 根目录 `README.md`
+- 根目录 `README_CN.md`
+
+README 双语文件应保持原有基础结构，但必须反映本次 release 的最终产品定位、当前
+版本号、推荐能力入口、示例目录、companion compatibility line 和核心业务价值。不要把
+README 更新留作发版后的 marketing 补丁：根目录 `README.md` 同时也是 PyPI long
+description，因为 `[project].readme` 指向它。
+
+打开或合并 release PR 前，需要把 release note 与两个 README 文件交叉核对，检查
+旧版本号、过期 companion protocol、已删除示例、deprecated 推荐 API 和不一致的业务
+价值表述。
+
 ## Desktop installers
 
 Desktop installers 不属于当前主仓库 release 流程。
