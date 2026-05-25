@@ -51,6 +51,7 @@ class SkillSource:
     source: str
     source_type: str
     materialized_path: Path
+    metadata: dict[str, Any] | None = None
 
 
 def _read_text(path: Path) -> str:
@@ -107,6 +108,8 @@ def _safe_excerpt(text: str, *, limit: int = 1200) -> str:
 
 def _default_skills_pack_id(source: str | Path) -> str:
     raw = str(source).strip().rstrip("/")
+    if _is_github_shorthand(raw):
+        return raw[:-4] if raw.endswith(".git") else raw
     parsed = urlparse(raw)
     if parsed.netloc == "github.com":
         path = parsed.path.strip("/")
@@ -125,6 +128,22 @@ def _default_skills_pack_id(source: str | Path) -> str:
 def _sanitize_skills_pack_storage_id(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip()).strip("_.-")
     return normalized or "skill_pack"
+
+
+def _is_github_shorthand(value: str) -> bool:
+    if "://" in value or value.startswith("git@") or value.startswith("/") or value.startswith("."):
+        return False
+    parts = [item for item in value.removesuffix(".git").split("/") if item]
+    if len(parts) != 2:
+        return False
+    return all(re.fullmatch(r"[A-Za-z0-9_.-]+", item) for item in parts)
+
+
+def _normalize_git_source(value: str) -> tuple[str, bool]:
+    raw = value.strip()
+    if _is_github_shorthand(raw):
+        return f"https://github.com/{ raw.removesuffix('.git') }.git", True
+    return raw, False
 
 
 class SkillRegistry:
@@ -148,8 +167,11 @@ class SkillRegistry:
         update: bool = False,
         skills_pack_id: str | None = None,
         skills_pack_name: str | None = None,
+        source_metadata: dict[str, Any] | None = None,
     ) -> SkillContract:
         source_info = self._materialize_source(source, source_type=source_type)
+        if source_metadata:
+            source_info.metadata = _copy_public(source_metadata)
         frontmatter, body = self._read_standard_skill(source_info.materialized_path)
         name = str(frontmatter.get("name") or "").strip()
         if not name:
@@ -185,6 +207,12 @@ class SkillRegistry:
             "description": contract.get("card", {}).get("description", ""),
             "trust_level": contract.get("trust_level", "local"),
             "source_type": source_info.source_type,
+            "source": source_info.source,
+            "source_url": str(_ensure_dict(contract.get("source")).get("source_url") or ""),
+            "source_ref": str(_ensure_dict(contract.get("source")).get("source_ref") or ""),
+            "source_commit": str(_ensure_dict(contract.get("source")).get("source_commit") or ""),
+            "source_subpath": str(_ensure_dict(contract.get("source")).get("source_subpath") or ""),
+            "source_package": str(_ensure_dict(contract.get("source")).get("source_package") or ""),
             "installed_path": str(skill_root),
             "metadata_path": str(agently_root / "install.json"),
         }
@@ -198,6 +226,8 @@ class SkillRegistry:
         name: str | None = None,
         skills_pack_id: str | None = None,
         fetch: bool = False,
+        ref: str | None = None,
+        subpath: str | None = None,
         source_type: str | None = None,
         trust_level: str | None = None,
         update: bool = True,
@@ -212,11 +242,13 @@ class SkillRegistry:
         if not resolved_skills_pack_id:
             raise SkillInstallError("install_skills_pack() requires a non-empty name or skills_pack_id.")
         skills_pack_name = str(name or skills_pack_id or resolved_skills_pack_id)
-        source_root, resolved_source_type = self._materialize_skills_pack_source(
+        source_root, resolved_source_type, source_metadata = self._materialize_skills_pack_source(
             source,
             skills_pack_id=resolved_skills_pack_id,
             source_type=source_type,
             fetch=fetch,
+            ref=ref,
+            subpath=subpath,
             update=update,
         )
         installed_skills: list[str] = []
@@ -229,6 +261,7 @@ class SkillRegistry:
                     update=update,
                     skills_pack_id=resolved_skills_pack_id,
                     skills_pack_name=skills_pack_name,
+                    source_metadata=source_metadata,
                 )
             except Exception as error:
                 failed_skills.append({"path": str(skill_dir), "error": str(error)})
@@ -240,6 +273,11 @@ class SkillRegistry:
             "name": skills_pack_name,
             "source": str(source),
             "source_type": resolved_source_type,
+            "source_url": str(source_metadata.get("source_url") or ""),
+            "source_ref": str(source_metadata.get("source_ref") or ""),
+            "source_commit": str(source_metadata.get("source_commit") or ""),
+            "source_subpath": str(source_metadata.get("source_subpath") or ""),
+            "source_package": str(source_metadata.get("source_package") or ""),
             "installed_skills": installed_skills,
             "failed_skills": failed_skills,
             "status": status,
@@ -250,6 +288,127 @@ class SkillRegistry:
         index["packs"] = packs
         self._write_index(index)
         return _copy_public(record)
+
+    def discover_skills_pack(
+        self,
+        source: str | Path,
+        *,
+        name: str | None = None,
+        skills_pack_id: str | None = None,
+        fetch: bool = True,
+        ref: str | None = None,
+        subpath: str | None = None,
+        source_type: str | None = None,
+        trust_level: str | None = None,
+        update: bool = False,
+    ) -> dict[str, Any]:
+        """Lightly materialize a skills source and build cards without installing.
+
+        Discovery may fetch/cache a remote repository so the planner can read
+        `SKILL.md`, but it does not copy Skills into the registry or execute any
+        bundled resources.
+        """
+        resolved_skills_pack_id = str(skills_pack_id or name or _default_skills_pack_id(source)).strip()
+        if not resolved_skills_pack_id:
+            raise SkillInstallError("discover_skills_pack() requires a non-empty source or skills_pack_id.")
+        source_root, resolved_source_type, source_metadata = self._materialize_skills_pack_source(
+            source,
+            skills_pack_id=resolved_skills_pack_id,
+            source_type=source_type,
+            fetch=fetch,
+            ref=ref,
+            subpath=subpath,
+            update=update,
+        )
+        contracts: list[SkillContract] = []
+        failed_skills: list[dict[str, Any]] = []
+        for skill_dir in self._discover_skills_pack_dirs(source_root):
+            try:
+                frontmatter, body = self._read_standard_skill(skill_dir)
+                contract = self._contract_from_files(skill_root=skill_dir, frontmatter=frontmatter, body=body)
+                contract_source = _ensure_dict(contract.get("source"))
+                contract_source.update({
+                    "source": str(skill_dir),
+                    "source_type": resolved_source_type,
+                    "installed_path": "",
+                    "skills_pack_id": resolved_skills_pack_id,
+                    "skills_pack_name": str(name or skills_pack_id or resolved_skills_pack_id),
+                    "source_url": str(source_metadata.get("source_url") or ""),
+                    "source_ref": str(source_metadata.get("source_ref") or ""),
+                    "source_commit": str(source_metadata.get("source_commit") or ""),
+                    "source_subpath": str(source_metadata.get("source_subpath") or ""),
+                    "source_package": str(source_metadata.get("source_package") or ""),
+                })
+                contract["source"] = contract_source
+                contract["trust_level"] = str(trust_level or ("remote" if resolved_source_type == "git" else resolved_source_type))
+                contract["install_metadata"] = {
+                    "schema_version": "agently.skills.discovery.v1",
+                    "source": str(skill_dir),
+                    "source_type": resolved_source_type,
+                    "trust_level": contract["trust_level"],
+                    "skills_pack_id": resolved_skills_pack_id,
+                    "skills_pack_name": str(name or skills_pack_id or resolved_skills_pack_id),
+                    "source_url": str(source_metadata.get("source_url") or ""),
+                    "source_ref": str(source_metadata.get("source_ref") or ""),
+                    "source_commit": str(source_metadata.get("source_commit") or ""),
+                    "source_subpath": str(source_metadata.get("source_subpath") or ""),
+                    "source_package": str(source_metadata.get("source_package") or ""),
+                }
+                contracts.append(contract)
+            except Exception as error:
+                failed_skills.append({"path": str(skill_dir), "error": str(error)})
+        return {
+            "skills_pack_id": resolved_skills_pack_id,
+            "name": str(name or skills_pack_id or resolved_skills_pack_id),
+            "source": str(source),
+            "source_type": resolved_source_type,
+            "source_url": str(source_metadata.get("source_url") or ""),
+            "source_ref": str(source_metadata.get("source_ref") or ""),
+            "source_commit": str(source_metadata.get("source_commit") or ""),
+            "source_subpath": str(source_metadata.get("source_subpath") or ""),
+            "source_package": str(source_metadata.get("source_package") or ""),
+            "contracts": _copy_public(contracts),
+            "failed_skills": failed_skills,
+            "status": "success" if contracts and not failed_skills else "partial" if contracts else "error",
+        }
+
+    def source_selector_options(self, selector: Any) -> dict[str, Any] | None:
+        if isinstance(selector, dict):
+            source = selector.get("source") or selector.get("url") or selector.get("package")
+            if not source:
+                return None
+            return {
+                "source": str(source),
+                "name": selector.get("name"),
+                "skills_pack_id": selector.get("skills_pack_id") or selector.get("pack_id"),
+                "fetch": bool(selector.get("fetch", True)),
+                "ref": selector.get("ref"),
+                "subpath": selector.get("subpath"),
+                "source_type": selector.get("source_type"),
+                "trust_level": selector.get("trust_level") or "remote",
+                "auto_allow": bool(selector.get("auto_allow", False)),
+            }
+        if isinstance(selector, str):
+            raw = selector.strip()
+            parsed = urlparse(raw)
+            if (
+                parsed.scheme in {"http", "https", "ssh", "git", "file"}
+                or raw.startswith("git@")
+                or _is_github_shorthand(raw)
+                or Path(raw).expanduser().exists()
+            ):
+                return {
+                    "source": raw,
+                    "name": None,
+                    "skills_pack_id": None,
+                    "fetch": True,
+                    "ref": None,
+                    "subpath": None,
+                    "source_type": None,
+                    "trust_level": "remote",
+                    "auto_allow": False,
+                }
+        return None
 
     def list_skills(self) -> list[dict[str, Any]]:
         records = list(_ensure_dict(self._read_index().get("skills")).values())
@@ -357,28 +516,68 @@ class SkillRegistry:
         skills_pack_id: str,
         source_type: str | None,
         fetch: bool,
+        ref: str | None,
+        subpath: str | None,
         update: bool,
-    ) -> tuple[Path, str]:
-        raw = str(source)
-        parsed = urlparse(raw)
-        if parsed.scheme in {"http", "https", "ssh", "git"} or raw.startswith("git@"):
+    ) -> tuple[Path, str, dict[str, Any]]:
+        raw = str(source).strip()
+        normalized_raw, shorthand = _normalize_git_source(raw)
+        metadata: dict[str, Any] = {
+            "source_url": "",
+            "source_ref": str(ref or ""),
+            "source_commit": "",
+            "source_subpath": str(subpath or ""),
+            "source_package": raw if shorthand else "",
+        }
+        parsed = urlparse(normalized_raw)
+        if parsed.scheme in {"http", "https", "ssh", "git", "file"} or normalized_raw.startswith("git@") or shorthand:
             if not fetch:
                 raise SkillInstallError("Remote skills pack sources require fetch=True.")
+            metadata["source_url"] = normalized_raw
             destination = self.root / "_pack_sources" / _sanitize_skills_pack_storage_id(skills_pack_id)
             if destination.exists() and update:
                 shutil.rmtree(destination)
             if not destination.exists():
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                completed = subprocess.run(["git", "clone", "--depth", "1", raw, str(destination)], check=False, capture_output=True, text=True)
+                clone_cmd = ["git", "clone", "--depth", "1"]
+                if ref:
+                    clone_cmd.extend(["--branch", ref])
+                clone_cmd.extend([normalized_raw, str(destination)])
+                completed = subprocess.run(clone_cmd, check=False, capture_output=True, text=True)
                 if completed.returncode != 0:
-                    raise SkillInstallError(f"Cannot fetch skills pack '{ raw }': { completed.stderr[-1000:] }")
-            return destination, "git"
+                    raise SkillInstallError(f"Cannot fetch skills pack '{ normalized_raw }': { completed.stderr[-1000:] }")
+            try:
+                completed = subprocess.run(
+                    ["git", "-C", str(destination), "rev-parse", "HEAD"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if completed.returncode == 0:
+                    metadata["source_commit"] = completed.stdout.strip()
+            except Exception:
+                metadata["source_commit"] = ""
+            root = self._resolve_source_subpath(destination, subpath)
+            return root, "git", metadata
         if source_type and source_type != "local":
             raise SkillInstallError("install_skills_pack supports local directories and git URLs only.")
         source_path = Path(source).expanduser().resolve()
         if not source_path.exists() or not source_path.is_dir():
             raise SkillInstallError(f"Local skills pack source '{ source }' is not a directory.")
-        return source_path, "local"
+        root = self._resolve_source_subpath(source_path, subpath)
+        return root, "local", metadata
+
+    @staticmethod
+    def _resolve_source_subpath(root: Path, subpath: str | None) -> Path:
+        if not subpath:
+            return root
+        resolved_root = root.resolve()
+        resolved = (resolved_root / subpath).resolve()
+        if resolved != resolved_root and resolved_root not in resolved.parents:
+            raise SkillInstallError(f"Skills pack subpath '{ subpath }' escapes source root.")
+        if not resolved.exists() or not resolved.is_dir():
+            raise SkillInstallError(f"Skills pack subpath '{ subpath }' is not a directory.")
+        return resolved
 
     def _discover_skills_pack_dirs(self, root: Path) -> list[Path]:
         discovered: list[Path] = []
@@ -441,6 +640,7 @@ class SkillRegistry:
         skills_pack_name: str | None,
     ) -> SkillContract:
         contract = self._contract_from_files(skill_root=skill_root, frontmatter=frontmatter, body=body)
+        source_metadata = _ensure_dict(source.metadata)
         install_metadata = {
             "schema_version": "agently.skills.install.v1",
             "source": source.source,
@@ -449,6 +649,11 @@ class SkillRegistry:
             "installed_at": datetime.now(timezone.utc).isoformat(),
             "skills_pack_id": skills_pack_id or "",
             "skills_pack_name": skills_pack_name or "",
+            "source_url": str(source_metadata.get("source_url") or ""),
+            "source_ref": str(source_metadata.get("source_ref") or ""),
+            "source_commit": str(source_metadata.get("source_commit") or ""),
+            "source_subpath": str(source_metadata.get("source_subpath") or ""),
+            "source_package": str(source_metadata.get("source_package") or ""),
         }
         contract["source"] = {
             "source": source.source,
@@ -456,6 +661,11 @@ class SkillRegistry:
             "installed_path": str(skill_root),
             "skills_pack_id": skills_pack_id or "",
             "skills_pack_name": skills_pack_name or "",
+            "source_url": install_metadata["source_url"],
+            "source_ref": install_metadata["source_ref"],
+            "source_commit": install_metadata["source_commit"],
+            "source_subpath": install_metadata["source_subpath"],
+            "source_package": install_metadata["source_package"],
         }
         contract["trust_level"] = install_metadata["trust_level"]
         contract["install_metadata"] = install_metadata
@@ -478,6 +688,11 @@ class SkillRegistry:
             "installed_path": str(skill_root),
             "skills_pack_id": str(install_metadata.get("skills_pack_id") or ""),
             "skills_pack_name": str(install_metadata.get("skills_pack_name") or ""),
+            "source_url": str(install_metadata.get("source_url") or ""),
+            "source_ref": str(install_metadata.get("source_ref") or ""),
+            "source_commit": str(install_metadata.get("source_commit") or ""),
+            "source_subpath": str(install_metadata.get("source_subpath") or ""),
+            "source_package": str(install_metadata.get("source_package") or ""),
         })
         contract["source"] = source
         contract["trust_level"] = str(install_metadata.get("trust_level") or contract.get("trust_level") or "local")

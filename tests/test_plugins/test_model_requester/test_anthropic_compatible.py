@@ -93,6 +93,24 @@ def test_generate_request_uses_messages_path_and_default_model():
     assert request["data"]["messages"] == [{"role": "user", "content": "hello"}]
 
 
+def test_client_options_disable_environment_proxy_by_default():
+    request = generate_request({"base_url": "https://api.anthropic.example/v1"}, {"input": "hello"})
+
+    assert request["client_options"]["trust_env"] is False
+
+
+def test_client_options_can_enable_environment_proxy_explicitly():
+    request = generate_request(
+        {
+            "base_url": "https://api.anthropic.example/v1",
+            "client_options": {"trust_env": True},
+        },
+        {"input": "hello"},
+    )
+
+    assert request["client_options"]["trust_env"] is True
+
+
 def test_inherits_model_requester_protocol_instead_of_responses_plugin():
     assert AnthropicCompatible.__bases__ == (ModelRequester,)
 

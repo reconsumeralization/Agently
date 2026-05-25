@@ -128,6 +128,24 @@ def test_request_options_override_legacy_plugin_root_options():
     assert request["request_options"] == {"temperature": 0.2, "top_p": 0.5, "model": "m1", "stream": True}
 
 
+def test_client_options_disable_environment_proxy_by_default():
+    request = generate_request({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
+
+    assert request["client_options"]["trust_env"] is False
+
+
+def test_client_options_can_enable_environment_proxy_explicitly():
+    request = generate_request(
+        {
+            "base_url": "https://api.example.com/v1",
+            "client_options": {"trust_env": True},
+        },
+        {"input": "hello"},
+    )
+
+    assert request["client_options"]["trust_env"] is True
+
+
 @pytest.mark.asyncio
 async def test_auth_headers_are_preserved_in_outgoing_request(monkeypatch: pytest.MonkeyPatch):
     captured = await capture_request_headers(

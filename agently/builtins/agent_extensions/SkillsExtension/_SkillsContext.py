@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
@@ -62,7 +63,7 @@ class AgentSkillsRuntimeContext:
         max_retries: int = 3,
         stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
     ) -> Any:
-        request = self.agent.create_temp_request(model_key=model_key).input(prompt)
+        request = self.agent.create_temp_request(model_key=model_key).input(self._normalize_model_prompt(prompt))
         if output_schema is not None:
             request = request.output(output_schema, format=output_format)
         response = request.get_response()
@@ -77,6 +78,11 @@ class AgentSkillsRuntimeContext:
             raise_ensure_failure=False,
         )
         return result
+
+    def _normalize_model_prompt(self, prompt: Any) -> Any:
+        if isinstance(prompt, str):
+            return prompt
+        return json.dumps(prompt, ensure_ascii=False, default=str)
 
     async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
         if self._runtime_stream_handler is None:

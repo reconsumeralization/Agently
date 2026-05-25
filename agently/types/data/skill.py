@@ -64,6 +64,11 @@ class SkillsPackRecord(TypedDict, total=False):
     name: str
     source: str
     source_type: str
+    source_url: str
+    source_ref: str
+    source_commit: str
+    source_subpath: str
+    source_package: str
     installed_skills: list[str]
     failed_skills: list[dict[str, Any]]
     status: str
@@ -104,6 +109,8 @@ class SkillExecutionPlan(TypedDict, total=False):
     resource_bindings: list[dict[str, Any]]
     expected_result_shape: dict[str, Any]
     expected_result_format: str
+    capability_policy: dict[str, Any]
+    stage_model_keys: dict[str, str]
     execution_strategy: ExecutionStrategy
     execution_stages: list[dict[str, Any]]
     diagnostics: list[dict[str, Any]]

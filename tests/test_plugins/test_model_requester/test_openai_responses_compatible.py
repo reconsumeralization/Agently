@@ -99,6 +99,24 @@ def test_generate_request_uses_responses_path_and_latest_default_model():
     ]
 
 
+def test_client_options_disable_environment_proxy_by_default():
+    request = generate_request({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
+
+    assert request["client_options"]["trust_env"] is False
+
+
+def test_client_options_can_enable_environment_proxy_explicitly():
+    request = generate_request(
+        {
+            "base_url": "https://api.example.com/v1",
+            "client_options": {"trust_env": True},
+        },
+        {"input": "hello"},
+    )
+
+    assert request["client_options"]["trust_env"] is True
+
+
 def test_inherits_model_requester_protocol_instead_of_openai_plugin():
     assert OpenAIResponsesCompatible.__bases__ == (ModelRequester,)
 

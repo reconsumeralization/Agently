@@ -16,11 +16,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Literal
+import warnings
 
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
-from agently.types.plugins import SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
+from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
 from agently.utils import Settings
 
+from .modules.effort_strategies import BUILTIN_EFFORT_STRATEGY_NAMES
 from .modules.executor import SkillExecutor
 from .modules.planner import SkillPlanner
 from .modules.registry import SkillRegistry
@@ -34,6 +36,7 @@ class AgentlySkillsExecutor(SkillsExecutor):
         self.plugin_manager = plugin_manager
         self.settings = settings
         self.registry = SkillRegistry(settings)
+        self._effort_strategy_handlers: dict[str, SkillsEffortStrategyHandler] = {}
 
     @staticmethod
     def _on_register():
@@ -74,6 +77,8 @@ class AgentlySkillsExecutor(SkillsExecutor):
         name: str | None = None,
         skills_pack_id: str | None = None,
         fetch: bool = False,
+        ref: str | None = None,
+        subpath: str | None = None,
         source_type: str | None = None,
         trust_level: str | None = None,
         update: bool = True,
@@ -86,12 +91,39 @@ class AgentlySkillsExecutor(SkillsExecutor):
             name=name,
             skills_pack_id=skills_pack_id,
             fetch=fetch,
+            ref=ref,
+            subpath=subpath,
             source_type=source_type,
             trust_level=trust_level,
             update=update,
             discover=discover,
             resolver_mode=resolver_mode,
             resolver_agent=resolver_agent,
+        )
+
+    def discover_skills_pack(
+        self,
+        source: str | Path,
+        *,
+        name: str | None = None,
+        skills_pack_id: str | None = None,
+        fetch: bool = True,
+        ref: str | None = None,
+        subpath: str | None = None,
+        source_type: str | None = None,
+        trust_level: str | None = None,
+        update: bool = False,
+    ) -> dict[str, Any]:
+        return self.registry.discover_skills_pack(
+            source,
+            name=name,
+            skills_pack_id=skills_pack_id,
+            fetch=fetch,
+            ref=ref,
+            subpath=subpath,
+            source_type=source_type,
+            trust_level=trust_level,
+            update=update,
         )
 
     def list_skills(self) -> list[dict[str, Any]]:
@@ -115,6 +147,35 @@ class AgentlySkillsExecutor(SkillsExecutor):
     def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 262144) -> str:
         return self.registry.read_resource(skill_id, path, max_bytes=max_bytes)
 
+    # ── Runtime strategy extension ────────────────────────────────────────
+
+    def register_effort_strategy(
+        self,
+        name: str,
+        handler: SkillsEffortStrategyHandler,
+        *,
+        replace: bool = False,
+    ) -> "AgentlySkillsExecutor":
+        strategy_name = str(name or "").strip()
+        if not strategy_name:
+            raise ValueError("Skills effort strategy name cannot be empty.")
+        if not callable(handler):
+            raise TypeError("Skills effort strategy handler must be callable.")
+        if (
+            strategy_name in self._effort_strategy_handlers
+            or strategy_name in BUILTIN_EFFORT_STRATEGY_NAMES
+        ) and not replace:
+            raise ValueError(f"Skills effort strategy '{ strategy_name }' is already registered.")
+        self._effort_strategy_handlers[strategy_name] = handler
+        return self
+
+    def unregister_effort_strategy(self, name: str) -> bool:
+        strategy_name = str(name or "").strip()
+        return self._effort_strategy_handlers.pop(strategy_name, None) is not None
+
+    def list_effort_strategies(self) -> list[str]:
+        return sorted({*BUILTIN_EFFORT_STRATEGY_NAMES, *self._effort_strategy_handlers})
+
     # ── Plan / Execute ─────────────────────────────────────────────────────
 
     async def async_resolve_plan(
@@ -125,16 +186,25 @@ class AgentlySkillsExecutor(SkillsExecutor):
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
+        output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
     ) -> SkillExecutionPlan:
+        if output is not None and semantic_outputs is not None:
+            raise ValueError("Use either output= or semantic_outputs= for Skills planning, not both.")
+        if semantic_outputs is not None:
+            warnings.warn(
+                "semantic_outputs= is deprecated for Skills planning; use output= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return await SkillPlanner(self.registry).resolve(
             context=context,
             task=task,
             skills=skills,
             skills_packs=skills_packs,
             mode=mode,
-            semantic_outputs=semantic_outputs,
+            semantic_outputs=output if output is not None else semantic_outputs,
             output_format=output_format,
         )
 
@@ -147,7 +217,10 @@ class AgentlySkillsExecutor(SkillsExecutor):
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         effort: str | None = None,
     ):
-        return await SkillExecutor(self.registry).execute(
+        return await SkillExecutor(
+            self.registry,
+            effort_strategy_handlers=self._effort_strategy_handlers,
+        ).execute(
             context=context,
             task=task,
             plan=plan,
