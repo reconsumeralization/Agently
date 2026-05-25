@@ -35,3 +35,22 @@ When preparing a release:
 - keep `[project].description` non-empty and concise
 - keep `[project].readme` pointed at `README.md`
 - do not expect PyPI metadata for an existing uploaded version to update in place; publish a new version when metadata must change publicly
+
+## Clean install smoke
+
+During release testing, validate the package in a brand-new empty environment
+created with `conda` or `uv`. Install the release candidate package and only the
+necessary runtime dependencies for a minimal script. Do not reuse a developer
+environment where optional packages may already be cached.
+
+The smoke script must verify two things:
+
+- A basic installed-package startup path works without optional dependencies
+  that are explicitly protected by `agently.utils.LazyImport`.
+- At least one LazyImport-protected missing dependency path is triggered on
+  purpose, and the user-facing install prompt/error is emitted correctly.
+
+Optional integrations such as DevTools, ChromaDB, FastMCP, SQLModel, Playwright,
+or other provider-specific packages should not be installed unless the smoke is
+testing that integration directly. Their absence must not break ordinary Agently
+imports or minimal Agent/TriggerFlow startup.

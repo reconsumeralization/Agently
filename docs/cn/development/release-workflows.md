@@ -35,3 +35,18 @@ PyPI 项目列表页展示的是包元数据 `Summary`，来源于 `pyproject.to
 - 保持 `[project].description` 非空且简短
 - 保持 `[project].readme` 指向 `README.md`
 - 不要预期 PyPI 会原地更新已上传版本的元数据；元数据需要公开变化时应发布新版本
+
+## 干净环境安装 smoke
+
+发版测试阶段必须用 `conda` 或 `uv` 创建一个全新的空环境，安装 release
+candidate 包以及最小脚本所需的必要运行时依赖。不要复用已经缓存了可选依赖的开发环境。
+
+这个 smoke 脚本必须验证两件事：
+
+- 已安装包的基础启动路径可用，并且不会因为缺少那些已经明确由
+  `agently.utils.LazyImport` 保护的可选依赖而失败。
+- 至少故意触发一个 LazyImport 保护的缺失依赖路径，并确认面向用户的安装提示或错误信息正确出现。
+
+除非 smoke 目标就是测试某个集成，否则不要安装 DevTools、ChromaDB、FastMCP、
+SQLModel、Playwright 或其他 provider-specific 可选包。缺少这些包不应影响普通
+Agently import 或最小 Agent/TriggerFlow 启动。
