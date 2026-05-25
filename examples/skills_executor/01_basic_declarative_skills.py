@@ -29,27 +29,13 @@ if str(ROOT) not in sys.path:
 from agently import Agently
 
 
-SKILL_MD = """\
----
-name: Release Checklist
-description: Check release readiness and record a release note. Use for release and rollback requests.
-keywords: [release, rollback, checklist]
----
-
-# Release Checklist
-
-Given a release request, confirm readiness: changelog present, migrations
-reviewed, rollback plan defined, on-call notified. Then write a concise release
-note summarizing what ships.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "release-checklist"
 
 
 def main():
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        skill_root = temp_path / "release-skill"
-        skill_root.mkdir()
-        (skill_root / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+        skill_root = SKILL_SOURCE
 
         Agently.skills_executor.configure(
             registry_root=str(temp_path / "registry"),

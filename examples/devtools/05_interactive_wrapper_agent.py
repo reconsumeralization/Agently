@@ -3,10 +3,10 @@
 """InteractiveWrapper example using an Agently Agent with streamed UI output."""
 
 from agently import Agently
-from agently_devtools import ObservationBridge, InteractiveWrapper
+from agently_devtools import InteractiveWrapper
 
-bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-agent")
-bridge.register(Agently)
+bridge = Agently.create_observation_bridge(app_id="agently-main-examples", group_id="interactive-wrapper-agent")
+bridge.watch(Agently)
 
 
 # Create a simple Agent
@@ -37,7 +37,7 @@ if __name__ == "__main__":
     try:
         interactive.wait()
     finally:
-        bridge.unregister(Agently)
+        bridge.unregister()
 
 # Stable expected key output from the declared run:
 # launched example prints the local DevTools or Interactive UI URL and streams/records the declared demo events.
@@ -50,7 +50,8 @@ if __name__ == "__main__":
 # The agent has a persistent system prompt (always=True) that applies to every request.
 #
 # Flow:
-# bridge.register(Agently) -> devtools event hooks installed
+# Agently.create_observation_bridge(...) -> devtools event hooks installed
+# bridge.watch(Agently) -> global observation scope
 # InteractiveWrapper(agent, ...) -> starts local HTTP server
 # interactive.ui_url -> http://localhost:<port>/?...
 #   |  (browser sends request: "hello")

@@ -71,6 +71,45 @@ Agently.set_settings("AnthropicCompatible", {
 
 每个 provider 的 recipe（环境变量、常用 model 名、base URL）见 [Providers](providers/)。
 
+## 用 Model Pool 切换模型
+
+需要使用多个模型的应用，可以先用 `model_pool` 配置模型别名，再用
+`activate_model(...)` 切换当前 Agent 模型。别名可以是具体的运行含义，例如
+`ollama-qwen2.5` 或 `deepseek-v4`。
+
+```python
+agent.set_settings("model_pool", {
+    "ollama-qwen2.5": "qwen2.5:7b",
+    "deepseek-v4": "deepseek-chat",
+})
+agent.set_settings("key_pool", {
+    "local": "ollama",
+    "deepseek-main": "${ENV.DEEPSEEK_API_KEY}",
+    "deepseek-backup": "${ENV.DEEPSEEK_BACKUP_API_KEY}",
+})
+agent.set_settings("key_pool_strategy", {
+    "qwen2.5:7b": {"mode": "fixed", "pool": ["local"]},
+    "deepseek-chat": {"mode": "round_robin", "pool": ["deepseek-main", "deepseek-backup"]},
+})
+
+result = (
+    agent
+    .activate_model("ollama-qwen2.5")
+    .input("Summarize this incident.")
+    .output({"summary": (str, "incident summary", True)})
+    .start()
+)
+```
+
+`activate_model(...)` 影响后续 Agent 自己创建和持有的请求，包括链式
+`agent.input(...).start()` 和 `agent.create_execution()`。如果只想覆盖单次调用，
+使用 `agent.create_request(model_key="deepseek-v4")`。
+
+API key 会在请求时根据 `key_pool_strategy` 自动选择：`fixed`、`random`、
+`round_robin` 或 `least_used`。Agently 4.1.3 不会在 provider 返回鉴权、额度或费用
+类错误后自动换另一个 key 重试；这类失败会暴露给应用代码，由业务系统决定该操作是否
+适合更换凭据重试。
+
 ## 插件源码位置
 
 - [agently/builtins/plugins/ModelRequester/OpenAICompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible.py)

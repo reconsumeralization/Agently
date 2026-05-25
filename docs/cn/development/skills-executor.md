@@ -23,10 +23,50 @@ description: Use when checking release readiness and rollback risk.
 Follow this checklist before recommending a release or rollback...
 ```
 
-## 安装
+## 声明和安装
 
-`install_skills(...)` 会把标准 Skill 目录复制到本地 registry。安装后的 Skill
-根目录仍然直接包含 `SKILL.md`。Agently 只在安装副本内添加 `.agently/`
+正常 Agent 运行时，优先在 Agent 上用 `use_skills(...)` 声明 Skills。
+Skills Executor 会像 Action candidate 一样先记录 source，在规划时轻量发现
+`SKILL.md`，只有 planner 选中或 required 时才完整安装 Skill 和资源。
+
+```python
+agent.use_skills(
+    [{"source": "anthropics/skills", "subpath": "skills/docx"}],
+    mode="required",
+)
+```
+
+`install_skills_pack(...)` 保留为高级池管理入口：预热、离线镜像、确定性 CI
+fixture、显式 registry 维护。`install_skills(...)` 仍用于单个本地 Skill
+目录的作者开发和 smoke test。
+
+自己编写本地 Skill 时，也应放在完全独立、符合标准结构的目录中。业务代码不要
+拼 inline `SKILL.md` 字符串，也不要使用根目录 `skill.yaml` 这类 YAML 清单；
+应用层只把目录路径交给 executor：
+
+```text
+my-skill/
+|-- SKILL.md
+|-- scripts/
+|-- references/
+`-- assets/
+```
+
+```python
+report = Agently.skills_executor.install_skills_pack(
+    "anthropics/skills",
+    fetch=True,
+    subpath="skills/docx",
+    trust_level="remote",
+)
+```
+
+远程安装会把仓库 clone 到 Agently 的本地 registry source cache，再把标准
+`SKILL.md` 包复制进 registry，并记录 source URL、ref、解析后的 commit、
+subpath、trust level 和 checksums。安装远程 Skill 不会执行包内 scripts。
+
+`install_skills(...)` 会把标准本地 Skill 目录复制到本地 registry。安装后的
+Skill 根目录仍然直接包含 `SKILL.md`。Agently 只在安装副本内添加 `.agently/`
 管理目录。
 
 ```text
@@ -57,11 +97,12 @@ agent.use_skills([contract["skill_id"]], mode="model_decision")
 
 ## 选择
 
-用 `use_skills(...)` 将已安装 Skills 暴露为可选 route candidates。模型先看到简短 decision cards；只有 Skills route 真正执行时才注入完整 guidance。
+用 `use_skills(...)` 将已安装或远程 Skills 暴露为 route candidates。模型先看到简短 decision cards；只有 Skills route 真正执行时才 materialize 完整 guidance 和资源。
 
 ```python
 agent = Agently.create_agent("ops-assistant")
 agent.use_skills(["release-review"], mode="model_decision")
+agent.use_skills([{"source": "anthropics/skills", "subpath": "skills/docx"}], mode="required")
 ```
 
 需要检查将会使用哪些 Skills 时，调用 `resolve_skills_plan(...)`。Required
@@ -98,21 +139,24 @@ print(execution.output)
 print(execution.skill_logs)
 ```
 
-`semantic_outputs=` 使用和 `.output(...)` 相同的 schema grammar；它就是本次
-Skill run 的结构化输出 schema：
+`output=` 使用和 `.output(...)` 相同的 schema grammar；它就是本次
+Skill run 的结构化输出契约，描述 Skill 执行要交付的业务结果形状。
+`output_format=` 才控制承载格式，例如 JSON、flat Markdown、hybrid 或自动选择。
+旧的 `semantic_outputs=` 参数仅作为 Skills 执行的兼容别名保留，并会触发
+deprecation warning。
 
 ```python
 execution = await agent.async_run_skills_task(
     "Write a release decision.",
     skills=["release-review"],
     mode="required",
-    semantic_outputs={"decision": (str, "go or no-go", True)},
+    output={"decision": (str, "go or no-go", True)},
 )
 ```
 
 显式 Skills 执行也支持 Agent prompt 方法。Skill run 会消费当前 prompt snapshot，
 把渲染后的 prompt 文本作为 task，并把 `output` / `output_format` slot 映射为
-`semantic_outputs` / `output_format`：
+`output` / `output_format`：
 
 ```python
 execution = await (
@@ -126,7 +170,7 @@ execution = await (
 
 `set_agent_prompt(...)` 写入的长期 prompt 会被继承并保留给后续轮次；
 `set_request_prompt(...)` / quick prompt 写入的本轮 request prompt 会被冻结到这次
-Skill run，然后从 pending request 清理。显式传入的 `semantic_outputs=` 和
+Skill run，然后从 pending request 清理。显式传入的 `output=` 和
 `output_format=` 参数优先于 prompt 推导值。
 
 `output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认
@@ -140,7 +184,7 @@ execution = await agent.async_run_skills_task(
     "Draft a release announcement as HTML.",
     skills=["release-review"],
     mode="required",
-    semantic_outputs={"html": (str, "render-ready HTML", True)},
+    output={"html": (str, "render-ready HTML", True)},
     output_format="flat_markdown",
 )
 ```
@@ -148,7 +192,7 @@ execution = await agent.async_run_skills_task(
 固定必填字段优先写在 schema 元组第三项：
 
 ```python
-semantic_outputs = {
+output = {
     "rules": [
         {
             "rule_id": (str, "Stable rule id", True),
@@ -173,16 +217,24 @@ judge。
 - `skills.prompt_only.start`
 - `skills.model_stream`，包含 `path`、`value`、`delta`、`is_complete`
 - `skills.prompt_only.done`
-- 选中多步策略时，还会收到 `skills.staged.*`、`skills.react.*` 和
-  `block.*` 事件
+- `effort="normal"` 或 `effort="max"` 选中内置 planner chain 时，会收到
+  `skills.runtime_chain.*`
+- 选中多步策略时，还会收到 `skills.staged.*`、`skills.react.*` 和 `block.*`
+  事件
 
-可以用 `effort=` 配合 `agent.set_settings("effort_presets", {...})`，把调用方
-看到的质量/成本档位映射到策略、model key、step budget 和 artifact inline limit：
+`effort="fast"` 使用低开销 single-shot 路径。`effort="normal"` 固定走完整
+preflight -> research -> plan -> execute -> verify -> reflect -> finalize
+链路。`effort="max"` 使用同一链路，但提高 retry 预算，并作为后续 Dynamic Task
+升级的挂接点。
+
+需要覆盖内置档位时，可以用 `agent.set_settings("effort_presets", {...})` 把调用方
+看到的质量/成本档位映射到策略、model key、step budget、retry count 和 artifact
+inline limit：
 
 ```python
 agent.set_settings("effort_presets", {
     "fast": {"strategy": "single_shot", "reason_key": "reason_fast", "step_budget": 1},
-    "normal": {"strategy": "staged", "reason_key": "reason", "step_budget": 5},
+    "normal": {"strategy": "runtime_chain", "reason_key": "reason", "retry_count": 1},
 })
 
 execution = await agent.async_run_skills_task(
@@ -193,14 +245,95 @@ execution = await agent.async_run_skills_task(
 )
 ```
 
-`reason_key` 是 model-pool 的符号 key。如果它没有在 `model_pool` 里映射，
-Agently 会沿用 agent 继承来的模型配置，而不会把这个符号 key 当成 provider model
-name 发出去。
+需要完全自定义行动策略时，可以在 Skills Executor 上注册 effort strategy handler，
+再通过 `effort=` 调用。handler 会拿到 Agent runtime context、选中的 Skills plan、
+解析后的 effort config 和 output format；它可以请求模型、通过 context 调用
+Action/MCP、发 runtime stream，并返回最终输出。
+
+handler 遵循 `SkillsEffortStrategyHandler` protocol：
+
+```python
+def handler(
+    *,
+    context: SkillsExecutionContext,
+    task: str,
+    plan: SkillExecutionPlan,
+    output_format: str | None = None,
+    effort: str | None = None,
+    effort_config: dict | None = None,
+) -> Awaitable[Any] | Any: ...
+```
+
+内置 handler 也注册在同一张 strategy 表里：`single_shot`、`runtime_chain`、
+`staged` 和 `react`。可以用
+`Agently.skills_executor.list_effort_strategies()` 查看当前可用策略名。自定义
+handler 只有显式传入 `replace=True` 时才能替换内置策略；否则重名会 fail closed。
+内置参考实现位于
+`agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/effort_strategies/`。
+
+```python
+async def audit_plus_strategy(*, context, task, plan, effort_config, **_):
+    await context.async_emit_runtime_stream({
+        "type": "skills.audit_plus.checkpoint",
+        "action": "checkpoint",
+    })
+    return await context.async_request_model(
+        prompt={
+            "task": task,
+            "selected_skills": plan["selected_skills"],
+            "policy": effort_config,
+        },
+        model_key="verifier",
+        output_schema={"decision": (str, "go / no-go", True)},
+        output_format="json",
+    )
+
+Agently.skills_executor.register_effort_strategy(
+    "audit_plus",
+    audit_plus_strategy,
+)
+
+agent.set_settings("effort_presets", {
+    "audit_plus": {"strategy": "audit_plus", "custom_budget": 7},
+})
+
+execution = await agent.async_run_skills_task(
+    "Audit this release.",
+    skills=["release-review"],
+    mode="required",
+    effort="audit_plus",
+)
+```
+
+Skills runtime 内部模型调用使用符号阶段 key：`planner`、`research`、`reason`、
+`executor`、`verifier`、`reflector` 和 `finalizer`。如果某个 key 没有在
+`model_pool` 里映射，Agently 会沿用 agent 继承来的模型配置，而不会把这个符号 key
+当成 provider model name 发出去。
 
 通过 Agent 自动编排选中 Skills route 时，模型字段流会桥接到稳定路径，例如
 `skills.model.fields.<field_path>`。
 
-安装 Skill 不会自动执行 bundled scripts 或资源。脚本和资源只有在宿主应用显式通过 Action 或 Execution Environment 授权时才能被使用。
+安装 Skill 不会自动执行 bundled scripts 或资源。选中的 Skill 如果声明了
+`mcp`、`mcpServers`、`allowed-tools: [Bash]` 或 `allow-scripts`，Skills
+Executor 会在执行前自动把所需运行时 actions 挂到当前 Agent：MCP 声明走
+`agent.use_mcp(...)`，Bash/scripts 声明走受管的 `enable_shell(...)` action，并把
+工作目录限制在该 Skill 的安装目录。stdio MCP、本地命令和脚本属于高风险能力，
+需要 `auto_allow=True` 或审批 handler；远程 HTTP MCP 不需要这个本地命令审批。
+
+如果选中的 Skill 声明了缺失能力，并且当前没有匹配的 Action/MCP tool，executor
+会先做一层保守 fallback：看起来是纯内存计算、解析、校验、转换或格式化的能力，
+可以被合成为 execution-scoped 的 Python sandbox action。业务系统、网络、文件、
+消息、支付、数据库、浏览器或其他外部副作用能力不会被合成；它们会 fail closed，
+返回 `capability_missing`，直到宿主提供真实 Action、MCP server 或 connector
+package。
+
+## 验收样例
+
+`examples/agent_auto_orchestration/19_remote_skills_weather_event_ops.py`
+端到端验证了 4.1.3 的远程连接器路径：业务代码只通过 `agent.use_skills(...)`
+声明公开远程 Skills；免费 weather MCP 服务通过 ActionRuntime 注册；模型生成 MCP
+action calls 取得真实天气观测；Skills Executor 在命中后懒安装选中的 Skills，并用
+`effort="normal"` 执行完整链路。
 
 ## 配置
 

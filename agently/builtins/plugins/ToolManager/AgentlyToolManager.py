@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable, Coroutine, Literal, 
 from agently.core.Action import ActionDispatcher, ActionRegistry
 from agently.types.plugins import ToolManager
 from agently.utils import DataFormatter, DeprecationWarnings, FunctionShifter, LazyImport, SettingsNamespace
+from agently.utils.MCP import normalize_mcp_transport
 from agently.types.data import ActionSpec
 
 if TYPE_CHECKING:
@@ -374,6 +375,7 @@ class AgentlyToolManager(ToolManager):
         self,
         transport: "MCPConfigs | str | Any",
         *,
+        headers: dict[str, str] | None = None,
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         side_effect_level: Literal["read", "write", "exec"] = "read",
@@ -385,6 +387,7 @@ class AgentlyToolManager(ToolManager):
         LazyImport.import_package("fastmcp", version_constraint=">=3")
         from fastmcp import Client
 
+        transport = normalize_mcp_transport(transport, headers=headers)
         normalized_tags = self._normalize_tags(tags)
 
         async with Client(transport) as client:  # type: ignore[arg-type]
@@ -414,8 +417,14 @@ class AgentlyToolManager(ToolManager):
                 )
         return self
 
-    async def async_use_mcp(self, transport: "MCPConfigs | str | Any", *, tags: str | list[str] | None = None):
-        await self.async_use_action_mcp(transport, tags=tags)
+    async def async_use_mcp(
+        self,
+        transport: "MCPConfigs | str | Any",
+        *,
+        headers: dict[str, str] | None = None,
+        tags: str | list[str] | None = None,
+    ):
+        await self.async_use_action_mcp(transport, headers=headers, tags=tags)
         return self
 
     def register_python_sandbox_action(

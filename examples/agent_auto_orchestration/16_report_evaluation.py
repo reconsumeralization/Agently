@@ -17,7 +17,7 @@ New-standard Skills model
 The old design used Skill ``model`` stages (extract metadata → evaluate). Under
 the new standard the Skill is pure ``SKILL.md`` guidance: ONE prompt-only request
 extracts what the report claims and evaluates all six dimensions, returning
-conceptual levels + issues (shaped by ``semantic_outputs``). The HOST maps levels
+conceptual levels + issues (shaped by ``output``). The HOST maps levels
 to a numeric overall score for reporting.
 
 Expected key output from one real DeepSeek run:
@@ -73,37 +73,11 @@ Pilot Rust on the single hottest parsing path behind a service boundary; keep
 the rest in Python. Re-evaluate after measuring throughput and on-call burden.
 """
 
-SKILL_MD = """\
----
-name: Research Report Evaluator
-description: >-
-  Evaluate a research report against its stated topic across six dimensions
-  (relevance, completeness, source authority, depth balance, consistency,
-  decision quality), assigning a conceptual quality level and issues to each.
-  Use for report evaluation, research review, and quality assessment.
-keywords: [report evaluation, research review, quality assessment, rubric]
----
-
-# Research Report Evaluator
-
-You are a rigorous research reviewer. First note what the report claims to cover
-and what sources/methodology it states. Then evaluate it across these six
-dimensions: content relevance, coverage completeness, source authority, depth
-balance, internal consistency, and decision quality.
-
-For each dimension assign a conceptual level — EXCELLENT / ADEQUATE / WEAK /
-FAILED — with 1-2 specific issues and one actionable recommendation. Then give an
-overall verdict (e.g. publish / revise / reject) with a one-paragraph rationale.
-
-Judge only what the report actually contains. Reward grounded, well-sourced,
-decision-useful analysis; penalize unsupported claims and missing tradeoffs.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "research-report-evaluator"
 
 
 def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "research-report-evaluator"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -136,7 +110,7 @@ async def main() -> None:
         f"Evaluate this research report:\n\n{report_text}",
         skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        output={
             "claimed_topic": (str, "The topic/question the report addresses", True),
             "dimensions": (
                 [{

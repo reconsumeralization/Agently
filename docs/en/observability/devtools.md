@@ -27,22 +27,38 @@ Default local endpoints from [`examples/devtools/README.md`](../../../examples/d
 
 ## ObservationBridge
 
-The example path is [`examples/devtools/01_observation_bridge_local.py`](../../../examples/devtools/01_observation_bridge_local.py). It registers the bridge on `Agently`, runs a TriggerFlow, then unregisters the bridge:
+The example path is [`examples/devtools/01_observation_bridge_local.py`](../../../examples/devtools/01_observation_bridge_local.py). It creates the bridge through Agently's LazyImport helper, watches the global runtime, runs a TriggerFlow, then unregisters the bridge:
+
+```python
+from agently import Agently
+
+bridge = Agently.create_observation_bridge(
+    app_id="agently-main-examples",
+    group_id="devtools-local-demo",
+)
+bridge.watch(Agently)
+
+try:
+    ...
+finally:
+    bridge.unregister()
+```
+
+Use `Agently.create_observation_bridge(target, ...)` or `bridge.watch(target)` when only selected objects should be uploaded; see [`02_observation_bridge_selective_watch.py`](../../../examples/devtools/02_observation_bridge_selective_watch.py). `bridge.watch(...)` accepts the global `Agently` object, agents, model requests/responses, TriggerFlows, TriggerFlow executions, Dynamic Task / TaskDAG selectors, Skill executions, tool functions, or `{"target_type": ..., "target_name": ...}` mappings.
+
+For a minimal example that keeps `agently_devtools` behind Agently's LazyImport facade, see [`07_agently_observe_lazy_bridge.py`](../../../examples/devtools/07_agently_observe_lazy_bridge.py).
+
+The lower-level DevTools package can also bind at construction time:
 
 ```python
 from agently import Agently
 from agently_devtools import ObservationBridge
 
-bridge = ObservationBridge(app_id="agently-main-examples", group_id="devtools-local-demo")
-bridge.register(Agently)
-
-try:
-    ...
-finally:
-    bridge.unregister(Agently)
+bridge = ObservationBridge(Agently)
+bridge.watch(agent)
 ```
 
-Use `auto_watch=False` plus `bridge.watch(flow)` when only selected flows should be uploaded; see [`02_observation_bridge_selective_watch.py`](../../../examples/devtools/02_observation_bridge_selective_watch.py).
+The older `bridge = ObservationBridge(...); bridge.register(Agently)` form remains compatible and emits a deprecation warning.
 
 `ObservationBridge` uploads from a background queue and coalesces high-frequency observation events such as `model.streaming` before sending them to the listener. This keeps passive observation off the request/output path. For short scripts that exit immediately after a run, call `await bridge.flush()` before process exit if you need all buffered events uploaded.
 

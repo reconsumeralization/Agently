@@ -77,6 +77,30 @@ class SkillsRuntimeContext(SkillsExecutionContext, Protocol):
 
 
 @runtime_checkable
+class SkillsEffortStrategyHandler(Protocol):
+    """Callable protocol for application-defined Skills effort strategies.
+
+    Handlers are invoked after Skills planning and capability mounting. They
+    receive the Agent runtime context, selected Skills plan, requested task, the
+    resolved effort config, and the requested output format. A handler may
+    request models, call Actions/MCP through the context, emit runtime stream
+    items, and return the final Skill execution output. Returning a
+    SkillExecution-like object is also accepted by the builtin implementation.
+    """
+
+    def __call__(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        task: str,
+        plan: SkillExecutionPlan,
+        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        effort: str | None = None,
+        effort_config: dict[str, Any] | None = None,
+    ) -> Awaitable[Any] | Any: ...
+
+
+@runtime_checkable
 class SkillsExecutor(Protocol):
     name: str
     DEFAULT_SETTINGS: dict[str, Any]
@@ -104,6 +128,8 @@ class SkillsExecutor(Protocol):
         name: str | None = None,
         skills_pack_id: str | None = None,
         fetch: bool = False,
+        ref: str | None = None,
+        subpath: str | None = None,
         source_type: str | None = None,
         trust_level: str | None = None,
         update: bool = True,
@@ -111,6 +137,20 @@ class SkillsExecutor(Protocol):
         resolver_mode: str = "deterministic",
         resolver_agent: Any = None,
     ) -> SkillsPackRecord: ...
+
+    def discover_skills_pack(
+        self,
+        source: str | Path,
+        *,
+        name: str | None = None,
+        skills_pack_id: str | None = None,
+        fetch: bool = True,
+        ref: str | None = None,
+        subpath: str | None = None,
+        source_type: str | None = None,
+        trust_level: str | None = None,
+        update: bool = False,
+    ) -> dict[str, Any]: ...
 
     def list_skills(self) -> list[dict[str, Any]]: ...
 
@@ -126,6 +166,18 @@ class SkillsExecutor(Protocol):
 
     def remove_skills_pack(self, skills_pack_id: str, *, remove_skills: bool = False) -> dict[str, Any]: ...
 
+    def register_effort_strategy(
+        self,
+        name: str,
+        handler: SkillsEffortStrategyHandler,
+        *,
+        replace: bool = False,
+    ) -> "SkillsExecutor": ...
+
+    def unregister_effort_strategy(self, name: str) -> bool: ...
+
+    def list_effort_strategies(self) -> list[str]: ...
+
     async def async_resolve_plan(
         self,
         *,
@@ -134,6 +186,7 @@ class SkillsExecutor(Protocol):
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
+        output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
     ) -> SkillExecutionPlan: ...

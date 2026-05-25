@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 from agently.core import BaseAgent
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode
 from agently.types.plugins import SkillsExecutor
-from agently.utils import FunctionShifter
+from agently.utils import DeprecationWarnings, FunctionShifter
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
 from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.planner import (
     _matches_selector,
@@ -60,11 +60,21 @@ class SkillsExtension(BaseAgent):
         skills: Any,
         *,
         mode: SkillMode = "model_decision",
+        auto_allow: bool = False,
     ):
         if mode not in {"model_decision", "required"}:
             raise ValueError("Skill mode must be one of: 'model_decision', 'required'.")
         for item in _ensure_list(skills):
-            self.__session_skill_selectors.append({"selector": _copy_public(item), "mode": mode})
+            selector = _copy_public(item)
+            if isinstance(selector, dict):
+                selector.setdefault("auto_allow", bool(auto_allow))
+            elif auto_allow and isinstance(selector, str):
+                raw_selector = selector.strip()
+                if "://" in raw_selector or raw_selector.startswith("git@") or "/" in raw_selector:
+                    selector = {"source": raw_selector, "auto_allow": True}
+                else:
+                    selector = {"id": raw_selector, "auto_allow": True}
+            self.__session_skill_selectors.append({"selector": selector, "mode": mode})
         return self
 
     def use_skills_packs(
@@ -82,14 +92,24 @@ class SkillsExtension(BaseAgent):
     def _skills_prompt_defaults(
         self,
         task: str | None,
+        output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ) -> tuple[str, Any, Literal["json", "flat_markdown", "hybrid", "auto"]]:
+        if output is not None and semantic_outputs is not None:
+            raise ValueError("Use either output= or semantic_outputs= for Skills execution, not both.")
+        if semantic_outputs is not None:
+            DeprecationWarnings.warn_deprecated_once(
+                "skills_executor.semantic_outputs.execution",
+                "semantic_outputs= is deprecated for Skills execution; use output= instead.",
+                stacklevel=3,
+            )
         prompt_defaults = self._dynamic_task_prompt_defaults(task)
         resolved_task = task if task is not None and prompt_defaults["target"] is None else prompt_defaults["target"]
         if not resolved_task:
             raise ValueError("Skills execution requires task=... or a configured agent.input(...).")
-        resolved_outputs = semantic_outputs if semantic_outputs is not None else prompt_defaults["output_schema"]
+        explicit_output = output if output is not None else semantic_outputs
+        resolved_outputs = explicit_output if explicit_output is not None else prompt_defaults["output_schema"]
         resolved_format = output_format or cast(Any, prompt_defaults["output_format"]) or "auto"
         return str(resolved_task), resolved_outputs, cast(Any, resolved_format)
 
@@ -100,11 +120,13 @@ class SkillsExtension(BaseAgent):
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
+        output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ) -> SkillExecutionPlan:
-        task, semantic_outputs, output_format = self._skills_prompt_defaults(
+        task, output, output_format = self._skills_prompt_defaults(
             task,
+            output=output,
             semantic_outputs=semantic_outputs,
             output_format=output_format,
         )
@@ -117,7 +139,7 @@ class SkillsExtension(BaseAgent):
             skills=selectors,
             skills_packs=skills_pack_selectors,
             mode=mode,
-            semantic_outputs=semantic_outputs,
+            output=output,
             output_format=output_format,
         )
 
@@ -128,6 +150,7 @@ class SkillsExtension(BaseAgent):
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
+        output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
     ) -> SkillExecutionPlan:
@@ -136,6 +159,7 @@ class SkillsExtension(BaseAgent):
             skills=skills,
             skills_packs=skills_packs,
             mode=mode,
+            output=output,
             semantic_outputs=semantic_outputs,
             output_format=output_format,
         )
@@ -147,13 +171,15 @@ class SkillsExtension(BaseAgent):
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
+        output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":
-        task, semantic_outputs, output_format = self._skills_prompt_defaults(
+        task, output, output_format = self._skills_prompt_defaults(
             task,
+            output=output,
             semantic_outputs=semantic_outputs,
             output_format=output_format,
         )
@@ -163,7 +189,7 @@ class SkillsExtension(BaseAgent):
             skills=skills,
             skills_packs=skills_packs,
             mode=mode,
-            semantic_outputs=semantic_outputs,
+            output=output,
             output_format=output_format,
         )
         execution = await self.async_execute_skills_plan(
@@ -183,6 +209,7 @@ class SkillsExtension(BaseAgent):
         skills: Any = None,
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
+        output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
@@ -193,6 +220,7 @@ class SkillsExtension(BaseAgent):
             skills=skills,
             skills_packs=skills_packs,
             mode=mode,
+            output=output,
             semantic_outputs=semantic_outputs,
             output_format=output_format,
             stream_handler=stream_handler,

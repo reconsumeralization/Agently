@@ -509,6 +509,7 @@ class OpenAIResponsesCompatible(ModelRequester):
         agently_request_dict["headers"] = headers
 
         client_options = DataFormatter.to_str_key_dict(self.plugin_settings.get("client_options"), default_value={})
+        client_options.setdefault("trust_env", False)
         proxy = self.plugin_settings.get("proxy", None)
         if proxy:
             client_options.update({"proxy": proxy})

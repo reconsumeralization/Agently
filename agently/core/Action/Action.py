@@ -70,6 +70,7 @@ from agently.types.plugins import (
 )
 from agently.utils import DeprecationWarnings, FunctionShifter, Settings, SettingsNamespace
 from agently.utils import DataFormatter, LazyImport
+from agently.utils.MCP import normalize_mcp_transport
 
 from .ActionArtifactManager import ActionArtifactManager
 from .ActionDispatcher import ActionDispatcher
@@ -715,6 +716,7 @@ class Action:
         self,
         transport: "MCPConfigs | str | Any",
         *,
+        headers: dict[str, str] | None = None,
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         side_effect_level: Literal["read", "write", "exec"] = "read",
@@ -726,6 +728,7 @@ class Action:
         LazyImport.import_package("fastmcp", version_constraint=">=3")
         from fastmcp import Client
 
+        transport = normalize_mcp_transport(transport, headers=headers)
         normalized_tags = self._normalize_tags(tags)
 
         async with Client(transport) as client:  # type: ignore[arg-type]
@@ -766,8 +769,14 @@ class Action:
                 )
         return self
 
-    async def async_use_mcp(self, transport: "MCPConfigs | str | Any", *, tags: str | list[str] | None = None):
-        await self.async_use_action_mcp(transport, tags=tags)
+    async def async_use_mcp(
+        self,
+        transport: "MCPConfigs | str | Any",
+        *,
+        headers: dict[str, str] | None = None,
+        tags: str | list[str] | None = None,
+    ):
+        await self.async_use_action_mcp(transport, headers=headers, tags=tags)
         return self
 
     def register_python_sandbox_action(

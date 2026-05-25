@@ -16,7 +16,7 @@ The old design used a Skill ``branch`` stage to route by severity. Under the new
 standard the Skill is pure ``SKILL.md`` guidance: in ONE prompt-only request the
 model triages severity AND produces a review whose depth matches that severity
 (the guidance tells it to scale rigor with severity). Structured findings come
-from ``semantic_outputs``; the HOST writes the review report to disk.
+from ``output``; the HOST writes the review report to disk.
 
 Expected key output from one real DeepSeek run:
     skill status: success
@@ -46,40 +46,7 @@ from examples.dynamic_task._shared import configure_model
 # Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SKILL_MD = """\
----
-name: Smart Code Review
-description: >-
-  Review a PR diff: triage its severity, then produce a depth-appropriate review
-  with structured findings, fix suggestions, and a merge decision. Use for code
-  review, review PR, and severity triage requests.
-keywords: [code review, review pr, severity triage, smart review, diff]
----
-
-# Smart Code Review
-
-You are a senior code reviewer. Given a PR diff, do this in ONE pass:
-
-## 1. Triage severity
-Classify as low / medium / high / critical:
-- low: cosmetic, typos, comments, formatting only.
-- medium: logic changes in a single function or module.
-- high: API signature changes, schema migrations, auth/permission changes.
-- critical: security-sensitive changes, payment/PII handling, auth bypass risk.
-
-## 2. Scale review depth to severity
-- low: a quick sanity check.
-- medium: review logic and edge cases.
-- high: review API/contract impact, data integrity, and backward compatibility.
-- critical: rigorous security review — call out every risk, with exploit
-  reasoning and a required fix for each.
-
-## 3. Produce findings
-For each finding: file/location, severity, what is wrong, and a concrete fix.
-Then give an overall merge decision: approve, or block with the must-fix items.
-
-Be specific to the diff. Do not invent code that is not shown.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "smart-code-review"
 
 PR_DIFF = r"""diff --git a/src/payments/processor.py b/src/payments/processor.py
 index 12a34b..56c78d 100644
@@ -128,9 +95,7 @@ index ab89cd..ef01gh 100644
 
 
 def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "smart-code-review"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -171,7 +136,7 @@ async def main() -> None:
         f"Review this PR diff:\n\n{PR_DIFF}",
         skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        output={
             "severity": (str, "Severity: low, medium, high, or critical", True),
             "reasoning": (str, "Brief reasoning for the severity classification", True),
             "review_depth": (str, "Review depth applied, matching severity", True),

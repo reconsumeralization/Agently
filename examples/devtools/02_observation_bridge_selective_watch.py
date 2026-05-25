@@ -3,7 +3,6 @@
 import asyncio
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently_devtools import ObservationBridge
 
 
 watched_flow = TriggerFlow(name="devtools-watched-flow")
@@ -23,13 +22,11 @@ async def ignored_step(data: TriggerFlowRuntimeData):
 watched_flow.to(watched_step)
 ignored_flow.to(ignored_step)
 
-bridge = ObservationBridge(
+bridge = Agently.create_observation_bridge(
+    watched_flow,
     app_id="agently-main-examples",
     group_id="devtools-selective-watch-demo",
-    auto_watch=False,
 )
-bridge.watch(watched_flow)
-bridge.register(Agently)
 
 
 async def run_flow(flow: TriggerFlow, value: str):
@@ -48,21 +45,20 @@ async def main():
 try:
     asyncio.run(main())
 finally:
-    bridge.unregister(Agently)
+    bridge.unregister()
 
 # Stable expected key output from the declared run:
 # watched flow result.input == "keep this run" and ignored flow result.input == "do not upload this run".
 #
 # How it works:
-# ObservationBridge with auto_watch=False does not attach to all flows automatically.
-# bridge.watch(watched_flow) selectively enables event forwarding for only that flow.
+# Agently.create_observation_bridge(watched_flow, ...) binds the DevTools bridge and
+# selectively enables event forwarding for only that flow.
 # ignored_flow runs without any bridge events being emitted.  Both flows produce local
 # output normally; the difference is only in which events reach the devtools server.
 #
 # Flow:
-# bridge = ObservationBridge(auto_watch=False)
-# bridge.watch(watched_flow)     <- only this flow emits events
-# bridge.register(Agently)
+# bridge = Agently.create_observation_bridge(watched_flow, ...)
+#   only this flow emits events
 #   |
 #   v
 # watched_flow("keep this run")  -> state["result"]["flow"] = "watched"
@@ -70,4 +66,4 @@ finally:
 #   (no bridge events for ignored_flow)
 #   |
 #   v
-# bridge.unregister(Agently)
+# bridge.unregister()

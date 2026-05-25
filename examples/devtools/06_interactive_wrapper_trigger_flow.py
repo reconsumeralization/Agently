@@ -5,10 +5,10 @@
 import asyncio
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently_devtools import ObservationBridge, InteractiveWrapper
+from agently_devtools import InteractiveWrapper
 
-bridge = ObservationBridge(app_id="agently-main-examples", group_id="interactive-wrapper-triggerflow")
-bridge.register(Agently)
+bridge = Agently.create_observation_bridge(app_id="agently-main-examples", group_id="interactive-wrapper-triggerflow")
+bridge.watch(Agently)
 
 flow = TriggerFlow(name="interactive-demo-flow")
 
@@ -71,7 +71,7 @@ if __name__ == "__main__":
     try:
         interactive.wait()
     finally:
-        bridge.unregister(Agently)
+        bridge.unregister()
 
 # Expected output when launched and given input "hello agently":
 # Interactive UI: http://localhost:<port>/?...

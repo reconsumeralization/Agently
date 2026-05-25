@@ -8,7 +8,12 @@ keywords: Agently, MCP, Model Context Protocol, use_mcp, MCPActionExecutor
 
 > 语言：[English](../../en/actions/mcp.md) · **中文**
 
-MCP（Model Context Protocol）是 hosted 服务向 AI agent 暴露工具的协议。Agently 通过 `MCPActionExecutor` 把 MCP 服务接入 action runtime，所以模型把 MCP tool 与你的 `@agent.action_func` action 看作同一接口。
+MCP（Model Context Protocol）向 AI agent 暴露外部工具。Agently 通过
+`MCPActionExecutor` 把 MCP 服务接入 action runtime，所以模型把 MCP tool 与你的
+`@agent.action_func` action 看作同一接口。
+
+服务集成优先使用 URL / Streamable HTTP MCP endpoint；本地开发、桌面客户端或单用户本地
+server 使用 stdio command config。SSE endpoint 只作为 legacy 兼容路径。
 
 ## 最小例子
 
@@ -49,8 +54,29 @@ asyncio.run(main())
 |---|---|
 | `await agent.use_mcp(url)` | 连接服务、列工具、注册；返回 agent 用于链式调用 |
 | `await agent.use_mcp(url, headers={...})` | 带自定义 HTTP header（auth token 等） |
+| `await agent.use_mcp({"mcpServers": {...}})` | 使用包含一个或多个 HTTP / stdio server 的 MCP config |
 
-具体签名取决于活动 `MCPActionExecutor` 插件 —— 默认 executor，URL + 可选 header 覆盖常见情况。
+默认 executor 会先把 URL + `headers=` 规范化为 MCP config，再交给 FastMCP。
+
+```python
+await agent.use_mcp(
+    "https://example.com/mcp",
+    headers={"Authorization": f"Bearer {token}"},
+)
+```
+
+本地 stdio server 直接传 MCP config：
+
+```python
+await agent.use_mcp({
+    "mcpServers": {
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"],
+        }
+    }
+})
+```
 
 ## 与自定义 action 混用
 

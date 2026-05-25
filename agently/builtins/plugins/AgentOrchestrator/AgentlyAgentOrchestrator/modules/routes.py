@@ -58,12 +58,12 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     mode = cast(Any, route_meta.get("mode", "model_decision"))
     task = execution.task_target()
     agent = cast(Any, execution.agent)
-    semantic_outputs = execution.prompt_snapshot.get("output")
+    output = execution.prompt_snapshot.get("output")
     output_format = execution.prompt_snapshot.get("output_format") or "auto"
     plan = await agent.async_resolve_skills_plan(
         task,
         mode=mode,
-        semantic_outputs=semantic_outputs,
+        output=output,
         output_format=output_format,
     )
     await execution.emit_stream(

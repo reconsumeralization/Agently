@@ -16,7 +16,7 @@ New-standard Skills model
 The capability is a single standard ``SKILL.md`` (guidance only — no
 ``skill.yaml``, no stages, no embedded actions). Running it is ONE prompt-only
 model request that returns the full structured release notes shaped by
-``semantic_outputs``. We stream field-level deltas as the model fills each
+``output``. We stream field-level deltas as the model fills each
 section, then the HOST writes the published file to disk (the only side effect).
 
 Expected key output from one real DeepSeek run:
@@ -83,44 +83,11 @@ MOCK_TEAM = "Platform Engineering — Release Team Alpha"
 # Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SKILL_MD = """\
----
-name: Release Notes Generator
-description: >-
-  Generate professional software release notes from a commit log: classify
-  changes, write user-facing summaries, draft a publishable announcement, and
-  assess release readiness. Use for release, changelog, version, and deploy
-  requests.
-keywords: [release, notes, changelog, version, deploy, 发布, 版本]
----
-
-# Release Notes Generator
-
-You are a release engineer + technical writer. Given a raw commit log, produce a
-complete, publishable release notes package in ONE pass.
-
-## Steps
-1. Classify every commit into: feature, fix, breaking change, docs, security.
-   A security-related fix belongs in BOTH fixes and security.
-2. Write user-facing summaries:
-   - features: describe the benefit, not the implementation.
-   - fixes: what was broken and how it is resolved.
-   - breaking changes: ALWAYS include clear migration steps.
-   - security: state the risk addressed without revealing exploit details.
-3. Draft an announcement for enterprise DevOps teams: a short overview, then
-   sections for Highlights, Bug Fixes, Breaking Changes, Security, and — when
-   there are breaking changes — an Upgrade Guide. End with a Get Started CTA.
-4. Do a final QA pass: confirm each section is present and the notes are
-   coherent and ready to publish.
-
-Be specific and accurate to the commit log. Do not invent changes.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "release-notes-generator"
 
 
 def install_skill() -> str:
-    skill_src = RUNTIME_ROOT / "src" / "release-notes-generator"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -130,7 +97,7 @@ def install_skill() -> str:
 # Host orchestration: run the Skill (prompt-only) + write the published file
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SEMANTIC_OUTPUTS: dict[str, Any] = {
+OUTPUT_SCHEMA: dict[str, Any] = {
     "feature_highlights": ([str], "User-friendly feature descriptions"),
     "fix_summaries": ([str], "User-friendly fix descriptions"),
     "breaking_notes": ([str], "Breaking changes with migration steps"),
@@ -179,7 +146,7 @@ async def main() -> None:
         task,
         skills=[skill_id],
         mode="required",
-        semantic_outputs=SEMANTIC_OUTPUTS,
+        output=OUTPUT_SCHEMA,
         stream_handler=on_stream,
     )
 

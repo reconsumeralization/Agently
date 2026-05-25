@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
-from agently.utils import DeprecationWarnings, Settings, create_logger
+from agently.utils import DeprecationWarnings, LazyImport, Settings, create_logger
 from agently.core import (
     Action,
     DynamicTask,
@@ -334,3 +334,18 @@ class AgentlyMain(Generic[A]):
             parent_settings=self.settings,
             name=name,
         )
+
+    def create_observation_bridge(self, *watch_targets: Any, **bridge_options: Any):
+        devtools = LazyImport.import_package(
+            "agently_devtools",
+            auto_install=False,
+            install_name="agently-devtools",
+        )
+        ObservationBridge = devtools.ObservationBridge
+        bridge = ObservationBridge(self, **bridge_options)
+        if watch_targets:
+            bridge.watch(*watch_targets)
+        return bridge
+
+    def observe(self, *watch_targets: Any, **bridge_options: Any):
+        return self.create_observation_bridge(*watch_targets, **bridge_options)

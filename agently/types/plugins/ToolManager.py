@@ -83,6 +83,18 @@ class ToolManager(AgentlyPlugin, Protocol):
 
     async def async_call_tool(self, name: str, kwargs: dict[str, Any]) -> Any: ...
 
-    async def async_use_mcp(self, transport: "MCPConfigs | str | Any", *, tags: str | list[str] | None = None) -> Any: ...
+    async def async_use_mcp(
+        self,
+        transport: "MCPConfigs | str | Any",
+        *,
+        headers: dict[str, str] | None = None,
+        tags: str | list[str] | None = None,
+    ) -> Any: ...
 
-    def use_mcp(self, transport: "MCPConfigs | str | Any", *, tags: str | list[str] | None = None) -> Any: ...
+    def use_mcp(
+        self,
+        transport: "MCPConfigs | str | Any",
+        *,
+        headers: dict[str, str] | None = None,
+        tags: str | list[str] | None = None,
+    ) -> Any: ...

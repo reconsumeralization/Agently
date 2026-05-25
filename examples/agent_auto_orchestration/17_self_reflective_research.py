@@ -44,33 +44,7 @@ from examples.dynamic_task._shared import configure_model
 DEFAULT_TOPIC = "What makes a durable moat for an AI application startup in 2026?"
 MAX_REVISIONS = 2
 
-SKILL_MD = """\
----
-name: Self-Reflective Research
-description: >-
-  Draft a research report, then critique and improve it: assess weaknesses,
-  decide whether revision is warranted, and produce an improved version. Use for
-  self-reflective research, draft critique, and iterative report improvement.
-keywords: [self-reflective, research, critique, revision, improvement]
----
-
-# Self-Reflective Research
-
-You are a researcher who critiques and improves your own work.
-
-## When given only a topic
-Draft a strong first report (evidence-based, specific), then critique it
-honestly and decide whether a revision is warranted.
-
-## When given a prior draft + your critique
-Produce an improved report that directly addresses the critique. Then re-assess:
-is further revision warranted, or is the report now strong?
-
-Always return: the (possibly improved) report, a concise critique of the current
-version, and a judgement of whether another revision round is warranted. Stop
-when revisions would no longer materially improve the report. Do not fabricate
-sources or figures.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "self-reflective-research"
 
 
 def parse_args() -> tuple[str, str]:
@@ -86,15 +60,13 @@ def parse_args() -> tuple[str, str]:
 
 
 def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "self-reflective-research"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
 
 
-SEMANTIC_OUTPUTS: dict[str, Any] = {
+OUTPUT_SCHEMA: dict[str, Any] = {
     "report": (str, "The current (possibly improved) report, markdown", True),
     "critique": (str, "Concise critique of the current version", True),
     "needs_revision": (bool, "True if another revision round is warranted", True),
@@ -132,7 +104,7 @@ async def main() -> None:
             label = f"revision {rev}"
         print(f"\n[{label}] running skill...")
         execution = await agent.async_run_skills_task(
-            task, skills=[skill_id], mode="required", semantic_outputs=SEMANTIC_OUTPUTS,
+            task, skills=[skill_id], mode="required", output=OUTPUT_SCHEMA,
         )
         if execution.status != "success":
             print("  skill status:", execution.status, execution.output)

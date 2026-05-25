@@ -355,3 +355,60 @@ async def test_mcp_executor_transport_routing():
             pass
         assert captured and captured[-1] is managed_transport, \
             "With managed resource injected, executor must prefer managed transport"
+
+
+def test_mcp_transport_normalization_supports_url_headers_and_configs():
+    from agently.utils.MCP import normalize_mcp_transport
+
+    normalized = normalize_mcp_transport(
+        "https://example.com/mcp",
+        headers={"Authorization": "Bearer token"},
+    )
+    assert normalized == {
+        "mcpServers": {
+            "default": {
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer token"},
+            }
+        }
+    }
+
+    config = {
+        "mcpServers": {
+            "weather": {"url": "https://weather.example/mcp"},
+            "filesystem": {"command": "npx", "args": ["-y", "server"]},
+        }
+    }
+    merged = normalize_mcp_transport(config, headers={"X-Team": "ops"})
+    assert merged["mcpServers"]["weather"]["headers"] == {"X-Team": "ops"}
+    assert "headers" not in merged["mcpServers"]["filesystem"]
+    assert normalize_mcp_transport(config) is config
+
+
+@pytest.mark.asyncio
+async def test_action_use_mcp_url_headers_passes_normalized_transport_to_fastmcp():
+    import unittest.mock as mock
+
+    captured: list[Any] = []
+
+    class FakeClient:
+        def __init__(self, transport):
+            captured.append(transport)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def list_tools(self):
+            return []
+
+    with mock.patch("fastmcp.Client", FakeClient):
+        await Agently.action.async_use_mcp(
+            "https://example.com/mcp",
+            headers={"Authorization": "Bearer token"},
+        )
+
+    assert captured[-1]["mcpServers"]["default"]["url"] == "https://example.com/mcp"
+    assert captured[-1]["mcpServers"]["default"]["headers"] == {"Authorization": "Bearer token"}

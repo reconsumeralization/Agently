@@ -8,7 +8,13 @@ keywords: Agently, MCP, Model Context Protocol, use_mcp, MCPActionExecutor
 
 > Languages: **English** · [中文](../../cn/actions/mcp.md)
 
-MCP (Model Context Protocol) is a protocol for hosted servers that expose tools to AI agents. Agently wires MCP servers into the action runtime via `MCPActionExecutor` so the model sees MCP tools and your own `@agent.action_func` actions through the same interface.
+MCP (Model Context Protocol) exposes external tools to AI agents. Agently wires
+MCP servers into the action runtime via `MCPActionExecutor` so the model sees
+MCP tools and your own `@agent.action_func` actions through the same interface.
+
+Use URL / Streamable HTTP MCP endpoints for service integrations, and stdio
+command configs for local development, desktop clients, or single-user local
+servers. SSE endpoints remain a legacy compatibility path.
 
 ## Minimal example
 
@@ -49,8 +55,30 @@ asyncio.run(main())
 |---|---|
 | `await agent.use_mcp(url)` | connect to the server, list tools, register them; returns the agent for chaining |
 | `await agent.use_mcp(url, headers={...})` | with custom HTTP headers (auth tokens, etc.) |
+| `await agent.use_mcp({"mcpServers": {...}})` | use an MCP config with one or more HTTP or stdio servers |
 
-The exact signature matches whatever the active `MCPActionExecutor` plugin expects — for the default executor, a URL plus optional headers covers the common case.
+For the default executor, `headers=` with a URL is normalized to an MCP config
+before FastMCP sees it.
+
+```python
+await agent.use_mcp(
+    "https://example.com/mcp",
+    headers={"Authorization": f"Bearer {token}"},
+)
+```
+
+For local stdio servers, pass MCP config directly:
+
+```python
+await agent.use_mcp({
+    "mcpServers": {
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"],
+        }
+    }
+})
+```
 
 ## Mixing MCP with custom actions
 

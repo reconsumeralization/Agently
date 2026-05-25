@@ -14,7 +14,7 @@ New-standard Skills model
 The old design wrapped web search / page fetch as Skill ``action`` stages. Under
 the new standard those are plain HOST tools doing the real network I/O. They run
 first; a single prompt-only ``SKILL.md`` then synthesizes the fetched sources
-into a structured report (shaped by ``semantic_outputs``). The HOST writes the
+into a structured report (shaped by ``output``). The HOST writes the
 report. Skill = synthesis guidance; network side effects = host.
 
 Expected key output from one real DeepSeek run:
@@ -152,38 +152,11 @@ async def fetch_details(urls: list[str], max_fetch: int = 3) -> list[dict[str, s
 # Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SKILL_MD = """\
----
-name: Web Research Report
-description: >-
-  Synthesize fetched web sources into a structured research report on a topic:
-  key findings, themes, tradeoffs, and a recommendation, with citations. Use for
-  web research, literature review, and report writing.
-keywords: [web research, report, synthesis, sources, citations]
----
-
-# Web Research Report
-
-You are a research analyst. You are given a topic and a set of fetched web
-sources (title, url, extracted content). Synthesize them into a structured
-report.
-
-## Produce
-1. An executive summary (3-5 sentences).
-2. Key findings as themed sections, each citing the source url(s) it draws on.
-3. Tradeoffs / disagreements between sources, if any.
-4. A short recommendation or "what to do next".
-5. A sources list (title + url).
-
-Ground every claim in the provided sources. If a source could not be fetched
-live, rely on its snippet and say the evidence is limited. Do not invent sources.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "web-research-report"
 
 
 def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "web-research-report"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -227,7 +200,7 @@ async def main() -> None:
         task,
         skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        output={
             "executive_summary": (str, "3-5 sentence summary", True),
             "report": (str, "Full markdown report with themed sections and citations", True),
             "sources": (

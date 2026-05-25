@@ -69,6 +69,47 @@ Agently.set_settings("AnthropicCompatible", {
 
 Per-provider recipes (env vars, common model names, base URLs) live in [Providers](providers/).
 
+## Switching Models With Model Pool
+
+For applications that use more than one model, configure model aliases with
+`model_pool`, then switch the active Agent model with `activate_model(...)`.
+The alias can be concrete and operational, such as `ollama-qwen2.5` or
+`deepseek-v4`.
+
+```python
+agent.set_settings("model_pool", {
+    "ollama-qwen2.5": "qwen2.5:7b",
+    "deepseek-v4": "deepseek-chat",
+})
+agent.set_settings("key_pool", {
+    "local": "ollama",
+    "deepseek-main": "${ENV.DEEPSEEK_API_KEY}",
+    "deepseek-backup": "${ENV.DEEPSEEK_BACKUP_API_KEY}",
+})
+agent.set_settings("key_pool_strategy", {
+    "qwen2.5:7b": {"mode": "fixed", "pool": ["local"]},
+    "deepseek-chat": {"mode": "round_robin", "pool": ["deepseek-main", "deepseek-backup"]},
+})
+
+result = (
+    agent
+    .activate_model("ollama-qwen2.5")
+    .input("Summarize this incident.")
+    .output({"summary": (str, "incident summary", True)})
+    .start()
+)
+```
+
+`activate_model(...)` affects subsequent Agent-owned requests, including
+chain-style `agent.input(...).start()` and `agent.create_execution()`.
+For a one-off override, use `agent.create_request(model_key="deepseek-v4")`.
+
+API keys are selected at request time by `key_pool_strategy`: `fixed`,
+`random`, `round_robin`, or `least_used`. Agently 4.1.3 does not automatically
+retry a failed provider request with another key after auth, quota, or billing
+errors; those failures are surfaced so application code can decide whether
+switching credentials is safe for the business operation.
+
 ## Where the plugin code lives
 
 - [agently/builtins/plugins/ModelRequester/OpenAICompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible.py)

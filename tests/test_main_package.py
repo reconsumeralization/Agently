@@ -56,6 +56,24 @@ def test_agently_set_api_key_and_alias_mapping():
         Agently.set_settings("agently.api_key", original_api_key)
 
 
+def test_agent_activate_model_sets_default_model_key_for_requests():
+    agent = Agently.create_agent("model-switcher")
+
+    assert agent.activate_model("ollama-qwen2.5") is agent
+    assert getattr(agent.request, "_model_key") == "ollama-qwen2.5"
+    assert getattr(agent.create_request(), "_model_key") == "ollama-qwen2.5"
+    assert getattr(agent.create_temp_request(), "_model_key") == "ollama-qwen2.5"
+
+    assert getattr(agent.create_request(model_key="deepseek-v4"), "_model_key") == "deepseek-v4"
+
+    agent.activate_model(None)
+    assert getattr(agent.request, "_model_key") is None
+    assert getattr(agent.create_request(), "_model_key") is None
+
+    with pytest.raises(ValueError, match="non-empty model_key"):
+        agent.activate_model("")
+
+
 def test_action_executor_plugins_registered():
     plugin_list = Agently.plugin_manager.get_plugin_list("ActionExecutor")
     assert "LocalFunctionActionExecutor" in plugin_list

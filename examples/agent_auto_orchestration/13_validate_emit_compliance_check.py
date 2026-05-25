@@ -15,7 +15,7 @@ New-standard Skills model
 The old design used Skill ``validate`` + ``emit`` stages. Under the new standard
 the Skill is pure ``SKILL.md`` guidance: ONE prompt-only request extracts
 clauses, checks which required categories are present/missing, flags gaps, and
-emits a risk summary (shaped by ``semantic_outputs``). The HOST writes the audit
+emits a risk summary (shaped by ``output``). The HOST writes the audit
 report to disk.
 
 Expected key output from one real DeepSeek run:
@@ -46,39 +46,7 @@ from examples.dynamic_task._shared import configure_model
 # Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SKILL_MD = """\
----
-name: Document Compliance Audit
-description: >-
-  Audit a vendor agreement or contract: extract key clauses, check that required
-  clause categories are present, flag compliance gaps and risks, and emit a
-  structured audit summary. Use for compliance, contract review, audit, and
-  vendor agreement requests.
-keywords: [compliance, contract review, audit, vendor agreement, clauses]
----
-
-# Document Compliance Audit
-
-You are a compliance reviewer. Given a contract, produce a structured audit in
-ONE pass.
-
-## Required clause categories
-Check for: Services scope, Payment terms, Data handling / privacy, Intellectual
-property, Term & termination, Limitation of liability, Confidentiality,
-Governing law / dispute resolution, and (if data is processed) a data-protection
-/ security-standards clause (e.g. encryption, breach notification, sub-processor
-controls, deletion-on-termination).
-
-## Produce
-1. Extract the key clauses present (name + one-line summary each).
-2. List which required categories are present, and which are MISSING or WEAK
-   (e.g. "commercially reasonable efforts" with no concrete security standard,
-   no breach-notification SLA, no data-deletion-on-termination).
-3. Flag each compliance gap with its risk level (low/medium/high) and why.
-4. Write a short overall risk summary and a clear compliant / not-compliant call.
-
-Be specific to the document. Do not invent clauses that are not present.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "document-compliance-audit"
 
 VENDOR_AGREEMENT = """
 VENDOR SERVICES AGREEMENT
@@ -125,9 +93,7 @@ Wilmington, Delaware.
 
 
 def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "document-compliance-audit"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -168,7 +134,7 @@ async def main() -> None:
         f"Audit this vendor agreement for compliance:\n\n{VENDOR_AGREEMENT}",
         skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        output={
             "clauses": (
                 [{"name": (str, "Clause name", True), "summary": (str, "One-line summary", True)}],
                 "Key clauses present in the document",

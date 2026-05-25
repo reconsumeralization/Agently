@@ -12,12 +12,13 @@ Skills are available — positioning, risk assessment, and launch comms.
 
 New-standard Skills model
 -------------------------
-This is the multi-skill case. Three standard ``SKILL.md`` Skills are installed.
+This is the multi-skill local-authoring case. Three app-owned standard
+``SKILL.md`` Skills are installed from a temporary local directory.
 With ``mode="model_decision"`` the planner asks the model which Skills to select
 and in what order (route arbitration over the decision cards). The executor then
 runs ONE prompt-only request that injects the FULL guidance of every selected
 Skill and instructs the model to synthesize them — no predetermined sequence,
-no per-Skill DAG. ``semantic_outputs`` shapes the combined launch package.
+no per-Skill DAG. ``output`` shapes the combined launch package.
 
 Expected key output from one real DeepSeek run:
     skill status: success
@@ -45,62 +46,14 @@ from examples.dynamic_task._shared import configure_model
 # Three standard SKILL.md Skills — guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-POSITIONING_SKILL = """\
----
-name: Market Positioning Analysis
-description: >-
-  Analyze product market positioning, competitive landscape, and unique value
-  proposition. Use for positioning, market analysis, and differentiation.
-keywords: [positioning, market analysis, competitive, value proposition, launch]
----
-
-# Market Positioning Analysis
-
-Given product context, produce: a 2-3 paragraph market landscape, one crisp
-positioning statement, and 3-5 differentiators grounded in the product's
-features, pricing, and competitive set.
-"""
-
-RISK_SKILL = """\
----
-name: Launch Risk Assessment
-description: >-
-  Identify, categorize, and prioritize product launch risks, producing a risk
-  matrix (probability × impact) with mitigation strategies. Use for launch risk,
-  risk register, and go-to-market risk review.
-keywords: [risk, launch risk, risk register, mitigation, go-to-market]
----
-
-# Launch Risk Assessment
-
-Given product context (and positioning if available), produce 5-8 launch risks.
-For each: category, probability (low/med/high), impact (low/med/high), and a
-mitigation. Call out the top 3 highest priority risks.
-"""
-
-COMMS_SKILL = """\
----
-name: Launch Communications Generator
-description: >-
-  Draft launch communications: an announcement / press release, an internal
-  support FAQ, and a customer-facing feature summary. Use for launch comms,
-  press release, announcement, and messaging.
-keywords: [launch comms, press release, announcement, FAQ, messaging]
----
-
-# Launch Communications Generator
-
-Given product context (and positioning + risks if available), draft: an
-announcement / press-release blog post, a short internal support FAQ, and a
-customer-facing feature summary. Tailor messaging to the positioning and avoid
-over-claiming where risks are acknowledged.
-"""
-
-SKILLS = {
-    "market-positioning-analysis": POSITIONING_SKILL,
-    "launch-risk-assessment": RISK_SKILL,
-    "launch-communications-generator": COMMS_SKILL,
+SKILL_SOURCES = {
+    "market-positioning-analysis": Path(__file__).resolve().parent / "skills" / "market-positioning-analysis",
+    "launch-risk-assessment": Path(__file__).resolve().parent / "skills" / "launch-risk-assessment",
+    "launch-communications-generator": Path(__file__).resolve().parent / "skills" / "launch-communications-generator",
 }
+
+
+
 
 PRODUCT_CONTEXT = {
     "product_name": "DevFlow Code Review AI",
@@ -124,15 +77,11 @@ PRODUCT_CONTEXT = {
 }
 
 
-def install_skills() -> list[str]:
+def _install_local_demo_skills() -> list[str]:
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
-    src_root = Path(tempfile.mkdtemp(prefix="agently_skill_src_"))
     skill_ids: list[str] = []
-    for slug, md in SKILLS.items():
-        d = src_root / slug
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "SKILL.md").write_text(md, encoding="utf-8")
-        contract = Agently.skills_executor.install_skills(d, trust_level="local", update=True)
+    for skill_src in SKILL_SOURCES.values():
+        contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
         skill_ids.append(str(contract["skill_id"]))
     return skill_ids
 
@@ -141,7 +90,7 @@ async def main() -> None:
     provider = configure_model(temperature=0.3)
     print(f"Model provider: {provider}\n")
 
-    skill_ids = install_skills()
+    skill_ids = _install_local_demo_skills()
     agent = Agently.create_agent("launch-orchestrator")
 
     divider = "=" * 60
@@ -167,7 +116,7 @@ async def main() -> None:
         task,
         skills=skill_ids,
         mode="model_decision",
-        semantic_outputs={
+        output={
             "positioning": (str, "Market landscape, positioning statement, differentiators", True),
             "risk_register": (
                 [{

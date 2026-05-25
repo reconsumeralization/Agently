@@ -1,4 +1,4 @@
-"""Bilingual lesson plan — prompt-only Skill, run twice (ZH and EN input).
+"""Bilingual lesson plan — remote education Skills, run twice (ZH and EN input).
 
 Run:
     python examples/agent_auto_orchestration/04_education_lesson_plan_bilingual.py
@@ -13,10 +13,11 @@ request.
 
 New-standard Skills model
 -------------------------
-A single standard ``SKILL.md`` (guidance only — no ``skill.yaml``, no stages).
-One prompt-only request returns the complete bilingual package shaped by
-``semantic_outputs`` (ZH outline, EN outline, paired vocabulary, teacher
-summary). The HOST writes each package to disk.
+This example uses real third-party education Skills from
+`GarethManning/education-agent-skills` instead of a local demo Skill. The
+selected remote Skills cover backwards design, language demand, vocabulary
+tiering, retrieval practice, and formative assessment. The HOST writes each
+package to disk.
 
 Expected key output from one real DeepSeek run (per topic):
     skill status: success
@@ -43,48 +44,13 @@ from examples.dynamic_task._shared import configure_model
 
 RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "education_bilingual"
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Skill definition — a standard SKILL.md, guidance only
-# ═══════════════════════════════════════════════════════════════════════════════
-
-SKILL_MD = """\
----
-name: Bilingual Lesson Plan Generator
-description: >-
-  Generate a complete bilingual (Chinese + English) K-12 lesson plan package
-  from a topic: aligned learning objectives, timed teaching sections, a paired
-  bilingual vocabulary bank, and a professional teacher summary. Use for lesson,
-  教案, curriculum, and education requests.
-keywords: [lesson, education, curriculum, bilingual, 教案, 教育]
----
-
-# Bilingual Lesson Plan Generator
-
-You are a professional K-12 curriculum designer and bilingual education
-specialist. Given a topic (in Chinese or English), produce ONE complete bilingual
-lesson package, age-appropriate and aligned with standard curriculum goals.
-
-## Produce
-1. A Chinese outline (中文教案): 标题、年级、3 条可衡量学习目标、4 个教学环节
-   (含名称/时长分钟/活动)、5 个核心中文词汇。总时长 40 分钟。
-2. An English outline mirroring the same lesson: title, grade level, 3 measurable
-   objectives, 4 timed teaching sections, 5 key English vocabulary terms.
-3. A paired bilingual vocabulary bank: align the ZH and EN terms, add 2 extra
-   relevant pairs, each with a concise learner-friendly English explanation
-   (at least 5 pairs total).
-4. A short professional teacher summary tying the package together.
-
-Keep both languages pedagogically equivalent.
-"""
-
-
-def install_skill() -> str:
-    skill_src = RUNTIME_ROOT / "src" / "bilingual-lesson-plan"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
-    Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
-    contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
-    return str(contract["skill_id"])
+REMOTE_EDUCATION_SKILLS = [
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/curriculum-assessment/backwards-design-unit-planner", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/eal-language-development/language-demand-analyser", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/eal-language-development/vocabulary-tiering-tool", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/memory-learning-science/retrieval-practice-generator", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/curriculum-assessment/formative-assessment-technique-selector", "trust_level": "remote"},
+]
 
 
 def _outline_schema() -> dict[str, Any]:
@@ -105,7 +71,7 @@ def _outline_schema() -> dict[str, Any]:
     }
 
 
-SEMANTIC_OUTPUTS: dict[str, Any] = {
+OUTPUT_SCHEMA: dict[str, Any] = {
     "zh_outline": (_outline_schema(), "Chinese lesson outline (中文教案)", True),
     "en_outline": (_outline_schema(), "English lesson outline", True),
     "vocabulary_pairs": (
@@ -123,7 +89,7 @@ SEMANTIC_OUTPUTS: dict[str, Any] = {
 }
 
 
-async def run_lesson_plan(agent, skill_id: str, task: str, label: str, index: int) -> None:
+async def run_lesson_plan(agent, task: str, label: str, index: int) -> None:
     divider = "=" * 60
     print(f"\n{divider}\n{label}\n任务: {task}\n{divider}")
     print("运行 bilingual lesson skill (流式)...\n")
@@ -140,9 +106,9 @@ async def run_lesson_plan(agent, skill_id: str, task: str, label: str, index: in
 
     execution = await agent.async_run_skills_task(
         task,
-        skills=[skill_id],
         mode="required",
-        semantic_outputs=SEMANTIC_OUTPUTS,
+        effort="normal",
+        output=OUTPUT_SCHEMA,
         stream_handler=on_stream,
     )
 
@@ -185,17 +151,21 @@ async def main() -> None:
     provider = configure_model(temperature=0.3)
     print(f"Model provider: {provider}\n")
 
-    skill_id = install_skill()
+    Agently.skills_executor.configure(
+        registry_root=str(RUNTIME_ROOT / "registry"),
+        allowed_trust_levels=["local", "remote"],
+    )
     agent = Agently.create_agent("education-bilingual")
+    agent.use_skills(REMOTE_EDUCATION_SKILLS, mode="required")
 
     await run_lesson_plan(
-        agent, skill_id,
+        agent,
         task="帮我设计一节小学五年级的自然科学课，主题是光合作用",
         label="Chinese input → bilingual lesson plan",
         index=1,
     )
     await run_lesson_plan(
-        agent, skill_id,
+        agent,
         task="Create a Grade 5 science lesson on photosynthesis for bilingual students",
         label="English input → bilingual lesson plan",
         index=2,

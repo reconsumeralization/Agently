@@ -207,8 +207,13 @@ class ActionExtension(BaseAgent):
             raise ValueError("desc_mode must be one of: 'append', 'override', 'default'.")
         return f"{ default_desc }\n\nAdditional guidance: { extra }"
 
-    async def async_use_mcp(self, transport: "MCPConfigs | str | Any"):
-        await self.action.async_use_mcp(transport, tags=[f"agent-{ self.name }"])
+    async def async_use_mcp(
+        self,
+        transport: "MCPConfigs | str | Any",
+        *,
+        headers: dict[str, str] | None = None,
+    ):
+        await self.action.async_use_mcp(transport, headers=headers, tags=[f"agent-{ self.name }"])
         return self
 
     def use_action_sandbox(
