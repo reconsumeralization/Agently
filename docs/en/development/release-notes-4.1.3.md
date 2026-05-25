@@ -72,8 +72,10 @@ turning the service into hand-written prompt glue.
 
 ## Execution Objects And Process Streams
 
-For services that need progress updates, diagnostics, logs, or UI streaming,
-the same Agent turn can be created as an execution object.
+For services that need rich stage-by-stage feedback, the same Agent turn can be
+created as an execution object. The primary value is not just logging or
+diagnostics; it is exposing concrete runtime information from any stage to the
+caller, UI, or downstream service while the work is still running.
 
 ```python
 execution = (
@@ -90,17 +92,19 @@ data = await execution.async_get_data()
 meta = await execution.async_get_meta()
 ```
 
-Business value: frontends and logs no longer need to stare at a black-box
-loading state. They can display route decisions, graph readiness, task starts,
-action calls, selected field deltas, blocked states, and final structured
-outputs.
+Business value: frontends no longer need to stare at a black-box loading state.
+They can show route decisions, research findings, graph readiness, task starts,
+action calls, tool results, selected field deltas, approval or blocked states,
+intermediate artifacts, and final structured outputs. Logs and diagnostics are
+important secondary consumers of the same stream.
 
 ## Skills As Runtime Capabilities
 
 `agent.use_skills(...)` is now the recommended Agent-level declaration surface
-for Skills. Application code declares candidate sources; the Skills Executor
-handles lightweight discovery, planner selection, on-demand materialization,
-capability mounting, diagnostics, and execution.
+for Skills. Its default mode is `model_decision`: the planner decides whether
+and which declared Skills should be used. Application code declares candidate
+sources; the Skills Executor handles lightweight discovery, planner selection,
+on-demand materialization, capability mounting, diagnostics, and execution.
 
 ```python
 agent.use_skills(
@@ -138,11 +142,27 @@ ExecutionEnvironment boundaries. The Skill does not create a second tool system.
 
 ```python
 agent.use_skills(
-    [{"source": "OctagonAI/skills", "trust_level": "remote"}],
+    [{"source": "owner/skills-with-mcp", "trust_level": "remote"}],
     mode="required",
     auto_allow=False,
 )
+```
 
+If the selected Skill declares HTTP MCP, it is mounted automatically during
+Skill execution. If it declares stdio, `npx`, local-command MCP, shell, or
+script execution, the runtime requires explicit approval or `auto_allow=True`:
+
+```python
+agent.use_skills(
+    [{"source": "owner/skills-with-local-mcp", "auto_allow": True}],
+    mode="required",
+)
+```
+
+Direct MCP registration remains available when the MCP service is an
+application-owned capability rather than a Skill-declared capability:
+
+```python
 await agent.use_mcp({
     "mcpServers": {
         "market_data": {
@@ -153,7 +173,7 @@ await agent.use_mcp({
 })
 ```
 
-HTTP MCP services can be used directly:
+Application-owned HTTP MCP services can also be used directly:
 
 ```python
 await agent.use_mcp(
@@ -239,22 +259,64 @@ Business value: complex work can be decomposed, streamed, inspected, and
 recovered through the same runtime instead of being compressed into one prompt
 or rewritten as a separate workflow engine.
 
-## Model Pool Stage Routing
+`max_tasks` is a planning guardrail, not an instruction to run forever. When it
+is omitted, Agently does not impose an explicit task-count limit beyond any
+configured planner setting; the planner still generates a finite DAG, validation
+and retry limits still apply, and execution ends when that DAG completes or
+fails.
 
-Skills planning and execution stages use model keys rather than hard-coded
-provider model names.
+## Model Pool And Stage Routing
+
+Agently 4.1.3 supports three-layer model resolution:
+
+```text
+business model key
+  -> model_pool concrete model name
+  -> key_pool_strategy key id
+  -> key_pool API key
+```
+
+This separates business roles such as `reason`, `planner`, or `finalizer` from
+provider model names and API keys.
 
 ```python
-Agently.set_settings(
-    "skills.runtime.stage_model_keys",
-    {
-        "planner": "reason",
-        "research": "research",
-        "executor": "executor",
-        "verifier": "reason",
-        "finalizer": "executor",
-    },
+agent.set_settings("model_pool", {
+    "reason": "deepseek-chat",
+    "planner": "deepseek-reasoner",
+})
+agent.set_settings("key_pool", {
+    "primary": "${ENV.DEEPSEEK_API_KEY}",
+})
+agent.set_settings("key_pool_strategy", {
+    "deepseek-chat": {"mode": "fixed", "pool": ["primary"]},
+    "deepseek-reasoner": {"mode": "fixed", "pool": ["primary"]},
+})
+```
+
+Ordinary model requests can opt into a business model key when creating a
+request:
+
+```python
+response = (
+    agent
+    .create_request(model_key="reason")
+    .input("Summarize this incident.")
+    .output({"summary": (str, "incident summary", True)})
+    .start()
 )
+```
+
+Skills planning and execution stages use the same model-key layer rather than
+hard-coded provider model names:
+
+```python
+agent.set_settings("skills.runtime.stage_model_keys", {
+    "planner": "reason",
+    "research": "research",
+    "executor": "executor",
+    "verifier": "reason",
+    "finalizer": "executor",
+})
 ```
 
 Business value: services can route cheap, fast, or stronger models to different
@@ -294,4 +356,3 @@ return structured business results
   standard `SKILL.md` packages.
 - `semantic_outputs=` for Skills execution is retained as a deprecated
   compatibility alias. New code should use `output=`.
-
