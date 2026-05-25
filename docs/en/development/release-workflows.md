@@ -34,9 +34,18 @@ business value. Do not leave README updates as a post-release marketing task:
 the root README is also the PyPI long description because `[project].readme`
 points at `README.md`.
 
-Before opening or merging the release PR, compare release notes with both README
-files and check for stale version numbers, outdated companion protocol names,
-removed examples, deprecated recommended APIs, and mismatched business claims.
+Before opening the release PR, compare release notes with both README files and
+check for stale version numbers, outdated companion protocol names, removed
+examples, deprecated recommended APIs, and mismatched business claims.
+
+Before merging the release PR, do a separate human release-note review. This is
+not a mechanical checklist. The reviewer should confirm that the release notes
+describe the final product story, code shape, examples, and business value that
+the release is actually shipping. If this review finds wording gaps, stale
+claims, missing README updates, confusing examples, or small API/documentation
+adjustments, make those changes in the release PR, rerun the relevant
+validation, and only then merge. Do not merge first and treat release-note fixes
+as follow-up marketing work.
 
 ## Desktop installers
 
