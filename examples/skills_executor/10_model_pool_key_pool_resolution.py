@@ -73,8 +73,7 @@ async def main():
     agent.set_settings(
         "model_pool",
         {
-            "reason": default_model,  # map "reason" → the default model
-            "finalizer": default_model,  # Skills single_shot uses the finalizer stage key
+            "deepseek-v4": default_model,
         },
     )
     agent.set_settings(
@@ -92,6 +91,7 @@ async def main():
             },
         },
     )
+    agent.set_settings("skills.runtime.stage_model_keys", {"finalizer": "deepseek-v4"})
 
     # ═══════════════════════════════════════════════════════════
     #  Demo 1: unit-level resolution tests (no model call)
@@ -102,7 +102,7 @@ async def main():
 
     from agently.utils.Settings import Settings
     test_settings = Settings(name="Test-Settings")
-    test_settings.set("model_pool", {"reason": "deepseek-v4-pro"})
+    test_settings.set("model_pool", {"deepseek-v4": "deepseek-v4-pro"})
     test_settings.set("key_pool", {"prod-1": "sk-key1"})
     test_settings.set(
         "key_pool_strategy",
@@ -112,10 +112,10 @@ async def main():
     )
     test_settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
 
-    resolve_model_pool_settings("reason", test_settings)
+    resolve_model_pool_settings("deepseek-v4", test_settings)
     assert test_settings.get("plugins.ModelRequester.OpenAICompatible.model") == "deepseek-v4-pro"
     assert test_settings.get("plugins.ModelRequester.OpenAICompatible.api_key") == "sk-key1"
-    print("  model_key 'reason' → model 'deepseek-v4-pro' + key_pool auth: OK")
+    print("  model_key 'deepseek-v4' → model 'deepseek-v4-pro' + key_pool auth: OK")
 
     # ═══════════════════════════════════════════════════════════
     #  Demo 2: backward compat — no model_key → global model
@@ -132,21 +132,19 @@ async def main():
     print("  backward compat: OK")
 
     # ═══════════════════════════════════════════════════════════
-    #  Demo 3: model_key via create_temp_request → real call
+    #  Demo 3: activate_model → real call
     # ═══════════════════════════════════════════════════════════
     print()
     print("═" * 60)
-    print("Demo 3: model_key via create_temp_request")
+    print("Demo 3: activate_model")
     print("═" * 60)
 
-    # Manual pipe: create_temp_request → input → get_response → get_text
-    request = agent.create_temp_request(model_key="reason")
-    request.input("Reply with exactly 'OK' and nothing else.")
-    response = request.get_response()
-    result = await response.async_get_text()
-    print(f"  Response (model_key='reason'): '{result.strip()}'")
+    agent.activate_model("deepseek-v4")
+    agent.input("Reply with exactly 'OK' and nothing else.")
+    result = await agent.async_get_text()
+    print(f"  Response (active model='deepseek-v4'): '{result.strip()}'")
     assert result.strip() == "OK", f"Expected 'OK', got '{result.strip()}'"
-    print("  model_key via create_temp_request: OK")
+    print("  activate_model: OK")
 
     # ═══════════════════════════════════════════════════════════
     #  Demo 4: model pool through public Skills execution
@@ -185,7 +183,7 @@ async def main():
     print("Demo 5: model_key with direct structured request")
     print("═" * 60)
 
-    request = agent.create_temp_request(model_key="reason")
+    request = agent.create_temp_request(model_key="deepseek-v4")
     request.input("Return a JSON object with a single key 'status' set to 'ok'.")
     request.output({"status": (str, "ok or error", True)}, format="json")
     response = request.get_response()

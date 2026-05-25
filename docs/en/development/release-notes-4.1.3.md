@@ -276,34 +276,42 @@ business model key
   -> key_pool API key
 ```
 
-This separates business roles such as `reason`, `planner`, or `finalizer` from
+This separates model aliases such as `ollama-qwen2.5` or `deepseek-v4` from
 provider model names and API keys.
 
 ```python
 agent.set_settings("model_pool", {
-    "reason": "deepseek-chat",
-    "planner": "deepseek-reasoner",
+    "ollama-qwen2.5": "qwen2.5:7b",
+    "deepseek-v4": "deepseek-chat",
 })
 agent.set_settings("key_pool", {
-    "primary": "${ENV.DEEPSEEK_API_KEY}",
+    "local": "ollama",
+    "deepseek-main": "${ENV.DEEPSEEK_API_KEY}",
+    "deepseek-backup": "${ENV.DEEPSEEK_BACKUP_API_KEY}",
 })
 agent.set_settings("key_pool_strategy", {
-    "deepseek-chat": {"mode": "fixed", "pool": ["primary"]},
-    "deepseek-reasoner": {"mode": "fixed", "pool": ["primary"]},
+    "qwen2.5:7b": {"mode": "fixed", "pool": ["local"]},
+    "deepseek-chat": {"mode": "round_robin", "pool": ["deepseek-main", "deepseek-backup"]},
 })
 ```
 
-Ordinary model requests can opt into a business model key when creating a
-request:
+Ordinary Agent turns can switch the active model with `activate_model(...)`:
 
 ```python
-response = (
+result = (
     agent
-    .create_request(model_key="reason")
+    .activate_model("ollama-qwen2.5")
     .input("Summarize this incident.")
     .output({"summary": (str, "incident summary", True)})
     .start()
 )
+```
+
+For one-off calls, `create_request(model_key=...)` still overrides the active
+Agent model:
+
+```python
+response = agent.create_request(model_key="deepseek-v4").input("Draft the customer reply.").start()
 ```
 
 Skills planning and execution stages use the same model-key layer rather than
@@ -311,13 +319,20 @@ hard-coded provider model names:
 
 ```python
 agent.set_settings("skills.runtime.stage_model_keys", {
-    "planner": "reason",
-    "research": "research",
-    "executor": "executor",
-    "verifier": "reason",
-    "finalizer": "executor",
+    "planner": "deepseek-v4",
+    "research": "deepseek-v4",
+    "executor": "ollama-qwen2.5",
+    "verifier": "deepseek-v4",
+    "finalizer": "deepseek-v4",
 })
 ```
+
+API key switching is automatic at request time according to
+`key_pool_strategy`: `fixed`, `random`, `round_robin`, or `least_used`.
+4.1.3 does not automatically retry a failed provider request with another key
+after an auth, quota, or billing error. Those failures are surfaced so the
+application can decide whether switching credentials is safe for that business
+operation.
 
 Business value: services can route cheap, fast, or stronger models to different
 runtime stages without changing business code. Planning, research, execution,

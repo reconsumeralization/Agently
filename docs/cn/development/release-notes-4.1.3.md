@@ -254,46 +254,59 @@ Agently 4.1.3 支持三层模型解析：
   -> key_pool 里的 API key
 ```
 
-这把 `reason`、`planner`、`finalizer` 这类业务角色和具体 provider model name、
+这把 `ollama-qwen2.5`、`deepseek-v4` 这类模型别名和具体 provider model name、
 API key 解耦。
 
 ```python
 agent.set_settings("model_pool", {
-    "reason": "deepseek-chat",
-    "planner": "deepseek-reasoner",
+    "ollama-qwen2.5": "qwen2.5:7b",
+    "deepseek-v4": "deepseek-chat",
 })
 agent.set_settings("key_pool", {
-    "primary": "${ENV.DEEPSEEK_API_KEY}",
+    "local": "ollama",
+    "deepseek-main": "${ENV.DEEPSEEK_API_KEY}",
+    "deepseek-backup": "${ENV.DEEPSEEK_BACKUP_API_KEY}",
 })
 agent.set_settings("key_pool_strategy", {
-    "deepseek-chat": {"mode": "fixed", "pool": ["primary"]},
-    "deepseek-reasoner": {"mode": "fixed", "pool": ["primary"]},
+    "qwen2.5:7b": {"mode": "fixed", "pool": ["local"]},
+    "deepseek-chat": {"mode": "round_robin", "pool": ["deepseek-main", "deepseek-backup"]},
 })
 ```
 
-普通模型请求可以在创建 request 时选择业务 model key：
+普通 Agent turn 可以用 `activate_model(...)` 切换当前模型：
 
 ```python
-response = (
+result = (
     agent
-    .create_request(model_key="reason")
+    .activate_model("ollama-qwen2.5")
     .input("Summarize this incident.")
     .output({"summary": (str, "incident summary", True)})
     .start()
 )
 ```
 
+单次调用仍然可以用 `create_request(model_key=...)` 覆盖当前 Agent 模型：
+
+```python
+response = agent.create_request(model_key="deepseek-v4").input("Draft the customer reply.").start()
+```
+
 Skills 规划和执行阶段使用同一层 model key，而不是硬编码 provider model name：
 
 ```python
 agent.set_settings("skills.runtime.stage_model_keys", {
-    "planner": "reason",
-    "research": "research",
-    "executor": "executor",
-    "verifier": "reason",
-    "finalizer": "executor",
+    "planner": "deepseek-v4",
+    "research": "deepseek-v4",
+    "executor": "ollama-qwen2.5",
+    "verifier": "deepseek-v4",
+    "finalizer": "deepseek-v4",
 })
 ```
+
+API key 切换是在请求时根据 `key_pool_strategy` 自动选择：`fixed`、`random`、
+`round_robin` 或 `least_used`。4.1.3 不会在 provider 返回鉴权、额度或费用类错误后
+自动换另一个 key 重试；这类失败会暴露给应用，由业务系统决定该操作是否适合更换凭据
+重试。
 
 业务价值：服务可以把不同阶段路由给便宜、快速或更强的模型，而不需要改业务代码。
 规划、调研、执行、校验、反思和最终生成都能使用适合该阶段的模型。

@@ -61,6 +61,7 @@ class BaseAgent:
             },
             name=f"Agent-{ self.name }-ExtensionHandlers",
         )
+        self._active_model_key: str | None = None
         self.request = ModelRequest(
             agent_name=self.name,
             agent_id=self.id,
@@ -75,6 +76,24 @@ class BaseAgent:
 
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
+
+    def activate_model(self, model_key: str | None = None):
+        """Set the default model key for subsequent Agent-owned requests.
+
+        The model key is resolved through the existing model_pool /
+        key_pool_strategy / key_pool settings when a request is consumed.
+        Passing None clears the active model key.
+        """
+        if model_key is None:
+            self._active_model_key = None
+            self.request._model_key = None
+            return self
+        normalized = str(model_key).strip()
+        if not normalized:
+            raise ValueError("activate_model(...) requires a non-empty model_key, or None to clear it.")
+        self._active_model_key = normalized
+        self.request._model_key = normalized
+        return self
 
     # Create Request
     def create_request(
@@ -102,7 +121,7 @@ class BaseAgent:
             parent_settings=self.settings,
             parent_prompt=self.agent_prompt if inherit_agent_prompt else None,
             parent_extension_handlers=self.extension_handlers if inherit_extension_handlers else None,
-            model_key=model_key,
+            model_key=model_key if model_key is not None else self._active_model_key,
         )
 
     def create_temp_request(self, model_key: str | None = None):
