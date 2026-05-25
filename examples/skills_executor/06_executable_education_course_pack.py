@@ -1,4 +1,4 @@
-"""Education course pack — prompt-only Skill + host-written Office artifacts.
+"""Education course pack — remote education Skills + host-written Office artifacts.
 
 Run:
     python examples/skills_executor/06_executable_education_course_pack.py
@@ -18,13 +18,12 @@ Expected key output from a real DeepSeek run:
 
 New-standard Skills model
 -------------------------
-The old benchmark used an *executable* dependency-installer Skill whose action
-ran ``pip install`` before staged generation. That executable-action-inside-a-
-Skill pattern is retired. Under the new standard the Skill is pure ``SKILL.md``
-guidance that produces structured course content in ONE prompt-only request;
-the HOST owns every side effect — writing the .docx/.pdf/.pptx/.xlsx artifacts.
-Python package dependencies are the host's responsibility, never a Skill's: a
-missing library simply skips that artifact (we do not install packages at runtime).
+This example uses real third-party Skills instead of a local demo Skill:
+GarethManning's education Skill library for pedagogy plus Anthropic's artifact
+Skills for document/spreadsheet/slide/PDF output guidance. The HOST still owns
+every side effect — writing the .docx/.pdf/.pptx/.xlsx artifacts. Python package
+dependencies are the host's responsibility, never a Skill's: a missing library
+simply skips that artifact (we do not install packages at runtime).
 """
 
 from __future__ import annotations
@@ -43,48 +42,20 @@ if str(ROOT) not in sys.path:
 from agently import Agently
 from examples.dynamic_task._shared import configure_model
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Skill definition — a standard SKILL.md, guidance only
-# ═══════════════════════════════════════════════════════════════════════════════
-
-SKILL_MD = """\
----
-name: Course Pack Designer
-description: >-
-  Design a complete teaching course pack for a given subject and level: a course
-  plan, teacher guide sections, a student handout, lesson slides, a vocabulary
-  bank, and an assessment rubric. Use for course design, lesson planning, and
-  curriculum/course pack requests.
-keywords: [course pack, curriculum, lesson plan, teaching, education, rubric]
----
-
-# Course Pack Designer
-
-You are an instructional designer. Given a subject and level, design a coherent,
-ready-to-teach course pack in ONE pass.
-
-## Produce
-1. A course title and a short course overview.
-2. Teacher guide sections: 3-5 sections, each a heading + 3-5 teaching points.
-3. A student handout: 4-6 short paragraphs of learner-facing material.
-4. Lesson slides: 6-10 slides, each a title + 3-5 bullets.
-5. A vocabulary bank: 8-12 term/definition pairs.
-6. An assessment rubric: 4-6 criteria, each with a performance descriptor.
-
-Keep everything level-appropriate and internally consistent (slides, handout,
-and rubric should reflect the same objectives).
-"""
-
 COURSE_BRIEF = "Design a B1 (intermediate) Business English course pack focused on running effective meetings."
 
-
-def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "course-pack-designer"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
-    Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
-    contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
-    return str(contract["skill_id"])
+REMOTE_SKILLS = [
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/curriculum-assessment/backwards-design-unit-planner", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/eal-language-development/language-demand-analyser", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/eal-language-development/vocabulary-tiering-tool", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/memory-learning-science/retrieval-practice-generator", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/memory-learning-science/spaced-practice-scheduler", "trust_level": "remote"},
+    {"source": "GarethManning/education-agent-skills", "subpath": "skills/curriculum-assessment/formative-assessment-technique-selector", "trust_level": "remote"},
+    {"source": "anthropics/skills", "subpath": "skills/docx", "trust_level": "remote"},
+    {"source": "anthropics/skills", "subpath": "skills/pdf", "trust_level": "remote"},
+    {"source": "anthropics/skills", "subpath": "skills/pptx", "trust_level": "remote"},
+    {"source": "anthropics/skills", "subpath": "skills/xlsx", "trust_level": "remote"},
+]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -195,8 +166,12 @@ async def main() -> None:
     provider = configure_model(temperature=0.3)
     print(f"Model provider: {provider}\n")
 
-    skill_id = install_skill()
+    Agently.skills_executor.configure(
+        registry_root=str(ROOT / ".example_runtime" / "skills_executor" / "education_course_pack" / "registry"),
+        allowed_trust_levels=["local", "remote"],
+    )
     agent = Agently.create_agent("course-designer")
+    agent.use_skills(REMOTE_SKILLS, mode="required")
 
     divider = "=" * 60
     print(divider)
@@ -207,9 +182,9 @@ async def main() -> None:
 
     execution = await agent.async_run_skills_task(
         COURSE_BRIEF,
-        skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        effort="normal",
+        output={
             "course_title": (str, "Course title", True),
             "course_overview": (str, "Short course overview", True),
             "teacher_guide_sections": (

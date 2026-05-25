@@ -472,7 +472,7 @@ def _run_case(case: ComboCase, candidate_skill_ids: list[str]) -> dict[str, Any]
         case.task,
         skills=candidate_skill_ids,
         mode="model_decision",
-        semantic_outputs=case.expected_outputs,
+        output=case.expected_outputs,
     )
     plan = execution.plan
     result = dict(plan.get("planner_result") or {})
@@ -610,7 +610,7 @@ def _required_term_covered(term: str, full_text: str) -> bool:
 def _semantic_rules(case: ComboCase) -> list[str]:
     rules = [
         "The plan selects only candidate skills and uses more than one skill when the task needs multiple capability layers.",
-        "The plan has explicit stages for entry planning, stage switching, intermediate artifact handoff, and final semantic outputs.",
+        "The plan has explicit stages for entry planning, stage switching, intermediate artifact handoff, and final outputs.",
         "The plan distinguishes Skill guidance from Actions, tools, external APIs, execution environments, and artifact files.",
         "The plan covers every expected deliverable by role/type semantics; exact filenames are not required.",
     ]

@@ -16,7 +16,7 @@ The old design wrapped deterministic scanners as Skill ``action`` stages. Under
 the new standard those scanners are plain HOST tools — they do the real,
 non-model work (regex secret/injection scanning, CVE lookup) and run before the
 model. A single prompt-only ``SKILL.md`` then triages the raw findings into a
-prioritized security audit report (shaped by ``semantic_outputs``). The HOST
+prioritized security audit report (shaped by ``output``). The HOST
 writes the report to disk. Skill = analysis guidance; tools/side effects = host.
 
 Expected key output from one real DeepSeek run:
@@ -201,40 +201,11 @@ def scan_codebase(root: Path) -> dict[str, Any]:
 # Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SKILL_MD = """\
----
-name: Security Audit Reporter
-description: >-
-  Triage raw security-scan findings (hardcoded secrets, injection patterns,
-  vulnerable dependencies) into a prioritized, actionable security audit report.
-  Use for security audit, code audit, vulnerability triage, and risk review.
-keywords: [security audit, code audit, vulnerability, triage, CVE, risk]
----
-
-# Security Audit Reporter
-
-You are an application security engineer. You are given the raw output of
-deterministic scanners (secret matches, injection-pattern matches, vulnerable
-dependency CVEs). Produce a prioritized audit report.
-
-## Do
-1. Assign an overall risk level (low/medium/high/critical) justified by the
-   severity breakdown and the presence of secrets / RCE-class issues.
-2. Write a short executive summary for an engineering leader.
-3. Prioritize remediations: list the top fixes in order, each with the concrete
-   action and why it matters. Hardcoded production secrets and RCE/command-
-   injection issues come first.
-4. Group findings by theme (secrets, injection, vulnerable deps) with counts.
-
-Base everything ONLY on the provided scan data. Do not invent files, secrets, or
-CVEs that are not present.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "security-audit-reporter"
 
 
 def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "security-audit-reporter"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -280,7 +251,7 @@ async def main() -> None:
         + json.dumps(scan, ensure_ascii=False, indent=2),
         skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        output={
             "risk_level": (str, "Overall risk: low, medium, high, or critical", True),
             "executive_summary": (str, "Short summary for an engineering leader", True),
             "top_remediations": (

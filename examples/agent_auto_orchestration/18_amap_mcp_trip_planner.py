@@ -1,4 +1,4 @@
-"""City day-trip planner — real remote MCP (AMap) + Skills, two-phase agent.
+"""City day-trip planner — remote Travel Planner Skill + real AMap MCP.
 
 Run:
     python examples/agent_auto_orchestration/18_amap_mcp_trip_planner.py
@@ -13,20 +13,17 @@ Environment:
 
 What this demonstrates
 ----------------------
-This is the "complex" combined path: a **real remote MCP server** wired into an
-agent's Action runtime, driven **from inside a Skill** — not by host glue code.
+This is the remote public-Skill + remote MCP path: the travel planning guidance
+comes from `ZawYePhyo/travel-planner-skill`, while live city facts come from the
+real AMap Streamable HTTP MCP server through the agent's Action runtime.
 
-Phase 1 — Field research (react Skill + AMap MCP).
-    A standard ``SKILL.md`` with ``execution: react`` and ``allowed-tools``
-    listing AMap tool names. The react loop reasons → calls a real AMap tool →
-    observes, gathering live weather and points-of-interest for the city. The
-    tools resolve through the agent's ActionRuntime (``agent.use_mcp(...)``),
-    and the react planner surfaces each tool's real argument schema to the
-    model, so calls use correct parameter names.
+Phase 1 — Field research (model-generated AMap MCP actions).
+    The model generates concrete AMap action calls against registered MCP tool
+    schemas; ActionRuntime executes them and records real observations.
 
-Phase 2 — Itinerary synthesis (single_shot Skill).
-    A prompt-only ``SKILL.md`` turns the gathered REAL observations into a
-    structured one-day itinerary via ``semantic_outputs``. The HOST writes the
+Phase 2 — Itinerary synthesis (remote Travel Planner Skill).
+    The remote travel-planner Skill turns the gathered REAL observations into a
+    structured one-day itinerary via ``output``. The HOST writes the
     markdown artifact (the only side effect).
 
 Model calls and MCP data are BOTH real. The weather forecast, attraction names,
@@ -61,50 +58,12 @@ from examples.dynamic_task._shared import configure_model
 
 RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "amap_trip_planner"
 
-# ── Phase 1 Skill: react loop that calls the real AMap MCP tools ──────────────
-FIELD_RESEARCH_SKILL = """---
-name: City Field Researcher
-description: Gather grounded local facts (weather and points of interest) for a city using AMap map tools.
-keywords: [travel, city, weather, attractions, restaurants, 行程, 景点]
-execution: react
-allowed-tools: [maps_weather, maps_text_search]
-max-steps: 6
----
-
-# City Field Researcher
-
-You research a city for a one-day visit using the available map tools. Use ONLY
-data returned by the tools — never invent weather, place names, or addresses.
-
-Work ONE tool call per step and read its result before the next step:
-1. Call `maps_weather` with the city name to get the forecast.
-2. Call `maps_text_search` with `keywords="景点"` and `city=<the city>` to find
-   top attractions.
-3. Call `maps_text_search` with `keywords="餐厅"` and `city=<the city>` to find
-   well-known local restaurants.
-
-When you have the weather plus attractions plus restaurants, set `final: true`.
-Always pass the exact argument names the tools declare.
-"""
+TRAVEL_PLANNER_SKILL = {
+    "source": "ZawYePhyo/travel-planner-skill",
+    "trust_level": "remote",
+}
 
 # ── Phase 2 Skill: prompt-only synthesis into a structured itinerary ──────────
-ITINERARY_SKILL = """---
-name: Itinerary Designer
-description: Turn researched city facts into a structured, weather-aware one-day itinerary.
-keywords: [itinerary, trip plan, schedule, travel]
----
-
-# Itinerary Designer
-
-Given REAL researched facts about a city (weather forecast, attractions,
-restaurants), design a practical one-day itinerary.
-
-- Adapt to the weather: if rain or extreme heat is forecast, prefer sheltered or
-  indoor options and say so.
-- Use only the provided place names and addresses; do not invent new ones.
-- Sequence morning → afternoon → evening with a dining suggestion, and keep it
-  realistic for a single day.
-"""
 
 ITINERARY_OUTPUTS: dict[str, Any] = {
     "city": (str, "City the plan is for.", True),
@@ -125,25 +84,56 @@ ITINERARY_OUTPUTS: dict[str, Any] = {
     "tips": ([str], "Practical tips, weather-aware.", True),
 }
 
-
-def install_skill(skill_md: str, slug: str) -> str:
-    src = RUNTIME_ROOT / "skills" / slug
-    src.mkdir(parents=True, exist_ok=True)
-    (src / "SKILL.md").write_text(skill_md, encoding="utf-8")
-    contract = Agently.skills_executor.install_skills(src, trust_level="local", update=True)
-    return str(contract["skill_id"])
-
-
 def _summarize_observations(history: list[dict[str, Any]]) -> str:
-    """Flatten the react observation trail into compact text for synthesis."""
+    """Flatten AMap observation records into compact text for synthesis."""
     lines: list[str] = []
     for obs in history:
-        name = obs.get("name", "tool")
+        name = obs.get("action_id", obs.get("name", "tool"))
         result = obs.get("result")
         if result in (None, "", {}):
             continue
         lines.append(f"### {name}\n{json.dumps(result, ensure_ascii=False)[:2000]}")
     return "\n\n".join(lines)
+
+
+async def _execute_model_owned_amap_actions(agent: Any, *, city: str) -> list[dict[str, Any]]:
+    agent.input(
+        (
+            f"Use the registered AMap MCP actions to collect one-day trip facts for {city}. "
+            "Generate action calls only for maps_weather and maps_text_search. "
+            "Call maps_weather once, maps_text_search for 景点, and maps_text_search for 餐厅. "
+            "Do not answer from memory."
+        )
+    )
+    action_calls = await agent.async_generate_action_call(max_rounds=1)
+    if not action_calls:
+        raise RuntimeError("The model did not generate AMap MCP action calls.")
+
+    records: list[dict[str, Any]] = []
+    for call in action_calls:
+        if not isinstance(call, dict):
+            continue
+        action_id = str(call.get("action_id") or call.get("tool_name") or call.get("name") or "")
+        if action_id not in {"maps_weather", "maps_text_search"}:
+            continue
+        action_input = call.get("action_input") or call.get("tool_kwargs") or call.get("kwargs") or {}
+        if not isinstance(action_input, dict):
+            action_input = {}
+        result = await agent.action.async_execute_action(
+            action_id,
+            action_input,
+            purpose=str(call.get("purpose") or "Collect AMap travel facts."),
+            source_protocol="example_model_generated_mcp",
+        )
+        records.append({
+            "action_id": action_id,
+            "action_input": action_input,
+            "status": result.get("status"),
+            "result": result.get("data", result.get("result", result.get("error"))),
+        })
+    if not records:
+        raise RuntimeError(f"The model generated no executable AMap actions: { action_calls }")
+    return records
 
 
 async def main() -> None:
@@ -164,39 +154,22 @@ async def main() -> None:
 
     Agently.skills_executor.configure(
         registry_root=str(RUNTIME_ROOT / "registry"),
-        allowed_trust_levels=["local"],
+        allowed_trust_levels=["local", "remote"],
     )
-    research_skill = install_skill(FIELD_RESEARCH_SKILL, "city-field-researcher")
-    itinerary_skill = install_skill(ITINERARY_SKILL, "itinerary-designer")
 
     agent = Agently.create_agent("amap-trip-planner")
-    # Wire the REAL remote AMap MCP server into the agent's Action runtime.
+    agent.use_skills([TRAVEL_PLANNER_SKILL], mode="required")
+    # Wire the REAL remote AMap Streamable HTTP MCP server into Action runtime.
     agent.use_mcp(f"https://mcp.amap.com/mcp?key={amap_key}")
     amap_tools = [t["name"] for t in agent.action.get_tool_info().values() if str(t["name"]).startswith("maps_")]
     print(f"amap_tools_registered={len(amap_tools)}")
 
-    # ── Phase 1: react Skill gathers real data through AMap MCP ──
-    print("\n[Phase 1] Field research via AMap MCP (react)…")
-    tool_rounds = 0
-
-    async def on_stream(item: dict[str, Any]) -> None:
-        if item.get("type") == "skills.react.action_runtime_round":
-            nonlocal tool_rounds
-            count = (item.get("payload") or {}).get("action_count", 0)
-            if count:
-                tool_rounds += 1
-                print(f"  → tool round {tool_rounds}: {count} call(s)")
-
-    research = await agent.async_run_skills_task(
-        f"Research a one-day visit to {city}. Gather weather, attractions, and restaurants.",
-        skills=[research_skill],
-        mode="required",
-        stream_handler=on_stream,
-    )
-    history = (research.output or {}).get("history", []) if isinstance(research.output, dict) else []
+    # ── Phase 1: model generates and ActionRuntime executes real AMap MCP calls ──
+    print("\n[Phase 1] Field research via AMap MCP actions…")
+    history = await _execute_model_owned_amap_actions(agent, city=city)
     research_calls = sum(1 for h in history if isinstance(h, dict) and h.get("result") not in (None, "", {}))
 
-    weather_observed = any("weather" in str(h.get("name", "")) and h.get("result") for h in history)
+    weather_observed = any("weather" in str(h.get("action_id", h.get("name", ""))) and h.get("result") for h in history)
     poi_names: list[str] = []
     for h in history:
         result = h.get("result")
@@ -214,13 +187,13 @@ async def main() -> None:
         print("No tool observations gathered; aborting synthesis.")
         return
 
-    # ── Phase 2: prompt-only Skill synthesizes a structured itinerary ──
-    print("\n[Phase 2] Itinerary synthesis (single_shot)…")
+    # ── Phase 2: remote Travel Planner Skill synthesizes a structured itinerary ──
+    print("\n[Phase 2] Itinerary synthesis (remote travel-planner Skill)…")
     synthesis = await agent.async_run_skills_task(
         f"Design a one-day itinerary for {city} from this researched data:\n\n{observations}",
-        skills=[itinerary_skill],
         mode="required",
-        semantic_outputs=ITINERARY_OUTPUTS,
+        effort="normal",
+        output=ITINERARY_OUTPUTS,
     )
     if synthesis.status != "success":
         print("synthesis failed:", synthesis.output)

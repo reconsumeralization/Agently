@@ -1,4 +1,4 @@
-"""Browser web testing — host serves app + scans + screenshots, Skill writes QA report.
+"""Browser web testing — host serves app + scans + remote webapp-testing Skill.
 
 Run:
     python examples/agent_auto_orchestration/10_browser_web_testing.py
@@ -14,9 +14,9 @@ New-standard Skills model
 The old design wrapped serving / a11y scan / screenshot as Skill ``action``
 stages. Under the new standard those are plain HOST tools: the host serves a
 local test app, runs a deterministic accessibility scan, and (if Playwright is
-installed) captures a screenshot. A single prompt-only ``SKILL.md`` then turns
-the page markup + scan findings into a QA test report (shaped by
-``semantic_outputs``). Skill = QA reasoning; serving/scanning/screenshots = host.
+installed) captures a screenshot. The QA reasoning Skill is Anthropic's remote
+`webapp-testing` Skill, not a local duplicate. Skill = QA/testing guidance;
+serving/scanning/screenshots = host.
 
 Expected key output from one real DeepSeek run:
     skill status: success
@@ -146,44 +146,11 @@ async def capture_screenshot(url: str) -> str:
         return ""
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Skill definition — a standard SKILL.md, guidance only
-# ═══════════════════════════════════════════════════════════════════════════════
-
-SKILL_MD = """\
----
-name: Web App QA Reporter
-description: >-
-  Turn a local web app's markup and an accessibility scan into a QA test report:
-  functional checks, accessibility issues with WCAG references, and prioritized
-  fixes. Use for web testing, QA, accessibility audit, and frontend review.
-keywords: [web testing, QA, accessibility, WCAG, frontend, audit]
----
-
-# Web App QA Reporter
-
-You are a frontend QA engineer. You are given the served pages' HTML and the
-output of a deterministic accessibility scan. Produce a QA report.
-
-## Do
-1. Summarize what the app appears to do (from the markup).
-2. List functional checks a tester should run (navigation, form submit, etc.).
-3. Report accessibility issues — incorporate the scan findings, each with its
-   WCAG reference and a concrete fix; add any additional issues the markup
-   reveals.
-4. Give an overall PASS / ISSUES-FOUND verdict and the top fixes in priority order.
-
-Base findings on the provided markup and scan. Do not invent pages or elements.
-"""
-
-
-def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "web-app-qa-reporter"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
-    Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
-    contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
-    return str(contract["skill_id"])
+WEBAPP_TESTING_SKILL = {
+    "source": "anthropics/skills",
+    "subpath": "skills/webapp-testing",
+    "trust_level": "remote",
+}
 
 
 async def main() -> None:
@@ -206,12 +173,17 @@ async def main() -> None:
         screenshot = await capture_screenshot(f"{base_url}/index.html")
         print(f"  screenshot: {screenshot or '(skipped — playwright not installed)'}\n")
 
-        skill_id = install_skill()
+        Agently.skills_executor.configure(
+            registry_root=str(ROOT / ".example_runtime" / "agent_auto_orchestration" / "browser_web_testing" / "registry"),
+            allowed_trust_levels=["local", "remote"],
+        )
         agent = Agently.create_agent("web-qa")
+        agent.use_skills([WEBAPP_TESTING_SKILL], mode="required")
 
         markup = "\n\n".join(f"### {name}\n{html}" for name, html in PAGES.items())
         task = (
-            f"Produce a QA report for this local web app served at {base_url}.\n\n"
+            "Produce a QA report for this local two-page CI dashboard app. "
+            f"The host already served it locally and tested it at port {base_url.rsplit(':', 1)[-1]}.\n\n"
             f"Pages markup:\n{markup}\n\n"
             f"Accessibility scan findings (JSON):\n{scan['findings']}"
         )
@@ -219,9 +191,8 @@ async def main() -> None:
         print("Generating QA report (skill)...")
         execution = await agent.async_run_skills_task(
             task,
-            skills=[skill_id],
             mode="required",
-            semantic_outputs={
+            output={
                 "app_summary": (str, "What the app appears to do", True),
                 "functional_checks": ([str], "Functional checks a tester should run", True),
                 "accessibility_issues": (

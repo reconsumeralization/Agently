@@ -14,7 +14,7 @@ New-standard Skills model
 -------------------------
 The old design used two Skill ``model`` stages + a ``save`` action. Under the new
 standard the Skill is pure ``SKILL.md`` guidance: ONE prompt-only request returns
-the positioning brief and the risk register (shaped by ``semantic_outputs``),
+the positioning brief and the risk register (shaped by ``output``),
 streamed field-by-field; the HOST writes the press kit to disk.
 
 Expected key output from one real DeepSeek run:
@@ -44,35 +44,7 @@ from examples.dynamic_task._shared import configure_model
 # Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SKILL_MD = """\
----
-name: Product Launch Press Kit
-description: >-
-  Generate a product launch press kit from a product brief: a market positioning
-  brief and a launch risk register with mitigations. Use for press kit, launch,
-  positioning, and press release requests.
-keywords: [press kit, launch, positioning, press release, risk register]
----
-
-# Product Launch Press Kit
-
-You are a product marketing lead + technical risk analyst. Given a product brief,
-produce a launch press kit in ONE pass.
-
-## Positioning brief
-- A 2-3 paragraph market landscape summary.
-- One crisp positioning statement.
-- 3-5 differentiators vs the listed competitors, grounded in the brief's
-  features, pricing, and beta results.
-
-## Launch risk register
-- 5-8 risks, each with severity (low/medium/high), category (e.g. market,
-  technical, compliance, GTM), and a one-sentence description.
-- For the top 3 risks, add a concrete mitigation.
-
-Be specific to the product brief; do not invent features, pricing, or metrics
-that are not present.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "product-launch-press-kit"
 
 PRODUCT_BRIEF = """Product: DevFlow Code Review AI
 Category: AI-Powered Developer Tools
@@ -100,9 +72,7 @@ Beta Results (48 teams, 6 weeks): 47% reduction in time-to-merge, 31% fewer prod
 
 
 def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "product-launch-press-kit"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -146,7 +116,7 @@ async def main() -> None:
         f"Build a launch press kit from this product brief:\n\n{PRODUCT_BRIEF}",
         skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        output={
             "positioning_text": (str, "Market landscape, positioning statement, and differentiators", True),
             "risks": (
                 [{

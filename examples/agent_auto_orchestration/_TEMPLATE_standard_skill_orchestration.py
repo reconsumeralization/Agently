@@ -35,7 +35,7 @@ execution metadata.
 
 So the migration recipe for every old `skill.yaml` staged Skill is:
   1. Move the stage `purpose` prose into the SKILL.md body as plain guidance.
-  2. Use `semantic_outputs=` for simple single_shot results, or standard
+  2. Use `output=` for simple single_shot results, or standard
      `execution: staged` metadata when the Skill genuinely needs model-side
      decomposition.
   3. Lift side-effecting `action` stages OUT of the Skill into host code,
@@ -68,37 +68,7 @@ from examples.dynamic_task._shared import configure_model
 #    There is deliberately NO skill.yaml and NO execution metadata here because
 #    this template demonstrates the default single_shot path.
 # ═══════════════════════════════════════════════════════════════════════════════
-SKILL_MD = """\
----
-name: Incident Response Planner
-description: >-
-  Analyze an infrastructure incident alert and produce a structured response
-  plan plus an executable on-call runbook. Use for incident, alert, on-call,
-  and runbook requests.
-keywords: [incident, alert, runbook, incident response, on call, SRE]
-version: 1.0.0
----
-
-# Incident Response Planner
-
-You are an SRE incident commander. Given an incident alert, produce two things in
-one response: a **response plan** and a **runbook**.
-
-## Response plan
-Cover all six areas, be specific and actionable, avoid generic advice:
-1. Severity assessment (P0/P1/P2/P3) with justification.
-2. Impact radius (which services, users, regions are affected).
-3. Immediate mitigation actions (what to do right now).
-4. Investigation steps (what to investigate and in what order).
-5. Stakeholders to notify (teams, roles, external parties).
-6. Expected resolution timeline (best case / worst case).
-
-## Runbook
-Convert the plan into a step-by-step checklist an on-call engineer can follow at
-3 AM. Each step states: the action, the owner role (e.g. on-call SRE, database
-team, security), the expected outcome, and a verification check. Include rollback
-steps for any irreversible action.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "incident-response-planner"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -107,9 +77,7 @@ steps for any irreversible action.
 #    Agently-managed files under .agently/skills/<skill_id>/.agently/.
 # ═══════════════════════════════════════════════════════════════════════════════
 def install_skill(runtime_dir: Path) -> str:
-    skill_src = runtime_dir / "incident-response-planner"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
 
     Agently.skills_executor.configure(registry_root=str(runtime_dir / "registry"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
@@ -137,7 +105,7 @@ def save_runbook(output_dir: Path, incident_id: str, plan: str, runbook: str) ->
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. Compose Skill (guidance) + host step (side effect) with TriggerFlow.
 #    Chunk A: run the Skill as a single_shot request, shaping the result
-#             with semantic_outputs (this replaces the old per-stage output_schema).
+#             with output (this replaces the old per-stage output_schema).
 #    Chunk B: take the structured result and run the host persistence step.
 # ═══════════════════════════════════════════════════════════════════════════════
 def build_flow(agent, skill_id: str, output_dir: Path) -> TriggerFlow:
@@ -149,7 +117,7 @@ def build_flow(agent, skill_id: str, output_dir: Path) -> TriggerFlow:
             alert,
             skills=[skill_id],
             mode="required",
-            semantic_outputs={
+            output={
                 "plan": (str, "Structured incident response plan covering all 6 areas."),
                 "runbook": (str, "Step-by-step on-call runbook with owners and verification."),
             },

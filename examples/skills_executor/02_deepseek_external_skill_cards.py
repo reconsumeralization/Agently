@@ -1,4 +1,4 @@
-"""DeepSeek + external SKILL.md package smoke test.
+"""DeepSeek + lazy remote SKILL.md source smoke test.
 
 Run:
     python examples/skills_executor/02_deepseek_external_skill_cards.py
@@ -8,49 +8,57 @@ Environment:
     Optional:
       DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
       DEEPSEEK_DEFAULT_MODEL=deepseek-chat
-      AGENTLY_SKILLS_REPO=../Agently-Skills
+      AGENTLY_SKILLS_REPO=../Agently-Skills       # optional local checkout
       ANTHROPIC_SKILLS_REPO=.example_runtime/anthropic-skills
 
 Expected key output from a real DeepSeek run:
+    installed_skills_before_plan=0
     [CASE] agently-runtime
     plan_status=resolved selected=['agently-runtime']
+    source_discovered=1 source_installed=1
+    execution_status=success
     selected_skill=agently-runtime
     [CASE] xlsx
     plan_status=resolved selected=['xlsx']
+    source_discovered=1 source_installed=1
+    execution_status=success
     selected_skill=xlsx
     [CASE] webapp-testing
     plan_status=resolved selected=['webapp-testing']
+    source_discovered=1 source_installed=1
+    execution_status=success
     selected_skill=webapp-testing
 
 How it works:
-    External SKILL.md folders are installed as guidance-heavy skill contracts.
-    agent.use_skills(..., mode="model_decision") exposes their SkillCards to the
-    request; DeepSeek decides how to use the card in its answer.
-    The Anthropic scripts remain package assets. They are not executed as arbitrary
-    Python handlers; executable work should be bound through host Actions when
-    required.
+    External SKILL.md folders are declared on agent.use_skills(...) as remote
+    source selectors. The Skills Executor performs lightweight discovery and
+    installs the selected Skill only when planning hits that source. The business
+    code never calls install_skills_pack(...) on the request path.
+
+    The Anthropic scripts remain package assets/resources. They are not executed
+    as arbitrary Python handlers; executable work should be bound through
+    ActionRuntime / ExecutionEnvironment when required.
 
 Flow:
-    local skill dir / cloned upstream skill dir
+    git URL / GitHub shorthand / local checkout
       |
       v
-    Agently.skills_executor.install_skills(...) -> SkillContract + SkillCard
+    agent.use_skills({"source": ..., "subpath": ...}, mode="required")
       |
       v
-    agent.use_skills(..., model_decision)
+    planner discovers SKILL.md card, then materializes selected Skill
       |
       v
-    request prefix adds optional skill_cards to prompt.info
-      |
-      v
-    DeepSeek returns structured task guidance using the selected card
+    async_run_skills_task(..., effort="fast") injects full guidance and returns
+    structured task guidance
 """
 
 from __future__ import annotations
 
 import os
-import subprocess
+import shutil
 import sys
+import asyncio
 from pathlib import Path
 from pprint import pprint
 from typing import Any
@@ -64,7 +72,6 @@ if str(ROOT) not in sys.path:
 from agently import Agently
 
 RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor"
-ANTHROPIC_REPO_URL = "https://github.com/anthropics/skills.git"
 
 
 CASES = [
@@ -121,43 +128,27 @@ def _configure_deepseek():
     Agently.set_settings("debug", False)
 
 
-def _run(command: list[str], *, cwd: Path):
-    subprocess.run(command, cwd=cwd, check=True)
-
-
-def _ensure_anthropic_repo() -> Path:
-    configured = os.getenv("ANTHROPIC_SKILLS_REPO")
-    repo_path = Path(configured).expanduser().resolve() if configured else RUNTIME_ROOT / "anthropic-skills"
-    if (repo_path / "skills" / "xlsx" / "SKILL.md").exists():
-        return repo_path
-
-    repo_path.parent.mkdir(parents=True, exist_ok=True)
-    _run(["git", "clone", "--depth", "1", ANTHROPIC_REPO_URL, str(repo_path)], cwd=ROOT)
-    return repo_path
-
-
-def _resolve_source(case: dict[str, str], anthropic_repo: Path) -> Path:
+def _source_for(case: dict[str, str]) -> tuple[str, bool, str]:
     if case["source"] == "agently-skills":
         configured = os.getenv("AGENTLY_SKILLS_REPO")
-        repo_path = Path(configured).expanduser().resolve() if configured else (ROOT / ".." / "Agently-Skills").resolve()
+        source = str(Path(configured).expanduser().resolve()) if configured else "AgentEra/Agently-Skills"
     else:
-        repo_path = anthropic_repo
-    skill_path = repo_path / case["relative_path"]
-    if not (skill_path / "SKILL.md").exists():
-        raise RuntimeError(f"Missing SKILL.md for { case['label'] }: { skill_path }")
-    return skill_path
+        configured = os.getenv("ANTHROPIC_SKILLS_REPO")
+        source = str(Path(configured).expanduser().resolve()) if configured else "anthropics/skills"
+    fetch = not Path(source).expanduser().exists()
+    trust_level = "remote" if fetch else "local"
+    return source, fetch, trust_level
 
 
-def _install_targets() -> list[str]:
-    anthropic_repo = _ensure_anthropic_repo()
-    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    Agently.skills_executor.configure(registry_root=str(RUNTIME_ROOT / "registry"), allowed_trust_levels=["local"])
-
-    installed_ids = []
-    for case in CASES:
-        contract = Agently.skills_executor.install_skills(_resolve_source(case, anthropic_repo), trust_level="local", update=True)
-        installed_ids.append(str(contract.get("skill_id")))
-    return installed_ids
+def _selector_for(case: dict[str, str]) -> dict[str, Any]:
+    source, fetch, trust_level = _source_for(case)
+    return {
+        "source": source,
+        "subpath": case["relative_path"],
+        "fetch": fetch,
+        "trust_level": trust_level,
+        "auto_allow": False,
+    }
 
 
 def _create_agent():
@@ -166,7 +157,7 @@ def _create_agent():
         "system",
         (
             "You are validating Agently Skills Executor behavior. "
-            "When skill_cards are present, select the matching skill only if it fits the task. "
+            "Use the selected remote Skill guidance when it fits the task. "
             "Return concrete execution guidance, not marketing copy."
         ),
     )
@@ -177,53 +168,58 @@ def _selected_ids(plan: dict[str, Any]) -> list[str]:
     return [str(item.get("skill_id")) for item in plan.get("selected_skills", [])]
 
 
-def _run_case(case: dict[str, str]) -> dict[str, Any]:
+async def _run_case(case: dict[str, str]) -> dict[str, Any]:
     agent = _create_agent()
-    selector = case["selector"]
+    selector = _selector_for(case)
     task = case["task"]
-    agent.use_skills([selector], mode="model_decision")
-    plan = agent.resolve_skills_plan(task, skills=[selector], mode="model_decision")
-    result = (
-        agent.input(
-            {
-                "task": task,
-                "expected_skill": selector,
-                "instruction": (
-                    "Use the disclosed skill card if it fits. "
-                    "Set selected_skill to the skill id you used, or 'none'."
-                ),
-            }
-        )
-        .output(
-            {
-                "selected_skill": (str, "The selected skill id, or none.", True),
-                "skill_fit": (str, "One concise reason the skill fits or does not fit.", True),
-                "first_steps": [(str, "Concrete first execution steps.", True)],
-                "must_not_do": [(str, "Important boundary or anti-pattern.", True)],
-            }
-        )
-        .start(max_retries=1, raise_ensure_failure=False)
+    agent.use_skills([selector], mode="required")
+    execution = await agent.async_run_skills_task(
+        (
+            f"{task}\n\n"
+            f"Expected selected_skill: {case['selector']}. Use the selected Skill guidance "
+            "to recommend concrete first execution steps and boundaries."
+        ),
+        mode="required",
+        effort="fast",
+        output={
+            "selected_skill": (str, "The selected skill id, or none.", True),
+            "skill_fit": (str, "One concise reason the skill fits or does not fit.", True),
+            "first_steps": [(str, "Concrete first execution steps.", True)],
+            "must_not_do": [(str, "Important boundary or anti-pattern.", True)],
+        },
     )
-    return {"plan": plan, "result": result}
+    return {"plan": execution.plan, "result": execution.output, "execution": execution}
 
 
-def main():
+async def main():
     _configure_deepseek()
-    installed_ids = _install_targets()
-    print("[INSTALLED_SKILLS]")
-    print(installed_ids)
+    if (RUNTIME_ROOT / "registry").exists():
+        shutil.rmtree(RUNTIME_ROOT / "registry")
+    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+    Agently.skills_executor.configure(
+        registry_root=str(RUNTIME_ROOT / "registry"),
+        allowed_trust_levels=["local", "remote"],
+    )
+    print(f"installed_skills_before_plan={len(Agently.skills_executor.list_skills())}")
 
     for case in CASES:
         print(f"\n[CASE] { case['label'] }")
-        outcome = _run_case(case)
+        outcome = await _run_case(case)
         plan = outcome["plan"]
         result = outcome["result"]
+        execution = outcome["execution"]
+        diagnostics = plan.get("diagnostics", [])
+        discovered = sum(1 for item in diagnostics if item.get("code") == "source_discovered")
+        installed = sum(1 for item in diagnostics if item.get("code") == "source_installed")
         print(f"plan_status={ plan.get('status') } selected={ _selected_ids(plan) }")
-        print(f"selected_skill={ result.get('selected_skill') }")
-        print(f"first_steps_count={ len(result.get('first_steps') or []) }")
+        print(f"source_discovered={discovered} source_installed={installed}")
+        print(f"execution_status={execution.status}")
+        result_dict = result if isinstance(result, dict) else {}
+        print(f"selected_skill={ result_dict.get('selected_skill') }")
+        print(f"first_steps_count={ len(result_dict.get('first_steps') or []) }")
         print("[RESULT]")
         pprint(result)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

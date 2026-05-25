@@ -15,7 +15,7 @@ New-standard Skills model
 -------------------------
 The capability is a single standard ``SKILL.md`` (guidance only). One prompt-only
 request produces both the response plan and the runbook (shaped by
-``semantic_outputs``). Persisting the document is a HOST side effect — it used to
+``output``). Persisting the document is a HOST side effect — it used to
 be an ``action`` stage inside the Skill; now it lives in host code, which is also
 where approval / wait policy belongs.
 
@@ -46,37 +46,7 @@ from examples.dynamic_task._shared import configure_model
 # Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SKILL_MD = """\
----
-name: Incident Response Planner
-description: >-
-  Analyze an infrastructure incident alert and produce a structured response
-  plan plus an executable on-call runbook. Use for incident, alert, on-call,
-  outage, and runbook requests.
-keywords: [incident, alert, runbook, incident response, on call, SRE, outage]
----
-
-# Incident Response Planner
-
-You are an SRE incident commander. Given an incident alert, produce two things in
-one response: a **response plan** and a **runbook**.
-
-## Response plan
-Cover all six areas, be specific and actionable, avoid generic advice:
-1. Severity assessment (P0/P1/P2/P3) with justification.
-2. Impact radius (which services, users, regions are affected).
-3. Immediate mitigation actions (what to do right now) — for a recent deploy
-   correlated with the alert, consider rollback first.
-4. Investigation steps (what to investigate and in what order).
-5. Stakeholders to notify (teams, roles, external parties).
-6. Expected resolution timeline (best case / worst case).
-
-## Runbook
-Convert the plan into a step-by-step checklist an on-call engineer can follow at
-3 AM. Each step states: the action, the owner role (e.g. on-call SRE, database
-team, payments), the expected outcome, and a verification check. Include rollback
-steps for any irreversible action.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "incident-response-planner"
 
 INCIDENT_ALERT = """[PAGERDUTY] Triggered - 2026-05-22 03:17:21 UTC
 
@@ -108,9 +78,7 @@ INCIDENT_ID = "INC-2026-05-0421"
 
 
 def install_skill() -> str:
-    skill_src = Path(tempfile.mkdtemp(prefix="agently_skill_src_")) / "incident-response-planner"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -167,7 +135,7 @@ async def main() -> None:
         INCIDENT_ALERT,
         skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        output={
             "severity": (str, "Severity P0/P1/P2/P3 with one-line justification", True),
             "plan": (str, "Structured incident response plan covering all 6 areas", True),
             "runbook": (str, "Step-by-step on-call runbook with owners and verification", True),

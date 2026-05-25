@@ -20,12 +20,12 @@ Expected key output from a real DeepSeek run on 2026-05-21:
     non_investment_advice=True
     risk_items=3
 
-This is intentionally the shortest business-facing shape: install a local
-skills pack of one standard ``SKILL.md`` and run it prompt-only to receive a
-structured research brief. The controlled side effect — fetching current quote
-data — runs in the HOST before the model analysis, not inside the Skill. The
-fetched data is passed to the prompt-only Skill as task context. No third-party
-Skill package scripts are executed.
+This is intentionally the shortest business-facing shape that still uses real
+third-party research Skills. OctagonAI financial/market/SEC/earnings Skills
+provide the research guidance, Anthropic docx/xlsx Skills provide artifact
+guidance, and the controlled side effect — fetching current quote data — runs
+in the HOST before model analysis. No third-party Skill package scripts are
+executed.
 """
 
 from __future__ import annotations
@@ -34,9 +34,7 @@ import csv
 from datetime import datetime, timedelta, timezone
 import json
 import re
-import shutil
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -53,67 +51,21 @@ from examples.dynamic_task._shared import configure_model
 
 
 RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor" / "stock_research_business_minimal"
-SKILLS_PACK_NAME = "equity-research-demo"
 QUOTE_CACHE_PATH = RUNTIME_ROOT / "quote_cache.json"
 TRANSIENT_HTTP_STATUS = {429, 500, 502, 503, 504}
 
-EQUITY_RESEARCH_SKILL = """---
-name: equity-research-brief
-description: Compare public companies from provided market, financial, filing, and earnings-call facts. Produce research-only conclusions, risks, watch indicators, and a clear non-investment-advice boundary.
-keywords:
-  - stock
-  - equity
-  - research
-  - earnings
-  - SEC
-  - valuation
----
-
-# Equity Research Brief
-
-Use this skill when the user asks for a research-only comparison of public
-companies.
-
-Guidance:
-
-- Use only the provided data or explicitly state the data boundary.
-- If quote retrieval degraded to cache or unavailable data, explicitly say so.
-- Compare companies across market performance, valuation context, financial
-  quality, earnings-call focus, SEC risk factors, and analyst sentiment.
-- Separate evidence from conclusion. Do not imply certainty from incomplete
-  data.
-- Do not output buy, sell, hold, allocation, order, or timing instructions.
-- End with a non-investment-advice boundary and concrete watch indicators.
-"""
+REMOTE_STOCK_RESEARCH_SKILLS = [
+    {"source": "OctagonAI/skills", "subpath": "skills/market-analyst-master", "trust_level": "remote"},
+    {"source": "OctagonAI/skills", "subpath": "skills/financial-analyst-master", "trust_level": "remote"},
+    {"source": "OctagonAI/skills", "subpath": "skills/sec-analyst-master", "trust_level": "remote"},
+    {"source": "OctagonAI/skills", "subpath": "skills/earnings-analyst-master", "trust_level": "remote"},
+    {"source": "anthropics/skills", "subpath": "skills/docx", "trust_level": "remote"},
+    {"source": "anthropics/skills", "subpath": "skills/xlsx", "trust_level": "remote"},
+]
 
 
 class QuoteSourceUnavailable(RuntimeError):
     pass
-
-
-def install_demo_skills_pack() -> None:
-    """Example setup: create and install one local Skill Pack."""
-
-    skill_dir = RUNTIME_ROOT / "skills_pack" / "equity-research-brief"
-    # Start from a clean Skill dir: a standard SKILL.md must be the *only*
-    # capability definition. Any stale legacy manifest (e.g. a skill.yaml left
-    # by an older example version) would make the framework reject the Skill.
-    if skill_dir.exists():
-        shutil.rmtree(skill_dir)
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(EQUITY_RESEARCH_SKILL, encoding="utf-8")
-
-    Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
-    pack_result = Agently.skills_executor.install_skills_pack(
-        skill_dir.parent,
-        name=SKILLS_PACK_NAME,
-        trust_level="local",
-        update=True,
-    )
-    # Surface install-time rejections early instead of failing cryptically at
-    # plan time with "required pack had no installed standard Skills".
-    if not (pack_result or {}).get("installed_skills"):
-        raise RuntimeError(f"Skill Pack install produced no Skills: {pack_result}")
 
 
 def _extract_tickers(task: str) -> list[str]:
@@ -315,9 +267,13 @@ ANALYSIS_OUTPUTS: dict[str, Any] = {
 
 
 def build_stock_research_brief() -> dict[str, Any]:
-    install_demo_skills_pack()
     provider = configure_model(temperature=0.0)
+    Agently.skills_executor.configure(
+        registry_root=str(RUNTIME_ROOT / "registry"),
+        allowed_trust_levels=["local", "remote"],
+    )
     agent = Agently.create_agent("stock-research-demo")
+    agent.use_skills(REMOTE_STOCK_RESEARCH_SKILLS, mode="required")
 
     # Controlled side effect runs in the HOST, before model analysis — not inside
     # the Skill. The Skill is pure guidance and never touches the network.
@@ -338,9 +294,9 @@ def build_stock_research_brief() -> dict[str, Any]:
 
     execution = agent.run_skills_task(
         task,
-        skills_packs=[SKILLS_PACK_NAME],
         mode="required",
-        semantic_outputs=ANALYSIS_OUTPUTS,
+        effort="normal",
+        output=ANALYSIS_OUTPUTS,
     )
     if execution.status != "success":
         raise RuntimeError(f"Equity research Skill execution failed: { execution.to_dict() }")

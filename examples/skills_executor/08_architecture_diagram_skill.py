@@ -19,7 +19,7 @@ A real task driven by the default single_shot SkillsExecutor path:
       exactly which skill must run.)
     * ``run_skills_task(...)`` issues one structured model request that injects the
       full SKILL.md body as instructions and returns a structured result shaped by
-      ``semantic_outputs``.
+      ``output``.
     * The HOST owns the side effect: it writes the returned HTML to disk. The skill
       never touches the filesystem.
 
@@ -52,48 +52,7 @@ ARTIFACTS_DIR = Path(__file__).resolve().parent / "_artifacts"
 
 
 # ── The skill: a standard SKILL.md, guidance only ───────────────────────────
-SKILL_MD = """\
----
-name: architecture-diagram
-description: >-
-  Create a professional, dark-themed software/system architecture diagram as a
-  single self-contained HTML file with inline SVG. Use when asked to visualize
-  system components, layers, services, or how parts of a codebase fit together.
-keywords: [architecture diagram, system design, svg, html, components, layers]
----
-
-# Architecture Diagram
-
-Produce ONE self-contained HTML document (embedded CSS + inline SVG, no
-JavaScript, no external images; Google Fonts link is allowed). It must render
-correctly when opened directly in a browser.
-
-## Visual design system
-- Background `#020617` with a subtle 40px grid pattern.
-- Font: JetBrains Mono (monospace) via Google Fonts.
-- Component boxes: rounded rects (`rx="6"`), 1.5px stroke, semi-transparent
-  fills. Colour components by role:
-  - facade / developer surface: fill `rgba(8,51,68,0.4)`, stroke `#22d3ee`
-  - core contracts: fill `rgba(6,78,59,0.4)`, stroke `#34d399`
-  - plugins / providers: fill `rgba(120,53,15,0.3)`, stroke `#fbbf24`
-  - execution environment / capabilities: fill `rgba(76,29,149,0.4)`, stroke `#a78bfa`
-  - observation / event bus: fill `rgba(251,146,60,0.3)`, stroke `#fb923c`
-  - external / generic: fill `rgba(30,41,59,0.5)`, stroke `#94a3b8`
-- Component name at 11px white bold; sublabel at 8-9px `#94a3b8`.
-- Arrows via an SVG `marker` arrowhead; draw connecting arrows before boxes so
-  they sit behind them.
-
-## Layout rules
-- Lay the system out as labelled horizontal bands stacked top-to-bottom, one band
-  per architectural layer, with each layer's components inside its band.
-- Keep ≥40px vertical gaps between stacked rows; never overlap boxes.
-- Add a short header (title + subtitle) and a small legend mapping each colour to
-  a layer. Place the legend outside every band.
-
-## Output
-Return the complete HTML document as a single string. Do not include commentary
-outside the HTML.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "architecture-diagram"
 
 
 # ── The task: a repo-grounded brief of the current Agently architecture ──────
@@ -134,9 +93,7 @@ development line.
 
 
 def install_skill(runtime_dir: Path) -> str:
-    skill_src = runtime_dir / "architecture-diagram"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=str(runtime_dir / "registry"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
@@ -153,7 +110,7 @@ async def main() -> None:
         AGENTLY_ARCHITECTURE_BRIEF,
         skills=[skill_id],
         mode="required",
-        semantic_outputs={
+        output={
             "html": (str, "The complete self-contained HTML document for the diagram."),
             "notes": (str, "One-line summary of the layers represented."),
         },

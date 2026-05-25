@@ -16,7 +16,7 @@ New-standard Skills model
 -------------------------
 The capability is a single standard ``SKILL.md`` (guidance only). One prompt-only
 request consumes the business context and returns the full structured brief
-shaped by ``semantic_outputs`` (landscape, competitor profiles, opportunities,
+shaped by ``output`` (landscape, competitor profiles, opportunities,
 executive summary). The HOST writes the brief file to disk.
 
 Expected key output from one real DeepSeek run:
@@ -95,51 +95,17 @@ MOCK_BUSINESS_CONTEXT = {
 # Skill definition — a standard SKILL.md, guidance only
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SKILL_MD = """\
----
-name: Market Research Brief
-description: >-
-  Generate a structured market research brief from a feature idea and supplied
-  business context: market landscape, competitor intelligence, opportunity
-  assessment, and a go-to-market recommendation. Use for market, research,
-  competitor, and product launch requests.
-keywords: [market, research, competitor, product, launch, 市场, 竞品, 分析]
----
-
-# Market Research Brief
-
-You are a market research analyst + competitive intelligence + product strategist.
-Given a feature idea and a block of business context (internal survey results,
-beta-test metrics, market signals, funding), produce a complete brief in ONE pass.
-
-## Cover
-1. Landscape: target market segment, market size & growth, key trends, primary
-   user persona, jobs-to-be-done. Treat supplied internal numbers as real, not
-   estimates, and reference them.
-2. Competitors: 3-5 profiles, each with approach, market position
-   (leader/challenger/niche), strengths, weaknesses. Use the supplied market
-   signals as evidence. Rate competitive intensity and list gaps competitors
-   are not addressing.
-3. Opportunities: 3-5 differentiation opportunities, each with value proposition,
-   feasibility (high/medium/low), and GTM approach. Use beta-test results as
-   product-market-fit evidence. Name the single most promising opportunity.
-4. Executive summary: 2-3 sentences for a VP of Product, plus a concrete next step.
-
-Be specific and reference the supplied numbers. Do not invent data not implied
-by the context.
-"""
+SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "market-research-brief"
 
 
 def install_skill() -> str:
-    skill_src = RUNTIME_ROOT / "src" / "market-research-brief"
-    skill_src.mkdir(parents=True, exist_ok=True)
-    (skill_src / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+    skill_src = SKILL_SOURCE
     Agently.skills_executor.configure(registry_root=tempfile.mkdtemp(prefix="agently_skills_reg_"), allowed_trust_levels=["local"])
     contract = Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
     return str(contract["skill_id"])
 
 
-SEMANTIC_OUTPUTS: dict[str, Any] = {
+OUTPUT_SCHEMA: dict[str, Any] = {
     "market_segment": (str, "Target market segment description", True),
     "market_size_estimate": (str, "Estimated market size with growth rate", True),
     "key_trends": ([str], "3-5 key industry trends", True),
@@ -208,7 +174,7 @@ async def main() -> None:
         task,
         skills=[skill_id],
         mode="required",
-        semantic_outputs=SEMANTIC_OUTPUTS,
+        output=OUTPUT_SCHEMA,
         stream_handler=on_stream,
     )
 
