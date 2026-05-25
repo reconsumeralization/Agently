@@ -16,11 +16,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Literal
-import warnings
 
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
 from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
-from agently.utils import Settings
+from agently.utils import DeprecationWarnings, Settings
 
 from .modules.effort_strategies import BUILTIN_EFFORT_STRATEGY_NAMES
 from .modules.executor import SkillExecutor
@@ -193,9 +192,9 @@ class AgentlySkillsExecutor(SkillsExecutor):
         if output is not None and semantic_outputs is not None:
             raise ValueError("Use either output= or semantic_outputs= for Skills planning, not both.")
         if semantic_outputs is not None:
-            warnings.warn(
+            DeprecationWarnings.warn_deprecated_once(
+                "skills_executor.semantic_outputs.planning",
                 "semantic_outputs= is deprecated for Skills planning; use output= instead.",
-                DeprecationWarning,
                 stacklevel=2,
             )
         return await SkillPlanner(self.registry).resolve(

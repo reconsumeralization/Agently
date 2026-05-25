@@ -16,12 +16,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, Callable, Literal, cast
-import warnings
 
 from agently.core import BaseAgent
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode
 from agently.types.plugins import SkillsExecutor
-from agently.utils import FunctionShifter
+from agently.utils import DeprecationWarnings, FunctionShifter
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
 from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.planner import (
     _matches_selector,
@@ -100,9 +99,9 @@ class SkillsExtension(BaseAgent):
         if output is not None and semantic_outputs is not None:
             raise ValueError("Use either output= or semantic_outputs= for Skills execution, not both.")
         if semantic_outputs is not None:
-            warnings.warn(
+            DeprecationWarnings.warn_deprecated_once(
+                "skills_executor.semantic_outputs.execution",
                 "semantic_outputs= is deprecated for Skills execution; use output= instead.",
-                DeprecationWarning,
                 stacklevel=3,
             )
         prompt_defaults = self._dynamic_task_prompt_defaults(task)
