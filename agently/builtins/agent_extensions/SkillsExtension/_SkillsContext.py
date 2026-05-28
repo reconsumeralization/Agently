@@ -12,16 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ── Agent → Plugin context adapter ────────────────────────────────────────────
-# AgentSkillsRuntimeContext bridges the Agent's internal API (settings, model
-# requests, runtime stream emission) to the SkillsExecutor plugin protocols
-# (SkillsPlanningContext / SkillsExecutionContext / SkillsRuntimeContext).
-#
-# This adapter pattern keeps the plugin implementation decoupled from concrete
-# Agent internals. When other plugins need Agent-owned services, follow this
-# pattern: define a context protocol in types/plugins/, implement the adapter
-# here or in a sibling module, and provide a factory function.
-# ──────────────────────────────────────────────────────────────────────────────
+"""Agent → Plugin context adapter for Skills Executor.
+
+``AgentSkillsRuntimeContext`` bridges the Agent's internal API (settings, model
+requests, runtime stream emission, ExecutionEnvironment handle) to the
+``SkillsExecutor`` plugin protocols (``SkillsPlanningContext`` /
+``SkillsExecutionContext`` / ``SkillsRuntimeContext``).
+
+This adapter pattern keeps the plugin implementation decoupled from concrete
+Agent internals. When other plugins need Agent-owned services, follow this
+pattern: define a context protocol in ``agently.types.plugins``, implement the
+adapter here or in a sibling module, and provide a factory function that the
+Agent extension calls when constructing the context for the plugin.
+"""
+
 
 from __future__ import annotations
 
