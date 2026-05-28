@@ -46,6 +46,14 @@ from agently.types.data import TaskDAG, TaskDAGNode
 from .DynamicTask import DynamicTask
 from .SkillsExecutor import SkillsExecutor
 from .Session import Session
+from .Workspace import (
+    LocalWorkspaceBackend,
+    Workspace,
+    WorkspaceConfigurationError,
+    WorkspaceError,
+    WorkspaceManager,
+    WorkspacePolicyError,
+)
 
 # from .TriggerFlow_old import (
 #     TriggerFlow,

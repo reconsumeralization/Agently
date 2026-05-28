@@ -14,7 +14,7 @@ This is a navigation aid: figure out which layer your problem lives at, then jum
 |---|---|---|
 | 1. One request | Can I get one structured answer from a model? | [Quickstart](../start/quickstart.md), [Requests Overview](../requests/overview.md) |
 | 2. Stable output | Do I get the fields I expect, every time? | [Schema as Prompt](../requests/schema-as-prompt.md), [Output Control](../requests/output-control.md) |
-| 3. Response and memory | Can I reuse one response, or continue a bounded conversation? | [Model Response](../requests/model-response.md), [Session Memory](../requests/session-memory.md) |
+| 3. Response and memory | Can I reuse one response, continue a bounded conversation, or preserve task records across turns? | [Model Response](../requests/model-response.md), [Session Memory](../requests/session-memory.md), [Workspace](../requests/workspace.md) |
 | 4. Actions and execution environments | Should the model call functions, MCP servers, or sandboxed commands with managed execution dependencies? | [Actions Overview](../actions/overview.md), [Action Runtime](../actions/action-runtime.md), [Execution Environment](../actions/execution-environment.md) |
 | 5. Knowledge and services | Do I need retrieval, HTTP, SSE, or WebSocket exposure? | [Knowledge Base](../knowledge/knowledge-base.md), [FastAPI Service Exposure](../services/fastapi.md) |
 | 6. Observability and development | Do I need observation events, DevTools, or coding-agent guidance? | [Observability Overview](../observability/overview.md), [Coding Agents](../development/coding-agents.md) |
@@ -33,6 +33,7 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Want field-by-field streaming UX | [Async First](../start/async-first.md) → [Output Control](../requests/output-control.md) |
 | Need to reuse one response multiple ways | [Model Response](../requests/model-response.md) |
 | Multi-turn chat with bounded history | [Session Memory](../requests/session-memory.md) |
+| Multi-turn task needs durable observations, artifacts, decisions, or checkpoints | [Workspace](../requests/workspace.md) |
 | Need the model to call tools / MCP servers | [Action Runtime](../actions/action-runtime.md) |
 | Need common Python / shell / workspace / Node.js / SQLite ability | [Action Runtime](../actions/action-runtime.md), start with `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace(...)`, `agent.enable_nodejs(...)`, or `agent.enable_sqlite(...)` |
 | Need web search or page browse | [Action Runtime](../actions/action-runtime.md), use `from agently.builtins.actions import Search, Browse` and `agent.use_actions(...)` |

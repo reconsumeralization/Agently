@@ -137,3 +137,9 @@ from .skill import (
     SkillPlanRejection,
     SkillPlanSelection,
 )
+
+from .workspace import (
+    WorkspaceLinkRef,
+    WorkspaceRecordRef,
+    WorkspaceSearchResult,
+)

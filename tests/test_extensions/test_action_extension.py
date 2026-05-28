@@ -289,6 +289,54 @@ def test_action_extension_enable_workspace_registers_file_actions(tmp_path):
     assert outside.get("status") == "error"
 
 
+def test_action_extension_enable_workspace_inherits_foundation_workspace(tmp_path):
+    agent = Agently.create_agent().use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    (workspace.content_root / "notes").mkdir()
+    (workspace.content_root / "notes" / "todo.txt").write_text("use foundation workspace\n", encoding="utf-8")
+
+    agent.enable_workspace()
+
+    spec = agent.action.action_registry.get_spec("read_file")
+    assert spec is not None
+    assert spec.get("meta", {}).get("root") == str(workspace.content_root)
+
+    listed = agent.action.execute_action("list_files", {"path": "notes"})
+    assert listed.get("status") == "success"
+    assert listed.get("data") == ["notes/todo.txt"]
+
+
+def test_action_extension_enable_workspace_without_foundation_warns(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = Agently.create_agent()
+
+    with pytest.warns(DeprecationWarning, match="agent.enable_workspace"):
+        agent.enable_workspace()
+
+    spec = agent.action.action_registry.get_spec("read_file")
+    assert spec is not None
+    assert spec.get("meta", {}).get("root") == str(tmp_path.resolve())
+
+
+def test_action_extension_shell_and_nodejs_inherit_foundation_workspace(tmp_path):
+    agent = Agently.create_agent().use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    agent.enable_shell(commands=["pwd"], action_id="workspace_shell")
+    agent.enable_nodejs(action_id="workspace_node")
+
+    shell_spec = agent.action.action_registry.get_spec("workspace_shell")
+    assert shell_spec is not None
+    shell_req = shell_spec.get("execution_environments", [])[0]
+    assert shell_req.get("config", {}).get("allowed_workdir_roots") == [str(workspace.content_root)]
+
+    node_spec = agent.action.action_registry.get_spec("workspace_node")
+    assert node_spec is not None
+    node_req = node_spec.get("execution_environments", [])[0]
+    assert node_req.get("config", {}).get("cwd") == str(workspace.content_root)
+
+
 @pytest.mark.asyncio
 async def test_action_extension_request_prefix_injects_action_results(monkeypatch):
     agent = Agently.create_agent()

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .StreamingPrintExtension import StreamingPrintExtension
+from .WorkspaceExtension import WorkspaceExtension
 from .ActionExtension import ActionExtension
 from .KeyWaiterExtension import KeyWaiterExtension
 from .AutoFuncExtension import AutoFuncExtension

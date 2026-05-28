@@ -35,6 +35,7 @@ from .SkillsExecutor import (
     SkillsRuntimeContext,
 )
 from .AgentOrchestrator import AgentOrchestrator
+from .Workspace import IngestionProfile, WorkspaceBackend
 from .ResponseParser import ResponseParser
 from .ToolManager import ToolManager
 from .BuiltInTool import BuiltInTool

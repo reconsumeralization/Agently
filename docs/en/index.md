@@ -31,6 +31,7 @@ This handbook is organized as a learning path. If you have not run a single requ
    - [Model Response](requests/model-response.md)
    - [Session Memory](requests/session-memory.md)
    - [Context Engineering](requests/context-engineering.md)
+   - [Workspace](requests/workspace.md)
 
 3. **Actions** — model-callable actions, built-in capability packages, MCP, managed execution environments, and compatibility surfaces
    - [Actions Overview](actions/overview.md)

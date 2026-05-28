@@ -16,7 +16,7 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 |---|---|---|
 | 1. 单次请求 | 我能不能从模型拿到一个结构化答案？ | [快速开始](../start/quickstart.md)、[Requests 概览](../requests/overview.md) |
 | 2. 稳定输出 | 我每次都能拿到期望的字段吗？ | [Schema as Prompt](../requests/schema-as-prompt.md)、[输出控制](../requests/output-control.md) |
-| 3. 响应与记忆 | 我能复用一次响应，或延续一个受控窗口的对话吗？ | [模型响应](../requests/model-response.md)、[会话记忆](../requests/session-memory.md) |
+| 3. 响应与记忆 | 我能复用一次响应、延续受控窗口对话，或跨 turn 保存任务 records 吗？ | [模型响应](../requests/model-response.md)、[会话记忆](../requests/session-memory.md)、[Workspace](../requests/workspace.md) |
 | 4. Action 与执行环境 | 模型是否需要调用函数、MCP server 或带托管执行依赖的沙箱命令？ | [Actions 概览](../actions/overview.md)、[Action Runtime](../actions/action-runtime.md)、[Execution Environment](../actions/execution-environment.md) |
 | 5. 知识与服务 | 是否需要检索、HTTP、SSE 或 WebSocket 暴露？ | [知识库](../knowledge/knowledge-base.md)、[FastAPI 服务封装](../services/fastapi.md) |
 | 6. 观测与开发 | 是否需要 observation event、DevTools 或 coding-agent 指引？ | [观测概览](../observability/overview.md)、[Coding Agents](../development/coding-agents.md) |
@@ -35,6 +35,7 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 | 想要字段级流式 UX | [Async First](../start/async-first.md) → [输出控制](../requests/output-control.md) |
 | 一次响应想多种方式复用 | [模型响应](../requests/model-response.md) |
 | 多轮对话且要控制窗口 | [会话记忆](../requests/session-memory.md) |
+| 多轮任务需要持久 observations、artifacts、decisions 或 checkpoints | [Workspace](../requests/workspace.md) |
 | 模型要调工具 / MCP | [Action Runtime](../actions/action-runtime.md) |
 | 需要常见 Python / shell / workspace / Node.js / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace(...)`、`agent.enable_nodejs(...)` 或 `agent.enable_sqlite(...)` 开始 |
 | 需要 web search 或页面 browse | [Action Runtime](../actions/action-runtime.md)，使用 `from agently.builtins.actions import Search, Browse` 和 `agent.use_actions(...)` |
