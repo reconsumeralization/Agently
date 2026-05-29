@@ -20,6 +20,69 @@ from agently.types.data.workspace import WorkspaceLinkRef, WorkspaceRecordRef
 
 
 @runtime_checkable
+class ContentStore(Protocol):
+    async def write_content(self, relative_path: str, content: bytes) -> str: ...
+
+    async def read_content(self, path: str) -> Any: ...
+
+
+@runtime_checkable
+class MetadataStore(Protocol):
+    async def put_record(self, ref: WorkspaceRecordRef) -> WorkspaceRecordRef: ...
+
+    async def get_record(self, record_id: str) -> WorkspaceRecordRef | None: ...
+
+
+@runtime_checkable
+class CheckpointStore(Protocol):
+    async def put_checkpoint(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+
+@runtime_checkable
+class TextIndex(Protocol):
+    async def index_record(self, ref: WorkspaceRecordRef, content: str) -> None: ...
+
+    async def search(
+        self,
+        query: str,
+        filters: dict[str, Any] | None = None,
+    ) -> list[WorkspaceRecordRef]: ...
+
+
+@runtime_checkable
+class VectorIndex(Protocol):
+    async def index_record(self, ref: WorkspaceRecordRef, content: str) -> None: ...
+
+    async def search(
+        self,
+        query: str,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int | None = None,
+    ) -> list[WorkspaceRecordRef]: ...
+
+
+@runtime_checkable
+class PolicyEngine(Protocol):
+    def ensure_writable(self) -> None: ...
+
+    def resolve_content_path(self, path: str) -> Any: ...
+
+    async def filter_records(
+        self,
+        records: list[WorkspaceRecordRef],
+        *,
+        purpose: str = "prompt",
+    ) -> list[WorkspaceRecordRef]: ...
+
+
+@runtime_checkable
 class IngestionProfile(Protocol):
     name: str
 
@@ -39,8 +102,29 @@ class IngestionProfile(Protocol):
 
 @runtime_checkable
 class WorkspaceBackend(Protocol):
-    root: Any
-    content_root: Any
+    @property
+    def root(self) -> Any: ...
+
+    @property
+    def content_root(self) -> Any: ...
+
+    @property
+    def content(self) -> ContentStore: ...
+
+    @property
+    def metadata(self) -> MetadataStore: ...
+
+    @property
+    def checkpoint_store(self) -> CheckpointStore: ...
+
+    @property
+    def text_index(self) -> TextIndex: ...
+
+    @property
+    def policy(self) -> PolicyEngine: ...
+
+    @property
+    def vector_index(self) -> VectorIndex | None: ...
 
     async def put(
         self,
@@ -77,4 +161,3 @@ class WorkspaceBackend(Protocol):
         *,
         step_id: str | None = None,
     ) -> WorkspaceRecordRef: ...
-

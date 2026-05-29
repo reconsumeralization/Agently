@@ -45,3 +45,34 @@ class WorkspaceSearchResult(TypedDict, total=False):
     ref: WorkspaceRecordRef
     score: float | None
     reason: str | None
+
+
+class WorkspaceRecallPlan(TypedDict):
+    goal: str
+    profile: str
+    queries: list[str]
+    filters: dict[str, Any]
+    scope: dict[str, Any]
+    budget: dict[str, Any]
+    diagnostics: dict[str, Any]
+
+
+class WorkspaceContextItem(TypedDict):
+    ref: WorkspaceRecordRef
+    kind: str | None
+    summary: str
+    content: str | None
+    use: str
+
+
+class WorkspaceContextOmission(TypedDict):
+    reason: str
+    count: int
+
+
+class WorkspaceContextPack(TypedDict):
+    goal: str
+    profile: str
+    items: list[WorkspaceContextItem]
+    omitted: list[WorkspaceContextOmission]
+    diagnostics: dict[str, Any]

@@ -23,6 +23,7 @@ from typing import Any
 from agently.types.data.workspace import WorkspaceLinkRef, WorkspaceRecordRef
 
 from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
+from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
 from ._utils import json_dumps, json_loads, slug, utc_now
 
 
@@ -43,6 +44,12 @@ class LocalWorkspaceBackend:
         self.db_path = self.root / "workspace.db"
         self.mode = mode
         self.read_only = mode in {"read", "read_only", "readonly"}
+        self.policy = LocalWorkspacePolicyEngine(self.content_root, read_only=self.read_only)
+        self.content = LocalContentStore(self.content_root, self.policy)
+        self.metadata = self
+        self.checkpoint_store = self
+        self.text_index = self
+        self.vector_index = NoopVectorIndex()
         if create:
             self._initialize()
         elif not self.root.exists():
@@ -133,12 +140,10 @@ class LocalWorkspaceBackend:
         conn.commit()
 
     def _ensure_writable(self):
-        if self.read_only:
-            raise WorkspacePolicyError("Workspace is configured read-only.")
+        self.policy.ensure_writable()
 
     def _ensure_collection(self, collection: str):
-        collection_path = self.content_root / collection
-        collection_path.mkdir(parents=True, exist_ok=True)
+        collection_path = self.content.ensure_collection(collection)
         descriptor = collection_path / "_collection.meta.json"
         if not descriptor.exists():
             descriptor.write_text(
@@ -153,15 +158,10 @@ class LocalWorkspaceBackend:
             )
 
     def _resolve_content_path(self, path: str | Path):
-        candidate = Path(path)
-        if not candidate.is_absolute():
-            candidate = self.content_root / candidate
-        resolved = candidate.expanduser().resolve()
         try:
-            resolved.relative_to(self.content_root)
-        except ValueError as error:
-            raise WorkspacePolicyError(f"Path is outside workspace content root: { path }") from error
-        return resolved
+            return self.policy.resolve_content_path(path)
+        except WorkspacePolicyError:
+            raise
 
     @staticmethod
     def _content_to_bytes(content: Any) -> bytes:
@@ -215,9 +215,7 @@ class LocalWorkspaceBackend:
         suffix = ".json" if not isinstance(content, (str, bytes)) else ".txt"
         file_name = f"{ record_id }-{ slug(kind or collection, 'record') }{ suffix }"
         relative_path = f"{ collection }/{ file_name }"
-        target = self._resolve_content_path(relative_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content_bytes)
+        relative_path = await self.content.write_content(relative_path, content_bytes)
         created_at = utc_now()
         record_summary = summary or content_text[:240].replace("\n", " ").strip()
         with self._connect() as conn:
@@ -248,7 +246,7 @@ class LocalWorkspaceBackend:
                 (record_id, record_summary, content_text),
             )
             conn.commit()
-        return {
+        ref: WorkspaceRecordRef = {
             "id": record_id,
             "collection": collection,
             "kind": kind,
@@ -261,6 +259,54 @@ class LocalWorkspaceBackend:
             "created_at": created_at,
             "meta": meta or {},
         }
+        await self.vector_index.index_record(ref, content_text)
+        return ref
+
+    async def put_record(self, ref: WorkspaceRecordRef) -> WorkspaceRecordRef:
+        self._ensure_writable()
+        self._ensure_collection(ref["collection"])
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO records (
+                    id, collection, kind, path, sha256, size, summary,
+                    scope_json, source_json, meta_json, created_at, is_checkpoint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ref["id"],
+                    ref["collection"],
+                    ref["kind"],
+                    ref["path"],
+                    ref["sha256"],
+                    ref["size"],
+                    ref["summary"],
+                    json_dumps(ref["scope"]),
+                    json_dumps(ref["source"]),
+                    json_dumps(ref["meta"]),
+                    ref["created_at"],
+                    1 if ref["collection"] == "checkpoints" or ref["meta"].get("checkpoint") else 0,
+                ),
+            )
+            conn.commit()
+        return ref
+
+    async def get_record(self, record_id: str) -> WorkspaceRecordRef | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
+        if row is None:
+            return None
+        return self._row_to_ref(row)
+
+    async def index_record(self, ref: WorkspaceRecordRef, content: str) -> None:
+        self._ensure_writable()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM records_fts WHERE record_id = ?", (ref["id"],))
+            conn.execute(
+                "INSERT INTO records_fts(record_id, summary, content) VALUES (?, ?, ?)",
+                (ref["id"], ref["summary"], content),
+            )
+            conn.commit()
 
     async def get(self, ref_or_path: WorkspaceRecordRef | str) -> Any:
         path: str | None = None
@@ -275,10 +321,7 @@ class LocalWorkspaceBackend:
             path = str(ref_or_path)
         if not path:
             raise FileNotFoundError(f"Workspace record content not found: { ref_or_path }")
-        target = self._resolve_content_path(path)
-        if not target.is_file():
-            raise FileNotFoundError(f"Workspace content not found: { path }")
-        return target.read_text(encoding="utf-8", errors="replace")
+        return await self.content.read_content(path)
 
     async def search(
         self,
@@ -385,3 +428,12 @@ class LocalWorkspaceBackend:
             )
             conn.commit()
         return ref
+
+    async def put_checkpoint(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+    ) -> WorkspaceRecordRef:
+        return await self.checkpoint(run_id, state, step_id=step_id)

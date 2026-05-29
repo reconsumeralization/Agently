@@ -139,7 +139,11 @@ from .skill import (
 )
 
 from .workspace import (
+    WorkspaceContextItem,
+    WorkspaceContextOmission,
+    WorkspaceContextPack,
     WorkspaceLinkRef,
+    WorkspaceRecallPlan,
     WorkspaceRecordRef,
     WorkspaceSearchResult,
 )

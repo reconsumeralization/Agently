@@ -31,6 +31,13 @@ records = await agent.workspace.search(
     "route fallback",
     filters={"collection": "observations", "kind": "test_output"},
 )
+
+context_pack = await agent.workspace.build_context(
+    goal="Fix the route fallback failure.",
+    scope={"task_id": "issue-123"},
+    budget={"tokens": 12000},
+    profile="software_dev",
+)
 ```
 
 ## 存什么
@@ -64,5 +71,12 @@ agent.enable_nodejs()
 
 Workspace V1 不暴露 `remember(...)`、`observe(...)`、`decide(...)` 这类可被模型调用
 的记忆动词。这些属于未来 Action、Recall 或 WorkLoop 层的高阶接口。V1 中，应用代码
-决定写入什么；后续 Recall 层决定给模型打包哪些上下文。
+决定写入什么；Recall 骨架通过可插拔 planner、retriever 和 context-builder profile
+把已存 records 打包成 `ContextPack`。
 
+## 插件边界
+
+Workspace 暴露 content、metadata、checkpoint、text index、policy 和 vector index
+等底层 backend seam。默认本地 backend 是 filesystem content + SQLite metadata/FTS
++ `NoopVectorIndex`。Recall 暴露 `RecallPlanner`、`Retriever` 和 `ContextBuilder`；
+高级模型辅助规划、向量检索、rerank 和 compression 预期作为插件叠加在这个底座上。

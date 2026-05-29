@@ -32,6 +32,13 @@ records = await agent.workspace.search(
     "route fallback",
     filters={"collection": "observations", "kind": "test_output"},
 )
+
+context_pack = await agent.workspace.build_context(
+    goal="Fix the route fallback failure.",
+    scope={"task_id": "issue-123"},
+    budget={"tokens": 12000},
+    profile="software_dev",
+)
 ```
 
 ## What It Stores
@@ -68,6 +75,15 @@ directory.
 Workspace V1 intentionally does not expose model-callable memory verbs such as
 `remember(...)`, `observe(...)`, or `decide(...)`. Those are higher-level
 affordances for future Action, Recall, or WorkLoop layers. In V1, application
-code decides what to write, and the later Recall layer decides what to package
-for the model.
+code decides what to write, and the Recall skeleton packages stored records into
+a `ContextPack` through pluggable planner, retriever, and context-builder
+profiles.
 
+## Plugin Seams
+
+Workspace exposes low-level backend seams for content, metadata, checkpoints,
+text index, policy, and vector index. The default local backend is filesystem
+content plus SQLite metadata/FTS and `NoopVectorIndex`. Recall exposes
+`RecallPlanner`, `Retriever`, and `ContextBuilder`; advanced model-assisted
+planning, vector retrieval, reranking, and compression are expected to arrive as
+plugins over this foundation.

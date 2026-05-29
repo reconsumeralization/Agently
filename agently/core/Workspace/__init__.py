@@ -17,11 +17,15 @@ from .Facade import Workspace
 from .LocalBackend import LocalWorkspaceBackend
 from .Manager import WorkspaceManager
 from .Profiles import CheckpointIngestionProfile, FastIngestionProfile
+from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
 
 __all__ = [
     "CheckpointIngestionProfile",
     "FastIngestionProfile",
+    "LocalContentStore",
     "LocalWorkspaceBackend",
+    "LocalWorkspacePolicyEngine",
+    "NoopVectorIndex",
     "Workspace",
     "WorkspaceConfigurationError",
     "WorkspaceError",

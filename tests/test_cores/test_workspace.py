@@ -2,6 +2,7 @@ import pytest
 
 from agently import Agently
 from agently.core import WorkspacePolicyError
+from agently.types.data import WorkspaceContextPack, WorkspaceRecallPlan, WorkspaceRecordRef
 
 
 @pytest.mark.asyncio
@@ -88,3 +89,159 @@ async def test_workspace_rejects_path_traversal_and_read_only_writes(tmp_path):
 def test_workspace_manager_registers_builtin_profiles():
     assert "fast" in Agently.workspace.list_profiles()
     assert "checkpoint" in Agently.workspace.list_profiles()
+    assert "auto" in Agently.workspace.list_recall_profiles()
+
+
+@pytest.mark.asyncio
+async def test_workspace_build_context_returns_refs_and_budget_diagnostics(tmp_path):
+    agent = Agently.create_agent("workspace-recall").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    failure_ref = await workspace.ingest(
+        content="route fallback failed because provider returned no route candidate",
+        collection="observations",
+        kind="test_output",
+        summary="route fallback pytest failure",
+        scope={"task_id": "issue-123"},
+        source={"type": "command", "name": "pytest"},
+    )
+    await workspace.ingest(
+        content="unrelated release note draft",
+        collection="artifacts",
+        kind="note",
+        summary="release note draft",
+        scope={"task_id": "issue-999"},
+        source={"type": "human"},
+    )
+
+    context_pack = await workspace.build_context(
+        goal="route fallback failure",
+        scope={"task_id": "issue-123"},
+        budget={"chars": 600},
+        profile="software_dev",
+    )
+
+    assert context_pack["goal"] == "route fallback failure"
+    assert context_pack["profile"] == "software_dev"
+    assert [item["ref"]["id"] for item in context_pack["items"]] == [failure_ref["id"]]
+    assert context_pack["items"][0]["content"] is not None
+    assert "route fallback" in context_pack["items"][0]["content"]
+    assert context_pack["diagnostics"]["planner"] == "rule"
+
+
+@pytest.mark.asyncio
+async def test_workspace_backend_component_protocols_are_wired(tmp_path):
+    agent = Agently.create_agent("workspace-components").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    ref: WorkspaceRecordRef = {
+        "id": "rec_component_protocol",
+        "collection": "observations",
+        "kind": "note",
+        "path": None,
+        "sha256": None,
+        "size": 0,
+        "summary": "component protocol record",
+        "scope": {"task_id": "issue-789"},
+        "source": {"type": "test"},
+        "created_at": "2026-05-29T00:00:00Z",
+        "meta": {},
+    }
+
+    await workspace.backend.metadata.put_record(ref)
+    await workspace.backend.text_index.index_record(ref, "component protocol indexed content")
+
+    records = await workspace.search("indexed", filters={"collection": "observations"})
+
+    assert [record["id"] for record in records] == [ref["id"]]
+    assert workspace.backend.vector_index is not None
+    assert await workspace.backend.vector_index.search("indexed") == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_registers_custom_recall_profile(tmp_path):
+    class StaticPlanner:
+        name = "static"
+
+        async def plan(
+            self,
+            *,
+            workspace,
+            goal: str,
+            scope: dict,
+            budget: dict,
+            profile: str,
+        ) -> WorkspaceRecallPlan:
+            _ = (workspace, budget)
+            return {
+                "goal": goal,
+                "profile": profile,
+                "queries": [],
+                "filters": {f"scope.{key}": value for key, value in scope.items()},
+                "scope": scope,
+                "budget": budget,
+                "diagnostics": {"planner": self.name},
+            }
+
+    class StaticRetriever:
+        name = "static"
+
+        async def retrieve(self, *, workspace, plan: WorkspaceRecallPlan) -> list[WorkspaceRecordRef]:
+            return await workspace.search(None, filters=plan["filters"])
+
+    class StaticBuilder:
+        name = "static"
+
+        async def build(
+            self,
+            *,
+            workspace,
+            goal: str,
+            profile: str,
+            records: list[WorkspaceRecordRef],
+            budget: dict,
+            diagnostics: dict,
+        ) -> WorkspaceContextPack:
+            _ = (workspace, budget)
+            return {
+                "goal": goal,
+                "profile": profile,
+                "items": [
+                    {
+                        "ref": record,
+                        "kind": record["kind"],
+                        "summary": record["summary"],
+                        "content": None,
+                        "use": "custom",
+                    }
+                    for record in records
+                ],
+                "omitted": [],
+                "diagnostics": diagnostics,
+            }
+
+    Agently.workspace.register_recall_profile(
+        "custom-test",
+        planner=StaticPlanner(),
+        retriever=StaticRetriever(),
+        context_builder=StaticBuilder(),
+    )
+    agent = Agently.create_agent("workspace-custom-recall").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    ref = await workspace.put(
+        "custom recall record",
+        collection="decisions",
+        kind="decision",
+        summary="custom recall decision",
+        scope={"task_id": "issue-456"},
+    )
+
+    context_pack = await workspace.build_context(
+        goal="anything",
+        scope={"task_id": "issue-456"},
+        profile="custom-test",
+    )
+
+    assert context_pack["items"][0]["ref"]["id"] == ref["id"]
+    assert context_pack["items"][0]["use"] == "custom"

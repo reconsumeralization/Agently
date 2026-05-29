@@ -85,3 +85,19 @@ class Workspace:
             summary=summary,
             meta=meta,
         )
+
+    async def build_context(
+        self,
+        *,
+        goal: str,
+        scope: dict[str, Any] | None = None,
+        budget: dict[str, Any] | None = None,
+        profile: str = "auto",
+    ):
+        return await self.manager.build_context(
+            self,
+            goal=goal,
+            scope=scope,
+            budget=budget,
+            profile=profile,
+        )
