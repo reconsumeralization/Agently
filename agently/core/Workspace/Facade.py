@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agently.types.data.workspace import WorkspaceRecordRef
+from agently.types.data.workspace import WorkspaceBackendCapabilities, WorkspaceLinkRef, WorkspaceRecordRef
 from agently.types.plugins import WorkspaceBackend
 
 if TYPE_CHECKING:
@@ -47,6 +47,9 @@ class Workspace:
     async def get(self, ref_or_path: WorkspaceRecordRef | str):
         return await self.backend.get(ref_or_path)
 
+    async def get_data(self, ref_or_path: WorkspaceRecordRef | str):
+        return await self.backend.get_data(ref_or_path)
+
     async def search(self, query: str | None = None, filters: dict[str, Any] | None = None):
         return await self.backend.search(query, filters)
 
@@ -59,8 +62,27 @@ class Workspace:
     ):
         return await self.backend.link(source, target, relation, meta)
 
+    async def links(
+        self,
+        ref_or_id: WorkspaceRecordRef | str | None = None,
+        *,
+        source: WorkspaceRecordRef | str | None = None,
+        target: WorkspaceRecordRef | str | None = None,
+        relation: str | None = None,
+    ) -> list[WorkspaceLinkRef]:
+        return await self.backend.links(ref_or_id, source=source, target=target, relation=relation)
+
     async def checkpoint(self, run_id: str, state: dict[str, Any], *, step_id: str | None = None):
         return await self.backend.checkpoint(run_id, state, step_id=step_id)
+
+    async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
+        return await self.backend.latest_checkpoint(run_id)
+
+    async def checkpoint_history(self, run_id: str, *, step_id: str | None = None) -> list[WorkspaceRecordRef]:
+        return await self.backend.checkpoint_history(run_id, step_id=step_id)
+
+    def capabilities(self) -> WorkspaceBackendCapabilities:
+        return self.backend.capabilities()
 
     async def ingest(
         self,

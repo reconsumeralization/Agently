@@ -53,7 +53,37 @@ checkpoint_ref = await agent.workspace.checkpoint(
     {"phase": "debugging", "refs": [ref]},
     step_id="run-tests",
 )
+
+state = await agent.workspace.get_data(checkpoint_ref)
+latest = await agent.workspace.latest_checkpoint("issue-123")
+history = await agent.workspace.checkpoint_history("issue-123")
 ```
+
+`get(...)` reads stored content as text. Use `get_data(...)` when records contain
+JSON-compatible structured data such as dicts, lists, or checkpoint state.
+
+## Links And Diagnostics
+
+Links record typed relationships between records and can be queried without
+accessing backend storage directly.
+
+```python
+decision_ref = await agent.workspace.put(
+    {"decision": "Patch route fallback"},
+    collection="decisions",
+    kind="loop_decision",
+    scope={"task_id": "issue-123"},
+)
+
+await agent.workspace.link(decision_ref, ref, relation="responds_to")
+links = await agent.workspace.links(source=decision_ref, relation="responds_to")
+
+capabilities = agent.workspace.capabilities()
+```
+
+`capabilities()` reports the active backend components for content, metadata,
+checkpoint, text index, policy, and vector index. This is useful when replacing
+the local backend with plugins.
 
 ## Action Boundary
 
@@ -87,3 +117,7 @@ content plus SQLite metadata/FTS and `NoopVectorIndex`. Recall exposes
 `RecallPlanner`, `Retriever`, and `ContextBuilder`; advanced model-assisted
 planning, vector retrieval, reranking, and compression are expected to arrive as
 plugins over this foundation.
+
+See `examples/trigger_flow/workspace_loop_foundation.py` for an explicit
+TriggerFlow loop that stores structured observations, links decisions to
+evidence, checkpoints compact state, and recalls a ContextPack.

@@ -139,6 +139,7 @@ from .skill import (
 )
 
 from .workspace import (
+    WorkspaceBackendCapabilities,
     WorkspaceContextItem,
     WorkspaceContextOmission,
     WorkspaceContextPack,

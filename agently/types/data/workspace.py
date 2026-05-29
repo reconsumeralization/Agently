@@ -41,6 +41,15 @@ class WorkspaceLinkRef(TypedDict):
     meta: dict[str, Any]
 
 
+class WorkspaceBackendCapabilities(TypedDict):
+    backend: str
+    root: str
+    content_root: str
+    read_only: bool
+    components: dict[str, str | None]
+    features: dict[str, bool]
+
+
 class WorkspaceSearchResult(TypedDict, total=False):
     ref: WorkspaceRecordRef
     score: float | None

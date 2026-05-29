@@ -65,6 +65,14 @@ async def test_workspace_checkpoint_is_compact_and_searchable(tmp_path):
     assert ref["scope"]["step_id"] == "step-1"
     data = await workspace.get(ref)
     assert "debugging" in data
+    structured_data = await workspace.get_data(ref)
+    assert structured_data == {"phase": "debugging", "refs": ["rec_test"]}
+
+    latest = await workspace.latest_checkpoint("issue-123")
+    assert latest is not None
+    assert latest["id"] == ref["id"]
+    history = await workspace.checkpoint_history("issue-123", step_id="step-1")
+    assert [item["id"] for item in history] == [ref["id"]]
 
 
 @pytest.mark.asyncio
@@ -90,6 +98,48 @@ def test_workspace_manager_registers_builtin_profiles():
     assert "fast" in Agently.workspace.list_profiles()
     assert "checkpoint" in Agently.workspace.list_profiles()
     assert "auto" in Agently.workspace.list_recall_profiles()
+
+
+@pytest.mark.asyncio
+async def test_workspace_structured_data_links_and_capabilities(tmp_path):
+    agent = Agently.create_agent("workspace-foundation-components").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    observation = {
+        "attempt": 2,
+        "result": {"status": "failed", "reason": "missing route candidate"},
+        "evidence": ["pytest::test_route_fallback"],
+    }
+    observation_ref = await workspace.put(
+        observation,
+        collection="observations",
+        kind="execution_observation",
+        summary="route fallback failed",
+        scope={"task_id": "issue-123"},
+    )
+    decision_ref = await workspace.put(
+        {"decision": "patch route provider fallback"},
+        collection="decisions",
+        kind="loop_decision",
+        summary="patch route provider fallback",
+        scope={"task_id": "issue-123"},
+    )
+
+    link_ref = await workspace.link(decision_ref, observation_ref, relation="responds_to")
+
+    assert await workspace.get_data(observation_ref) == observation
+    assert [item["id"] for item in await workspace.links(decision_ref)] == [link_ref["id"]]
+    assert [item["id"] for item in await workspace.links(source=decision_ref)] == [link_ref["id"]]
+    assert [item["id"] for item in await workspace.links(target=observation_ref, relation="responds_to")] == [
+        link_ref["id"]
+    ]
+    capabilities = workspace.capabilities()
+    assert capabilities["backend"] == "local"
+    assert capabilities["components"]["content"] == "LocalContentStore"
+    assert capabilities["components"]["vector_index"] == "NoopVectorIndex"
+    assert capabilities["features"]["structured_get_data"] is True
+    assert capabilities["features"]["links_query"] is True
+    assert capabilities["features"]["checkpoint_lookup"] is True
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from agently.types.data.workspace import WorkspaceLinkRef, WorkspaceRecordRef
+from agently.types.data.workspace import WorkspaceBackendCapabilities, WorkspaceLinkRef, WorkspaceRecordRef
 
 
 @runtime_checkable
@@ -140,6 +140,8 @@ class WorkspaceBackend(Protocol):
 
     async def get(self, ref_or_path: WorkspaceRecordRef | str) -> Any: ...
 
+    async def get_data(self, ref_or_path: WorkspaceRecordRef | str) -> Any: ...
+
     async def search(
         self,
         query: str | None = None,
@@ -154,6 +156,15 @@ class WorkspaceBackend(Protocol):
         meta: dict[str, Any] | None = None,
     ) -> WorkspaceLinkRef: ...
 
+    async def links(
+        self,
+        ref_or_id: WorkspaceRecordRef | str | None = None,
+        *,
+        source: WorkspaceRecordRef | str | None = None,
+        target: WorkspaceRecordRef | str | None = None,
+        relation: str | None = None,
+    ) -> list[WorkspaceLinkRef]: ...
+
     async def checkpoint(
         self,
         run_id: str,
@@ -161,3 +172,14 @@ class WorkspaceBackend(Protocol):
         *,
         step_id: str | None = None,
     ) -> WorkspaceRecordRef: ...
+
+    async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None: ...
+
+    async def checkpoint_history(
+        self,
+        run_id: str,
+        *,
+        step_id: str | None = None,
+    ) -> list[WorkspaceRecordRef]: ...
+
+    def capabilities(self) -> WorkspaceBackendCapabilities: ...

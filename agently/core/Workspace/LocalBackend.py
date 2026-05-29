@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from agently.types.data.workspace import WorkspaceLinkRef, WorkspaceRecordRef
+from agently.types.data.workspace import WorkspaceBackendCapabilities, WorkspaceLinkRef, WorkspaceRecordRef
 
 from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
 from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
@@ -194,6 +194,16 @@ class LocalWorkspaceBackend:
             "meta": json_loads(row["meta_json"], {}),
         }
 
+    def _row_to_link(self, row: sqlite3.Row) -> WorkspaceLinkRef:
+        return {
+            "id": str(row["id"]),
+            "source_id": str(row["source_id"]),
+            "target_id": str(row["target_id"]),
+            "relation": str(row["relation"]),
+            "created_at": str(row["created_at"]),
+            "meta": json_loads(row["meta_json"], {}),
+        }
+
     async def put(
         self,
         content: Any,
@@ -323,6 +333,20 @@ class LocalWorkspaceBackend:
             raise FileNotFoundError(f"Workspace record content not found: { ref_or_path }")
         return await self.content.read_content(path)
 
+    async def get_data(self, ref_or_path: WorkspaceRecordRef | str) -> Any:
+        content = await self.get(ref_or_path)
+        path: str | None = None
+        if isinstance(ref_or_path, dict):
+            path = ref_or_path.get("path")
+        elif isinstance(ref_or_path, str) and ref_or_path.startswith("rec_"):
+            record = await self.get_record(ref_or_path)
+            path = record.get("path") if record is not None else None
+        else:
+            path = str(ref_or_path)
+        if path and path.endswith(".json") and isinstance(content, str):
+            return json_loads(content, content)
+        return content
+
     async def search(
         self,
         query: str | None = None,
@@ -401,6 +425,34 @@ class LocalWorkspaceBackend:
             "meta": meta or {},
         }
 
+    async def links(
+        self,
+        ref_or_id: WorkspaceRecordRef | str | None = None,
+        *,
+        source: WorkspaceRecordRef | str | None = None,
+        target: WorkspaceRecordRef | str | None = None,
+        relation: str | None = None,
+    ) -> list[WorkspaceLinkRef]:
+        params: list[Any] = []
+        clauses: list[str] = []
+        if ref_or_id is not None:
+            record_id = self._record_id(ref_or_id)
+            clauses.append("(source_id = ? OR target_id = ?)")
+            params.extend([record_id, record_id])
+        if source is not None:
+            clauses.append("source_id = ?")
+            params.append(self._record_id(source))
+        if target is not None:
+            clauses.append("target_id = ?")
+            params.append(self._record_id(target))
+        if relation is not None:
+            clauses.append("relation = ?")
+            params.append(relation)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT * FROM links { where } ORDER BY created_at ASC", params).fetchall()
+        return [self._row_to_link(row) for row in rows]
+
     async def checkpoint(
         self,
         run_id: str,
@@ -437,3 +489,67 @@ class LocalWorkspaceBackend:
         step_id: str | None = None,
     ) -> WorkspaceRecordRef:
         return await self.checkpoint(run_id, state, step_id=step_id)
+
+    async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT r.* FROM checkpoints c
+                JOIN records r ON r.id = c.record_id
+                WHERE c.run_id = ?
+                ORDER BY c.created_at DESC, c.rowid DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_ref(row)
+
+    async def checkpoint_history(
+        self,
+        run_id: str,
+        *,
+        step_id: str | None = None,
+    ) -> list[WorkspaceRecordRef]:
+        params: list[Any] = [run_id]
+        step_clause = ""
+        if step_id is not None:
+            step_clause = "AND c.step_id = ?"
+            params.append(step_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT r.* FROM checkpoints c
+                JOIN records r ON r.id = c.record_id
+                WHERE c.run_id = ? { step_clause }
+                ORDER BY c.created_at DESC, c.rowid DESC
+                """,
+                params,
+            ).fetchall()
+        return [self._row_to_ref(row) for row in rows]
+
+    def capabilities(self) -> WorkspaceBackendCapabilities:
+        vector_index = self.vector_index
+        return {
+            "backend": "local",
+            "root": str(self.root),
+            "content_root": str(self.content_root),
+            "read_only": self.read_only,
+            "components": {
+                "content": type(self.content).__name__,
+                "metadata": type(self.metadata).__name__,
+                "checkpoint_store": type(self.checkpoint_store).__name__,
+                "text_index": type(self.text_index).__name__,
+                "policy": type(self.policy).__name__,
+                "vector_index": type(vector_index).__name__ if vector_index is not None else None,
+            },
+            "features": {
+                "structured_get_data": True,
+                "links_query": True,
+                "checkpoint_lookup": True,
+                "metadata_filters": True,
+                "text_search": True,
+                "vector_search": vector_index is not None and getattr(vector_index, "name", None) != "noop",
+            },
+        }

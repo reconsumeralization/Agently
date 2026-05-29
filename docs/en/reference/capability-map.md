@@ -34,6 +34,7 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Need to reuse one response multiple ways | [Model Response](../requests/model-response.md) |
 | Multi-turn chat with bounded history | [Session Memory](../requests/session-memory.md) |
 | Multi-turn task needs durable observations, artifacts, decisions, or checkpoints | [Workspace](../requests/workspace.md) |
+| Explicit workflow loop needs durable structured state, record links, checkpoint lookup, and recall | [TriggerFlow Overview](../triggerflow/overview.md) + [Workspace](../requests/workspace.md); see `examples/trigger_flow/workspace_loop_foundation.py` |
 | Need the model to call tools / MCP servers | [Action Runtime](../actions/action-runtime.md) |
 | Need common Python / shell / workspace / Node.js / SQLite ability | [Action Runtime](../actions/action-runtime.md), start with `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace(...)`, `agent.enable_nodejs(...)`, or `agent.enable_sqlite(...)` |
 | Need web search or page browse | [Action Runtime](../actions/action-runtime.md), use `from agently.builtins.actions import Search, Browse` and `agent.use_actions(...)` |

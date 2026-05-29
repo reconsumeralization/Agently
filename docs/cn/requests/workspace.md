@@ -52,7 +52,36 @@ checkpoint_ref = await agent.workspace.checkpoint(
     {"phase": "debugging", "refs": [ref]},
     step_id="run-tests",
 )
+
+state = await agent.workspace.get_data(checkpoint_ref)
+latest = await agent.workspace.latest_checkpoint("issue-123")
+history = await agent.workspace.checkpoint_history("issue-123")
 ```
+
+`get(...)` 按文本读取已存内容。record 中保存 dict、list 或 checkpoint state 等
+JSON-compatible 结构化数据时，使用 `get_data(...)` 取回结构化对象。
+
+## Links 与诊断
+
+Links 用来记录 records 之间的 typed relationship，并且可以通过公开 API 查询，
+不需要直接访问 backend 存储。
+
+```python
+decision_ref = await agent.workspace.put(
+    {"decision": "Patch route fallback"},
+    collection="decisions",
+    kind="loop_decision",
+    scope={"task_id": "issue-123"},
+)
+
+await agent.workspace.link(decision_ref, ref, relation="responds_to")
+links = await agent.workspace.links(source=decision_ref, relation="responds_to")
+
+capabilities = agent.workspace.capabilities()
+```
+
+`capabilities()` 会报告当前 backend 的 content、metadata、checkpoint、text index、
+policy 和 vector index 组件。替换 local backend 或插件调试时可以用它确认当前 wiring。
 
 ## Action 边界
 
@@ -80,3 +109,7 @@ Workspace 暴露 content、metadata、checkpoint、text index、policy 和 vecto
 等底层 backend seam。默认本地 backend 是 filesystem content + SQLite metadata/FTS
 + `NoopVectorIndex`。Recall 暴露 `RecallPlanner`、`Retriever` 和 `ContextBuilder`；
 高级模型辅助规划、向量检索、rerank 和 compression 预期作为插件叠加在这个底座上。
+
+`examples/trigger_flow/workspace_loop_foundation.py` 展示了一个显式 TriggerFlow
+loop：写入结构化 observations，把 decisions link 到 evidence，checkpoint 紧凑状态，
+并通过 Recall 生成 ContextPack。
