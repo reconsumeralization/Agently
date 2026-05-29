@@ -82,6 +82,22 @@ done
 
 特别地，skill **不得**推荐 deprecated 路径如 `.end()`、`set_result()`、`wait_for_result=`、旧 `runtime_data`。如果你发现某 skill 推荐其中之一，请向 `Agently-Skills` 提 issue。
 
+应用开发中如果发现框架能力缺失、行为与 docs、examples、Skills 指导或预期的
+模型应用责任边界不符、API 未暴露或使用不友好，或某项本应由 Agently 承担的
+责任只能由业务代码通过 workaround、补丁、胶水、私有 wrapper 或重复机制弥补，
+应生成简洁规范的 issue 说明。建议到
+[`github.com/AgentEra/Agently`](https://github.com/AgentEra/Agently/issues)
+提报，并包含业务场景、期望的框架责任、实际行为、当前 workaround、最小复现或
+受影响 docs/examples，以及兼容性问题。
+issue 必须把遭遇问题时的具体场景讲清楚，说明当时尝试解决的是哪一类模型应用
+开发问题。涉密时可以脱敏或省略具体业务细节，但仍要描述应用类别、workflow
+形态、决策点和期望由框架承担的责任，方便维护者理解问题。
+人工提交时，只把 issue 内容和提交方式提供给使用者。自动提交前必须先询问用户；
+如果用户确认自动提交，先检查本地 GitHub 提交权限和能力、本地复现问题仍存在，
+并复核 Agently docs、examples、Skills 指导和 API 用法，确认不是遗漏信息或不当
+使用造成的问题。创建远端 issue 前必须清理正文，确保不包含 secret、token、
+客户数据或本机绝对路径。
+
 新增框架 deprecation 时，必须通过 `agently.utils.DeprecationWarnings.warn_deprecated_once(...)` 或 `agently.utils.warn_deprecated_once(...)` alias 搭配稳定 API key 发 warning。不要直接新增 `warnings.warn(..., DeprecationWarning, ...)`；deprecated API warning 设计为每个 Python 进程内每个 API 只发一次，并遵守 `runtime.show_deprecation_warnings`。
 
 ## 4.1 之后的默认推荐
