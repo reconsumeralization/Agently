@@ -15,50 +15,15 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any
 
 from agently.types.data.workspace import WorkspaceLinkRef, WorkspaceRecordRef
-from agently.types.plugins import IngestionProfile, WorkspaceBackend
 
-
-class WorkspaceError(RuntimeError):
-    """Base Workspace error."""
-
-
-class WorkspaceConfigurationError(WorkspaceError):
-    """Raised when Workspace is missing required configuration."""
-
-
-class WorkspacePolicyError(WorkspaceError):
-    """Raised when Workspace policy blocks an operation."""
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-
-
-def _json_loads(value: str | None, default: Any) -> Any:
-    if not value:
-        return default
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return default
-
-
-def _slug(value: str, fallback: str) -> str:
-    normalized = "".join(char.lower() if char.isalnum() else "-" for char in str(value))
-    normalized = "-".join(part for part in normalized.split("-") if part)
-    return normalized or fallback
+from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
+from ._utils import json_dumps, json_loads, slug, utc_now
 
 
 class LocalWorkspaceBackend:
@@ -91,10 +56,10 @@ class LocalWorkspaceBackend:
         meta_path = self.root / "workspace.meta.json"
         if not meta_path.exists():
             meta_path.write_text(
-                _json_dumps(
+                json_dumps(
                     {
                         "schema_version": "agently.workspace.local.v1",
-                        "created_at": _utc_now(),
+                        "created_at": utc_now(),
                         "backend": "local",
                         "content_root": str(self.content_root),
                     }
@@ -177,11 +142,11 @@ class LocalWorkspaceBackend:
         descriptor = collection_path / "_collection.meta.json"
         if not descriptor.exists():
             descriptor.write_text(
-                _json_dumps(
+                json_dumps(
                     {
                         "schema_version": "agently.workspace.collection.v1",
                         "collection": collection,
-                        "created_at": _utc_now(),
+                        "created_at": utc_now(),
                     }
                 ),
                 encoding="utf-8",
@@ -204,7 +169,7 @@ class LocalWorkspaceBackend:
             return content
         if isinstance(content, str):
             return content.encode("utf-8")
-        return _json_dumps(content).encode("utf-8")
+        return json_dumps(content).encode("utf-8")
 
     @staticmethod
     def _content_to_text(content: Any) -> str:
@@ -212,7 +177,7 @@ class LocalWorkspaceBackend:
             return content.decode("utf-8", errors="replace")
         if isinstance(content, str):
             return content
-        return _json_dumps(content)
+        return json_dumps(content)
 
     def _row_to_ref(self, row: sqlite3.Row) -> WorkspaceRecordRef:
         return {
@@ -223,10 +188,10 @@ class LocalWorkspaceBackend:
             "sha256": row["sha256"],
             "size": int(row["size"] or 0),
             "summary": str(row["summary"] or ""),
-            "scope": _json_loads(row["scope_json"], {}),
-            "source": _json_loads(row["source_json"], {}),
+            "scope": json_loads(row["scope_json"], {}),
+            "source": json_loads(row["source_json"], {}),
             "created_at": str(row["created_at"]),
-            "meta": _json_loads(row["meta_json"], {}),
+            "meta": json_loads(row["meta_json"], {}),
         }
 
     async def put(
@@ -241,19 +206,19 @@ class LocalWorkspaceBackend:
         meta: dict[str, Any] | None = None,
     ) -> WorkspaceRecordRef:
         self._ensure_writable()
-        collection = _slug(collection, "artifacts")
+        collection = slug(collection, "artifacts")
         self._ensure_collection(collection)
         record_id = f"rec_{ uuid.uuid4().hex }"
         content_bytes = self._content_to_bytes(content)
         content_text = self._content_to_text(content)
         digest = hashlib.sha256(content_bytes).hexdigest()
         suffix = ".json" if not isinstance(content, (str, bytes)) else ".txt"
-        file_name = f"{ record_id }-{ _slug(kind or collection, 'record') }{ suffix }"
+        file_name = f"{ record_id }-{ slug(kind or collection, 'record') }{ suffix }"
         relative_path = f"{ collection }/{ file_name }"
         target = self._resolve_content_path(relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content_bytes)
-        created_at = _utc_now()
+        created_at = utc_now()
         record_summary = summary or content_text[:240].replace("\n", " ").strip()
         with self._connect() as conn:
             conn.execute(
@@ -271,9 +236,9 @@ class LocalWorkspaceBackend:
                     digest,
                     len(content_bytes),
                     record_summary,
-                    _json_dumps(scope or {}),
-                    _json_dumps(source or {}),
-                    _json_dumps(meta or {}),
+                    json_dumps(scope or {}),
+                    json_dumps(source or {}),
+                    json_dumps(meta or {}),
                     created_at,
                     1 if collection == "checkpoints" else 0,
                 ),
@@ -375,13 +340,13 @@ class LocalWorkspaceBackend:
     ) -> WorkspaceLinkRef:
         self._ensure_writable()
         link_id = f"link_{ uuid.uuid4().hex }"
-        created_at = _utc_now()
+        created_at = utc_now()
         source_id = self._record_id(source)
         target_id = self._record_id(target)
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO links(id, source_id, target_id, relation, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (link_id, source_id, target_id, relation, _json_dumps(meta or {}), created_at),
+                (link_id, source_id, target_id, relation, json_dumps(meta or {}), created_at),
             )
             conn.commit()
         return {
@@ -412,125 +377,11 @@ class LocalWorkspaceBackend:
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO checkpoints(run_id, step_id, record_id, state_json, created_at) VALUES (?, ?, ?, ?, ?)",
-                (run_id, step_id, ref["id"], _json_dumps(state), ref["created_at"]),
+                (run_id, step_id, ref["id"], json_dumps(state), ref["created_at"]),
             )
             conn.execute(
                 "INSERT OR REPLACE INTO manifests(key, value_json) VALUES (?, ?)",
-                (f"checkpoint.latest.{ run_id }", _json_dumps(ref)),
+                (f"checkpoint.latest.{ run_id }", json_dumps(ref)),
             )
             conn.commit()
         return ref
-
-
-class FastIngestionProfile:
-    name = "fast"
-
-    async def ingest(self, *, workspace, content, collection, kind, scope, source, summary=None, meta=None):
-        return await workspace.put(
-            content,
-            collection=collection,
-            kind=kind,
-            summary=summary,
-            scope=scope,
-            source=source,
-            meta=meta,
-        )
-
-
-class CheckpointIngestionProfile:
-    name = "checkpoint"
-
-    async def ingest(self, *, workspace, content, collection, kind, scope, source, summary=None, meta=None):
-        run_id = str(scope.get("run_id") or source.get("run_id") or "default")
-        step_id = scope.get("step_id")
-        state = content if isinstance(content, dict) else {"value": content}
-        return await workspace.checkpoint(run_id, state, step_id=str(step_id) if step_id is not None else None)
-
-
-class Workspace:
-    """Workspace facade bound to one backend."""
-
-    def __init__(self, backend: WorkspaceBackend, manager: "WorkspaceManager"):
-        self.backend = backend
-        self.manager = manager
-        self.root = Path(str(getattr(backend, "root")))
-        self.content_root = Path(str(getattr(backend, "content_root")))
-
-    async def put(self, record_or_content: Any, *, collection: str, kind: str | None = None, meta: dict[str, Any] | None = None, **kwargs):
-        return await self.backend.put(record_or_content, collection=collection, kind=kind, meta=meta, **kwargs)
-
-    async def get(self, ref_or_path: WorkspaceRecordRef | str):
-        return await self.backend.get(ref_or_path)
-
-    async def search(self, query: str | None = None, filters: dict[str, Any] | None = None):
-        return await self.backend.search(query, filters)
-
-    async def link(self, source: WorkspaceRecordRef | str, target: WorkspaceRecordRef | str, relation: str, meta: dict[str, Any] | None = None):
-        return await self.backend.link(source, target, relation, meta)
-
-    async def checkpoint(self, run_id: str, state: dict[str, Any], *, step_id: str | None = None):
-        return await self.backend.checkpoint(run_id, state, step_id=step_id)
-
-    async def ingest(
-        self,
-        *,
-        content: Any,
-        collection: str,
-        kind: str | None = None,
-        scope: dict[str, Any] | None = None,
-        source: dict[str, Any] | None = None,
-        summary: str | None = None,
-        meta: dict[str, Any] | None = None,
-        profile: str = "fast",
-    ):
-        handler = self.manager.get_profile(profile)
-        return await handler.ingest(
-            workspace=self,
-            content=content,
-            collection=collection,
-            kind=kind,
-            scope=scope or {},
-            source=source or {},
-            summary=summary,
-            meta=meta,
-        )
-
-
-class WorkspaceManager:
-    """Factory and registry for Workspace foundation capabilities."""
-
-    def __init__(self):
-        self._profiles: dict[str, IngestionProfile] = {}
-        self.register_profile("fast", FastIngestionProfile())
-        self.register_profile("checkpoint", CheckpointIngestionProfile())
-
-    def create(
-        self,
-        path_or_backend: str | Path | WorkspaceBackend,
-        *,
-        create: bool = True,
-        mode: str = "read_write",
-    ) -> Workspace:
-        if hasattr(path_or_backend, "put") and hasattr(path_or_backend, "search"):
-            backend = cast(WorkspaceBackend, path_or_backend)
-        else:
-            backend = LocalWorkspaceBackend(path_or_backend, create=create, mode=mode)  # type: ignore[arg-type]
-        return Workspace(backend, self)
-
-    def register_profile(self, name: str, handler: IngestionProfile | Callable[..., Any]):
-        normalized = str(name).strip()
-        if not normalized:
-            raise ValueError("Workspace profile name must be non-empty.")
-        if not hasattr(handler, "ingest"):
-            raise TypeError("Workspace profile handler must provide async ingest(...).")
-        self._profiles[normalized] = handler  # type: ignore[assignment]
-        return self
-
-    def get_profile(self, name: str) -> IngestionProfile:
-        normalized = str(name or "fast").strip() or "fast"
-        if normalized not in self._profiles:
-            raise WorkspaceConfigurationError(f"Workspace ingestion profile is not registered: { normalized }")
-        return self._profiles[normalized]
-
-    def list_profiles(self) -> list[str]:
-        return sorted(self._profiles.keys())

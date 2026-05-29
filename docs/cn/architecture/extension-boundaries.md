@@ -119,6 +119,21 @@ agent.enable_coding_workspace(...)
 Typing 是开发体验和 API 稳定性的一部分。例如 `desc_mode` 这类选项应写成
 `Literal["append", "override", "default"]`，同时保留运行时校验来覆盖未类型化或动态调用方。
 
+### 模块组织
+
+Core 和 builtins 能力都可以用子目录 package 表达。当一个 feature 同时包含 facade、
+manager、默认实现、registry、adapter、policy 或 validation 等多个架构角色时，
+应优先采用这种形态。
+
+新增 core 或 builtins 能力时，不应默认使用单文件模式。先判断 feature 预期的
+子模块体量和 ownership 边界；只有能力确实体量很小、拆分反而是过度设计时，
+才保持单文件。
+
+已落地案例包括 `core/Action`、`core/TriggerFlow`、`core/TaskDAGExecutor`、
+`core/Workspace`、`builtins/plugins/ExecutionEnvironmentProvider` 和
+`builtins/plugins/SkillsExecutor`。公开 import 通过 package `__init__.py`
+和顶层 re-export 保持稳定。
+
 ## Action 与 Execution Environment
 
 Action 和 Execution Environment 是两个独立层。
