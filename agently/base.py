@@ -29,6 +29,7 @@ from agently.core import (
     ModelRequest,
     BaseAgent,
     SkillsExecutor,
+    WorkspaceManager,
 )
 from agently._default_init import (
     _load_default_actions,
@@ -76,6 +77,7 @@ action_dispatcher = action.action_dispatcher
 action_runtime = action.action_runtime
 action_flow = action.action_flow
 skills_executor = SkillsExecutor(plugin_manager, settings)
+workspace = WorkspaceManager()
 _agently_emitter = event_center.create_emitter("Agently")
 
 
@@ -174,6 +176,7 @@ if settings.get("debug", None) is not None:
 from agently.builtins.agent_extensions import (
     StreamingPrintExtension,
     SessionExtension,
+    WorkspaceExtension,
     ActionExtension,
     SkillsExtension,
     KeyWaiterExtension,
@@ -186,6 +189,7 @@ class Agent(
     StreamingPrintExtension,
     SessionExtension,
     SkillsExtension,
+    WorkspaceExtension,
     ActionExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
@@ -219,6 +223,7 @@ class AgentlyMain(Generic[A]):
         self.action_runtime = action_runtime
         self.action_flow = action_flow
         self.skills_executor = skills_executor
+        self.workspace = workspace
         self.AgentType = AgentType
 
         def refresh_httpx_log_level():

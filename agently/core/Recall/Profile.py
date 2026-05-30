@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .StreamingPrintExtension import StreamingPrintExtension
-from .WorkspaceExtension import WorkspaceExtension
-from .ActionExtension import ActionExtension
-from .KeyWaiterExtension import KeyWaiterExtension
-from .AutoFuncExtension import AutoFuncExtension
-from .ConfigurePromptExtension import ConfigurePromptExtension
-from .SessionExtension import SessionExtension
-from .ChatSessionExtension import ChatSessionExtension
-from .SkillsExtension import SkillsExtension
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from agently.types.plugins import ContextBuilder, RecallPlanner, Retriever
+
+
+@dataclass(frozen=True)
+class RecallProfile:
+    name: str
+    planner: RecallPlanner
+    retriever: Retriever
+    context_builder: ContextBuilder

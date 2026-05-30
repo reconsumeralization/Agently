@@ -203,6 +203,7 @@ async def test_auth_headers_are_preserved_in_outgoing_request(monkeypatch: pytes
             "base_url": "https://api.example.com/v1",
             "model": "m1",
             "stream": False,
+            "api_key": "KEY1",
             "auth": {"headers": {"Authorization": "Custom ABC", "X-Test": "1"}},
         },
         {"input": "hello"},

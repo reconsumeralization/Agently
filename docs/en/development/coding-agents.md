@@ -81,6 +81,28 @@ Documentation tells humans what's possible. Skills tell coding agents what's rec
 
 In particular, skills must NOT recommend deprecated paths like `.end()`, `set_result()`, `wait_for_result=`, or the old `runtime_data` API. If you find a skill recommending one of these, file an issue against `Agently-Skills`.
 
+When application development exposes a missing framework capability, behavior
+that does not match docs, examples, Skills guidance, or the expected
+model-application responsibility boundary, an unexposed or unfriendly API, or a
+responsibility Agently should own but business code must patch with
+workarounds, glue, private wrappers, or duplicated mechanisms, generate a
+concise issue report. Recommend filing it at
+[`github.com/AgentEra/Agently`](https://github.com/AgentEra/Agently/issues) with
+the scenario, expected framework responsibility, actual behavior, workaround,
+minimal reproduction or affected docs/examples, and compatibility concern.
+The issue must make the encountered scenario concrete enough to explain what
+kind of model-application development problem was being solved. If business
+details are confidential, anonymize or omit them, but still describe the
+application category, workflow shape, decision point, and framework
+responsibility needed for maintainers to understand the issue.
+For manual filing, provide the issue content and filing method to the user only.
+Ask before automatic filing; if the user approves, first verify local GitHub
+submission capability and permission, reproduce that the problem still exists,
+and re-check Agently docs, examples, Skills guidance, and API usage to confirm
+the report is not caused by overlooked information or incorrect usage. Before
+creating the remote issue, sanitize the body so it does not include secrets,
+tokens, customer data, or local absolute paths.
+
 When adding a framework deprecation, route the warning through `agently.utils.DeprecationWarnings.warn_deprecated_once(...)` or the `agently.utils.warn_deprecated_once(...)` alias with a stable API key. Do not add direct `warnings.warn(..., DeprecationWarning, ...)` calls; deprecated API warnings are intentionally once per API per Python process and respect `runtime.show_deprecation_warnings`.
 
 ## Post-4.1 defaults

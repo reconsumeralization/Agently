@@ -56,6 +56,8 @@ route_to_handler(result["category"], result)
 
 `route_to_handler(...)` 是普通 Python：一个 category → 函数的 dict。
 
+不要让分词、关键词命中、子串规则或正则成为语义路由的 owner。语义分类应由模型通过 output schema 产出结构化结果，确定性代码消费校验后的 `category` 并执行分派。确定性预处理仍可用于精确 ID 查询、去重、规范化或硬性策略闸门这类非语义工作。类别少、规则简单时可以用较小模型，条件允许也可以用本地模型；类别多、规则交织、输入歧义高、风险高或返回结构复杂时，使用更大参数的模型。
+
 ### TriggerFlow 形态
 
 每类处理本身有自己的步骤时：
@@ -145,6 +147,7 @@ flow 之外消费 `execution.get_async_runtime_stream(...)`。
 
 - handler 都是单步时不要加 TriggerFlow。直接 Python 路由 —— 上面单次请求形态够了。
 - 不要让模型做路由逻辑（「现在告诉我要做什么」）。拿干净的结构化答案（`category`、`severity`、`summary`），让你的代码路由。模型擅长分类；编排逻辑属于代码。
+- 不要让分词、关键词命中、子串规则或正则意图检查替代语义分类成为 route owner。
 - 不要把分类器模型名放进 `flow_data`。用 `runtime_resources`（或在模块级 pin 住 agent）。
 
 ## 交叉链接
