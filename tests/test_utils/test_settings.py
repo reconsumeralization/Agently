@@ -15,6 +15,7 @@ def test_settings():
 
 def test_settings_load_yaml_file_with_auto_env(tmp_path, monkeypatch):
     settings = Settings()
+    settings.register_path_mappings("OpenAICompatible", "plugins.ModelRequester.OpenAICompatible")
     config_path = tmp_path / "settings.yaml"
     env_path = tmp_path / ".env"
 
@@ -39,6 +40,42 @@ def test_settings_load_yaml_file_with_auto_env(tmp_path, monkeypatch):
 
     assert settings["OpenAICompatible.base_url"] == "https://example.com/v1"
     assert settings["OpenAICompatible.auth"] == "secret-key"
+    assert settings["plugins.ModelRequester.OpenAICompatible.base_url"] == "https://example.com/v1"
+    assert settings["plugins.ModelRequester.OpenAICompatible.auth"] == "secret-key"
+
+
+def test_settings_load_yaml_file_applies_path_mapping_without_auto_env(tmp_path):
+    settings = Settings()
+    settings.register_path_mappings("OpenAICompatible", "plugins.ModelRequester.OpenAICompatible")
+    config_path = tmp_path / "settings.yaml"
+
+    config_path.write_text(
+        yaml.safe_dump({"OpenAICompatible": {"model": "deepseek-chat"}}),
+        encoding="utf-8",
+    )
+
+    settings.load("yaml_file", str(config_path))
+
+    assert settings["OpenAICompatible.model"] == "deepseek-chat"
+    assert settings["plugins.ModelRequester.OpenAICompatible.model"] == "deepseek-chat"
+
+
+def test_settings_load_yaml_file_applies_kv_mapping(tmp_path):
+    settings = Settings()
+    settings.register_kv_mappings(
+        "profile",
+        "prod",
+        {"runtime.show_model_logs": "off", "runtime.httpx_log_level": "WARNING"},
+    )
+    config_path = tmp_path / "settings.yaml"
+
+    config_path.write_text(yaml.safe_dump({"profile": "prod"}), encoding="utf-8")
+
+    settings.load("yaml_file", str(config_path))
+
+    assert settings["profile"] == "prod"
+    assert settings["runtime.show_model_logs"] == "off"
+    assert settings["runtime.httpx_log_level"] == "WARNING"
 
 
 def test_settings_load_yaml_file_keep_placeholder_when_env_missing(tmp_path, monkeypatch):

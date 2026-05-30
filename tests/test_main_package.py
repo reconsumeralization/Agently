@@ -720,6 +720,53 @@ def test_agently_load_settings_file(tmp_path, monkeypatch):
     assert Agently.settings["test_main_package.base_url"] == "https://example.com"
 
 
+def test_agently_load_settings_file_applies_model_requester_alias(tmp_path, monkeypatch):
+    config_path = tmp_path / "settings.yaml"
+    env_path = tmp_path / ".env"
+    previous_short = Agently.settings.get("OpenAICompatible", None)
+    previous_openai = Agently.settings.get("plugins.ModelRequester.OpenAICompatible", None)
+
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "OpenAICompatible": {
+                    "base_url": "${ENV.OPENAI_BASE_URL}",
+                    "api_key": "${ENV.OPENAI_API_KEY}",
+                    "model": "${ENV.OPENAI_MODEL}",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    env_path.write_text(
+        "\n".join(
+            [
+                "OPENAI_BASE_URL=https://example.com/v1",
+                "OPENAI_API_KEY=sk-test",
+                "OPENAI_MODEL=deepseek-chat",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    try:
+        Agently.load_settings("yaml_file", str(config_path), auto_load_env=True)
+
+        assert Agently.settings["OpenAICompatible.model"] == "deepseek-chat"
+        assert Agently.settings["plugins.ModelRequester.OpenAICompatible.base_url"] == "https://example.com/v1"
+        assert Agently.settings["plugins.ModelRequester.OpenAICompatible.api_key"] == "sk-test"
+        assert Agently.settings["plugins.ModelRequester.OpenAICompatible.model"] == "deepseek-chat"
+    finally:
+        Agently.settings.set("OpenAICompatible", previous_short)
+        Agently.settings.set("plugins.ModelRequester.OpenAICompatible", previous_openai)
+
+
 def test_agently_load_settings_refresh_httpx_log_level(tmp_path):
     config_path = tmp_path / "settings.yaml"
     config_path.write_text(
