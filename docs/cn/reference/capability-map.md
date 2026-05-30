@@ -36,7 +36,7 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 | 一次响应想多种方式复用 | [模型响应](../requests/model-response.md) |
 | 多轮对话且要控制窗口 | [会话记忆](../requests/session-memory.md) |
 | 多轮任务需要持久 observations、artifacts、decisions 或 checkpoints | [Workspace](../requests/workspace.md) |
-| 显式 workflow loop 需要持久结构化状态、record links、checkpoint 查询和 recall | [TriggerFlow 概览](../triggerflow/overview.md) + [Workspace](../requests/workspace.md)；见 `examples/trigger_flow/workspace_loop_foundation.py` |
+| 显式 workflow loop 需要持久结构化状态、record links、checkpoint 查询和 recall | [TriggerFlow 概览](../triggerflow/overview.md) + [Workspace](../requests/workspace.md)；见 `examples/workspace/workspace_loop_foundation.py` |
 | 模型要调工具 / MCP | [Action Runtime](../actions/action-runtime.md) |
 | 需要常见 Python / shell / workspace / Node.js / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace(...)`、`agent.enable_nodejs(...)` 或 `agent.enable_sqlite(...)` 开始 |
 | 需要 web search 或页面 browse | [Action Runtime](../actions/action-runtime.md)，使用 `from agently.builtins.actions import Search, Browse` 和 `agent.use_actions(...)` |

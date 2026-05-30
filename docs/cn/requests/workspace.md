@@ -110,6 +110,6 @@ Workspace 暴露 content、metadata、checkpoint、text index、policy 和 vecto
 + `NoopVectorIndex`。Recall 暴露 `RecallPlanner`、`Retriever` 和 `ContextBuilder`；
 高级模型辅助规划、向量检索、rerank 和 compression 预期作为插件叠加在这个底座上。
 
-`examples/trigger_flow/workspace_loop_foundation.py` 展示了一个显式 TriggerFlow
+`examples/workspace/workspace_loop_foundation.py` 展示了一个显式 TriggerFlow
 loop：写入结构化 observations，把 decisions link 到 evidence，checkpoint 紧凑状态，
 并通过 Recall 生成 ContextPack。

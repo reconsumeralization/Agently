@@ -118,6 +118,6 @@ content plus SQLite metadata/FTS and `NoopVectorIndex`. Recall exposes
 planning, vector retrieval, reranking, and compression are expected to arrive as
 plugins over this foundation.
 
-See `examples/trigger_flow/workspace_loop_foundation.py` for an explicit
+See `examples/workspace/workspace_loop_foundation.py` for an explicit
 TriggerFlow loop that stores structured observations, links decisions to
 evidence, checkpoints compact state, and recalls a ContextPack.
