@@ -135,6 +135,8 @@ def test_action_extension_set_tool_loop_config():
     agent = Agently.create_agent()
     assert agent.action is agent.tool
     assert callable(agent.use_actions)
+    assert callable(agent.enable_workspace_file_actions)
+    assert callable(agent.use_workspace_file_actions)
     assert callable(agent.action_func)
     agent.set_tool_loop(
         enabled=True,
@@ -256,12 +258,12 @@ def test_action_extension_enable_helper_desc_modes():
         agent.enable_python(action_id="bad_desc_mode", desc="x", desc_mode=bad_mode)
 
 
-def test_action_extension_enable_workspace_registers_file_actions(tmp_path):
+def test_action_extension_enable_workspace_file_actions_registers_file_actions(tmp_path):
     agent = Agently.create_agent()
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "todo.txt").write_text("fix runtime docs\nship examples\n", encoding="utf-8")
 
-    agent.enable_workspace(root=tmp_path, write=True, desc="Project notes workspace.")
+    agent.enable_workspace_file_actions(root=tmp_path, write=True, desc="Project notes workspace.")
 
     spec = agent.action.action_registry.get_spec("read_file")
     assert spec is not None
@@ -287,6 +289,67 @@ def test_action_extension_enable_workspace_registers_file_actions(tmp_path):
 
     outside = agent.action.execute_action("read_file", {"path": "../outside.txt"})
     assert outside.get("status") == "error"
+
+
+def test_action_extension_enable_workspace_file_actions_inherits_foundation_workspace(tmp_path):
+    agent = Agently.create_agent().use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    (workspace.files_root / "notes").mkdir()
+    (workspace.files_root / "notes" / "todo.txt").write_text("use foundation workspace\n", encoding="utf-8")
+
+    agent.enable_workspace_file_actions()
+
+    spec = agent.action.action_registry.get_spec("read_file")
+    assert spec is not None
+    assert spec.get("meta", {}).get("root") == str(workspace.files_root)
+
+    listed = agent.action.execute_action("list_files", {"path": "notes"})
+    assert listed.get("status") == "success"
+    assert listed.get("data") == ["notes/todo.txt"]
+
+
+def test_action_extension_enable_workspace_file_actions_without_foundation_warns(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = Agently.create_agent()
+
+    with pytest.warns(DeprecationWarning, match="agent.enable_workspace_file_actions"):
+        agent.enable_workspace_file_actions()
+
+    spec = agent.action.action_registry.get_spec("read_file")
+    assert spec is not None
+    assert spec.get("meta", {}).get("root") == str(tmp_path.resolve())
+
+
+def test_action_extension_enable_workspace_compat_alias_warns(tmp_path):
+    agent = Agently.create_agent().use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+
+    with pytest.warns(DeprecationWarning, match="enable_workspace_file_actions"):
+        agent.enable_workspace()
+
+    spec = agent.action.action_registry.get_spec("read_file")
+    assert spec is not None
+    assert spec.get("meta", {}).get("root") == str(workspace.files_root)
+
+
+def test_action_extension_shell_and_nodejs_inherit_foundation_workspace(tmp_path):
+    agent = Agently.create_agent().use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    agent.enable_shell(commands=["pwd"], action_id="workspace_shell")
+    agent.enable_nodejs(action_id="workspace_node")
+
+    shell_spec = agent.action.action_registry.get_spec("workspace_shell")
+    assert shell_spec is not None
+    shell_req = shell_spec.get("execution_environments", [])[0]
+    assert shell_req.get("config", {}).get("allowed_workdir_roots") == [str(workspace.files_root)]
+
+    node_spec = agent.action.action_registry.get_spec("workspace_node")
+    assert node_spec is not None
+    node_req = node_spec.get("execution_environments", [])[0]
+    assert node_req.get("config", {}).get("cwd") == str(workspace.files_root)
 
 
 @pytest.mark.asyncio

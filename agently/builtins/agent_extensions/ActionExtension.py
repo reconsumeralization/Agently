@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar
 
@@ -28,6 +29,7 @@ from agently.base import action as global_action
 P = ParamSpec("P")
 R = TypeVar("R")
 CapabilityDescMode: TypeAlias = Literal["append", "override", "default"]
+_WORKSPACE_ROOT_UNSET = object()
 
 
 class ActionExtension(BaseAgent):
@@ -46,7 +48,7 @@ class ActionExtension(BaseAgent):
         self.use_nodejs = self.enable_nodejs
         self.use_sqlite = self.enable_sqlite
         self.use_docker = self.enable_docker
-        self.use_workspace = self.enable_workspace
+        self.use_workspace_file_actions = self.enable_workspace_file_actions
 
         self.settings.setdefault("action.loop.max_rounds", 5, inherit=True)
         self.settings.setdefault("action.loop.concurrency", None, inherit=True)
@@ -282,6 +284,9 @@ class ActionExtension(BaseAgent):
         timeout: int = 20,
         env: dict[str, str] | None = None,
     ):
+        workspace = getattr(self, "workspace", None)
+        if root is None and workspace is not None:
+            root = getattr(workspace, "files_root", getattr(workspace, "content_root", None))
         roots = [str(Path(root).expanduser().resolve())] if root is not None else None
         default_desc = "Run an allowlisted shell command inside a managed workspace boundary."
         return self.use_action_sandbox(
@@ -307,6 +312,9 @@ class ActionExtension(BaseAgent):
         timeout: int = 20,
         env: dict[str, str] | None = None,
     ):
+        workspace = getattr(self, "workspace", None)
+        if cwd is None and workspace is not None:
+            cwd = str(getattr(workspace, "files_root", getattr(workspace, "content_root")))
         default_desc = "Run JavaScript with Node.js inside a managed execution environment."
         self.action.register_nodejs_action(
             action_id=action_id,
@@ -368,10 +376,11 @@ class ActionExtension(BaseAgent):
         )
         return self
 
-    def enable_workspace(
+    def enable_workspace_file_actions(
         self,
         *,
-        root: str | Path = ".",
+        root: str | Path | object = _WORKSPACE_ROOT_UNSET,
+        isolated: bool = False,
         read: bool = True,
         write: bool = False,
         search: bool = True,
@@ -383,7 +392,21 @@ class ActionExtension(BaseAgent):
         desc: str | None = None,
         desc_mode: CapabilityDescMode = "append",
     ):
-        root_path = Path(root).expanduser().resolve()
+        workspace = getattr(self, "workspace", None)
+        if isolated and root is _WORKSPACE_ROOT_UNSET:
+            root = tempfile.mkdtemp(prefix="agently-workspace-action-")
+        elif root is _WORKSPACE_ROOT_UNSET and workspace is not None:
+            root = getattr(workspace, "files_root", getattr(workspace, "content_root"))
+        elif root is _WORKSPACE_ROOT_UNSET:
+            DeprecationWarnings.warn_deprecated_once(
+                "ActionExtension.enable_workspace.default_root_without_foundation_workspace",
+                "`agent.enable_workspace_file_actions()` without `agent.use_workspace(...)` "
+                "defaults to the current directory. "
+                "Configure `agent.use_workspace(...)` or pass an explicit `root=`.",
+                stacklevel=2,
+            )
+            root = "."
+        root_path = Path(str(root)).expanduser().resolve()
         agent_tag = f"agent-{ self.name }"
         prefix = action_prefix.strip()
 
@@ -587,6 +610,45 @@ class ActionExtension(BaseAgent):
             )
 
         return self
+
+    def enable_workspace(
+        self,
+        *,
+        root: str | Path | object = _WORKSPACE_ROOT_UNSET,
+        isolated: bool = False,
+        read: bool = True,
+        write: bool = False,
+        search: bool = True,
+        list_files: bool = True,
+        action_prefix: str = "",
+        expose_to_model: bool = True,
+        max_file_bytes: int = 20000,
+        max_search_file_bytes: int = 200000,
+        desc: str | None = None,
+        desc_mode: CapabilityDescMode = "append",
+    ):
+        DeprecationWarnings.warn_deprecated_once(
+            "ActionExtension.enable_workspace.renamed_to_enable_workspace_file_actions",
+            "`agent.enable_workspace(...)` is kept as a compatibility alias for "
+            "`agent.enable_workspace_file_actions(...)`. `agent.use_workspace(...)` "
+            "configures the Workspace; use `enable_workspace_file_actions(...)` "
+            "when you want to expose Workspace file list/search/read/write actions.",
+            stacklevel=2,
+        )
+        return self.enable_workspace_file_actions(
+            root=root,
+            isolated=isolated,
+            read=read,
+            write=write,
+            search=search,
+            list_files=list_files,
+            action_prefix=action_prefix,
+            expose_to_model=expose_to_model,
+            max_file_bytes=max_file_bytes,
+            max_search_file_bytes=max_search_file_bytes,
+            desc=desc,
+            desc_mode=desc_mode,
+        )
 
     def set_action_loop(
         self,

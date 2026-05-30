@@ -27,6 +27,16 @@ AgentlyPluginType = Literal[
     "TaskDAGPlanner",
     "SkillsExecutor",
     "AgentOrchestrator",
+    "WorkspaceBackend",
+    "ContentStore",
+    "MetadataStore",
+    "CheckpointStore",
+    "TextIndex",
+    "PolicyEngine",
+    "VectorIndex",
+    "RecallPlanner",
+    "Retriever",
+    "ContextBuilder",
 ]
 
 

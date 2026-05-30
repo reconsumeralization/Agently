@@ -56,6 +56,8 @@ route_to_handler(result["category"], result)
 
 The Python `route_to_handler(...)` is plain code: a dict of category → function.
 
+Do not make tokenization, word segmentation, keyword hits, substring rules, or regex the owner of semantic routing. The model owns the classification through the output schema, and deterministic code dispatches from the validated structured category. Deterministic preprocessing is still fine for non-semantic work such as exact ID lookup, deduplication, normalization, or hard policy gates. Small or local models can be enough for short category lists and simple rules; use a larger model when the labels, rules, ambiguity, risk, or returned structure are more complex.
+
 ### TriggerFlow shape
 
 When per-category handling has its own steps:
@@ -146,6 +148,7 @@ Consume from `execution.get_async_runtime_stream(...)` outside the flow.
 
 - Don't add a TriggerFlow if your handlers are one-step each. Just route in plain Python — the single-request shape above is enough.
 - Don't try to make the model do the routing logic ("now respond with what to do"). Get a clean structured answer (`category`, `severity`, `summary`), then let your code route. Models are good at classifying; orchestration logic belongs in your code.
+- Don't replace semantic classification with tokenization, word segmentation, keyword hits, substring rules, or regex-based intent checks as the route owner.
 - Don't put the classifier model name in `flow_data`. Use `runtime_resources` (or pin the agent at module level).
 
 ## Cross-links

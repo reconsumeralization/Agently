@@ -103,7 +103,7 @@ python examples/execution_environment/08_health_check_reuse_local.py
 Notes:
 
 - Execution Environment declarations are lazy; a declaration does not start a sandbox or transport.
-- Business examples should prefer `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace(...)`, `agent.enable_nodejs(...)`, and `agent.enable_sqlite(...)` over direct manager/provider APIs.
+- Business examples should prefer `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, and `agent.enable_sqlite(...)` over direct manager/provider APIs.
 - Built-in providers currently cover MCP, Bash, Python, Node, Docker, Browser, and SQLite. Search is intentionally not an Execution Environment provider; configure proxy, timeout, backend, and region on `agently.builtins.actions.Search(...)`.
 - Ready handles are health-checked before reuse. Unhealthy handles emit `execution_environment.unhealthy`, are released, and are replaced with fresh handles.
 - `enable_*` helpers provide default action descriptions, so `desc=` is optional. By default `desc=` appends extra guidance; `desc_mode="override"` replaces the default description only when you need full control.

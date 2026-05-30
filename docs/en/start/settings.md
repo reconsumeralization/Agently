@@ -73,6 +73,7 @@ Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 ```
 
 `auto_load_env=True` loads any `.env` in the working directory before resolving `${ENV.*}` placeholders.
+Top-level aliases use the same mappings as `set_settings(...)`, so a file can use either `OpenAICompatible:` or the full `plugins.ModelRequester.OpenAICompatible:` path.
 
 If you need a standalone `Settings` object, use `Settings().load(...)`:
 

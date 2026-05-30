@@ -150,10 +150,6 @@ class Settings(SerializableStateData):
         auto_load_env: bool = False,
         raise_empty: bool = False,
     ):
-        if not auto_load_env:
-            super().load(data_type, value)
-            return self
-
         data = None
         if data_type.endswith("_file"):
             with open(value, "r", encoding="utf-8") as file:
@@ -179,8 +175,18 @@ class Settings(SerializableStateData):
         if not data or not isinstance(data, dict):
             raise TypeError(f"[Agently Settings] Can not load parsed data, expect dictionary type, got: { type(data) }")
 
-        data = self._substitute_env_placeholder(data, raise_empty=raise_empty)
-        super().load("json", json.dumps(data))
+        if auto_load_env:
+            data = self._substitute_env_placeholder(data, raise_empty=raise_empty)
+        mapped_data: dict[str, Any] = {}
+        for key, item_value in data.items():
+            mapped_data[key] = item_value
+            if key in self._path_mappings:
+                mapped_data[str(self._path_mappings[key])] = item_value
+            elif key in self._kv_mappings:
+                actual_settings = self._kv_mappings.get(f"{ key }.{ item_value }")
+                if actual_settings:
+                    mapped_data.update(cast(dict[str, Any], actual_settings))
+        self.update(mapped_data)
         return self
 
     def set_settings(

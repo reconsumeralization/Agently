@@ -117,7 +117,7 @@ Expected shape:
 ```python
 agent.enable_python(...)
 agent.enable_shell(...)
-agent.enable_workspace(...)
+agent.enable_workspace_file_actions(...)
 agent.enable_nodejs(...)
 agent.enable_sqlite(...)
 agent.enable_vector_store(...)
@@ -139,6 +139,24 @@ Typing is part of developer experience and API stability. For example, an option
 such as `desc_mode` should be typed as `Literal["append", "override",
 "default"]`, while runtime validation should remain for untyped or dynamic
 callers.
+
+### Module Organization
+
+Core and builtins capabilities can be implemented as subdirectory packages.
+Prefer that shape when a feature has multiple architectural roles, such as a
+facade, manager, default implementation, registry, adapter, policy, or
+validation layer.
+
+Do not default new core or builtins work to a single file. First judge the
+feature's expected submodule volume and ownership boundaries. A single file is
+appropriate only when the capability is genuinely small and splitting it would
+be over-design.
+
+Landed examples include `core/Action`, `core/TriggerFlow`,
+`core/TaskDAGExecutor`, `core/Workspace`,
+`builtins/plugins/ExecutionEnvironmentProvider`, and
+`builtins/plugins/SkillsExecutor`. Keep public imports stable through package
+`__init__.py` files and top-level re-exports.
 
 ## Action And Execution Environment
 

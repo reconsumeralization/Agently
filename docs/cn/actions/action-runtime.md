@@ -108,7 +108,7 @@ print(calculate("3333+6666=?"))
 | `agent.enable_shell(...)` | 挂载带 workspace 与命令 allowlist 的托管 `run_bash` action |
 | `agent.enable_nodejs(...)` | 挂载托管 `run_nodejs` action |
 | `agent.enable_sqlite(...)` | 挂载托管 `query_sqlite` action |
-| `agent.enable_workspace(...)` | 挂载 workspace 文件列表、搜索、读取、写入 actions |
+| `agent.enable_workspace_file_actions(...)` | 把当前 Workspace 文件作业区暴露成列表、搜索、读取、写入 actions |
 | `@agent.auto_func` | 把 Python 函数签名 + docstring 变成模型驱动的实现，使用 agent 的 action |
 | `agent.get_action_result()` | 请求后取 action 调用记录 |
 | `extra.action_logs` | action loop 期间产生的结构化日志 |

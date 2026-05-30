@@ -12,6 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Skills Executor plugin protocol surfaces.
+
+This module groups four Protocol declarations because they form one tightly
+coupled boundary, even though only one is a plugin-manager-managed protocol:
+
+- ``SkillsExecutor`` is the plugin protocol implemented by framework and
+  third-party Skills Executor plugins. ``PluginManager`` resolves it from
+  ``builtins.plugins.SkillsExecutor``.
+- ``SkillsPlanningContext`` / ``SkillsExecutionContext`` /
+  ``SkillsRuntimeContext`` are SPI surfaces implemented by the Agent and
+  injected at planning / execution time. They are not plugins; they describe
+  what the Agent gives the plugin.
+
+Splitting these into separate files would obscure that injection direction and
+duplicate type imports. New context Protocols that follow the same SPI shape
+should be added here; new plugin Protocols belong in their own file.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable

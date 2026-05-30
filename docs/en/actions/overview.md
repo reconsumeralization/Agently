@@ -17,7 +17,7 @@ This is not the orchestration layer. If you need branches, fan-out, approval, wa
 | Topic | Owns | Does not own |
 |---|---|---|
 | Action Runtime | Planning, action-call normalization, dispatch, action logs | Long-running workflow lifecycle |
-| Agent Component helpers | Business-facing shortcuts such as `enable_python`, `enable_shell`, `enable_workspace` | Provider lifecycle internals |
+| Agent Component helpers | Business-facing shortcuts such as `enable_python`, `enable_shell`, and exposing the current Workspace file area through `enable_workspace_file_actions` | Provider lifecycle internals |
 | Tools compatibility | `tool_func`, `use_tool`, `use_tools`, `extra.tool_logs` aliases | New extension design |
 | MCP | Loading remote or local MCP tools into the action surface | A separate workflow engine |
 | Sandbox actions | Running code through an `ActionExecutor` backend | General container orchestration |

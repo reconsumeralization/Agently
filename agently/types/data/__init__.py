@@ -137,3 +137,14 @@ from .skill import (
     SkillPlanRejection,
     SkillPlanSelection,
 )
+
+from .workspace import (
+    WorkspaceBackendCapabilities,
+    WorkspaceContextItem,
+    WorkspaceContextOmission,
+    WorkspaceContextPack,
+    WorkspaceLinkRef,
+    WorkspaceRecallPlan,
+    WorkspaceRecordRef,
+    WorkspaceSearchResult,
+)
