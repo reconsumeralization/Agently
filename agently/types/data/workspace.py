@@ -45,6 +45,7 @@ class WorkspaceBackendCapabilities(TypedDict):
     backend: str
     root: str
     content_root: str
+    files_root: str
     read_only: bool
     components: dict[str, str | None]
     features: dict[str, bool]

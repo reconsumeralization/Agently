@@ -46,6 +46,7 @@ async def test_workspace_local_ingest_search_link_and_get(tmp_path):
     assert [item["id"] for item in results] == [ref["id"]]
     assert (tmp_path / "run" / "workspace.meta.json").is_file()
     assert (tmp_path / "run" / "workspace.db").is_file()
+    assert (tmp_path / "run" / "files").is_dir()
     assert (tmp_path / "run" / "content" / "observations" / "_collection.meta.json").is_file()
 
 
@@ -135,6 +136,7 @@ async def test_workspace_structured_data_links_and_capabilities(tmp_path):
     ]
     capabilities = workspace.capabilities()
     assert capabilities["backend"] == "local"
+    assert capabilities["files_root"] == str(workspace.files_root)
     assert capabilities["components"]["content"] == "LocalContentStore"
     assert capabilities["components"]["vector_index"] == "NoopVectorIndex"
     assert capabilities["features"]["structured_get_data"] is True

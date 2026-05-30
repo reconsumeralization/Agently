@@ -109,6 +109,9 @@ class WorkspaceBackend(Protocol):
     def content_root(self) -> Any: ...
 
     @property
+    def files_root(self) -> Any: ...
+
+    @property
     def content(self) -> ContentStore: ...
 
     @property

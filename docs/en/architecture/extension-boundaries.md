@@ -117,7 +117,7 @@ Expected shape:
 ```python
 agent.enable_python(...)
 agent.enable_shell(...)
-agent.enable_workspace(...)
+agent.enable_workspace_file_actions(...)
 agent.enable_nodejs(...)
 agent.enable_sqlite(...)
 agent.enable_vector_store(...)

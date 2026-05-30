@@ -41,6 +41,7 @@ class LocalWorkspaceBackend:
     ):
         self.root = Path(root).expanduser().resolve()
         self.content_root = self.root / "content"
+        self.files_root = self.root / "files"
         self.db_path = self.root / "workspace.db"
         self.mode = mode
         self.read_only = mode in {"read", "read_only", "readonly"}
@@ -58,6 +59,7 @@ class LocalWorkspaceBackend:
     def _initialize(self):
         self.root.mkdir(parents=True, exist_ok=True)
         self.content_root.mkdir(parents=True, exist_ok=True)
+        self.files_root.mkdir(parents=True, exist_ok=True)
         for collection in self.DEFAULT_COLLECTIONS:
             self._ensure_collection(collection)
         meta_path = self.root / "workspace.meta.json"
@@ -69,6 +71,7 @@ class LocalWorkspaceBackend:
                         "created_at": utc_now(),
                         "backend": "local",
                         "content_root": str(self.content_root),
+                        "files_root": str(self.files_root),
                     }
                 ),
                 encoding="utf-8",
@@ -535,6 +538,7 @@ class LocalWorkspaceBackend:
             "backend": "local",
             "root": str(self.root),
             "content_root": str(self.content_root),
+            "files_root": str(self.files_root),
             "read_only": self.read_only,
             "components": {
                 "content": type(self.content).__name__,

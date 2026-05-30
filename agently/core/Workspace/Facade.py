@@ -32,6 +32,7 @@ class Workspace:
         self.manager = manager
         self.root = Path(str(getattr(backend, "root")))
         self.content_root = Path(str(getattr(backend, "content_root")))
+        self.files_root = Path(str(getattr(backend, "files_root", self.content_root)))
 
     async def put(
         self,

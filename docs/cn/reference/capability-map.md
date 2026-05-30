@@ -38,7 +38,7 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 | 多轮任务需要持久 observations、artifacts、decisions 或 checkpoints | [Workspace](../requests/workspace.md) |
 | 显式 workflow loop 需要持久结构化状态、record links、checkpoint 查询和 recall | [TriggerFlow 概览](../triggerflow/overview.md) + [Workspace](../requests/workspace.md)；见 `examples/workspace/workspace_loop_foundation.py` |
 | 模型要调工具 / MCP | [Action Runtime](../actions/action-runtime.md) |
-| 需要常见 Python / shell / workspace / Node.js / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace(...)`、`agent.enable_nodejs(...)` 或 `agent.enable_sqlite(...)` 开始 |
+| 需要常见 Python / shell / workspace / Node.js / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)`、`agent.enable_nodejs(...)` 或 `agent.enable_sqlite(...)` 开始 |
 | 需要 web search 或页面 browse | [Action Runtime](../actions/action-runtime.md)，使用 `from agently.builtins.actions import Search, Browse` 和 `agent.use_actions(...)` |
 | 执行前需要托管 MCP/sandbox/process/browser/SQLite 生命周期 | [Execution Environment](../actions/execution-environment.md)，通常面向 action/plugin 开发者 |
 | 判断新扩展应该放在哪一层 | [扩展边界](../architecture/extension-boundaries.md) |
@@ -56,7 +56,7 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 - 「我需要 TriggerFlow 吗？」——只在有明确的阶段、分支、并发或暂停恢复时才需要。带重试的单次请求不需要 TriggerFlow。
 - 「Dynamic Task 还是 TriggerFlow？」——当图本身是提交上来的数据，需要规划、校验、裁剪和执行时用 Dynamic Task；当你在代码里掌握稳定工作流拓扑时直接用 TriggerFlow。
 - 「Sync 还是 async？」——脚本和 demo 用 sync。服务、流式 UI 与 TriggerFlow 用 async。见 [Async First](../start/async-first.md)。
-- 「Action 还是 tool API？」——新代码：`Agently.action` / `agent.use_actions(...)`、来自 `agently.builtins.actions` 的内置 package，以及 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace(...)` 等场景 helper。已有的 `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` 仍可用，但定位为兼容入口；见 [Action Runtime](../actions/action-runtime.md)。
+- 「Action 还是 tool API？」——新代码：`Agently.action` / `agent.use_actions(...)`、来自 `agently.builtins.actions` 的内置 package，以及 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)` 等场景 helper。已有的 `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` 仍可用，但定位为兼容入口；见 [Action Runtime](../actions/action-runtime.md)。
 - 「Agent start 还是显式 API？」——候选驱动的自动编排用 `agent.start()`；需要路线诊断或过程流式输出时用 `agent.create_execution()`。如果应用必须强制走 Skills 或 Dynamic Task，使用显式 `agent.run_skills_task(...)` 或 `Agently.create_dynamic_task(...)`。
 - 「Executor 还是 Execution Environment？」——Executor 负责一次调用；Execution Environment 在调用前准备可复用或受 policy 约束的依赖；见 [Execution Environment](../actions/execution-environment.md)。
 - 「Core API 还是语法糖？」——应用开发者应优先使用 built-in actions 和 Agent Component helpers。Core manager 与 provider 面向框架、action、plugin 开发者；见 [扩展边界](../architecture/extension-boundaries.md)。

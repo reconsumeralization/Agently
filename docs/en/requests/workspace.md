@@ -87,17 +87,21 @@ the local backend with plugins.
 
 ## Action Boundary
 
-`agent.use_workspace(...)` also defines `agent.workspace.content_root`.
+`agent.use_workspace(...)` also defines `agent.workspace.files_root`, an
+ordinary editable working tree for shell, Node.js, and file actions.
 Filesystem-like action helpers inherit that boundary when no explicit root or
-cwd is passed.
+cwd is passed. `agent.workspace.content_root` remains the managed record-content
+store used by Workspace records.
 
 ```python
-agent.enable_workspace(write=True)
+agent.enable_workspace_file_actions(write=True)
 agent.enable_shell(commands=["pwd", "pytest"])
 agent.enable_nodejs()
 ```
 
-Pass an explicit `root=` or `cwd=` when an action must use an independent
+`enable_workspace_file_actions(...)` does not create a second Workspace. It exposes
+list/search/read/write file actions over the current Workspace file area. Pass
+an explicit `root=` or `cwd=` only when an action must use an independent
 directory.
 
 ## Not A Memory Strategy

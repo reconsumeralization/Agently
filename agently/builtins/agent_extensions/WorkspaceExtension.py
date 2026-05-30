@@ -37,6 +37,6 @@ class WorkspaceExtension(BaseAgent):
         self.workspace = global_workspace.create(path_or_backend, create=create, mode=mode)
         self.settings.set("workspace.root", str(self.workspace.root))
         self.settings.set("workspace.content_root", str(self.workspace.content_root))
+        self.settings.set("workspace.files_root", str(self.workspace.files_root))
         self.settings.set("workspace.mode", mode)
         return self
-
