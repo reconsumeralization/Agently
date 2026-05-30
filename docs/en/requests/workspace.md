@@ -125,3 +125,8 @@ plugins over this foundation.
 See `examples/workspace/workspace_loop_foundation.py` for an explicit
 TriggerFlow loop that stores structured observations, links decisions to
 evidence, checkpoints compact state, and recalls a ContextPack.
+
+See `examples/workspace/workspace_with_action_output.py` for the Action
+boundary: a file action writes into `workspace.files_root`, a shell action reads
+that file, application code explicitly ingests the action output as a Workspace
+observation, and Recall packages it into a ContextPack.

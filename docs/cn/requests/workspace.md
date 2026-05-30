@@ -117,3 +117,7 @@ Workspace 暴露 content、metadata、checkpoint、text index、policy 和 vecto
 `examples/workspace/workspace_loop_foundation.py` 展示了一个显式 TriggerFlow
 loop：写入结构化 observations，把 decisions link 到 evidence，checkpoint 紧凑状态，
 并通过 Recall 生成 ContextPack。
+
+`examples/workspace/workspace_with_action_output.py` 展示 Action 边界：file action
+写入 `workspace.files_root`，shell action 读取该文件，应用代码把 action output 显式
+ingest 为 Workspace observation，再通过 Recall 打包成 ContextPack。
