@@ -645,7 +645,7 @@ class OpenAIResponsesCompatible(ModelRequester):
             )
         if "body" in auth and isinstance(auth["body"], dict):
             request_data.data.update(**auth["body"])
-        if auth_api_key != "None":
+        if auth_api_key != "None" and "Authorization" not in headers_with_auth:
             headers_with_auth["Authorization"] = f"Bearer { auth_api_key }"
         return headers_with_auth
 
