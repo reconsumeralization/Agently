@@ -27,7 +27,7 @@ Expected key output from one real DeepSeek run on 2026-05-31:
     workspace_issue_ref_recorded=True
     workspace_context_item_count=1
     all_items_are_open_issues=True
-    latest_issue_numbers=[280, 278, 277, 276, 275]
+    latest_issue_numbers=[280, 278, 277, 276, 274]
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ from examples.dynamic_task._shared import configure_model
 
 RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "github_issue_intake"
 TASK_ID = "agently-public-issue-intake"
+EXAMPLE_TIMEOUT_SECONDS = 180
 
 
 async def collect_lineage_flags(execution) -> dict[str, bool | int]:
@@ -325,4 +326,14 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(asyncio.wait_for(main(), timeout=EXAMPLE_TIMEOUT_SECONDS))
+    except asyncio.TimeoutError as exc:
+        raise SystemExit(
+            "Timed out while waiting for the model-owned GitHub issue intake step. "
+            "This usually means the provider, ActionRuntime planning, final response "
+            "generation, or final text materialization stalled. For diagnosis, attach "
+            "an EventCenter observation hook or temporarily call "
+            "`agent.set_settings(\"debug\", True)` / `agent.set_settings(\"debug\", \"detail\")`, "
+            "then remove debug code after the run is healthy."
+        ) from exc
