@@ -101,7 +101,7 @@ class Cmd:
         return False
 
     def _is_workdir_allowed(self, workdir: str | Path | None) -> bool:
-        workdir_path = Path(workdir or Path.cwd()).resolve()
+        workdir_path = self._resolve_workdir(workdir)
         for root in self.allowed_workdir_roots:
             try:
                 workdir_path.relative_to(root)
@@ -110,6 +110,13 @@ class Cmd:
                 continue
         return False
 
+    def _resolve_workdir(self, workdir: str | Path | None) -> Path:
+        if workdir is not None:
+            return Path(workdir).resolve()
+        if self.allowed_workdir_roots:
+            return self.allowed_workdir_roots[0]
+        return Path.cwd().resolve()
+
     async def run(
         self,
         cmd: str | Sequence[str],
@@ -117,12 +124,13 @@ class Cmd:
         allow_unsafe: bool = False,
     ) -> dict:
         args = self._normalize_cmd(cmd)
+        workdir_path = self._resolve_workdir(workdir)
         if not self._is_workdir_allowed(workdir):
             return {
                 "ok": False,
                 "need_approval": True,
                 "reason": "workdir_not_allowed",
-                "workdir": str(workdir or Path.cwd()),
+                "workdir": str(workdir_path),
             }
         if not self._is_cmd_allowed(args) and not allow_unsafe:
             return {
@@ -133,7 +141,7 @@ class Cmd:
             }
         result = subprocess.run(
             args,
-            cwd=str(Path(workdir).resolve()) if workdir else None,
+            cwd=str(workdir_path),
             capture_output=True,
             text=True,
             timeout=self.timeout,
