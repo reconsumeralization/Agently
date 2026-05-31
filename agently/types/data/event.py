@@ -272,5 +272,6 @@ class RuntimeEvent(ObservationEvent):
     pass
 
 
-EventHook = Callable[[ObservationEvent], None | Awaitable[None]]
-ObservationEventHook: TypeAlias = EventHook
+RuntimeEventHook = Callable[[RuntimeEvent], None | Awaitable[None]]
+EventHook: TypeAlias = RuntimeEventHook
+ObservationEventHook: TypeAlias = RuntimeEventHook

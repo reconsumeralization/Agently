@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import AsyncGenerator, Generator
 from typing import Any, Literal, TYPE_CHECKING
@@ -23,6 +24,7 @@ from typing import Any, Literal, TYPE_CHECKING
 from agently.core.AgentExecution import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
+    RuntimeStageStallError,
     merge_stream_meta,
     normalize_execution_limits,
     normalize_execution_lineage,
@@ -123,6 +125,13 @@ class AgentExecution:
         delta: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> AgentExecutionStreamData:
+        if path != "error":
+            self.execution_context.record_progress(
+                stage=path,
+                status="completed" if is_complete else "progress",
+                event_type=path,
+                meta=meta,
+            )
         stream_meta = merge_stream_meta(
             meta,
             execution_id=self.id,
@@ -168,6 +177,47 @@ class AgentExecution:
             "reusable": True,
         }
         return self._selected_route
+
+    async def _async_execute_route(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"],
+        ensure_keys: list[str] | None,
+        ensure_all_keys: bool | None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None",
+        key_style: Literal["dot", "slash"],
+        max_retries: int,
+        raise_ensure_failure: bool,
+    ) -> tuple[str, Any]:
+        with bind_runtime_context(agent_execution_context=self.execution_context):
+            self.execution_context.record_progress(stage="route_selection", status="started")
+            route, route_meta = await self.select_route()
+            self.execution_context.record_progress(stage="route_selection", status="completed")
+            self.route_plan = self.route_planner.build_route_plan(
+                execution_id=self.id,
+                route=route,
+                route_meta=route_meta,
+            )
+            self.route_info.setdefault("selected_route", route)
+            self.route_info.setdefault("options", DataFormatter.sanitize(route_meta))
+            self.route_info.setdefault("reusable", True)
+            await self.emit_stream("route.selected", self.route_plan, route=route)
+            if route == "skills":
+                result = await run_skills_route(self, route_meta)
+            elif route == "dynamic_task":
+                result = await run_dynamic_task_route(self, route_meta)
+            else:
+                result = await run_model_request_route(
+                    self,
+                    type=type,
+                    ensure_keys=ensure_keys,
+                    ensure_all_keys=ensure_all_keys,
+                    validate_handler=validate_handler,
+                    key_style=key_style,
+                    max_retries=max_retries,
+                    raise_ensure_failure=raise_ensure_failure,
+                )
+            return route, result
 
     def record_model_response_id(self, response_id: str | None):
         if not response_id:
@@ -287,36 +337,57 @@ class AgentExecution:
             self._started = True
             self.status = "running"
             try:
-                with bind_runtime_context(agent_execution_context=self.execution_context):
-                    route, route_meta = await self.select_route()
-                    self.route_plan = self.route_planner.build_route_plan(
-                        execution_id=self.id,
-                        route=route,
-                        route_meta=route_meta,
-                    )
-                    self.route_info.setdefault("selected_route", route)
-                    self.route_info.setdefault("options", DataFormatter.sanitize(route_meta))
-                    self.route_info.setdefault("reusable", True)
-                    await self.emit_stream("route.selected", self.route_plan, route=route)
-                    if route == "skills":
-                        self.result = await run_skills_route(self, route_meta)
-                    elif route == "dynamic_task":
-                        self.result = await run_dynamic_task_route(self, route_meta)
-                    else:
-                        self.result = await run_model_request_route(
-                            self,
-                            type=type,
-                            ensure_keys=ensure_keys,
-                            ensure_all_keys=ensure_all_keys,
-                            validate_handler=validate_handler,
-                            key_style=key_style,
-                            max_retries=max_retries,
-                            raise_ensure_failure=raise_ensure_failure,
-                        )
+                self.execution_context.record_progress(
+                    stage="agent_execution",
+                    status="started",
+                    event_type="agent_execution.started",
+                    meta={"execution_id": self.id, "execution_mode": self.mode},
+                )
+                run_coro = self._async_execute_route(
+                    type=type,
+                    ensure_keys=ensure_keys,
+                    ensure_all_keys=ensure_all_keys,
+                    validate_handler=validate_handler,
+                    key_style=key_style,
+                    max_retries=max_retries,
+                    raise_ensure_failure=raise_ensure_failure,
+                )
+                route, self.result = await self._await_route_with_limits(run_coro)
                 if self.status == "running":
                     self.status = "success"
                 await self.emit_stream("result", self.result, route=route, source="agent_execution")
                 return self.result
+            except RuntimeStageStallError as error:
+                self.status = "timed_out" if error.status == "timed_out" else "stalled"
+                self._error = error
+                self._record_error_diagnostic(error)
+                await self.emit_stream(
+                    "error",
+                    error.to_diagnostic(),
+                    source="agent_execution",
+                )
+                raise
+            except asyncio.TimeoutError as error:
+                self.status = "timed_out"
+                timeout_error = RuntimeStageStallError(
+                    (
+                        "AgentExecution hard deadline exceeded: "
+                        f"max_seconds={ self.limits.get('max_seconds') }."
+                    ),
+                    stage=str((self.execution_context.last_progress_event or {}).get("stage") or "agent_execution"),
+                    status="timed_out",
+                    elapsed_seconds=None,
+                    timeout_seconds=self.limits.get("max_seconds"),
+                    last_progress_event=(self.execution_context.last_progress_event or {}).get("event_type"),
+                )
+                self._error = timeout_error
+                self._record_error_diagnostic(timeout_error)
+                await self.emit_stream(
+                    "error",
+                    timeout_error.to_diagnostic(),
+                    source="agent_execution",
+                )
+                raise timeout_error from error
             except AgentExecutionLimitExceeded as error:
                 self.status = "blocked"
                 self._error = error
@@ -341,6 +412,98 @@ class AgentExecution:
                 self._refresh_diagnostics()
                 self._completed = True
                 await self.close_streams()
+
+    async def _await_route_with_limits(self, run_coro: Any):
+        max_seconds = self.limits.get("max_seconds")
+        max_no_progress_seconds = self.limits.get("max_no_progress_seconds")
+        if max_seconds is None and max_no_progress_seconds is None:
+            return await run_coro
+
+        hard_deadline = (
+            self.execution_context.started_at + float(max_seconds)
+            if max_seconds is not None
+            else None
+        )
+        idle_limit = float(max_no_progress_seconds) if max_no_progress_seconds is not None else None
+        task = asyncio.create_task(run_coro)
+        try:
+            while True:
+                now = time.monotonic()
+                next_timeouts: list[float] = []
+                if hard_deadline is not None:
+                    next_timeouts.append(max(0.0, hard_deadline - now))
+                if idle_limit is not None:
+                    idle_deadline = self.execution_context.last_progress_at + idle_limit
+                    next_timeouts.append(max(0.0, idle_deadline - now))
+                if not next_timeouts:
+                    return await task
+
+                try:
+                    return await asyncio.wait_for(asyncio.shield(task), timeout=min(next_timeouts))
+                except asyncio.TimeoutError as error:
+                    if task.done():
+                        return await task
+                    now = time.monotonic()
+                    if hard_deadline is not None and now >= hard_deadline:
+                        await self._cancel_limited_task(task)
+                        raise self._build_execution_stall_error(
+                            status="timed_out",
+                            message=(
+                                "AgentExecution hard deadline exceeded: "
+                                f"max_seconds={ max_seconds }."
+                            ),
+                            elapsed_seconds=now - self.execution_context.started_at,
+                            idle_seconds=now - self.execution_context.last_progress_at,
+                            timeout_seconds=float(max_seconds) if max_seconds is not None else None,
+                        ) from error
+                    if idle_limit is not None:
+                        idle_seconds = now - self.execution_context.last_progress_at
+                        if idle_seconds >= idle_limit:
+                            await self._cancel_limited_task(task)
+                            raise self._build_execution_stall_error(
+                                status="stalled",
+                                message=(
+                                    "AgentExecution made no progress before idle deadline: "
+                                    f"max_no_progress_seconds={ max_no_progress_seconds }."
+                                ),
+                                elapsed_seconds=now - self.execution_context.started_at,
+                                idle_seconds=idle_seconds,
+                                timeout_seconds=idle_limit,
+                            ) from error
+        except BaseException:
+            if not task.done():
+                task.cancel()
+            raise
+
+    async def _cancel_limited_task(self, task: "asyncio.Task[Any]"):
+        if task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    def _build_execution_stall_error(
+        self,
+        *,
+        status: Literal["stalled", "timed_out"],
+        message: str,
+        elapsed_seconds: float | None,
+        idle_seconds: float | None,
+        timeout_seconds: float | None,
+    ) -> RuntimeStageStallError:
+        last_event = self.execution_context.last_progress_event or {}
+        return RuntimeStageStallError(
+            message,
+            stage=str(last_event.get("stage") or "agent_execution"),
+            status=status,
+            elapsed_seconds=elapsed_seconds,
+            idle_seconds=idle_seconds,
+            timeout_seconds=timeout_seconds,
+            last_progress_event=(
+                str(last_event.get("event_type"))
+                if last_event.get("event_type") is not None
+                else None
+            ),
+        )
 
     async def async_get_data(
         self,
@@ -490,16 +653,25 @@ class AgentExecution:
         self.diagnostics["budget"] = budget
         if limit_events:
             self.diagnostics["limit_events"] = limit_events
+        for key in ("stages", "last_progress"):
+            value = context_diagnostics.get(key)
+            if value:
+                self.diagnostics[key] = value
 
     def _record_error_diagnostic(self, error: BaseException):
         errors = self.diagnostics.setdefault("errors", [])
         if isinstance(errors, list):
             item = (
                 error.to_diagnostic()
-                if isinstance(error, AgentExecutionLimitExceeded)
+                if isinstance(error, (AgentExecutionLimitExceeded, RuntimeStageStallError))
                 else {"type": error.__class__.__name__, "message": str(error)}
             )
             errors.append(item)
+            if isinstance(error, RuntimeStageStallError):
+                target_key = "timeouts" if error.status == "timed_out" else "stalls"
+                target = self.diagnostics.setdefault(target_key, [])
+                if isinstance(target, list):
+                    target.append(item)
 
     def raise_if_limit_exceeded(self):
         self.execution_context.raise_if_limit_exceeded()

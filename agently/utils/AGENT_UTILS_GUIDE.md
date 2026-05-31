@@ -109,7 +109,7 @@ Key pieces:
 - `create_logger(app_name="Agently", log_level="INFO")` returns `AgentlyLogger` with `raise_error` helper.
 
 ### RuntimeEmitter
-Purpose: compatibility wrapper for Event Center observation event emission.
+Purpose: compatibility wrapper for Event Center RuntimeEvent emission.
 
 Key method:
 - `create_runtime_emitter(source)` delegates to `agently.base.event_center`.

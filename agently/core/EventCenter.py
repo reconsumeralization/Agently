@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from agently.types.data import ErrorInfo, ObservationEvent, RuntimeEvent
-from agently.types.data.event import matches_observation_event_type
+from agently.types.data.event import matches_runtime_event_type
 from agently.utils import FunctionShifter
 
 if TYPE_CHECKING:
@@ -112,17 +112,17 @@ class EventCenter:
 
     async def async_emit(self, event: "Mapping[str, Any] | ObservationEvent | RuntimeEvent"):
         if isinstance(event, RuntimeEvent):
-            event_object = ObservationEvent.model_validate(event.model_dump())
-        elif isinstance(event, ObservationEvent):
             event_object = event
+        elif isinstance(event, ObservationEvent):
+            event_object = RuntimeEvent.model_validate(event.model_dump())
         else:
             event_data: dict[str, Any] = dict(event)
             if not event_data.get("source"):
                 event_data["source"] = _infer_runtime_source()
-            event_object = ObservationEvent.model_validate(event_data)
+            event_object = RuntimeEvent.model_validate(event_data)
         tasks = []
         for event_types, callback in self._hooks.values():
-            if not matches_observation_event_type(event_object.event_type, event_types):
+            if not matches_runtime_event_type(event_object.event_type, event_types):
                 continue
             coro = FunctionShifter.asyncify(callback)
             tasks.append(asyncio.create_task(coro(event_object)))
@@ -197,7 +197,7 @@ class ObservationEventEmitter:
         else:
             final_error = error
         await self._event_center.async_emit(
-            ObservationEvent(
+            RuntimeEvent(
                 event_type=event_type,
                 source=self._source,
                 level=level,

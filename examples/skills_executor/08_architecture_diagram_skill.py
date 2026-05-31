@@ -79,9 +79,10 @@ top to bottom, with the listed components:
    Process, Filesystem, Network, Credentials, MCP, Resources.
 6. External Dependencies & Integrations (external colour): Model Providers
    (DeepSeek, Ollama, any OpenAI-compatible endpoint), ChromaDB, FastAPI.
-7. Observation, Diagnostics & DevTools (event-bus colour): core EventCenter emits
-   serialized ObservationEvent objects consumed by the agently-devtools companion
-   (observe / evaluate / playground). Core never imports the companion.
+7. Runtime Events, Diagnostics & DevTools (event-bus colour): core EventCenter
+   dispatches RuntimeEvent records; the main framework DevTools bridge projects
+   them to ObservationEvent payloads consumed by the agently-devtools companion
+   (observe / evaluate / playground). Core never imports the companion eagerly.
 
 Key principle to convey: the separation rule
 "core contract -> plugin/provider impl -> built-in capability Action ->

@@ -64,10 +64,19 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert in_development["target_version"] == "4.1.3.2"
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
-        "preferred_event_type": "ObservationEvent",
-        "legacy_event_type": "RuntimeEvent",
-        "legacy_compatibility": "Agently 4.1.x",
-        "replacement_line": "Agently 4.2",
+        "preferred_event_type": "RuntimeEvent",
+        "devtools_projection_type": "ObservationEvent",
+        "event_center_dispatch": "RuntimeEvent",
+        "compatibility_input_type": "ObservationEvent",
+    }
+    assert in_development["companions"]["devtools"]["runtime_control"] == {
+        "agent_execution_limits": ["max_seconds", "max_no_progress_seconds"],
+        "provider_stream_idle_timeout": [
+            "OpenAICompatible.stream_idle_timeout",
+            "OpenAIResponsesCompatible.stream_idle_timeout",
+        ],
+        "response_materialization_idle_timeout": "response.materialization_idle_timeout",
+        "typed_stall_error": "RuntimeStageStallError",
     }
     assert in_development["companions"]["skills"]["authoring_protocol"] == "agently-skills.authoring.v2"
     assert in_development["companions"]["skills"]["authoring_format"] == "standard SKILL.md only"

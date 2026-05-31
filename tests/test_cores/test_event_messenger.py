@@ -126,7 +126,10 @@ async def test_observation_event_names_are_preferred_aliases():
     await ec.async_emit(RuntimeEvent(event_type="observation.alias", message="legacy object"))
 
     assert all(isinstance(event, ObservationEvent) for event in captured)
-    assert type(captured[2]) is ObservationEvent
+    assert all(isinstance(event, RuntimeEvent) for event in captured)
+    assert type(captured[0]) is RuntimeEvent
+    assert type(captured[1]) is RuntimeEvent
+    assert type(captured[2]) is RuntimeEvent
     assert [event.message for event in captured] == ["alias object", "alias emitter", "legacy object"]
 
 

@@ -1,6 +1,6 @@
 ---
 title: Event Center
-description: Observation event registration, filtering, shape, and compatibility rules in Agently.
+description: RuntimeEvent registration, filtering, shape, and DevTools projection rules in Agently.
 keywords: Agently, EventCenter, ObservationEvent, RuntimeEvent, observation, DevTools
 ---
 
@@ -8,16 +8,16 @@ keywords: Agently, EventCenter, ObservationEvent, RuntimeEvent, observation, Dev
 
 > Languages: **English** · [中文](../../cn/observability/event-center.md)
 
-The Event Center is Agently's framework-level observation channel. It carries **observation events**: model requests, Session application, TriggerFlow lifecycle, Action calls, and similar framework activity can be forwarded to DevTools or to a custom log sink through this channel.
+The Event Center is Agently's framework-level runtime event channel. It carries **RuntimeEvent** records: model requests, Session application, TriggerFlow lifecycle, Action calls, and similar framework activity can be forwarded to DevTools or to a custom log sink through this channel.
 
-It is separate from TriggerFlow `emit` / `when`: `emit` / `when` changes control flow inside a flow; observation events only observe what happened.
+It is separate from TriggerFlow `emit` / `when`: `emit` / `when` changes control flow inside a flow; RuntimeEvent records report what happened.
 
 Naming compatibility:
 
-- `ObservationEvent` is the preferred name for new code.
-- `RuntimeEvent` is the historical name and remains a compatible alias through the Agently 4.1.x line.
-- Agently 4.2 is the intended replacement line for deprecated event naming.
-- Existing `emit_runtime` / `async_emit_runtime` code continues to work; new code may use `emit_observation` / `async_emit_observation`.
+- `RuntimeEvent` is the preferred framework event model for new code.
+- Event Center dispatches `RuntimeEvent` records to ordinary hooks.
+- `ObservationEvent` is the DevTools bridge projection derived from `RuntimeEvent`.
+- Existing `emit_observation` / `async_emit_observation` code continues to work as a compatibility alias.
 
 ## Register a hook
 
@@ -45,7 +45,7 @@ Agently.event_center.unregister_hook("docs.capture")
 
 `event_types` can be a string, a list of strings, or `None`. With `None`, the hook receives every event. Sync callbacks are accepted too; Event Center normalizes them to async calls.
 
-## Emit an observation event
+## Emit a runtime event
 
 The usual path is an emitter:
 
@@ -78,20 +78,19 @@ For top-level convenience APIs:
 await Agently.async_emit_observation({
     "event_type": "runtime.info",
     "source": "Docs",
-    "message": "preferred observation API",
+    "message": "compatibility observation API",
 })
 
-# 4.1.x compatibility alias:
 await Agently.async_emit_runtime({
     "event_type": "runtime.info",
     "source": "Docs",
-    "message": "legacy runtime API",
+    "message": "runtime API",
 })
 ```
 
 ## Event shape
 
-The top-level fields come from `agently.types.data.event.ObservationEvent`. `RuntimeEvent` has the same shape and remains a 4.1.x compatibility alias:
+The top-level fields come from `agently.types.data.event.RuntimeEvent`. `ObservationEvent` has the same serialized shape when the main framework DevTools bridge projects RuntimeEvent records for DevTools ingestion:
 
 | Field | Meaning |
 |---|---|
@@ -134,9 +133,27 @@ events include `declared`, `approval_required`, `ensuring`, `ready`,
 handle failed the health check before reuse; the manager releases it and ensures
 a fresh handle.
 
+## Runtime Progress And Stall Diagnostics
+
+Runtime control uses the same vocabulary as RuntimeEvent records, but it does
+not depend on Event Center subscribers being installed. A slow or failing hook
+must not block liveness updates.
+
+AgentExecution records progress in `async_get_meta()["diagnostics"]`:
+
+- `diagnostics["stages"]["events"]` keeps recent stage progress.
+- `diagnostics["last_progress"]` records the latest accepted progress event.
+- `diagnostics["timeouts"]` records hard-deadline failures.
+- `diagnostics["stalls"]` records idle no-progress failures.
+
+When debugging a live app, attach a temporary Event Center hook or enable
+console detail logs with `.set_settings("debug", True)` /
+`.set_settings("debug", "detail")`. Remove temporary debug hooks and debug
+settings after the issue is understood.
+
 ## Compatibility rules
 
-Observation events are an observation protocol. Agently-DevTools and custom consumers should fail open:
+RuntimeEvent records are an extensible framework event protocol. Agently-DevTools and custom consumers should fail open:
 
 - Ignore unknown top-level fields and unknown `payload` fields.
 - Do not fail on unknown `event_type` values.

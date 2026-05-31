@@ -9,10 +9,22 @@
       "companion_package": "agently-devtools",
       "runtime_protocol": "agently-devtools.observation-runtime.v1",
       "event_naming": {
-        "preferred_event_type": "ObservationEvent",
-        "legacy_event_type": "RuntimeEvent",
-        "legacy_compatibility": "Agently 4.1.x",
-        "replacement_line": "Agently 4.2"
+        "preferred_event_type": "RuntimeEvent",
+        "devtools_projection_type": "ObservationEvent",
+        "event_center_dispatch": "RuntimeEvent",
+        "compatibility_input_type": "ObservationEvent"
+      },
+      "runtime_control": {
+        "agent_execution_limits": [
+          "max_seconds",
+          "max_no_progress_seconds"
+        ],
+        "provider_stream_idle_timeout": [
+          "OpenAICompatible.stream_idle_timeout",
+          "OpenAIResponsesCompatible.stream_idle_timeout"
+        ],
+        "response_materialization_idle_timeout": "response.materialization_idle_timeout",
+        "typed_stall_error": "RuntimeStageStallError"
       },
       "recommended_version_specifier": ">=0.1.5,<0.2.0"
     },

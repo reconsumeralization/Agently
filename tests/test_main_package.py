@@ -10,6 +10,11 @@ from agently.compatibility import (
     get_devtools_compatibility_manifest,
     get_skills_compatibility_manifest,
 )
+from agently.core.AgentExecution import RuntimeStageStallError
+from agently.core.ExtensionHandlers import ExtensionHandlers
+from agently.core.ModelResponseResult import ModelResponseResult
+from agently.core.Prompt import Prompt
+from agently.utils import Settings
 from agently.types.data import StreamingData
 from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import HybridRoutePlanner
 
@@ -131,6 +136,186 @@ def test_agent_can_create_dynamic_task():
 
     assert task.name == "graph-agent-DynamicTask"
     assert task.settings.parent is agent.settings
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_max_seconds_raises_typed_timeout():
+    async def run_task(_context):
+        await asyncio.sleep(0.05)
+        return "late"
+
+    agent = Agently.create_agent("execution-timeout-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-execution-timeout",
+                "tasks": [{"id": "slow", "kind": "local", "binding": "local_handler"}],
+                "semantic_outputs": {"final": "slow"},
+            },
+            handlers={"local_handler": run_task},
+        )
+        .input("run slowly")
+        .create_execution(limits={"max_seconds": 0.001})
+    )
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        await execution.async_get_data()
+
+    assert raised.value.status == "timed_out"
+    assert raised.value.timeout_seconds == 0.001
+    meta = await execution.async_get_meta()
+    assert meta["status"] == "timed_out"
+    assert meta["diagnostics"]["timeouts"][0]["status"] == "timed_out"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_max_no_progress_seconds_raises_typed_stall():
+    async def run_task(_context):
+        await asyncio.sleep(0.05)
+        return "late"
+
+    agent = Agently.create_agent("execution-idle-stall-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-execution-idle-stall",
+                "tasks": [{"id": "slow", "kind": "local", "binding": "local_handler"}],
+                "semantic_outputs": {"final": "slow"},
+            },
+            handlers={"local_handler": run_task},
+        )
+        .input("run slowly")
+        .create_execution(limits={"max_no_progress_seconds": 0.001})
+    )
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        await execution.async_get_data()
+
+    assert raised.value.status == "stalled"
+    assert raised.value.timeout_seconds == 0.001
+    assert raised.value.last_progress_event is not None
+    meta = await execution.async_get_meta()
+    assert meta["status"] == "stalled"
+    assert meta["diagnostics"]["stalls"][0]["status"] == "stalled"
+    assert meta["diagnostics"]["last_progress"]["event_type"] == raised.value.last_progress_event
+
+
+def test_agent_execution_sync_wrapper_raises_typed_stall():
+    async def run_task(_context):
+        await asyncio.sleep(0.05)
+        return "late"
+
+    agent = Agently.create_agent("execution-sync-idle-stall-agent")
+    execution = (
+        agent
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "agent-execution-sync-idle-stall",
+                "tasks": [{"id": "slow", "kind": "local", "binding": "local_handler"}],
+                "semantic_outputs": {"final": "slow"},
+            },
+            handlers={"local_handler": run_task},
+        )
+        .input("run slowly")
+        .create_execution(limits={"max_no_progress_seconds": 0.001})
+    )
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        execution.get_data()
+
+    assert raised.value.status == "stalled"
+
+
+@pytest.mark.asyncio
+async def test_model_response_result_materialization_idle_timeout():
+    class SlowResponseParser:
+        def __init__(self, *_args, **_kwargs):
+            self.full_result_data = {}
+
+        async def async_get_text(self):
+            await asyncio.sleep(0.05)
+            return "late"
+
+        async def async_get_data(self, *, type="parsed"):
+            await asyncio.sleep(0.05)
+            return {"type": type}
+
+        async def async_get_data_object(self):
+            await asyncio.sleep(0.05)
+            return None
+
+        async def async_get_meta(self):
+            await asyncio.sleep(0.05)
+            return {}
+
+        def get_generator(self, **_kwargs):
+            return iter(())
+
+        async def get_async_generator(self, **_kwargs):
+            if False:
+                yield None
+
+    class MinimalPromptGenerator:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def to_text(self, *_args, **_kwargs):
+            return ""
+
+        def to_messages(self, *_args, **_kwargs):
+            return []
+
+        def to_prompt_object(self, *_args, **_kwargs):
+            return {}
+
+        def to_output_model(self, *_args, **_kwargs):
+            return None
+
+        def to_serializable_prompt_data(self, *_args, **_kwargs):
+            return {}
+
+        def to_json_prompt(self, *_args, **_kwargs):
+            return "{}"
+
+        def to_yaml_prompt(self, *_args, **_kwargs):
+            return ""
+
+    class FakePluginManager:
+        def get_plugin(self, category, *_args):
+            if category == "PromptGenerator":
+                return MinimalPromptGenerator
+            return SlowResponseParser
+
+    async def empty_response_generator():
+        if False:
+            yield ("done", "")
+
+    settings = Settings(
+        {
+            "plugins": {"ResponseParser": {"activate": "slow"}},
+            "response": {"materialization_idle_timeout": 0.001},
+        }
+    )
+    result = ModelResponseResult(
+        "timeout-agent",
+        "response-timeout",
+        Prompt(cast(Any, FakePluginManager()), settings),
+        empty_response_generator(),
+        cast(Any, FakePluginManager()),
+        settings,
+        ExtensionHandlers(),
+    )
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        await result.async_get_text()
+
+    assert raised.value.stage == "final_response_text_materialization"
+    assert raised.value.status == "stalled"
 
 
 @pytest.mark.asyncio

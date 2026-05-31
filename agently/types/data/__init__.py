@@ -79,6 +79,7 @@ from .event import (
     RunContext,
     ObservationEvent,
     RuntimeEvent,
+    RuntimeEventHook,
     EventHook,
     ObservationEventHook,
 )

@@ -36,6 +36,8 @@ class AgentExecutionLimits(TypedDict, total=False):
     allow_create_task: bool
     max_model_requests: int | None
     max_nested_agent_steps: int | None
+    max_seconds: float | None
+    max_no_progress_seconds: float | None
 
 
 class AgentExecutionWorkspaceRefs(TypedDict, total=False):
@@ -50,6 +52,10 @@ class AgentExecutionDiagnostics(TypedDict, total=False):
     budget: dict[str, Any]
     limit_events: list[dict[str, Any]]
     errors: list[dict[str, Any]]
+    stalls: list[dict[str, Any]]
+    timeouts: list[dict[str, Any]]
+    stages: dict[str, Any]
+    last_progress: dict[str, Any]
 
 
 class AgentExecutionRouteInfo(TypedDict, total=False):

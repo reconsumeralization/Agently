@@ -45,6 +45,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agently import Agently
+from agently.core.AgentExecution import RuntimeStageStallError
 from agently.utils import DataFormatter
 from examples.dynamic_task._shared import configure_model
 
@@ -138,6 +139,9 @@ def action_stdout(meta: dict[str, Any], command_token: str) -> str:
 
 async def main():
     provider = configure_model(temperature=0.0)
+    Agently.set_settings("OpenAICompatible.stream_idle_timeout", 60.0)
+    Agently.set_settings("OpenAIResponsesCompatible.stream_idle_timeout", 60.0)
+    Agently.set_settings("response.materialization_idle_timeout", 60.0)
     if not gh_available():
         raise RuntimeError("GitHub CLI `gh` is required for this example.")
     if RUNTIME_ROOT.exists():
@@ -192,7 +196,11 @@ async def main():
                 "iteration_id": "iter-1",
                 "step_id": "agent-owned-gh-search",
             },
-            limits={"max_model_requests": 3},
+            limits={
+                "max_model_requests": 3,
+                "max_seconds": 90,
+                "max_no_progress_seconds": 60,
+            },
         )
     )
     search_stream_task = asyncio.create_task(collect_lineage_flags(search_repo))
@@ -251,7 +259,11 @@ async def main():
                 "step_id": "agent-owned-gh-issue-intake",
                 "parent_execution_id": search_repo.id,
             },
-            limits={"max_model_requests": 3},
+            limits={
+                "max_model_requests": 3,
+                "max_seconds": 90,
+                "max_no_progress_seconds": 60,
+            },
         )
     )
     issue_stream_task = asyncio.create_task(collect_lineage_flags(issue_intake))
@@ -328,6 +340,15 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(asyncio.wait_for(main(), timeout=EXAMPLE_TIMEOUT_SECONDS))
+    except RuntimeStageStallError as exc:
+        raise SystemExit(
+            "AgentExecution stalled with a framework diagnostic. "
+            f"stage={exc.stage}, status={exc.status}, "
+            f"last_progress_event={exc.last_progress_event}, timeout_seconds={exc.timeout_seconds}. "
+            "Attach an EventCenter hook or temporarily call "
+            "`agent.set_settings(\"debug\", True)` / `agent.set_settings(\"debug\", \"detail\")`, "
+            "then remove debug code after the run is healthy."
+        ) from exc
     except asyncio.TimeoutError as exc:
         raise SystemExit(
             "Timed out while waiting for the model-owned GitHub issue intake step. "
