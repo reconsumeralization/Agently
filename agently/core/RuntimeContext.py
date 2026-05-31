@@ -49,6 +49,10 @@ _current_tool_phase_run_context: ContextVar["RunContext | None"] = ContextVar(
 	"agently_current_tool_phase_run_context",
 	default=None,
 )
+_current_agent_execution_context: ContextVar[object | None] = ContextVar(
+	"agently_current_agent_execution_context",
+	default=None,
+)
 _current_settings: ContextVar["Settings | None"] = ContextVar(
 	"agently_current_settings",
 	default=None,
@@ -64,6 +68,7 @@ def bind_runtime_context(
 	agent_turn_run_context: "RunContext | None | object" = _MISSING,
 	chunk_run_context: "RunContext | None | object" = _MISSING,
 	tool_phase_run_context: "RunContext | None | object" = _MISSING,
+	agent_execution_context: object | None = _MISSING,
 	settings: "Settings | None | object" = _MISSING,
 ) -> Iterator[None]:
 	tokens = []
@@ -110,6 +115,13 @@ def bind_runtime_context(
 					_current_tool_phase_run_context.set(cast("RunContext | None", tool_phase_run_context)),
 				)
 			)
+		if agent_execution_context is not _MISSING:
+			tokens.append(
+				(
+					_current_agent_execution_context,
+					_current_agent_execution_context.set(agent_execution_context),
+				)
+			)
 		if settings is not _MISSING:
 			tokens.append(
 				(
@@ -145,6 +157,10 @@ def get_current_chunk_run_context():
 
 def get_current_tool_phase_run_context():
 	return _current_tool_phase_run_context.get()
+
+
+def get_current_agent_execution_context():
+	return _current_agent_execution_context.get()
 
 
 def get_current_settings():

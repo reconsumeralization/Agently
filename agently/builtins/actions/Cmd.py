@@ -33,6 +33,11 @@ class Cmd:
             if allowed_cmd_prefixes is not None
             else ["ls", "rg", "cat", "pwd", "whoami", "date", "head", "tail"]
         )
+        self._allowed_cmd_prefix_tokens = [
+            self._normalize_cmd(prefix)
+            for prefix in self.allowed_cmd_prefixes
+            if isinstance(prefix, str) and prefix.strip()
+        ]
         roots = allowed_workdir_roots if allowed_workdir_roots is not None else [Path.cwd()]
         self.allowed_workdir_roots = [Path(root).resolve() for root in roots]
         self.timeout = timeout
@@ -80,9 +85,20 @@ class Cmd:
     def _is_cmd_allowed(self, args: list[str]) -> bool:
         if not args:
             return False
-        cmd = args[0]
-        base = Path(cmd).name
-        return base in self.allowed_cmd_prefixes
+        base = Path(args[0]).name
+        for prefix in self._allowed_cmd_prefix_tokens:
+            if len(prefix) == 0:
+                continue
+            if len(prefix) == 1:
+                if base == prefix[0] or args[0] == prefix[0]:
+                    return True
+                continue
+            if len(args) < len(prefix):
+                continue
+            first_matches = base == prefix[0] or args[0] == prefix[0]
+            if first_matches and args[1 : len(prefix)] == prefix[1:]:
+                return True
+        return False
 
     def _is_workdir_allowed(self, workdir: str | Path | None) -> bool:
         workdir_path = Path(workdir or Path.cwd()).resolve()

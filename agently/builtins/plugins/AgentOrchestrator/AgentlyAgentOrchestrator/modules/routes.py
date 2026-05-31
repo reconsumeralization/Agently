@@ -39,8 +39,36 @@ async def run_model_request_route(
     if ensure_all_keys is not None:
         agent.request.prompt.set("ensure_all_keys", ensure_all_keys)
     response = agent.request.get_response(parent_run_context=turn_run_context)
-    async for item in response.get_async_generator(type="instant"):
-        await execution.bridge_model_stream_item(item, route="model_request")
+    execution.record_model_response_id(response.id)
+    has_structured_stream = bool(execution.prompt_snapshot.get("output"))
+    if has_structured_stream:
+        async for item in response.get_async_generator(type="instant"):
+            await execution.bridge_model_stream_item(item, route="model_request")
+    else:
+        async for event, data in response.get_async_generator(type="all"):
+            if event in {"action", "tool"}:
+                await execution.record_action_log(
+                    data,
+                    route="model_request",
+                    source="action" if event == "action" else "tool",
+                )
+            elif event == "delta":
+                await execution.emit_stream(
+                    "model.delta",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    delta=str(data),
+                    event_type="delta",
+                    is_complete=False,
+                )
+            elif event == "done":
+                await execution.emit_stream(
+                    "model.text",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                )
     data = await response.async_get_data(
         type=type,
         ensure_keys=ensure_keys,
@@ -49,8 +77,18 @@ async def run_model_request_route(
         max_retries=max_retries,
         raise_ensure_failure=raise_ensure_failure,
     )
+    full_result_data = getattr(getattr(response, "result", None), "full_result_data", {})
+    extra = full_result_data.get("extra", {}) if isinstance(full_result_data, dict) else {}
+    if isinstance(extra, dict):
+        action_logs = extra.get("action_logs", [])
+        if isinstance(action_logs, list):
+            for log in action_logs:
+                await execution.record_action_log(log, route="model_request", source="action")
+        tool_logs = extra.get("tool_logs", [])
+        if isinstance(tool_logs, list):
+            for log in tool_logs:
+                await execution.record_action_log(log, route="model_request", source="tool")
     execution.close_snapshot = {"status": "success", "route": "model_request"}
-    execution.logs = {"model_response_id": response.id}
     return data
 
 
@@ -84,8 +122,9 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
                 output_format=output_format,
                 stream_handler=bridge_runtime_stream,
             )
+            execution.raise_if_limit_exceeded()
             execution.close_snapshot = skills_execution.close_snapshot
-            execution.logs = dict(skills_execution.to_dict())
+            execution.logs["route_logs"] = dict(skills_execution.to_dict())
             execution.status = skills_execution.status
             return skills_execution.output
         await execution.emit_stream(
@@ -113,6 +152,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         output_format=output_format,
         stream_handler=bridge_runtime_stream,
     )
+    execution.raise_if_limit_exceeded()
     for log in skills_execution.skill_logs:
         await execution.emit_stream(
             f"skills.{ log.get('skill_id', 'skill') }",
@@ -122,15 +162,9 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
             stage_id=None,
         )
     for log in skills_execution.action_logs:
-        await execution.emit_stream(
-            f"actions.{ log.get('action_id', 'action') }",
-            log,
-            route="skills",
-            source="action",
-            action_id=str(log.get("action_id") or "") or None,
-        )
+        await execution.record_action_log(log, route="skills", source="action")
     execution.close_snapshot = skills_execution.close_snapshot
-    execution.logs = dict(skills_execution.to_dict())
+    execution.logs["route_logs"] = dict(skills_execution.to_dict())
     execution.status = skills_execution.status
     return skills_execution.output
 
@@ -189,7 +223,7 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
         close_snapshot = await run_task
         task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
         execution.close_snapshot = close_snapshot
-        execution.logs = {"task_dag": close_snapshot}
+        execution.logs["route_logs"] = {"task_dag": close_snapshot}
         return task_result
     stream = dag_execution.get_async_runtime_stream(timeout=None)
     try:
@@ -203,7 +237,7 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
         raise
     task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
     execution.close_snapshot = close_snapshot
-    execution.logs = {"task_dag": close_snapshot}
+    execution.logs["route_logs"] = {"task_dag": close_snapshot}
     return task_result
 
 

@@ -148,3 +148,15 @@ from .workspace import (
     WorkspaceRecordRef,
     WorkspaceSearchResult,
 )
+
+from .agent_execution import (
+    AgentExecutionDiagnostics,
+    AgentExecutionLineage,
+    AgentExecutionLimits,
+    AgentExecutionMeta,
+    AgentExecutionMode,
+    AgentExecutionStatus,
+    AgentExecutionStreamMeta,
+    AgentExecutionWorkspaceRecord,
+    AgentExecutionWorkspaceRefs,
+)

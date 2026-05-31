@@ -53,6 +53,84 @@ meta = await execution.async_get_meta()
 execution 对象沿用模型 response 的消费风格：`get_data`、`get_text`、
 `get_meta`、`get_generator` 以及对应 async 方法。
 
+`create_execution()` 默认使用 `mode="one_turn"`，保留普通单轮 Agent 调用
+语义。当开发者自己编写循环，或未来 AgentTaskLoop 需要一个有边界的单步执行时，
+使用 `mode="task_step"`，并显式传入 lineage 和 limits：
+
+```python
+execution = agent.input("Try one bounded fix step.").create_execution(
+    mode="task_step",
+    lineage={
+        "task_id": "issue-123",
+        "iteration_id": "iter-2",
+        "step_id": "execute-fix",
+        "parent_execution_id": "exec-prev",
+    },
+    limits={"max_model_requests": 3},
+)
+```
+
+`mode="task_step"` 仍然只是一次 Agent execution，不是多轮循环本身。它增加稳定
+lineage、route metadata、diagnostics，以及跨普通模型 route、Dynamic Task
+model task、Skills model stage 共享的模型请求预算计数。无限预算推荐用 `None`
+表达；`-1` 作为兼容写法可用，但新示例不推荐。
+
+如果 task-step 超出模型请求预算，Agently 会抛出
+`agently.core.AgentExecution.AgentExecutionLimitExceeded`。execution meta
+仍然可以检查，并会记录 `status="blocked"`，以及 `diagnostics` 里的 limit event。
+
+`async_get_meta()` 会包含 `execution_mode`、`lineage`、`limits`、`route`、
+`route_plan`、`logs`、`diagnostics` 和 `workspace_refs`。`logs` 是跨 route
+稳定检查运行事实的位置，例如模型响应 id、ActionRuntime action records 和 artifact refs：
+
+```python
+meta = await execution.async_get_meta()
+meta["route"]["selected_route"]
+meta["logs"]["model_response_ids"]
+meta["logs"]["action_logs"]
+meta["logs"]["artifact_refs"]
+```
+
+当 `model_request` route 使用 Actions 时，execution 会通过 meta 和
+`actions.<action_id>` 这类 stream event 暴露 action records。需要持久化业务证据时，
+host 应读取框架 action record 或 artifact，再显式写入 Workspace；不要为了让 host
+能存储结果而要求模型把 raw action stdout 再复制一遍。
+
+每条过程流 item 也会带上关联 metadata：
+
+```python
+item.meta["execution_id"]
+item.meta["execution_mode"]
+item.meta["lineage"]["task_id"]
+```
+
+如果在 `create_execution()` 前配置了 `agent.use_workspace(...)`，execution 会拿到
+这个 Workspace binding。AgentExecution 仍然不会自动决定什么应该进入记忆；调用方应从
+execution 侧显式持久化：
+
+```python
+workspace_record = await execution.async_record_workspace(
+    collection="observations",
+    kind="agent_execution_observation",
+    content={"result": data},
+    checkpoint=True,
+)
+```
+
+这个 helper 仍然通过已有的通用 Workspace API 写入，并把 record/checkpoint id 更新到
+`meta["workspace_refs"]`。Workspace 保持 durable substrate，不需要理解
+AgentExecution 语义。下一步再由调用方调用 `workspace.build_context(...)`。
+
+开发排障时，可以挂 EventCenter observation hook，或临时打开控制台明细：
+
+```python
+Agently.event_center.register_hook(print, event_types=None, hook_name="debug")
+agent.set_settings("debug", "detail")
+```
+
+这只用于调试 route selection、model request、ActionRuntime 或 Workspace 持久化。
+问题定位后，应从示例和生产代码中移除 debug hook/settings。
+
 ## 提交式 Dynamic Task 输入
 
 提交式 Dynamic Task DAG 的 task `inputs` 继续使用 DAG 运行时占位符，例如
