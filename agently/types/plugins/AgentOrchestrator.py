@@ -20,7 +20,8 @@ from .base import AgentlyPlugin
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
-    from agently.types.data import RunContext
+    from agently.types.data import AgentExecutionLineage, AgentExecutionLimits, AgentExecutionMode, RunContext
+    from agently.types.plugins.AgentExecution import AgentExecution
 
 
 @runtime_checkable
@@ -31,5 +32,8 @@ class AgentOrchestrator(AgentlyPlugin, Protocol):
         self,
         agent: "BaseAgent",
         *,
+        mode: "AgentExecutionMode | str" = "one_turn",
+        lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
+        limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
-    ) -> Any: ...
+    ) -> "AgentExecution": ...

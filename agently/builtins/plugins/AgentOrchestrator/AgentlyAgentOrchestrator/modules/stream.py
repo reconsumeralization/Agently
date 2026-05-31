@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from agently.types.data import AgentExecutionStreamData
@@ -24,9 +25,18 @@ from agently.utils import DataFormatter
 class AgentExecutionStream:
     """Execution-local stream buffer and TriggerFlow bridge."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        execution_id: str | None = None,
+        execution_mode: str | None = None,
+        lineage: Mapping[str, Any] | None = None,
+    ):
         self.items: list[AgentExecutionStreamData] = []
         self.queues: list[asyncio.Queue[Any]] = []
+        self.execution_id = execution_id
+        self.execution_mode = execution_mode
+        self.lineage = dict(lineage or {})
 
     async def emit(
         self,
@@ -44,6 +54,13 @@ class AgentExecutionStream:
         event_type: Literal["delta", "done"] = "done",
         meta: dict[str, Any] | None = None,
     ) -> AgentExecutionStreamData:
+        item_meta = dict(meta or {})
+        if self.execution_id is not None:
+            item_meta.setdefault("execution_id", self.execution_id)
+        if self.execution_mode is not None:
+            item_meta.setdefault("execution_mode", self.execution_mode)
+        if self.lineage:
+            item_meta.setdefault("lineage", dict(self.lineage))
         item = AgentExecutionStreamData(
             path=path,
             value=DataFormatter.sanitize(value),
@@ -56,7 +73,7 @@ class AgentExecutionStream:
             task_id=task_id,
             action_id=action_id,
             graph_id=graph_id,
-            meta=DataFormatter.sanitize(meta) if meta is not None else None,
+            meta=DataFormatter.sanitize(item_meta) if item_meta else None,
         )
         self.items.append(item)
         for queue in list(self.queues):

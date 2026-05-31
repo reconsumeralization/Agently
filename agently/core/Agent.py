@@ -27,7 +27,17 @@ from agently.utils import DataFormatter, Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
-    from agently.types.data import OutputValidateHandler, PromptStandardSlot, ChatMessage, ChatMessageDict, RunContext, TaskDAG
+    from agently.types.data import (
+        AgentExecutionLineage,
+        AgentExecutionLimits,
+        AgentExecutionMode,
+        OutputValidateHandler,
+        PromptStandardSlot,
+        ChatMessage,
+        ChatMessageDict,
+        RunContext,
+        TaskDAG,
+    )
 
 
 class BaseAgent:
@@ -540,11 +550,24 @@ class BaseAgent:
             raise_ensure_failure=raise_ensure_failure,
         )
 
-    def create_execution(self, *, parent_run_context: "RunContext | None" = None):
+    def create_execution(
+        self,
+        *,
+        mode: "AgentExecutionMode | str" = "one_turn",
+        lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
+        limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        parent_run_context: "RunContext | None" = None,
+    ):
         plugin_name = str(self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator"))
         plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentOrchestrator", plugin_name))
         orchestrator = plugin_class(plugin_manager=self.plugin_manager, settings=self.settings)
-        return orchestrator.create_execution(self, parent_run_context=parent_run_context)
+        return orchestrator.create_execution(
+            self,
+            mode=mode,
+            lineage=lineage,
+            limits=limits,
+            parent_run_context=parent_run_context,
+        )
 
     def validate(self, handler: "OutputValidateHandler"):
         self.extension_handlers.append("validate_handlers", handler)

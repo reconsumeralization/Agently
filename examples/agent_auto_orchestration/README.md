@@ -51,6 +51,8 @@ python examples/agent_auto_orchestration/16_report_evaluation.py
 python examples/agent_auto_orchestration/17_self_reflective_research.py
 python examples/agent_auto_orchestration/18_amap_mcp_trip_planner.py   # needs AMAP_API_KEY
 python examples/agent_auto_orchestration/19_remote_skills_weather_event_ops.py
+python examples/agent_auto_orchestration/20_agent_execution_task_step_workspace_loop.py
+python examples/agent_auto_orchestration/21_agent_execution_github_issue_intake.py
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` is the canonical reference for the
@@ -123,6 +125,22 @@ single-shot Skill + host orchestration pattern.
   `effort="normal"` to produce a structured operations packet. Needs
   `DEEPSEEK_API_KEY`, Node.js, and `npx`; skips cleanly when prerequisites are
   missing.
+
+- **20 — AgentExecution Task-Step Workspace Loop.** Acceptance example for the
+  4.1.3.2 AgentExecution step contract. The host owns a two-step loop, runs two
+  real model-backed `create_execution(mode="task_step", lineage=..., limits=...)`
+  calls, explicitly persists observations/checkpoints through the execution's
+  bound Workspace helper, builds a ContextPack between steps, and verifies
+  stream/meta lineage correlation.
+
+- **21 — GitHub Issue Intake.** Business-scenario example for the 4.1.3.2
+  application landing point. A DeepSeek/Ollama-backed AgentExecution receives a
+  restricted bash action, decides and runs local `gh search repos`, selects the
+  official repo from real command output, then runs `gh issue list` through the
+  same ActionRuntime path. Host code reads AgentExecution action logs/artifact
+  refs, validates the real `gh` stdout, stores the latest open issues through
+  the execution's bound Workspace helper, and builds a ContextPack for
+  downstream maintainer work. Requires authenticated GitHub CLI.
 
 ## Actions / Dynamic-Task DAG examples (not Skills)
 

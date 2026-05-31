@@ -20,7 +20,7 @@ from typing import Any, AsyncGenerator, TYPE_CHECKING, cast
 
 from agently.core.Prompt import Prompt
 from agently.core.ExtensionHandlers import ExtensionHandlers
-from agently.core.RuntimeContext import bind_runtime_context
+from agently.core.RuntimeContext import bind_runtime_context, get_current_agent_execution_context
 from agently.utils import Settings, DataFormatter
 
 from agently.core.ModelResponseResult import ModelResponseResult
@@ -227,6 +227,16 @@ class ModelResponse:
                         "run": self.model_run_context,
                     }
                 )
+                consume_model_request = getattr(
+                    get_current_agent_execution_context(),
+                    "consume_model_request",
+                    None,
+                )
+                if callable(consume_model_request):
+                    consume_model_request(
+                        response_id=self.id,
+                        run_id=self.model_run_context.run_id,
+                    )
                 response_generator = model_requester.request_model(request_data)
                 broadcast_generator = model_requester.broadcast_response(response_generator)
                 broadcast_prefixes = self.extension_handlers.get("broadcast_prefixes", [])
