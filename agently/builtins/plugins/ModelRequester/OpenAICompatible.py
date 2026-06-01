@@ -38,6 +38,7 @@ from agently.utils import (
     DataFormatter,
     DataLocator,
 )
+from agently.utils.ModelPool import resolve_api_key_failover
 
 if TYPE_CHECKING:
     from agently.core.Prompt import Prompt
@@ -476,8 +477,7 @@ class OpenAICompatible(ModelRequester):
 
         return _aiter_sse()
 
-    async def request_model(self, request_data: "AgentlyRequestData") -> AsyncGenerator[tuple[str, Any], None]:
-        # auth
+    def _build_headers_with_auth(self, request_data: "AgentlyRequestData") -> dict[str, Any]:
         auth = DataFormatter.to_str_key_dict(
             self.plugin_settings.get("auth", "None"),
             value_format="serializable",
@@ -501,6 +501,33 @@ class OpenAICompatible(ModelRequester):
             request_data.data.update(**auth["body"])
         if auth_api_key != "None" and "Authorization" not in headers_with_auth:
             headers_with_auth["Authorization"] = f"Bearer { auth_api_key }"
+        return headers_with_auth
+
+    def _build_failover_headers(
+        self,
+        request_data: "AgentlyRequestData",
+        *,
+        error: Any,
+        status_code: int | None,
+        response_text: str | None,
+        full_request_data: dict[str, Any],
+        stream_started: bool,
+    ) -> dict[str, Any] | None:
+        decision = resolve_api_key_failover(
+            self.plugin_settings,
+            error=error,
+            status_code=status_code,
+            response_text=response_text,
+            request_data=full_request_data,
+            provider=self.name,
+            stream_started=stream_started,
+        )
+        if not decision.retry:
+            return None
+        return self._build_headers_with_auth(request_data)
+
+    async def request_model(self, request_data: "AgentlyRequestData") -> AsyncGenerator[tuple[str, Any], None]:
+        headers_with_auth = self._build_headers_with_auth(request_data)
 
         # request
         # stream request
@@ -517,103 +544,161 @@ class OpenAICompatible(ModelRequester):
                     default_value={},
                 )
                 full_request_data.update(request_data.request_options)
-                try:
-                    has_done = False
-                    sse_generator = await self._aiter_sse_with_retry(
-                        client, "POST", request_data.request_url, json=full_request_data, headers=headers_with_auth
-                    )
-                    if self._should_use_first_token_timeout(request_data):
-                        sse_generator = self._aiter_with_first_token_timeout(
-                            sse_generator,
-                            timeout_seconds=self._get_first_token_timeout_seconds(),
+                stream_started = False
+                while True:
+                    try:
+                        has_done = False
+                        sse_generator = await self._aiter_sse_with_retry(
+                            client,
+                            "POST",
+                            request_data.request_url,
+                            json=full_request_data,
+                            headers=headers_with_auth,
                         )
-                    sse_generator = self._aiter_with_stream_idle_timeout(
-                        sse_generator,
-                        timeout_seconds=self._get_stream_idle_timeout_seconds(),
-                    )
-                    async for sse in sse_generator:
-                        yield sse.event, sse.data
-                        if sse.data.strip() == "[DONE]":
-                            has_done = True
-                    if not has_done:
-                        yield "message", "[DONE]"
-                except SSEError as e:
-                    response = await client.post(
-                        request_data.request_url,
-                        json=full_request_data,
-                        headers=headers_with_auth,
-                    )
-                    # Raise status code >= 400
-                    if response.status_code >= 400:
-                        e = RequestError(
-                            f"Status Code: { response.status_code }\n"
-                            f"Detail: { response.text }\n"
-                            f"Request Data: {full_request_data}"
-                        )
-                        await self._emitter.async_error(
-                            e,
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
-                        yield "error", e
-                    else:
-                        content_type = response.headers.get("Content-Type", "")
-                        if content_type.startswith("application/json"):
-                            try:
-                                error_json = response.json()
-                            except Exception:
-                                error_json = await response.aread()
-                                error_json = json.loads(error_json.decode())
-                            error = error_json["error"]
-                            error_title = f"{ error['code'] if 'code' in error else 'unknown_code' } - { error['type'] if 'type' in error else 'unknown_type' }"
-                            error_detail = error["message"] if "message" in error else ""
-                            await self._emitter.async_error(
-                                f"Error: { error_title }\n"
-                                f"Detail: {error_detail }\n"
-                                f"Request Data: {full_request_data}",
-                                event_type="model.requester.error",
-                                payload={"request_data": full_request_data},
+                        if self._should_use_first_token_timeout(request_data):
+                            sse_generator = self._aiter_with_first_token_timeout(
+                                sse_generator,
+                                timeout_seconds=self._get_first_token_timeout_seconds(),
                             )
-                            yield "error", error_detail
-                        else:
+                        sse_generator = self._aiter_with_stream_idle_timeout(
+                            sse_generator,
+                            timeout_seconds=self._get_stream_idle_timeout_seconds(),
+                        )
+                        async for sse in sse_generator:
+                            stream_started = True
+                            yield sse.event, sse.data
+                            if sse.data.strip() == "[DONE]":
+                                has_done = True
+                        if not has_done:
+                            yield "message", "[DONE]"
+                        break
+                    except SSEError as e:
+                        response = await client.post(
+                            request_data.request_url,
+                            json=full_request_data,
+                            headers=headers_with_auth,
+                        )
+                        if response.status_code >= 400:
+                            e = RequestError(
+                                f"Status Code: { response.status_code }\n"
+                                f"Detail: { response.text }\n"
+                                f"Request Data: {full_request_data}"
+                            )
+                            failover_headers = self._build_failover_headers(
+                                request_data,
+                                error=e,
+                                status_code=response.status_code,
+                                response_text=response.text,
+                                full_request_data=full_request_data,
+                                stream_started=stream_started,
+                            )
+                            if failover_headers is not None:
+                                headers_with_auth = failover_headers
+                                client.headers.update(headers_with_auth)
+                                continue
                             await self._emitter.async_error(
-                                "Error: SSE Error\n" f"Detail: {e}\n" f"Request Data: {full_request_data}",
+                                e,
                                 event_type="model.requester.error",
                                 payload={"request_data": full_request_data},
                             )
                             yield "error", e
-                except HTTPStatusError as e:
-                    await self._emitter.async_error(
-                        "Error: HTTP Status Error\n"
-                        f"Detail: { e.response.status_code } - { e.response.text }\n"
-                        f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", e
-                except TimeoutError as e:
-                    await self._emitter.async_error(
-                        "Error: Timeout Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", e
-                except RequestError as e:
-                    await self._emitter.async_error(
-                        "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", e
-                except Exception as e:
-                    await self._emitter.async_error(
-                        "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", e
-                finally:
-                    await client.aclose()
+                        else:
+                            content_type = response.headers.get("Content-Type", "")
+                            if content_type.startswith("application/json"):
+                                try:
+                                    error_json = response.json()
+                                except Exception:
+                                    error_json = await response.aread()
+                                    error_json = json.loads(error_json.decode())
+                                error = error_json["error"]
+                                error_title = f"{ error['code'] if 'code' in error else 'unknown_code' } - { error['type'] if 'type' in error else 'unknown_type' }"
+                                error_detail = error["message"] if "message" in error else ""
+                                await self._emitter.async_error(
+                                    f"Error: { error_title }\n"
+                                    f"Detail: {error_detail }\n"
+                                    f"Request Data: {full_request_data}",
+                                    event_type="model.requester.error",
+                                    payload={"request_data": full_request_data},
+                                )
+                                yield "error", error_detail
+                            else:
+                                await self._emitter.async_error(
+                                    "Error: SSE Error\n" f"Detail: {e}\n" f"Request Data: {full_request_data}",
+                                    event_type="model.requester.error",
+                                    payload={"request_data": full_request_data},
+                                )
+                                yield "error", e
+                        break
+                    except HTTPStatusError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=e.response.status_code,
+                            response_text=e.response.text,
+                            full_request_data=full_request_data,
+                            stream_started=stream_started,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
+                        await self._emitter.async_error(
+                            "Error: HTTP Status Error\n"
+                            f"Detail: { e.response.status_code } - { e.response.text }\n"
+                            f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
+                    except TimeoutError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=None,
+                            response_text=None,
+                            full_request_data=full_request_data,
+                            stream_started=stream_started,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
+                        await self._emitter.async_error(
+                            "Error: Timeout Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
+                    except RequestError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=None,
+                            response_text=None,
+                            full_request_data=full_request_data,
+                            stream_started=stream_started,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
+                        await self._emitter.async_error(
+                            "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
+                    except Exception as e:
+                        await self._emitter.async_error(
+                            "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
         # normal request
         else:
             async with AsyncClient(**request_data.client_options) as client:
@@ -624,51 +709,91 @@ class OpenAICompatible(ModelRequester):
                     default_value={},
                 )
                 full_request_data.update(request_data.request_options)
-                try:
-                    response = await client.post(
-                        request_data.request_url,
-                        json=full_request_data,
-                    )
-                    if response.status_code >= 400:
-                        e = RequestError(
-                            f"Status Code: { response.status_code }\n"
-                            f"Detail: { response.text }\n"
-                            f"Request Data: {full_request_data}"
+                while True:
+                    try:
+                        response = await client.post(
+                            request_data.request_url,
+                            json=full_request_data,
+                            headers=headers_with_auth,
                         )
+                        if response.status_code >= 400:
+                            e = RequestError(
+                                f"Status Code: { response.status_code }\n"
+                                f"Detail: { response.text }\n"
+                                f"Request Data: {full_request_data}"
+                            )
+                            failover_headers = self._build_failover_headers(
+                                request_data,
+                                error=e,
+                                status_code=response.status_code,
+                                response_text=response.text,
+                                full_request_data=full_request_data,
+                                stream_started=False,
+                            )
+                            if failover_headers is not None:
+                                headers_with_auth = failover_headers
+                                client.headers.update(headers_with_auth)
+                                continue
+                            await self._emitter.async_error(
+                                e,
+                                event_type="model.requester.error",
+                                payload={"request_data": full_request_data},
+                            )
+                            yield "error", e
+                        else:
+                            yield "message", response.content.decode()
+                            yield "message", "[DONE]"
+                        break
+                    except HTTPStatusError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=e.response.status_code,
+                            response_text=e.response.text,
+                            full_request_data=full_request_data,
+                            stream_started=False,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
                         await self._emitter.async_error(
-                            e,
+                            "Error: HTTP Status Error\n"
+                            f"Detail: { e.response.status_code } - { e.response.text }\n"
+                            f"Request Data: { full_request_data }",
                             event_type="model.requester.error",
                             payload={"request_data": full_request_data},
                         )
                         yield "error", e
-                    else:
-                        yield "message", response.content.decode()
-                        yield "message", "[DONE]"
-                except HTTPStatusError as e:
-                    await self._emitter.async_error(
-                        "Error: HTTP Status Error\n"
-                        f"Detail: { e.response.status_code } - { e.response.text }\n"
-                        f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", e
-                except RequestError as e:
-                    await self._emitter.async_error(
-                        "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", e
-                except Exception as e:
-                    await self._emitter.async_error(
-                        "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", e
-                finally:
-                    await client.aclose()
+                        break
+                    except RequestError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=None,
+                            response_text=None,
+                            full_request_data=full_request_data,
+                            stream_started=False,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
+                        await self._emitter.async_error(
+                            "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
+                    except Exception as e:
+                        await self._emitter.async_error(
+                            "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
 
     async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResponseGenerator":
         meta = {}

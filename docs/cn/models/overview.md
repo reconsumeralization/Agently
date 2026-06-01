@@ -105,10 +105,14 @@ result = (
 `agent.input(...).start()` 和 `agent.create_execution()`。如果只想覆盖单次调用，
 使用 `agent.create_request(model_key="deepseek-v4")`。
 
-API key 会在请求时根据 `key_pool_strategy` 自动选择：`fixed`、`random`、
-`round_robin` 或 `least_used`。Agently 4.1.3 不会在 provider 返回鉴权、额度或费用
-类错误后自动换另一个 key 重试；这类失败会暴露给应用代码，由业务系统决定该操作是否
-适合更换凭据重试。
+API key 会在请求时根据 key pool 的 `selection` 策略选择：`fixed`、`random`、
+`round_robin` 或 `least_used`。旧的 `key_pool_strategy` 路径继续兼容。
+
+provider 错误后的 failover 需要通过 `api_key_pools.<pool>.failover` 显式开启。没有
+failover 策略时，provider 错误会按旧行为直接暴露。内置 failover 策略可以针对配置的
+HTTP 状态码重试另一个 key；自定义 handler 可以检查 provider error object，并返回
+`"try_next"`、`"retry_same"`、`"raise"`、某个 key id、一个 key entry dict，或
+`{"key_id": "b"}` / `{"key_entry": context.keys[1]}` 这样的包装。
 
 ## 插件源码位置
 

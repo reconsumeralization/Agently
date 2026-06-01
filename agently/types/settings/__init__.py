@@ -19,6 +19,8 @@ from .model_requester import (
 )
 from .model_routing import (
     APIKeyPoolKey,
+    APIKeyPoolFailoverPolicy,
+    APIKeyPoolSelectionPolicy,
     APIKeyPoolSettings,
     ModelProfileSettings,
 )
@@ -28,6 +30,8 @@ __all__ = [
     "OpenAICompatibleSettings",
     "OpenAIResponsesCompatibleSettings",
     "APIKeyPoolKey",
+    "APIKeyPoolFailoverPolicy",
+    "APIKeyPoolSelectionPolicy",
     "APIKeyPoolSettings",
     "ModelProfileSettings",
 ]

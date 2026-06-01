@@ -45,6 +45,9 @@ from .prompt import (
     ToolMeta,
 )
 from .request import (
+    APIKeyFailoverAction,
+    APIKeyFailoverContext,
+    APIKeySelectionContext,
     AgentlyRequestData,
     AgentlyRequestDataDict,
 )

@@ -74,6 +74,62 @@ async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict,
 
 
 @pytest.mark.asyncio
+async def test_non_stream_request_retries_next_api_key_on_failover(monkeypatch):
+    calls: list[dict[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, content: bytes):
+            self.status_code = status_code
+            self.content = content
+            self.text = content.decode()
+            self.headers = {"Content-Type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(dict(self.headers if headers is None else headers))
+            if len(calls) == 1:
+                return FakeResponse(429, b'{"error":{"message":"rate limited"}}')
+            return FakeResponse(200, b'{"choices":[{"delta":{"content":"ok"}}]}')
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "api_key": "key-a",
+            "stream": False,
+            "_api_key_pool_runtime": {
+                "pool_id": "example",
+                "failover": {"strategy": "try_next", "max_attempts": 2, "retry_status_codes": [429]},
+                "keys": [
+                    {"id": "a", "value": "key-a", "index": 0},
+                    {"id": "b", "value": "key-b", "index": 1},
+                ],
+                "selected_key_id": "a",
+                "attempts": [{"key_id": "a", "action": "initial"}],
+            },
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert [headers.get("Authorization") for headers in calls] == ["Bearer key-a", "Bearer key-b"]
+    assert events == [("message", '{"choices":[{"delta":{"content":"ok"}}]}'), ("message", "[DONE]")]
+
+
+@pytest.mark.asyncio
 async def test_main(require_ollama):
     request_settings = cast(
         ModelRequesterSettings,

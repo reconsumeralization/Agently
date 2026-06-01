@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal
 
 from pydantic import Field
@@ -21,6 +22,7 @@ from pydantic import Field
 from agently.types.config import AgentlyConfigModel
 
 KeyPoolStrategy = Literal["fixed", "random", "round_robin", "least_used"]
+KeyPoolFailoverStrategy = Literal["none", "raise", "try_next", "retry_next", "retry_same"]
 
 
 class APIKeyPoolKey(AgentlyConfigModel):
@@ -32,9 +34,26 @@ class APIKeyPoolKey(AgentlyConfigModel):
     tags: dict[str, Any] | None = None
 
 
+class APIKeyPoolSelectionPolicy(AgentlyConfigModel):
+    strategy: KeyPoolStrategy | None = None
+    mode: KeyPoolStrategy | None = None
+    handler: Callable[..., Any] | None = None
+
+
+class APIKeyPoolFailoverPolicy(AgentlyConfigModel):
+    strategy: KeyPoolFailoverStrategy | None = None
+    handler: Callable[..., Any] | None = None
+    max_attempts: int | None = None
+    retry_status_codes: list[int] | None = None
+    status_codes: list[int] | None = None
+    allow_stream_retry_after_output: bool | None = None
+
+
 class APIKeyPoolSettings(AgentlyConfigModel):
     strategy: KeyPoolStrategy | None = None
     mode: KeyPoolStrategy | None = None
+    selection: KeyPoolStrategy | APIKeyPoolSelectionPolicy | Callable[..., Any] | dict[str, Any] | None = None
+    failover: KeyPoolFailoverStrategy | APIKeyPoolFailoverPolicy | Callable[..., Any] | dict[str, Any] | None = None
     key_entries: list[str | APIKeyPoolKey | dict[str, Any]] | None = Field(
         default=None,
         alias="keys",

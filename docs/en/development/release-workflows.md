@@ -38,10 +38,13 @@ is merged into `dev`. The version release candidate is then assembled from
 companion repositories reconciled against the current work version.
 
 When starting new version-development work after the previous public version has
-already been released, do not infer the next current work version or the task
-branch from local history. If either the current work version or the intended
-task branch is not explicitly specified, stop and ask the maintainer to specify
-both before changing code, specs, docs, examples, or compatibility metadata.
+already been released, treat `compatibility/in-development.json` as the explicit
+current work version while no release-prep or release-promotion action has
+started for a newer batch. Do not ask the maintainer to restate that version on
+each task. If the in-development manifest is missing, stale, or intentionally
+being replaced, stop and ask for the current work version. If the intended task
+branch is not explicitly specified, stop and ask for the branch before changing
+code, specs, docs, examples, or compatibility metadata.
 
 When a branch implements a slice of a larger roadmap target, record both facts:
 the feature spec should describe the larger target, while

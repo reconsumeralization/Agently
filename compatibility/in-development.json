@@ -84,6 +84,12 @@
         "model_pool",
         "model_profiles",
         "api_key_pools"
+      ],
+      "api_key_pools": [
+        "selection_policy",
+        "failover_policy",
+        "selection_handler",
+        "failover_handler"
       ]
     }
   }
