@@ -116,6 +116,84 @@ from agently import Agently
 Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 ```
 
+## Typed provider settings
+
+Provider settings can be supplied as dicts or typed helper classes. The typed
+class only improves construction and validation; internally Agently stores the
+same dict under the provider namespace.
+
+```python
+from agently import Agently
+from agently.types.settings import OpenAICompatibleSettings
+
+Agently.set_settings(
+    OpenAICompatibleSettings(
+        base_url="https://api.deepseek.com/v1",
+        api_key="${ENV.DEEPSEEK_API_KEY}",
+        model="deepseek-chat",
+        request_options={"temperature": 0},
+    )
+)
+```
+
+Built-in provider helpers live in `agently.types.settings`. Third-party plugins
+can expose their own settings classes from their plugin package and register
+them through the plugin's `SETTINGS_SCHEMAS`.
+
+## Model profiles and key pools
+
+For applications that route by business scenario, use the layered settings
+shape:
+
+- `model_pool`: maps a business key to a model profile id.
+- `model_profiles`: stores provider, model, endpoint, request options, and the
+  key pool to use.
+- `api_key_pools`: stores credential pools and their selection strategy.
+
+```python
+Agently.set_settings("model_pool", {
+    "support-chat": "deepseek-chat-prod",
+    "reasoning": "deepseek-reason-prod",
+})
+
+Agently.set_settings("model_profiles", {
+    "deepseek-chat-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_pool": "deepseek-prod",
+    },
+    "deepseek-reason-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-reasoner",
+        "api_key_pool": "deepseek-prod",
+        "request_options": {"temperature": 0},
+    },
+})
+
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "strategy": "round_robin",
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    }
+})
+
+agent = Agently.create_agent()
+agent.activate_model("reasoning")
+```
+
+`fixed`, `random`, `round_robin`, and `least_used` are supported. Key selection
+happens before the provider request. Agently does not automatically retry a
+different credential after an auth, quota, or billing failure; applications
+should decide whether switching credentials after a failed business operation
+is safe.
+
+The legacy `model_pool -> key_pool_strategy -> key_pool` form remains accepted.
+
 ## Verify connectivity
 
 ```python

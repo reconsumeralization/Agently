@@ -1,6 +1,7 @@
 import pytest
 import yaml
 
+from agently.types.settings import OpenAICompatibleSettings
 from agently.utils import Settings
 from agently.utils.ModelPool import resolve_model_pool_settings
 
@@ -11,6 +12,27 @@ def test_settings():
     child_settings = Settings(parent=parent_settings)
     root_settings.set("test", 1)
     assert child_settings.get() == {"test": 1}
+
+
+def test_settings_accepts_typed_settings_model():
+    settings = Settings()
+
+    settings.set_settings(
+        OpenAICompatibleSettings(
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com",
+            api_key="typed-key",
+        )
+    )
+
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.model") == "deepseek-chat"
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.base_url") == "https://api.deepseek.com"
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.api_key") == "typed-key"
+
+
+def test_typed_settings_reject_unknown_fields():
+    with pytest.raises(ValueError):
+        OpenAICompatibleSettings.model_validate({"model": "deepseek-chat", "unknown": True})
 
 
 def test_settings_load_yaml_file_with_auto_env(tmp_path, monkeypatch):
@@ -140,3 +162,75 @@ def test_model_pool_mapped_key_updates_model():
     resolve_model_pool_settings("reason", settings)
 
     assert settings.get("plugins.ModelRequester.OpenAICompatible.model") == "deepseek-reasoner"
+
+
+def test_model_pool_profile_updates_provider_settings_and_key_pool(monkeypatch):
+    monkeypatch.setenv("REASON_KEY_A", "key-a")
+    settings = Settings()
+    settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
+    settings.set("model_pool", {"reason": "deepseek-reason-profile"})
+    settings.set(
+        "model_profiles",
+        {
+            "deepseek-reason-profile": {
+                "provider": "OpenAICompatible",
+                "model": "deepseek-reasoner",
+                "base_url": "https://api.deepseek.com",
+                "api_key_pool": "deepseek-prod",
+                "request_options": {"temperature": 0},
+            }
+        },
+    )
+    settings.set(
+        "api_key_pools",
+        {
+            "deepseek-prod": {
+                "strategy": "fixed",
+                "keys": [{"id": "reason-a", "value": "${ENV.REASON_KEY_A}"}],
+            }
+        },
+    )
+
+    resolve_model_pool_settings("reason", settings)
+
+    assert settings.get("plugins.ModelRequester.activate") == "OpenAICompatible"
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.model") == "deepseek-reasoner"
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.base_url") == "https://api.deepseek.com"
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.api_key") == "key-a"
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.request_options") == {"temperature": 0}
+
+
+def test_model_pool_profile_can_switch_provider(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_KEY_A", "anthropic-key-a")
+    settings = Settings()
+    settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
+    settings.set("model_pool", {"long-context": "anthropic-prod"})
+    settings.set(
+        "model_profiles",
+        {
+            "anthropic-prod": {
+                "provider": "AnthropicCompatible",
+                "base_url": "https://api.anthropic.com/v1",
+                "model": "claude-sonnet-4-20250514",
+                "api_key_pool": "anthropic-prod",
+                "max_tokens": 4096,
+            }
+        },
+    )
+    settings.set(
+        "api_key_pools",
+        {
+            "anthropic-prod": {
+                "strategy": "fixed",
+                "keys": [{"id": "anthropic-a", "value": "${ENV.ANTHROPIC_KEY_A}"}],
+            }
+        },
+    )
+
+    resolve_model_pool_settings("long-context", settings)
+
+    assert settings.get("plugins.ModelRequester.activate") == "AnthropicCompatible"
+    assert settings.get("plugins.ModelRequester.AnthropicCompatible.model") == "claude-sonnet-4-20250514"
+    assert settings.get("plugins.ModelRequester.AnthropicCompatible.base_url") == "https://api.anthropic.com/v1"
+    assert settings.get("plugins.ModelRequester.AnthropicCompatible.api_key") == "anthropic-key-a"
+    assert settings.get("plugins.ModelRequester.AnthropicCompatible.max_tokens") == 4096

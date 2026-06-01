@@ -32,6 +32,7 @@ from agently.core.AgentExecution import (
 )
 from agently.core.RuntimeContext import bind_runtime_context
 from agently.types.data import AgentExecutionStreamData
+from agently.types.options import normalize_execution_options
 from agently.utils import DataFormatter, FunctionShifter
 
 from .routing import HybridRoutePlanner
@@ -59,6 +60,7 @@ class AgentExecution:
         mode: "AgentExecutionMode | str" = "one_turn",
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: Any = None,
         parent_run_context: "RunContext | None" = None,
     ):
         self.agent = agent
@@ -66,6 +68,9 @@ class AgentExecution:
         self.mode: "AgentExecutionMode" = normalize_execution_mode(str(mode))
         self.lineage: "AgentExecutionLineage" = normalize_execution_lineage(lineage)
         self.limits: "AgentExecutionLimits" = normalize_execution_limits(limits, mode=self.mode)
+        self.options: dict[str, Any] = normalize_execution_options(options)
+        self.effective_options: dict[str, Any] = self._build_effective_options()
+        self.consumed_options: dict[str, Any] = {}
         self.workspace = getattr(agent, "workspace", None)
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
@@ -109,6 +114,33 @@ class AgentExecution:
         self.get_meta = FunctionShifter.syncify(self.async_get_meta)
         self.record_workspace = FunctionShifter.syncify(self.async_record_workspace)
         self.get_generator = self._get_generator
+
+    def _build_effective_options(self) -> dict[str, Any]:
+        effective = dict(self.options)
+        execution_options = effective.get("execution")
+        execution_options = dict(execution_options) if isinstance(execution_options, dict) else {}
+        execution_options.update(
+            {
+                "mode": self.mode,
+                "lineage": self.lineage,
+                "limits": self.limits,
+            }
+        )
+        effective["execution"] = execution_options
+        return effective
+
+    def route_options(self, route_name: str) -> dict[str, Any]:
+        routes = self.options.get("routes", {})
+        if not isinstance(routes, dict):
+            return {}
+        route_options = routes.get(route_name, {})
+        return dict(route_options) if isinstance(route_options, dict) else {}
+
+    def record_consumed_option(self, path: str, value: Any, *, owner: str):
+        self.consumed_options[path] = {
+            "value": DataFormatter.sanitize(value),
+            "owner": owner,
+        }
 
     def task_target(self) -> str:
         return self.route_planner.task_target()
@@ -546,6 +578,9 @@ class AgentExecution:
             "status": self.status,
             "lineage": DataFormatter.sanitize(self.lineage),
             "limits": DataFormatter.sanitize(self.limits),
+            "options": DataFormatter.sanitize(self.options),
+            "effective_options": DataFormatter.sanitize(self.effective_options),
+            "consumed_options": DataFormatter.sanitize(self.consumed_options),
             "route_plan": DataFormatter.sanitize(self.route_plan),
             "route": DataFormatter.sanitize(self.route_info),
             "close_snapshot": DataFormatter.sanitize(self.close_snapshot),

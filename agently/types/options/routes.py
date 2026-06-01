@@ -12,9 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .config import (
-    AgentlyConfigModel,
-    ConfigSchemaRegistry,
-    options_schema_registry,
-    settings_schema_registry,
-)
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from agently.types.config import AgentlyConfigModel
+
+
+class SkillsRouteOptions(AgentlyConfigModel):
+    __options_namespace__ = "routes.skills"
+
+    effort: str | Literal["fast", "normal", "max"] | None = None
+    output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None
+    meta: dict[str, Any] | None = None

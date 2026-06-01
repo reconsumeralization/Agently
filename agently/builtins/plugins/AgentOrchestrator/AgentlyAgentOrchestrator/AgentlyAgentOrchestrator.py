@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from agently.types.options import ExecutionOptions
 from agently.types.plugins import AgentOrchestrator
 
 from .modules.execution import AgentExecution
@@ -36,6 +37,9 @@ class AgentlyAgentOrchestrator(AgentOrchestrator):
 
     name = "AgentlyAgentOrchestrator"
     DEFAULT_SETTINGS: dict[str, Any] = {}
+    OPTIONS_SCHEMAS = {
+        "execution": ExecutionOptions,
+    }
 
     @staticmethod
     def _on_register():
@@ -56,6 +60,7 @@ class AgentlyAgentOrchestrator(AgentOrchestrator):
         mode: "AgentExecutionMode | str" = "one_turn",
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: "ExecutionOptions | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
     ) -> AgentExecution:
         return AgentExecution(
@@ -63,5 +68,6 @@ class AgentlyAgentOrchestrator(AgentOrchestrator):
             mode=mode,
             lineage=lineage,
             limits=limits,
+            options=options,
             parent_run_context=parent_run_context,
         )

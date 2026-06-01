@@ -118,6 +118,78 @@ from agently import Agently
 Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 ```
 
+## Typed provider settings
+
+Provider settings 可以继续用 dict，也可以用 typed helper class。typed class 只负责
+构造提示和提前校验；进入 Agently 后仍会存成同一个 provider namespace 下的 dict。
+
+```python
+from agently import Agently
+from agently.types.settings import OpenAICompatibleSettings
+
+Agently.set_settings(
+    OpenAICompatibleSettings(
+        base_url="https://api.deepseek.com/v1",
+        api_key="${ENV.DEEPSEEK_API_KEY}",
+        model="deepseek-chat",
+        request_options={"temperature": 0},
+    )
+)
+```
+
+内置 provider helper 位于 `agently.types.settings`。第三方插件可以从自己的插件包
+导出 settings class，并通过插件的 `SETTINGS_SCHEMAS` 注册。
+
+## Model profiles 与 key pools
+
+需要按业务场景路由模型时，使用分层配置：
+
+- `model_pool`：业务 key 到 model profile id 的映射。
+- `model_profiles`：保存 provider、model、endpoint、request options 和 key pool。
+- `api_key_pools`：保存 API key 池与轮换策略。
+
+```python
+Agently.set_settings("model_pool", {
+    "support-chat": "deepseek-chat-prod",
+    "reasoning": "deepseek-reason-prod",
+})
+
+Agently.set_settings("model_profiles", {
+    "deepseek-chat-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_pool": "deepseek-prod",
+    },
+    "deepseek-reason-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-reasoner",
+        "api_key_pool": "deepseek-prod",
+        "request_options": {"temperature": 0},
+    },
+})
+
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "strategy": "round_robin",
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    }
+})
+
+agent = Agently.create_agent()
+agent.activate_model("reasoning")
+```
+
+支持 `fixed`、`random`、`round_robin`、`least_used`。key selection 发生在 provider
+请求前。Agently 不会在鉴权、额度或计费失败后自动换另一个 credential 重试；应用应由
+业务侧判断失败后切换 credential 是否安全。
+
+旧的 `model_pool -> key_pool_strategy -> key_pool` 写法继续兼容。
+
 ## 验证连通性
 
 ```python

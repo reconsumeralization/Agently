@@ -83,6 +83,9 @@ class AgentExecutionMeta(TypedDict, total=False):
     status: AgentExecutionStatus
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
+    options: dict[str, Any]
+    effective_options: dict[str, Any]
+    consumed_options: dict[str, Any]
     route_plan: dict[str, Any]
     route: AgentExecutionRouteInfo
     close_snapshot: dict[str, Any]

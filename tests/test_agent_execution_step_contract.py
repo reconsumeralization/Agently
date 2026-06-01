@@ -11,6 +11,7 @@ from agently import Agently
 from agently.core import PluginManager
 from agently.core.AgentExecution import AgentExecutionLimitExceeded
 from agently.types.data import AgentlyRequestData
+from agently.types.options import ExecutionOptions, SkillsRouteOptions
 from agently.utils import DataFormatter
 from agently.utils import Settings
 
@@ -119,6 +120,11 @@ Return a short structured answer for the task step contract.
 """,
         encoding="utf-8",
     )
+
+
+def test_execution_options_validate_known_route_schema():
+    with pytest.raises(ValueError):
+        ExecutionOptions.model_validate({"routes": {"skills": {"unknown": True}}})
 
 
 @pytest.mark.asyncio
@@ -346,6 +352,48 @@ async def test_agent_execution_task_step_budget_covers_skills_model_stage(tmp_pa
     assert meta["status"] == "blocked"
     assert meta["route_plan"]["selected_route"] == "skills"
     assert meta["diagnostics"]["budget"]["model_requests_used"] == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_options_forward_skills_effort(tmp_path):
+    captured: dict[str, Any] = {}
+    skill_root = tmp_path / "skill-pack" / "skills" / "task-step"
+    _write_skill(skill_root)
+    agent = _create_agent("task-step-skills-options").use_skills(
+        str(tmp_path / "skill-pack"),
+        mode="required",
+        auto_allow=True,
+    )
+    original_execute_skills_plan = agent.async_execute_skills_plan
+
+    async def capture_execute_skills_plan(*args: Any, **kwargs: Any):
+        captured["effort"] = kwargs.get("effort")
+        return await original_execute_skills_plan(*args, **kwargs)
+
+    agent.async_execute_skills_plan = capture_execute_skills_plan
+    execution = (
+        agent
+        .input("use the task step skill")
+        .create_execution(
+            options=ExecutionOptions.model_validate(
+                {"routes": {"skills": SkillsRouteOptions(effort="fast")}}
+            ),
+            limits={"max_model_requests": 0},
+        )
+    )
+
+    with pytest.raises(AgentExecutionLimitExceeded):
+        await execution.async_get_data()
+
+    meta = await execution.async_get_meta()
+    assert captured["effort"] == "fast"
+    assert meta["options"]["routes"]["skills"]["effort"] == "fast"
+    assert meta["effective_options"]["execution"]["mode"] == "one_turn"
+    assert meta["effective_options"]["execution"]["limits"]["max_model_requests"] == 0
+    assert meta["consumed_options"]["routes.skills.effort"] == {
+        "value": "fast",
+        "owner": "AgentlySkillsExecutor",
+    }
 
 
 @pytest.mark.asyncio

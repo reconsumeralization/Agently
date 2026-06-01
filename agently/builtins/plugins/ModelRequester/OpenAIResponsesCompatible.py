@@ -33,6 +33,7 @@ from stamina import retry
 from agently.types.plugins import ModelRequester
 from agently.types.data import AgentlyRequestData, SerializableValue
 from agently.core.AgentExecution import RuntimeStageStallError
+from agently.types.settings import OpenAIResponsesCompatibleSettings as TypedOpenAIResponsesCompatibleSettings
 from agently.utils import DataFormatter, SettingsNamespace
 
 if TYPE_CHECKING:
@@ -59,6 +60,9 @@ class OpenAIResponsesCompatibleSettings(TypedDict, total=False):
 
 class OpenAIResponsesCompatible(ModelRequester):
     name = "OpenAIResponsesCompatible"
+    SETTINGS_SCHEMAS = {
+        "plugins.ModelRequester.OpenAIResponsesCompatible": TypedOpenAIResponsesCompatibleSettings,
+    }
 
     DEFAULT_SETTINGS = {
         "$mappings": {

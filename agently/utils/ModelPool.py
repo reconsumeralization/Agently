@@ -14,15 +14,13 @@
 
 """Model pool + key pool resolution.
 
-Resolves a caller-provided ``model_key`` into a concrete model name and API key
-by walking the three-layer agent settings configuration::
+Resolves a caller-provided ``model_key`` into concrete provider settings. The
+current layered shape is::
 
-    model_key → model_pool → model_name → key_pool_strategy → key_id → key_pool → api_key
+    model_key -> model_pool -> model_profile -> api_key_pool -> key
 
-Every step falls back gracefully when the corresponding pool is absent or doesn't
-contain the expected key, preserving full backward compatibility with single-model
-setups. An unmapped model key is treated as "use the request's inherited model",
-not as a concrete provider model name.
+Legacy ``model_pool``/``key_pool_strategy``/``key_pool`` settings remain
+supported for compatibility.
 """
 
 from __future__ import annotations
@@ -77,48 +75,146 @@ def _select_key(mode: str, pool: list[str], model_name: str, key_pool: dict[str,
     raise ValueError(f"Unknown key_pool_strategy mode: {mode!r}")
 
 
-def resolve_model_pool_settings(model_key: str, settings: Any) -> None:
-    """Resolve *model_key* → model name + API key and inject into *settings*.
+def _as_dict(value: Any) -> dict[str, Any]:
+    if hasattr(value, "to_dict"):
+        value = value.to_dict()
+    return dict(value) if isinstance(value, dict) else {}
 
-    Reads ``model_pool``, ``key_pool``, and ``key_pool_strategy`` from
-    *settings* (walking the full parent chain).  Injected values are written
-    into *settings* at the paths that the active ``ModelRequester`` plugin
-    already reads.
+
+def _resolve_api_key_pool(
+    *,
+    pool_id: str,
+    api_key_pools: dict[str, Any],
+    legacy_key_pool: dict[str, str],
+) -> str | None:
+    pool_config = _as_dict(api_key_pools.get(pool_id))
+    if not pool_config:
+        return None
+    mode = str(pool_config.get("strategy") or pool_config.get("mode") or "fixed")
+    raw_entries = pool_config.get("keys")
+    if raw_entries is None:
+        raw_entries = pool_config.get("pool", [])
+    if not isinstance(raw_entries, list):
+        return None
+
+    key_values: dict[str, str] = {}
+    key_ids: list[str] = []
+    for index, raw_entry in enumerate(raw_entries):
+        if isinstance(raw_entry, str):
+            key_id = raw_entry
+            raw_key = legacy_key_pool.get(raw_entry, raw_entry)
+        else:
+            entry = _as_dict(raw_entry)
+            if not entry:
+                continue
+            key_id = str(entry.get("id") or entry.get("key_id") or entry.get("name") or f"{ pool_id }[{ index }]")
+            raw_key = entry.get("value")
+            if raw_key is None:
+                raw_key = entry.get("api_key")
+            if raw_key is None:
+                raw_key = entry.get("auth")
+            if raw_key is None:
+                raw_key = legacy_key_pool.get(key_id)
+        if raw_key is None:
+            continue
+        key_ids.append(key_id)
+        key_values[key_id] = _resolve_env(str(raw_key))
+    if not key_ids:
+        return None
+    selected_key_id = _select_key(mode, key_ids, f"api_key_pool:{ pool_id }", key_values)
+    return key_values.get(selected_key_id)
+
+
+def _resolve_legacy_api_key(
+    *,
+    model_name: str,
+    key_pool: dict[str, str],
+    key_pool_strategy: dict[str, dict[str, Any]],
+) -> str | None:
+    strategy = key_pool_strategy.get(model_name)
+    if not strategy:
+        return None
+    mode = strategy.get("mode", "fixed")
+    pool_ids: list[str] = strategy.get("pool", [])
+    if not pool_ids:
+        return None
+    selected_key_id = _select_key(str(mode), pool_ids, model_name, key_pool)
+    raw_key = key_pool.get(selected_key_id, "")
+    return _resolve_env(raw_key) if raw_key else None
+
+
+def _profile_from_model_pool(
+    model_key: str,
+    model_pool: dict[str, Any],
+    model_profiles: dict[str, Any],
+) -> tuple[str | None, dict[str, Any]]:
+    model_ref = model_pool.get(model_key)
+    if not model_ref:
+        return None, {}
+    if isinstance(model_ref, dict):
+        inline_profile = dict(model_ref)
+        return str(inline_profile.get("model") or model_key), inline_profile
+    if isinstance(model_ref, str) and model_ref in model_profiles:
+        profile = _as_dict(model_profiles.get(model_ref))
+        return str(profile.get("model") or model_ref), profile
+    return str(model_ref), {}
+
+
+def resolve_model_pool_settings(model_key: str, settings: Any) -> None:
+    """Resolve *model_key* into provider, model, profile fields, and API key.
+
+    Reads the current layered ``model_pool``/``model_profiles``/
+    ``api_key_pools`` shape, with fallback support for legacy ``key_pool`` and
+    ``key_pool_strategy``. Injected values are written into the ModelRequester
+    settings namespace that the selected provider already reads.
 
     This is a no-op when *model_key* is ``None`` or empty.
     """
     if not model_key:
         return
 
-    model_pool: dict[str, str] = settings.get("model_pool", {}) or {}
+    model_pool: dict[str, Any] = settings.get("model_pool", {}) or {}
+    model_profiles: dict[str, Any] = settings.get("model_profiles", {}) or {}
+    api_key_pools: dict[str, Any] = settings.get("api_key_pools", {}) or {}
     key_pool: dict[str, str] = settings.get("key_pool", {}) or {}
     key_pool_strategy: dict[str, dict[str, Any]] = settings.get("key_pool_strategy", {}) or {}
 
-    # Step 1: model_key → model_name. If no mapping is configured, leave the
-    # request's inherited provider settings untouched. Internal keys such as
-    # "reason" must not leak to the provider as literal model names.
-    model_name = model_pool.get(model_key)
+    model_name, profile = _profile_from_model_pool(model_key, model_pool, model_profiles)
     if not model_name:
         return
 
-    # Determine the active ModelRequester plugin namespace
     active_plugin = str(settings.get("plugins.ModelRequester.activate", "OpenAICompatible"))
-    ns = f"plugins.ModelRequester.{active_plugin}"
+    provider = str(profile.get("provider") or active_plugin)
+    if provider != active_plugin:
+        settings.set("plugins.ModelRequester.activate", provider)
+    ns = f"plugins.ModelRequester.{provider}"
 
-    # Step 2: model_name → key_pool_strategy → key_id → api_key
     strategy = key_pool_strategy.get(model_name)
     api_key: str | None = None
-    if strategy:
-        mode = strategy.get("mode", "fixed")
-        pool_ids: list[str] = strategy.get("pool", [])
-        if pool_ids:
-            selected_key_id = _select_key(mode, pool_ids, model_name, key_pool)
-            raw_key = key_pool.get(selected_key_id, "")
-            if raw_key:
-                api_key = _resolve_env(raw_key)
+    if profile.get("api_key_pool"):
+        api_key = _resolve_api_key_pool(
+            pool_id=str(profile["api_key_pool"]),
+            api_key_pools=api_key_pools,
+            legacy_key_pool=key_pool,
+        )
+    if api_key is None:
+        raw_profile_key = profile.get("api_key")
+        if raw_profile_key is None:
+            raw_profile_key = profile.get("auth") if isinstance(profile.get("auth"), str) else None
+        if raw_profile_key is not None:
+            api_key = _resolve_env(str(raw_profile_key))
+    if api_key is None and strategy:
+        api_key = _resolve_legacy_api_key(
+            model_name=model_name,
+            key_pool=key_pool,
+            key_pool_strategy=key_pool_strategy,
+        )
 
-    # Step 3: Inject resolved values into request settings.
-    # The ModelRequester plugin's SettingsNamespace reads exactly these paths.
     settings.set(f"{ns}.model", model_name)
+    for key, value in profile.items():
+        if key in {"provider", "model", "api_key_pool", "api_key"}:
+            continue
+        if value is not None:
+            settings.set(f"{ ns }.{ key }", value)
     if api_key is not None:
         settings.set(f"{ns}.api_key", api_key)
