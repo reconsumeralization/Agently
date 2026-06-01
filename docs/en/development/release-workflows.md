@@ -37,6 +37,12 @@ is merged into `dev`. The version release candidate is then assembled from
 `dev`, with release notes, compatibility manifests, examples, docs, and
 companion repositories reconciled against the current work version.
 
+When starting new version-development work after the previous public version has
+already been released, do not infer the next current work version or the task
+branch from local history. If either the current work version or the intended
+task branch is not explicitly specified, stop and ask the maintainer to specify
+both before changing code, specs, docs, examples, or compatibility metadata.
+
 When a branch implements a slice of a larger roadmap target, record both facts:
 the feature spec should describe the larger target, while
 `compatibility/in-development.json` should describe the current work version
