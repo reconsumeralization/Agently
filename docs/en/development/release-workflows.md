@@ -47,6 +47,37 @@ adjustments, make those changes in the release PR, rerun the relevant
 validation, and only then merge. Do not merge first and treat release-note fixes
 as follow-up marketing work.
 
+## Acceptance Argument
+
+Before recommending a release, write a coverage-first acceptance argument for
+each user-visible feature slice. Start from the target contract, not from the
+examples or tests that already exist.
+
+The release reviewer should first list the required behavior from the roadmap,
+spec, issue acceptance criteria, compatibility manifest, docs, and example
+rules. Then map each requirement to the evidence that proves it:
+
+- scenario examples with real DeepSeek or local Ollama output and stable
+  `Expected key output`
+- deterministic tests for compatibility, stream/meta shape, route lifecycle,
+  budget accounting, errors, and workspace records
+- protocol/type tests for public contracts and dependency direction
+- docs, compatibility manifests, spec reconciliation, and companion guidance
+- DevTools or other companion validation when runtime events, observation
+  payloads, lineage, or companion protocols changed
+
+Examples prove that the release solves a real scenario. They must not be the
+only proof for compatibility behavior, protocol boundaries, route lifecycle,
+error semantics, budget counting, or internal architecture ownership. If a
+requirement has no evidence, either implement it before release, mark it as an
+explicit deferral in the relevant spec and release notes, or remove the release
+claim.
+
+The release PR body or review notes should include this matrix or a concise
+link to it. Do not accept a release by pointing directly at existing examples,
+tests, or closed issues without first checking that those evidence sources cover
+the target contract.
+
 ## Desktop installers
 
 Desktop installers are not part of the current main-repository release flow.
