@@ -78,6 +78,29 @@ link to it. Do not accept a release by pointing directly at existing examples,
 tests, or closed issues without first checking that those evidence sources cover
 the target contract.
 
+## Release PR Body
+
+The release PR from `dev` to `main` must include enough information for a
+reviewer to accept or block the release without reconstructing the work from
+commit history.
+
+At minimum, include:
+
+- release version, release level, and current PyPI published version
+- change summary grouped by user-visible capability
+- coverage-first acceptance argument or matrix
+- validation commands and results, including any skipped or failed checks
+- clean install smoke environment and result
+- compatibility manifest updates and companion repository status
+- DevTools version or protocol recommendation when runtime events,
+  observation payloads, lineage, or DevTools code changed
+- issue closure or follow-up issue status
+- known deferred scope and residual release risk
+- post-merge companion promotion or publish steps
+
+Do not use a terse PR body that only says "release" or only lists commits.
+Release PRs are part of the durable acceptance record.
+
 ## Desktop installers
 
 Desktop installers are not part of the current main-repository release flow.
