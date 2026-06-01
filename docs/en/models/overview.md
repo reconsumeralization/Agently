@@ -118,12 +118,12 @@ custom handlers can inspect the provider error object and return `"try_next"`,
 ## Where the plugin code lives
 
 - [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/)
-- [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py)
-- [agently/builtins/plugins/ModelRequester/AnthropicCompatible.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible.py)
+- [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible/)
+- [agently/builtins/plugins/ModelRequester/AnthropicCompatible/](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible/)
 
-`OpenAICompatible` is the reference package layout for the runtime-handler
-contract: `plugin.py` is the public coordinator, and private implementation
-roles live in `modules/request_builder.py`, `modules/credential.py`,
+Each built-in requester uses the runtime-handler package layout: `plugin.py` is
+the public coordinator, and private implementation roles live in
+`modules/request_builder.py`, `modules/credential.py`,
 `modules/transport.py`, `modules/handlers.py`, and
 `modules/response_adapter.py`.
 

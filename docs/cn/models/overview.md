@@ -117,11 +117,11 @@ HTTP 状态码重试另一个 key；自定义 handler 可以检查 provider erro
 ## 插件源码位置
 
 - [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/)
-- [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py)
-- [agently/builtins/plugins/ModelRequester/AnthropicCompatible.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible.py)
+- [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible/)
+- [agently/builtins/plugins/ModelRequester/AnthropicCompatible/](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible/)
 
-`OpenAICompatible` 是 runtime-handler contract 的参考包结构：`plugin.py`
-是公开 coordinator，私有实现职责分别放在 `modules/request_builder.py`、
+每个内置 requester 都使用 runtime-handler 包结构：`plugin.py` 是公开
+coordinator，私有实现职责分别放在 `modules/request_builder.py`、
 `modules/credential.py`、`modules/transport.py`、`modules/handlers.py`
 和 `modules/response_adapter.py`。
 

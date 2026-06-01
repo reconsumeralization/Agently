@@ -180,24 +180,28 @@ def test_builtin_agent_execution_matches_protocol_without_core_builtin_dependenc
 
 def test_model_requester_runtime_handler_contract_imports_and_ownership():
     model_requester_root = Path(__file__).resolve().parents[1] / "agently" / "builtins" / "plugins" / "ModelRequester"
-    openai_package = model_requester_root / "OpenAICompatible"
+    requesters = {
+        "OpenAICompatible": OpenAICompatible,
+        "OpenAIResponsesCompatible": OpenAIResponsesCompatible,
+        "AnthropicCompatible": AnthropicCompatible,
+    }
 
-    openai_module = importlib.import_module("agently.builtins.plugins.ModelRequester.OpenAICompatible")
-    assert openai_module.OpenAICompatible is OpenAICompatible
-    assert openai_package.is_dir()
-    assert not (model_requester_root / "OpenAICompatible.py").exists()
-    assert (openai_package / "plugin.py").exists()
-    for module_name in [
-        "request_builder.py",
-        "credential.py",
-        "transport.py",
-        "handlers.py",
-        "response_adapter.py",
-    ]:
-        assert (openai_package / "modules" / module_name).exists()
-    assert len((openai_package / "plugin.py").read_text(encoding="utf-8").splitlines()) < 180
-
-    for requester in (OpenAICompatible, OpenAIResponsesCompatible, AnthropicCompatible):
+    for requester_name, requester in requesters.items():
+        requester_package = model_requester_root / requester_name
+        requester_module = importlib.import_module(f"agently.builtins.plugins.ModelRequester.{requester_name}")
+        assert getattr(requester_module, requester_name) is requester
+        assert requester_package.is_dir()
+        assert not (model_requester_root / f"{requester_name}.py").exists()
+        assert (requester_package / "plugin.py").exists()
+        for module_name in [
+            "request_builder.py",
+            "credential.py",
+            "transport.py",
+            "handlers.py",
+            "response_adapter.py",
+        ]:
+            assert (requester_package / "modules" / module_name).exists()
+        assert len((requester_package / "plugin.py").read_text(encoding="utf-8").splitlines()) < 180
         assert callable(getattr(requester, "build_request_handlers"))
 
     builtin_root = Path(__file__).resolve().parents[1] / "agently" / "builtins"

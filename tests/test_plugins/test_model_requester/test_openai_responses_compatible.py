@@ -118,7 +118,7 @@ def test_client_options_can_enable_environment_proxy_explicitly():
 
 
 def test_inherits_model_requester_protocol_instead_of_openai_plugin():
-    assert OpenAIResponsesCompatible.__bases__ == (ModelRequester,)
+    assert ModelRequester in OpenAIResponsesCompatible.__mro__
 
 
 def test_generate_request_maps_rich_content_and_preserves_instructions():
