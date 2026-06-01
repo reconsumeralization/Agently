@@ -14,7 +14,7 @@ receives the Agent's Workspace binding; the host explicitly asks the execution
 to store observations/checkpoints in Workspace, then calls
 `workspace.build_context(...)` before the next step.
 
-Expected key output from one real DeepSeek run on 2026-05-31:
+Expected key output from one real DeepSeek run on 2026-06-01:
     provider=deepseek
     first_execution_mode=task_step
     first_budget_used=1

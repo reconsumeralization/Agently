@@ -32,6 +32,7 @@ from stamina import retry
 
 from agently.types.plugins import ModelRequester
 from agently.types.data import AgentlyRequestData, SerializableValue
+from agently.core.AgentExecution import RuntimeStageStallError
 from agently.utils import DataFormatter, SettingsNamespace
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 class OpenAIResponsesCompatibleSettings(TypedDict, total=False):
     model: str
     timeout_mode: Literal["http", "first_token"]
+    stream_idle_timeout: float | None
     client_options: dict[str, "SerializableValue"]
     headers: dict[str, "SerializableValue"]
     proxy: str
@@ -68,6 +70,7 @@ class OpenAIResponsesCompatible(ModelRequester):
         "model": None,
         "default_model": "gpt-5.5",
         "timeout_mode": "first_token",
+        "stream_idle_timeout": None,
         "client_options": {},
         "headers": {},
         "proxy": None,
@@ -141,8 +144,37 @@ class OpenAIResponsesCompatible(ModelRequester):
             return float(read_timeout)
         return None
 
+    def _get_stream_idle_timeout_seconds(self) -> float | None:
+        raw_timeout = self.plugin_settings.get("stream_idle_timeout", None)
+        if raw_timeout is None or raw_timeout == -1 or raw_timeout == "-1":
+            return None
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float, str)):
+            return None
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout > 0 else None
+
     def _should_use_first_token_timeout(self, request_data: "AgentlyRequestData") -> bool:
         return self._get_timeout_mode() == "first_token" and bool(request_data.stream)
+
+    def _build_stream_stall_error(
+        self,
+        *,
+        stage: str,
+        timeout_seconds: float,
+        message: str,
+    ) -> RuntimeStageStallError:
+        return RuntimeStageStallError(
+            message,
+            stage=stage,
+            status="stalled",
+            idle_seconds=timeout_seconds,
+            timeout_seconds=timeout_seconds,
+            provider=self.name,
+            model=cast(str | None, self.plugin_settings.get("model", None)),
+        )
 
     async def _aiter_with_first_token_timeout(
         self,
@@ -159,10 +191,45 @@ class OpenAIResponsesCompatible(ModelRequester):
             first_item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
         except asyncio.TimeoutError as e:
             await generator.aclose()
-            raise TimeoutError(f"First token timeout after { timeout_seconds } seconds.") from e
+            raise self._build_stream_stall_error(
+                stage="response_first_event",
+                timeout_seconds=timeout_seconds,
+                message=f"First token timeout after { timeout_seconds } seconds.",
+            ) from e
 
         yield first_item
         async for item in generator:
+            yield item
+
+    async def _aiter_with_stream_idle_timeout(
+        self,
+        generator: AsyncGenerator[Any, None],
+        *,
+        timeout_seconds: float | None,
+    ) -> AsyncGenerator[Any, None]:
+        if timeout_seconds is None:
+            async for item in generator:
+                yield item
+            return
+
+        try:
+            first_item = await anext(generator)
+        except StopAsyncIteration:
+            return
+
+        yield first_item
+        while True:
+            try:
+                item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError as e:
+                await generator.aclose()
+                raise self._build_stream_stall_error(
+                    stage="response_stream",
+                    timeout_seconds=timeout_seconds,
+                    message=f"Stream idle timeout after { timeout_seconds } seconds.",
+                ) from e
             yield item
 
     async def _aiter_sse_with_retry(
@@ -678,6 +745,10 @@ class OpenAIResponsesCompatible(ModelRequester):
                             sse_generator,
                             timeout_seconds=self._get_first_token_timeout_seconds(),
                         )
+                    sse_generator = self._aiter_with_stream_idle_timeout(
+                        sse_generator,
+                        timeout_seconds=self._get_stream_idle_timeout_seconds(),
+                    )
                     async for sse in sse_generator:
                         if sse.data.strip() == "[DONE]":
                             continue

@@ -14,9 +14,14 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, cast
 
-from agently.types.data import AgentExecutionLineage, AgentExecutionLimits, AgentExecutionMode
+from agently.types.data import (
+    AgentExecutionLineage,
+    AgentExecutionLimits,
+    AgentExecutionMode,
+)
 from agently.utils import DataFormatter
 
 
@@ -36,6 +41,59 @@ class AgentExecutionLimitExceeded(RuntimeError):
             "limit_name": self.limit_name,
             "limit_value": self.limit_value,
             "used": self.used,
+        }
+
+
+class RuntimeStageStallError(TimeoutError):
+    """Raised when a runtime stage stalls or exceeds a hard deadline."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str,
+        status: str,
+        response_id: str | None = None,
+        run_id: str | None = None,
+        agent_name: str | None = None,
+        elapsed_seconds: float | None = None,
+        idle_seconds: float | None = None,
+        timeout_seconds: float | None = None,
+        last_progress_event: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        planning_protocol: str | None = None,
+    ):
+        super().__init__(message)
+        self.stage = stage
+        self.status = status
+        self.response_id = response_id
+        self.run_id = run_id
+        self.agent_name = agent_name
+        self.elapsed_seconds = elapsed_seconds
+        self.idle_seconds = idle_seconds
+        self.timeout_seconds = timeout_seconds
+        self.last_progress_event = last_progress_event
+        self.provider = provider
+        self.model = model
+        self.planning_protocol = planning_protocol
+
+    def to_diagnostic(self) -> dict[str, Any]:
+        return {
+            "error_type": self.__class__.__name__,
+            "stage": self.stage,
+            "status": self.status,
+            "message": str(self),
+            "response_id": self.response_id,
+            "run_id": self.run_id,
+            "agent_name": self.agent_name,
+            "elapsed_seconds": self.elapsed_seconds,
+            "idle_seconds": self.idle_seconds,
+            "timeout_seconds": self.timeout_seconds,
+            "last_progress_event": self.last_progress_event,
+            "provider": self.provider,
+            "model": self.model,
+            "planning_protocol": self.planning_protocol,
         }
 
 
@@ -76,6 +134,11 @@ def normalize_execution_limits(
             source.get("max_nested_agent_steps", None if mode == "one_turn" else 0),
             key="max_nested_agent_steps",
         ),
+        "max_seconds": _normalize_seconds_limit(source.get("max_seconds"), key="max_seconds"),
+        "max_no_progress_seconds": _normalize_seconds_limit(
+            source.get("max_no_progress_seconds"),
+            key="max_no_progress_seconds",
+        ),
     }
 
 
@@ -110,6 +173,10 @@ class AgentExecutionContext:
         self.limits = cast(AgentExecutionLimits, dict(limits))
         self.model_request_count = 0
         self.limit_events: list[dict[str, Any]] = []
+        self.started_at = time.monotonic()
+        self.last_progress_at = self.started_at
+        self.last_progress_event: dict[str, Any] | None = None
+        self.stage_events: list[dict[str, Any]] = []
 
     def consume_model_request(self, *, response_id: str | None = None, run_id: str | None = None):
         limit = self.limits.get("max_model_requests")
@@ -135,13 +202,44 @@ class AgentExecutionContext:
         self.model_request_count += 1
 
     def diagnostics(self) -> dict[str, Any]:
+        last_progress = dict(self.last_progress_event or {})
+        if self.last_progress_event is not None:
+            last_progress["age_seconds"] = time.monotonic() - self.last_progress_at
         return {
             "budget": {
                 "model_requests_used": self.model_request_count,
                 "max_model_requests": self.limits.get("max_model_requests"),
             },
             "limit_events": [dict(item) for item in self.limit_events],
+            "stages": {
+                "events": [dict(item) for item in self.stage_events[-50:]],
+            },
+            "last_progress": last_progress,
         }
+
+    def record_progress(
+        self,
+        *,
+        stage: str,
+        status: str = "progress",
+        event_type: str | None = None,
+        run_id: str | None = None,
+        response_id: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ):
+        now = time.monotonic()
+        event = {
+            "stage": stage,
+            "status": status,
+            "event_type": event_type,
+            "run_id": run_id,
+            "response_id": response_id,
+            "monotonic_time": now,
+            "meta": DataFormatter.sanitize(meta or {}),
+        }
+        self.last_progress_at = now
+        self.last_progress_event = event
+        self.stage_events.append(event)
 
     def raise_if_limit_exceeded(self):
         if not self.limit_events:
@@ -187,3 +285,19 @@ def _normalize_limit_value(value: Any, *, key: str) -> int | None:
     if integer < 0:
         raise ValueError(f"AgentExecution limit '{ key }' can not be negative except -1 for unlimited.")
     return integer
+
+
+def _normalize_seconds_limit(value: Any, *, key: str) -> float | None:
+    if value is None:
+        return None
+    if value == -1 or value == "-1":
+        return None
+    if isinstance(value, bool):
+        raise TypeError(f"AgentExecution limit '{ key }' must be a number, None, or -1.")
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"AgentExecution limit '{ key }' must be a number, None, or -1.") from error
+    if seconds < 0:
+        raise ValueError(f"AgentExecution limit '{ key }' can not be negative except -1 for unlimited.")
+    return seconds

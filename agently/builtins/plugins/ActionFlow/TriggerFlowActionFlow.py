@@ -14,9 +14,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
-from agently.core.RuntimeContext import bind_runtime_context, resolve_parent_run_context
+from agently.core.AgentExecution import RuntimeStageStallError
+from agently.core.RuntimeContext import bind_runtime_context, get_current_agent_execution_context, resolve_parent_run_context
 from agently.types.data import ErrorInfo
 
 if TYPE_CHECKING:
@@ -352,7 +355,12 @@ class TriggerFlowActionFlow:
                 settings=settings,
             ):
                 await execution.async_start(wait_for_result=False)
-                result = await execution.async_close(timeout=timeout)
+                self._record_agent_execution_progress("action_loop_close", "started", planning_protocol)
+                try:
+                    result = await execution.async_close(timeout=timeout)
+                except asyncio.TimeoutError as error:
+                    raise self._build_action_loop_close_stall(timeout, planning_protocol) from error
+                self._record_agent_execution_progress("action_loop_close", "completed", planning_protocol)
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -393,3 +401,45 @@ class TriggerFlowActionFlow:
                 },
             )
         return normalized
+
+    def _record_agent_execution_progress(
+        self,
+        stage: str,
+        status: str,
+        planning_protocol: str | None,
+    ):
+        context = get_current_agent_execution_context()
+        record_progress = getattr(context, "record_progress", None)
+        if callable(record_progress):
+            record_progress(
+                stage=stage,
+                status=status,
+                event_type=f"{ stage }.{ status }",
+                meta={"planning_protocol": planning_protocol},
+            )
+
+    def _build_action_loop_close_stall(
+        self,
+        timeout: float | None,
+        planning_protocol: str | None,
+    ) -> RuntimeStageStallError:
+        context = get_current_agent_execution_context()
+        now = time.monotonic()
+        last_progress_at = float(getattr(context, "last_progress_at", now))
+        last_event = getattr(context, "last_progress_event", None) or {}
+        return RuntimeStageStallError(
+            (
+                "ActionFlow loop close did not complete before timeout"
+                + (f": timeout={ timeout }." if timeout is not None else ".")
+            ),
+            stage="action_loop_close",
+            status="stalled",
+            idle_seconds=now - last_progress_at,
+            timeout_seconds=float(timeout) if timeout is not None else None,
+            last_progress_event=(
+                str(last_event.get("event_type"))
+                if isinstance(last_event, dict) and last_event.get("event_type") is not None
+                else None
+            ),
+            planning_protocol=planning_protocol,
+        )

@@ -15,6 +15,7 @@
 from .Context import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
+    RuntimeStageStallError,
     merge_stream_meta,
     normalize_execution_limits,
     normalize_execution_lineage,
@@ -24,6 +25,7 @@ from .Context import (
 __all__ = [
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
+    "RuntimeStageStallError",
     "merge_stream_meta",
     "normalize_execution_limits",
     "normalize_execution_lineage",

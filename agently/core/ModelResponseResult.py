@@ -18,8 +18,9 @@ import asyncio
 import inspect
 import warnings
 
-from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, cast, overload, Generator, Mapping, Sequence
+from typing import Any, AsyncGenerator, Awaitable, Literal, TYPE_CHECKING, cast, overload, Generator, Mapping, Sequence
 
+from agently.core.AgentExecution import RuntimeStageStallError
 from agently.core.RuntimeContext import bind_runtime_context
 from agently.utils import DeprecationWarnings, FunctionShifter, DataFormatter, DataLocator, DataPathBuilder
 
@@ -217,6 +218,53 @@ class ModelResponseResult:
         if isinstance(error, BaseException):
             return error
         return ValueError(str(error))
+
+    def _materialization_idle_timeout(self) -> float | None:
+        raw_timeout = self.settings.get("response.materialization_idle_timeout", None)
+        if raw_timeout is None or raw_timeout == -1 or raw_timeout == "-1":
+            return None
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float, str)):
+            return None
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout >= 0 else None
+
+    async def _await_materialization(self, awaitable: Awaitable[Any], *, stage: str):
+        timeout = self._materialization_idle_timeout()
+        try:
+            if timeout is None:
+                return await awaitable
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError as error:
+            stall_error = RuntimeStageStallError(
+                f"Response materialization idle timeout after { timeout } seconds.",
+                stage=stage,
+                status="stalled",
+                response_id=self._response_id,
+                run_id=self.model_run_context.run_id if self.model_run_context is not None else None,
+                agent_name=self.agent_name,
+                idle_seconds=timeout,
+                timeout_seconds=timeout,
+            )
+            await self._emit_materialization_stall(stall_error)
+            raise stall_error from error
+
+    async def _emit_materialization_stall(self, error: RuntimeStageStallError):
+        from agently.base import async_emit_runtime
+
+        await async_emit_runtime(
+            {
+                "event_type": "model.response_materialization_stalled",
+                "source": "ModelResponseResult",
+                "level": "ERROR",
+                "message": str(error),
+                "payload": error.to_diagnostic(),
+                "error": error,
+                "run": self.model_run_context or self.request_run_context,
+            }
+        )
 
     def _normalize_validate_result(
         self,
@@ -673,7 +721,10 @@ class ModelResponseResult:
         needs_constraint_flow = (type in ("parsed", "all") and (active_ensure_keys or strict_output)) or should_validate
         if not needs_constraint_flow:
             try:
-                data = await self._response_parser.async_get_data(type=type)
+                data = await self._await_materialization(
+                    self._response_parser.async_get_data(type=type),
+                    stage="response_materialization",
+                )
                 # Auto-mode degradation also applies in non-constraint flow
                 if type in ("parsed", "all") and _retry_count < max_retries:
                     degraded_data = await self._try_auto_degradation(
@@ -692,7 +743,10 @@ class ModelResponseResult:
                 await self._run_finally_handlers_once()
 
         try:
-            data = await self._response_parser.async_get_data(type=type)
+            data = await self._await_materialization(
+                self._response_parser.async_get_data(type=type),
+                stage="response_materialization",
+            )
 
             # Auto-mode format degradation
             if type in ("parsed", "all") and _retry_count < max_retries:
@@ -747,7 +801,10 @@ class ModelResponseResult:
                         strict_output=strict_output,
                         max_retries=max_retries,
                     )
-                return await self._response_parser.async_get_data(type=type)
+                return await self._await_materialization(
+                    self._response_parser.async_get_data(type=type),
+                    stage="response_materialization",
+                )
 
             validation_outcome = await self._run_validate_handlers_once(
                 active_validate_handlers,
@@ -776,7 +833,10 @@ class ModelResponseResult:
                     )
                 if validation_outcome.get("raise_value") is not None or raise_ensure_failure:
                     raise self._build_validation_failure_exception(validation_outcome)
-                return await self._response_parser.async_get_data(type=type)
+                return await self._await_materialization(
+                    self._response_parser.async_get_data(type=type),
+                    stage="response_materialization",
+                )
             return data
         finally:
             await self._run_finally_handlers_once()
@@ -835,20 +895,32 @@ class ModelResponseResult:
                 _retry_count=0,
                 raise_ensure_failure=raise_ensure_failure,
             )
-            result_object = await self._response_parser.async_get_data_object()
+            result_object = await self._await_materialization(
+                self._response_parser.async_get_data_object(),
+                stage="response_materialization",
+            )
             await self._run_finally_handlers_once()
             return result_object
-        result_object = await self._response_parser.async_get_data_object()
+        result_object = await self._await_materialization(
+            self._response_parser.async_get_data_object(),
+            stage="response_materialization",
+        )
         await self._run_finally_handlers_once()
         return result_object
 
     async def async_get_meta(self):
-        meta = await self._response_parser.async_get_meta()
+        meta = await self._await_materialization(
+            self._response_parser.async_get_meta(),
+            stage="response_materialization",
+        )
         await self._run_finally_handlers_once()
         return meta
 
     async def async_get_text(self):
-        text = await self._response_parser.async_get_text()
+        text = await self._await_materialization(
+            self._response_parser.async_get_text(),
+            stage="final_response_text_materialization",
+        )
         await self._run_finally_handlers_once()
         return text
 

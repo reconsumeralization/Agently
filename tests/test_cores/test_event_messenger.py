@@ -126,7 +126,10 @@ async def test_observation_event_names_are_preferred_aliases():
     await ec.async_emit(RuntimeEvent(event_type="observation.alias", message="legacy object"))
 
     assert all(isinstance(event, ObservationEvent) for event in captured)
-    assert type(captured[2]) is ObservationEvent
+    assert all(isinstance(event, RuntimeEvent) for event in captured)
+    assert type(captured[0]) is RuntimeEvent
+    assert type(captured[1]) is RuntimeEvent
+    assert type(captured[2]) is RuntimeEvent
     assert [event.message for event in captured] == ["alias object", "alias emitter", "legacy object"]
 
 
@@ -148,6 +151,214 @@ async def test_event_center_filtering():
     assert captured[0].event_type == "custom.allowed"
     assert captured[0].payload == {"row": 1}
     assert captured[0].meta["scope"] == "unit-test"
+
+
+@pytest.mark.asyncio
+async def test_event_center_summary_delivery_policy_batches_high_frequency_events():
+    ec = EventCenter()
+    captured: list[RuntimeEvent] = []
+
+    async def capture(event: RuntimeEvent):
+        captured.append(event)
+
+    ec.register_hook(
+        capture,
+        event_types="model.response.delta",
+        hook_name="summary_capture",
+        delivery_policy={"mode": "summary", "max_items": 3},
+    )
+
+    for value in ("A", "B", "C"):
+        await ec.async_emit(
+            {
+                "event_type": "model.response.delta",
+                "source": "model",
+                "payload": {"delta": value},
+                "meta": {"response_id": "response-1", "frequency": "high"},
+            }
+        )
+
+    assert len(captured) == 1
+    assert captured[0].event_type == "model.response.delta"
+    assert captured[0].meta["coalesced"] is True
+    assert captured[0].meta["coalesced_count"] == 3
+    assert captured[0].payload["count"] == 3
+    assert [event["payload"]["delta"] for event in captured[0].payload["events"]] == ["A", "B", "C"]
+
+
+@pytest.mark.asyncio
+async def test_event_center_summary_policy_flushes_before_non_high_frequency_event():
+    ec = EventCenter()
+    captured: list[RuntimeEvent] = []
+
+    async def capture(event: RuntimeEvent):
+        captured.append(event)
+
+    ec.register_hook(
+        capture,
+        hook_name="mixed_summary_capture",
+        delivery_policy={"mode": "summary", "max_items": 10, "high_frequency_only": True},
+    )
+
+    await ec.async_emit({"event_type": "model.response.delta", "payload": {"delta": "A"}})
+    await ec.async_emit({"event_type": "model.response.completed", "payload": {"text": "A"}})
+
+    assert len(captured) == 2
+    assert captured[0].event_type == "model.response.delta"
+    assert captured[0].meta["coalesced"] is True
+    assert captured[0].meta["coalesced_count"] == 1
+    assert captured[1].event_type == "model.response.completed"
+    assert "coalesced" not in captured[1].meta
+
+
+@pytest.mark.asyncio
+async def test_event_center_flush_releases_buffered_summary_events():
+    ec = EventCenter()
+    captured: list[RuntimeEvent] = []
+
+    async def capture(event: RuntimeEvent):
+        captured.append(event)
+
+    ec.register_hook(
+        capture,
+        event_types="model.response.delta",
+        hook_name="flush_summary_capture",
+        delivery_policy={"mode": "summary", "max_items": 10},
+    )
+
+    await ec.async_emit({"event_type": "model.response.delta", "payload": {"delta": "A"}})
+    assert captured == []
+
+    await ec.async_flush("flush_summary_capture")
+
+    assert len(captured) == 1
+    assert captured[0].meta["coalesced"] is True
+    assert captured[0].meta["coalesced_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_event_center_default_delivery_policy_remains_raw():
+    ec = EventCenter()
+    captured: list[RuntimeEvent] = []
+
+    async def capture(event: RuntimeEvent):
+        captured.append(event)
+
+    ec.register_hook(capture, event_types="model.response.delta", hook_name="raw_capture")
+
+    await ec.async_emit({"event_type": "model.response.delta", "payload": {"delta": "A"}})
+    await ec.async_emit({"event_type": "model.response.delta", "payload": {"delta": "B"}})
+
+    assert [event.payload["delta"] for event in captured] == ["A", "B"]
+    assert all("coalesced" not in event.meta for event in captured)
+
+
+@pytest.mark.asyncio
+async def test_event_center_background_hook_does_not_block_emit_path_and_flush_recovers():
+    ec = EventCenter()
+    slow_started = asyncio.Event()
+    slow_can_finish = asyncio.Event()
+    fast_captured: list[RuntimeEvent] = []
+
+    async def slow_hook(event: RuntimeEvent):
+        slow_started.set()
+        await slow_can_finish.wait()
+
+    async def fast_hook(event: RuntimeEvent):
+        fast_captured.append(event)
+
+    ec.register_hook(slow_hook, hook_name="slow", delivery_policy={"dispatch": "background"})
+    ec.register_hook(fast_hook, hook_name="fast")
+
+    started_at = asyncio.get_running_loop().time()
+    await ec.async_emit({"event_type": "runtime.info", "message": "hello"})
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert elapsed < 0.05
+    assert slow_started.is_set()
+    assert [event.message for event in fast_captured] == ["hello"]
+
+    slow_can_finish.set()
+    await ec.async_flush("slow")
+
+
+@pytest.mark.asyncio
+async def test_event_center_idle_flush_recovers_background_delivery():
+    ec = EventCenter(idle_flush_seconds=0.01, background_timeout=0.1)
+    completed: list[str] = []
+
+    async def hook(event: RuntimeEvent):
+        await asyncio.sleep(0.01)
+        completed.append(event.message or "")
+
+    ec.register_hook(hook, hook_name="background", delivery_policy={"dispatch": "background"})
+
+    await ec.async_emit({"event_type": "runtime.info", "message": "idle"})
+    await asyncio.sleep(0.05)
+
+    assert completed == ["idle"]
+
+
+@pytest.mark.asyncio
+async def test_event_center_idle_flush_cancels_stuck_background_delivery():
+    ec = EventCenter(idle_flush_seconds=0.01, background_timeout=0.01)
+    cancelled = asyncio.Event()
+
+    async def hook(event: RuntimeEvent):
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    ec.register_hook(hook, hook_name="stuck", delivery_policy={"dispatch": "background"})
+
+    await ec.async_emit({"event_type": "runtime.info", "message": "stuck"})
+    await asyncio.wait_for(cancelled.wait(), timeout=0.2)
+    await asyncio.sleep(0)
+
+    assert not ec._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_event_center_idle_flush_releases_summary_buffer():
+    ec = EventCenter(idle_flush_seconds=0.01, background_timeout=0.1)
+    captured: list[RuntimeEvent] = []
+
+    async def hook(event: RuntimeEvent):
+        captured.append(event)
+
+    ec.register_hook(
+        hook,
+        hook_name="summary",
+        event_types="model.response.delta",
+        delivery_policy={"mode": "summary", "max_items": 10},
+    )
+
+    await ec.async_emit({"event_type": "model.response.delta", "payload": {"delta": "A"}})
+    assert captured == []
+
+    await asyncio.sleep(0.05)
+
+    assert len(captured) == 1
+    assert captured[0].meta["coalesced"] is True
+    assert captured[0].meta["coalesced_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_event_center_default_hook_dispatch_awaits_completion():
+    ec = EventCenter()
+    completed: list[str] = []
+
+    async def slow_hook(event: RuntimeEvent):
+        await asyncio.sleep(0.01)
+        completed.append(event.message or "")
+
+    ec.register_hook(slow_hook, hook_name="slow_default")
+
+    await ec.async_emit({"event_type": "runtime.info", "message": "reliable"})
+
+    assert completed == ["reliable"]
 
 
 @pytest.mark.asyncio

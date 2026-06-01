@@ -71,7 +71,11 @@ execution = agent.input("Try one bounded fix step.").create_execution(
         "step_id": "execute-fix",
         "parent_execution_id": "exec-prev",
     },
-    limits={"max_model_requests": 3},
+    limits={
+        "max_model_requests": 3,
+        "max_seconds": 180,
+        "max_no_progress_seconds": 60,
+    },
 )
 ```
 
@@ -86,10 +90,52 @@ If a task-step exceeds its model-request budget, Agently raises
 meta remains inspectable and records `status="blocked"` plus the limit event in
 `diagnostics`.
 
-`async_get_meta()` includes `execution_mode`, `lineage`, `limits`, `route`,
-`route_plan`, `logs`, `diagnostics`, and `workspace_refs`. `logs` is the
-route-independent place to inspect runtime facts such as model response ids,
-ActionRuntime action records, and artifact refs:
+For stuck executions, `limits.max_seconds` is a hard deadline for the whole
+AgentExecution. `limits.max_no_progress_seconds` is an idle stall boundary: any
+accepted runtime progress from route selection, model streaming, Dynamic Task,
+Skills, or ActionRuntime refreshes the timer. If either boundary is exceeded,
+Agently raises `RuntimeStageStallError` from `agently.core.AgentExecution`.
+`async_get_meta()` remains inspectable and records `status="timed_out"` or
+`status="stalled"` with `diagnostics["timeouts"]` / `diagnostics["stalls"]` and
+the last progress event.
+
+Provider and response materialization waits have separate knobs:
+
+```python
+Agently.set_settings("OpenAICompatible.stream_idle_timeout", 60.0)
+Agently.set_settings("OpenAIResponsesCompatible.stream_idle_timeout", 60.0)
+Agently.set_settings("response.materialization_idle_timeout", 60.0)
+```
+
+`stream_idle_timeout` bounds the gap after the first provider stream event.
+First-event timeout and stream-idle timeout both raise
+`RuntimeStageStallError` with provider/model fields when the requester can
+identify them.
+`response.materialization_idle_timeout` bounds the wait while final text, data,
+object, or meta is materialized from the response parser. `None` is unlimited;
+`-1` is accepted for compatibility.
+
+High-frequency RuntimeEvent outlets should request Event Center summary
+delivery instead of asking AgentExecution to throttle at the source:
+
+```python
+Agently.event_center.register_hook(
+    handler,
+    event_types="model.response.delta",
+    hook_name="app.delta_summary",
+    delivery_policy={"mode": "summary", "emit_interval": 0.1, "max_items": 20},
+)
+```
+
+AgentExecution stream APIs stay raw. Event Center outlet summaries include
+`meta["coalesced"]`, `coalesced_count`, and source event ids when a hook opts in
+to summary delivery.
+
+`async_get_meta()` includes `execution_mode`, `lineage`, `limits`,
+`route`, `route_plan`, `logs`, `diagnostics`, and `workspace_refs`. `logs` is
+the route-independent place to inspect runtime
+facts such as model response ids, ActionRuntime action records, and artifact
+refs:
 
 ```python
 meta = await execution.async_get_meta()

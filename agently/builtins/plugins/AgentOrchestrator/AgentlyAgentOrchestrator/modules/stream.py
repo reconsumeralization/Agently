@@ -23,7 +23,7 @@ from agently.utils import DataFormatter
 
 
 class AgentExecutionStream:
-    """Execution-local stream buffer and TriggerFlow bridge."""
+    """Execution-local raw stream buffer and TriggerFlow bridge."""
 
     def __init__(
         self,
@@ -75,14 +75,34 @@ class AgentExecutionStream:
             graph_id=graph_id,
             meta=DataFormatter.sanitize(item_meta) if item_meta else None,
         )
+        return await self._publish(item)
+
+    async def close(self):
+        for queue in list(self.queues):
+            await queue.put(None)
+
+    async def flush_delta_buffer(self) -> AgentExecutionStreamData | None:
+        return None
+
+    async def _publish(self, item: AgentExecutionStreamData) -> AgentExecutionStreamData:
         self.items.append(item)
         for queue in list(self.queues):
             await queue.put(item)
         return item
 
-    async def close(self):
-        for queue in list(self.queues):
-            await queue.put(None)
+    def _is_compatible_delta(self, left: AgentExecutionStreamData, right: AgentExecutionStreamData) -> bool:
+        return (
+            left.path == right.path
+            and left.source == right.source
+            and left.route == right.route
+            and left.stage_id == right.stage_id
+            and left.task_id == right.task_id
+            and left.action_id == right.action_id
+            and left.graph_id == right.graph_id
+            and (left.meta or {}).get("execution_id") == (right.meta or {}).get("execution_id")
+            and (left.meta or {}).get("response_id") == (right.meta or {}).get("response_id")
+            and (left.meta or {}).get("field_path") == (right.meta or {}).get("field_path")
+        )
 
     async def bridge_model_stream_item(
         self,

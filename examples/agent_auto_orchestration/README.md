@@ -140,7 +140,11 @@ single-shot Skill + host orchestration pattern.
   same ActionRuntime path. Host code reads AgentExecution action logs/artifact
   refs, validates the real `gh` stdout, stores the latest open issues through
   the execution's bound Workspace helper, and builds a ContextPack for
-  downstream maintainer work. Requires authenticated GitHub CLI.
+  downstream maintainer work. Runtime stall diagnostics use
+  `RuntimeStageStallError`, provider stream-idle settings, and AgentExecution
+  `limits.max_no_progress_seconds`; expensive RuntimeEvent outlets should use
+  EventCenter hook `delivery_policy` for summary delivery when the host does not
+  need token-level updates. Requires authenticated GitHub CLI.
 
 ## Actions / Dynamic-Task DAG examples (not Skills)
 

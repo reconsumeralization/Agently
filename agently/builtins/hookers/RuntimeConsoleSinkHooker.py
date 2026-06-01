@@ -404,6 +404,13 @@ def _render_line(prefix: str, detail: str, *, color: str = "gray"):
 class RuntimeConsoleSinkHooker(EventHooker):
     name = "RuntimeConsoleSinkHooker"
     event_types = None
+    delivery_policy = {
+        "mode": "summary",
+        "dispatch": "await",
+        "emit_interval": 0.1,
+        "max_items": 20,
+        "high_frequency_only": True,
+    }
 
     _streaming_key: tuple[str | None, str | None] | None = None
 

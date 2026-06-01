@@ -22,7 +22,12 @@ from .modules.execution import AgentExecution
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
-    from agently.types.data import AgentExecutionLineage, AgentExecutionLimits, AgentExecutionMode, RunContext
+    from agently.types.data import (
+        AgentExecutionLineage,
+        AgentExecutionLimits,
+        AgentExecutionMode,
+        RunContext,
+    )
     from agently.utils import Settings
 
 
