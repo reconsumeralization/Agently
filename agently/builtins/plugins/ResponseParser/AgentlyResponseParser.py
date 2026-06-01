@@ -97,6 +97,7 @@ class AgentlyResponseParser(ResponseParser):
         self._response_consumer: GeneratorConsumer | None = None
         self._consumer_lock = asyncio.Lock()
         self._final_json_parse_result: tuple[str | None, Any, BaseModel | None, bool] | None = None
+        self._runtime_observations: list[dict[str, Any]] = []
 
         self._streaming_canceled = False
 
@@ -128,7 +129,31 @@ class AgentlyResponseParser(ResponseParser):
             self._build_result_object,
         )
 
-    async def _handle_done_event(self, data: Any, buffer: str, async_emit_runtime) -> None:
+    def _record_runtime_observation(
+        self,
+        kind: str,
+        *,
+        message: str,
+        level: str = "INFO",
+        payload: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self._runtime_observations.append(
+            {
+                "kind": kind,
+                "level": level,
+                "message": message,
+                "payload": payload or {},
+                "error": error,
+            }
+        )
+
+    def drain_runtime_observations(self) -> list[dict[str, Any]]:
+        observations = self._runtime_observations
+        self._runtime_observations = []
+        return observations
+
+    async def _handle_done_event(self, data: Any, buffer: str) -> None:
         self.full_result_data["text_result"] = str(data)
         if self._prompt_object.output_format == "json":
             self._final_json_parse_result = self._parse_json_output(str(data))
@@ -137,42 +162,32 @@ class AgentlyResponseParser(ResponseParser):
                 self.full_result_data["cleaned_result"] = completed
                 self.full_result_data["parsed_result"] = parsed
                 self.full_result_data["result_object"] = result_object
-                await async_emit_runtime(
-                    {
-                        "event_type": "model.completed",
-                        "source": "AgentlyResponseParser",
-                        "message": "Model response parsed as JSON output.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.response_id,
-                            "result": DataFormatter.sanitize(parsed),
-                            "raw_text": str(data),
-                            "cleaned_text": completed,
-                            "repaired": repaired,
-                            "streamed_text": buffer,
-                        },
-                        "run": self.run_context,
-                    }
+                self._record_runtime_observation(
+                    "completed",
+                    message="Model response parsed as JSON output.",
+                    payload={
+                        "result": DataFormatter.sanitize(parsed),
+                        "raw_text": str(data),
+                        "cleaned_text": completed,
+                        "repaired": repaired,
+                        "streamed_text": buffer,
+                        "format": "json",
+                    },
                 )
             else:
                 self.full_result_data["cleaned_result"] = completed
                 self.full_result_data["parsed_result"] = None
                 self.full_result_data["result_object"] = None
-                await async_emit_runtime(
-                    {
-                        "event_type": "model.parse_failed",
-                        "source": "AgentlyResponseParser",
-                        "level": "WARNING",
-                        "message": "Can not parse JSON output from model response.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.response_id,
-                            "result": str(data),
-                            "cleaned_text": completed,
-                            "streamed_text": buffer,
-                        },
-                        "run": self.run_context,
-                    }
+                self._record_runtime_observation(
+                    "parse_failed",
+                    level="WARNING",
+                    message="Can not parse JSON output from model response.",
+                    payload={
+                        "result": str(data),
+                        "cleaned_text": completed,
+                        "streamed_text": buffer,
+                        "format": "json",
+                    },
                 )
             return
 
@@ -183,39 +198,29 @@ class AgentlyResponseParser(ResponseParser):
                 self.full_result_data["parsed_result"] = parsed
                 self.full_result_data["result_object"] = result_object
                 self.full_result_data["text_result"] = str(data)
-                await async_emit_runtime(
-                    {
-                        "event_type": "model.completed",
-                        "source": "AgentlyResponseParser",
-                        "message": "Model response parsed as flat_markdown output.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.response_id,
-                            "result": DataFormatter.sanitize(parsed),
-                            "raw_text": str(data),
-                            "streamed_text": buffer,
-                        },
-                        "run": self.run_context,
-                    }
+                self._record_runtime_observation(
+                    "completed",
+                    message="Model response parsed as flat_markdown output.",
+                    payload={
+                        "result": DataFormatter.sanitize(parsed),
+                        "raw_text": str(data),
+                        "streamed_text": buffer,
+                        "format": "flat_markdown",
+                    },
                 )
             else:
                 self.full_result_data["parsed_result"] = None
                 self.full_result_data["result_object"] = None
                 self.full_result_data["text_result"] = str(data)
-                await async_emit_runtime(
-                    {
-                        "event_type": "model.parse_failed",
-                        "source": "AgentlyResponseParser",
-                        "level": "WARNING",
-                        "message": "Can not parse flat_markdown output from model response.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.response_id,
-                            "result": str(data),
-                            "streamed_text": buffer,
-                        },
-                        "run": self.run_context,
-                    }
+                self._record_runtime_observation(
+                    "parse_failed",
+                    level="WARNING",
+                    message="Can not parse flat_markdown output from model response.",
+                    payload={
+                        "result": str(data),
+                        "streamed_text": buffer,
+                        "format": "flat_markdown",
+                    },
                 )
             return
 
@@ -226,39 +231,29 @@ class AgentlyResponseParser(ResponseParser):
                 self.full_result_data["parsed_result"] = parsed
                 self.full_result_data["result_object"] = result_object
                 self.full_result_data["text_result"] = str(data)
-                await async_emit_runtime(
-                    {
-                        "event_type": "model.completed",
-                        "source": "AgentlyResponseParser",
-                        "message": "Model response parsed as hybrid output.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.response_id,
-                            "result": DataFormatter.sanitize(parsed),
-                            "raw_text": str(data),
-                            "streamed_text": buffer,
-                        },
-                        "run": self.run_context,
-                    }
+                self._record_runtime_observation(
+                    "completed",
+                    message="Model response parsed as hybrid output.",
+                    payload={
+                        "result": DataFormatter.sanitize(parsed),
+                        "raw_text": str(data),
+                        "streamed_text": buffer,
+                        "format": "hybrid",
+                    },
                 )
             else:
                 self.full_result_data["parsed_result"] = None
                 self.full_result_data["result_object"] = None
                 self.full_result_data["text_result"] = str(data)
-                await async_emit_runtime(
-                    {
-                        "event_type": "model.parse_failed",
-                        "source": "AgentlyResponseParser",
-                        "level": "WARNING",
-                        "message": "Can not parse hybrid output from model response.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.response_id,
-                            "result": str(data),
-                            "streamed_text": buffer,
-                        },
-                        "run": self.run_context,
-                    }
+                self._record_runtime_observation(
+                    "parse_failed",
+                    level="WARNING",
+                    message="Can not parse hybrid output from model response.",
+                    payload={
+                        "result": str(data),
+                        "streamed_text": buffer,
+                        "format": "hybrid",
+                    },
                 )
             return
 
@@ -271,20 +266,15 @@ class AgentlyResponseParser(ResponseParser):
             data = [item["embedding"] for item in data]
         self.full_result_data["parsed_result"] = data
         if self.settings.get("$log.cancel_logs") is not True:
-            await async_emit_runtime(
-                {
-                    "event_type": "model.completed",
-                    "source": "AgentlyResponseParser",
-                    "message": "Model response parsing completed.",
-                    "payload": {
-                        "agent_name": self.agent_name,
-                        "response_id": self.response_id,
-                        "result": DataFormatter.sanitize(data),
-                        "raw_text": str(data),
-                        "streamed_text": buffer,
-                    },
-                    "run": self.run_context,
-                }
+            self._record_runtime_observation(
+                "completed",
+                message="Model response parsing completed.",
+                payload={
+                    "result": DataFormatter.sanitize(data),
+                    "raw_text": str(data),
+                    "streamed_text": buffer,
+                    "format": self._prompt_object.output_format,
+                },
             )
 
     async def _flush_streaming_json_events(self, streaming_json_parser: StreamingJSONParser) -> AsyncGenerator[StreamingData, None]:
@@ -314,8 +304,6 @@ class AgentlyResponseParser(ResponseParser):
             raise
 
     async def _extract(self):
-        from agently.base import async_emit_runtime
-
         buffer = ""
         stream_chunk_index = 0
         try:
@@ -326,7 +314,7 @@ class AgentlyResponseParser(ResponseParser):
                     warnings.warn(f"\n⚠️ Incorrect response data from Agently Response Generator: { item }")
                     continue
                 if event == "done":
-                    await self._handle_done_event(data, buffer, async_emit_runtime)
+                    await self._handle_done_event(data, buffer)
                     yield event, data
                     continue
                 yield event, data
@@ -337,34 +325,20 @@ class AgentlyResponseParser(ResponseParser):
                         buffer += str(data)
                         stream_chunk_index += 1
                         if self.settings.get("$log.cancel_logs") is not True:
-                            await async_emit_runtime(
-                                {
-                                    "event_type": "model.streaming",
-                                    "source": "AgentlyResponseParser",
-                                    "level": "DEBUG",
-                                    "message": str(data),
-                                    "payload": {
-                                        "agent_name": self.agent_name,
-                                        "response_id": self.response_id,
-                                        "delta": str(data),
-                                        "chunk_index": stream_chunk_index,
-                                    },
-                                    "run": self.run_context,
-                                }
+                            self._record_runtime_observation(
+                                "streaming",
+                                level="DEBUG",
+                                message=str(data),
+                                payload={
+                                    "delta": str(data),
+                                    "chunk_index": stream_chunk_index,
+                                },
                             )
                         elif self._streaming_canceled is False:
-                            await async_emit_runtime(
-                                {
-                                    "event_type": "model.streaming_canceled",
-                                    "source": "AgentlyResponseParser",
-                                    "level": "INFO",
-                                    "message": f"Streaming logs canceled for response '{ self.response_id }'.",
-                                    "payload": {
-                                        "agent_name": self.agent_name,
-                                        "response_id": self.response_id,
-                                    },
-                                    "run": self.run_context,
-                                }
+                            self._record_runtime_observation(
+                                "streaming_canceled",
+                                level="INFO",
+                                message=f"Streaming logs canceled for response '{ self.response_id }'.",
                             )
                             self._streaming_canceled = True
                     case "original_done":
@@ -372,35 +346,19 @@ class AgentlyResponseParser(ResponseParser):
                     case "meta":
                         if isinstance(data, Mapping):
                             self.full_result_data["meta"].update(dict(data))
-                            await async_emit_runtime(
-                                {
-                                    "event_type": "model.meta",
-                                    "source": "AgentlyResponseParser",
-                                    "message": "Model response meta updated.",
-                                    "payload": {
-                                        "agent_name": self.agent_name,
-                                        "response_id": self.response_id,
-                                        "meta": dict(data),
-                                    },
-                                    "run": self.run_context,
-                                }
+                            self._record_runtime_observation(
+                                "meta",
+                                message="Model response meta updated.",
+                                payload={"meta": dict(data)},
                             )
                     case "error":
                         if isinstance(data, Exception):
                             self.full_result_data["errors"].append(data)
-                            await async_emit_runtime(
-                                {
-                                    "event_type": "model.failed",
-                                    "source": "AgentlyResponseParser",
-                                    "level": "ERROR",
-                                    "message": "Model response stream emitted an error.",
-                                    "payload": {
-                                        "agent_name": self.agent_name,
-                                        "response_id": self.response_id,
-                                    },
-                                    "error": data,
-                                    "run": self.run_context,
-                                }
+                            self._record_runtime_observation(
+                                "failed",
+                                level="ERROR",
+                                message="Model response stream emitted an error.",
+                                error=data,
                             )
         finally:
             if hasattr(self.response_generator, "aclose"):

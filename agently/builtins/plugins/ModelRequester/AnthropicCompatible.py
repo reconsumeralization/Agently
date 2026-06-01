@@ -22,8 +22,9 @@ from httpx import AsyncClient, ReadError, HTTPStatusError, RequestError, Timeout
 from httpx_sse import aconnect_sse, SSEError
 from stamina import retry
 
+from agently.core.AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint
 from agently.types.plugins import ModelRequester
-from agently.types.data import AgentlyRequestData, SerializableValue
+from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState, SerializableValue
 from agently.core.AgentExecution import RuntimeStageStallError
 from agently.types.settings import AnthropicCompatibleSettings as TypedAnthropicCompatibleSettings
 from agently.utils import DataFormatter, SettingsNamespace
@@ -96,12 +97,9 @@ class AnthropicCompatible(ModelRequester):
         prompt: "Prompt",
         settings: "Settings",
     ):
-        from agently.base import event_center
-
         self.prompt = prompt
         self.settings = settings
         self.plugin_settings = SettingsNamespace(self.settings, f"plugins.ModelRequester.{ self.name }")
-        self._emitter = event_center.create_emitter(self.name)
 
         if self.prompt["attachment"]:
             self.plugin_settings["rich_content"] = True
@@ -775,14 +773,34 @@ class AnthropicCompatible(ModelRequester):
             return "length"
         return "stop"
 
-    async def request_model(self, request_data: "AgentlyRequestData") -> AsyncGenerator[tuple[str, Any], None]:
-        headers_with_auth = self._build_headers_with_auth(request_data)
+    def _build_full_request_data(self, request_data: "AgentlyRequestData") -> dict[str, Any]:
         full_request_data = DataFormatter.to_str_key_dict(
             request_data.data,
             value_format="serializable",
             default_value={},
         )
         full_request_data.update(request_data.request_options)
+        return full_request_data
+
+    def build_request_handlers(self, request_data: "AgentlyRequestData") -> AttemptHandlers:
+        async def execute(_state: AttemptState) -> AsyncGenerator[tuple[str, Any], None]:
+            async for item in self._request_model_legacy(request_data):
+                yield item
+
+        async def handle_error(error: BaseException, _state: AttemptState) -> AttemptDecision:
+            return AttemptDecision.yield_error(error)
+
+        return AttemptHandlers(execute=execute, handle_error=handle_error)
+
+    @core_attempt_runner_entrypoint
+    async def request_model(self, request_data: "AgentlyRequestData") -> AsyncGenerator[tuple[str, Any], None]:
+        runner = AttemptRunner(self.build_request_handlers(request_data))
+        async for item in runner.run_stream():
+            yield item
+
+    async def _request_model_legacy(self, request_data: "AgentlyRequestData") -> AsyncGenerator[tuple[str, Any], None]:
+        headers_with_auth = self._build_headers_with_auth(request_data)
+        full_request_data = self._build_full_request_data(request_data)
 
         if request_data.stream:
             client_options = request_data.client_options.copy()
@@ -834,11 +852,6 @@ class AnthropicCompatible(ModelRequester):
                                 headers_with_auth = failover_headers
                                 client.headers.update(headers_with_auth)
                                 continue
-                            await self._emitter.async_error(
-                                error,
-                                event_type="model.requester.error",
-                                payload={"request_data": full_request_data},
-                            )
                             yield "error", error
                         else:
                             yield "message", response.content.decode()
@@ -856,13 +869,6 @@ class AnthropicCompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            "Error: HTTP Status Error\n"
-                            f"Detail: { e.response.status_code } - { e.response.text }\n"
-                            f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
                     except TimeoutError as e:
@@ -878,11 +884,6 @@ class AnthropicCompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            "Error: Timeout Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
                     except RequestError as e:
@@ -898,19 +899,9 @@ class AnthropicCompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
                     except Exception as e:
-                        await self._emitter.async_error(
-                            "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
             return
@@ -942,11 +933,6 @@ class AnthropicCompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            error,
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", error
                     else:
                         yield "message", response.content.decode()
@@ -964,13 +950,6 @@ class AnthropicCompatible(ModelRequester):
                         headers_with_auth = failover_headers
                         client.headers.update(headers_with_auth)
                         continue
-                    await self._emitter.async_error(
-                        "Error: HTTP Status Error\n"
-                        f"Detail: { e.response.status_code } - { e.response.text }\n"
-                        f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
                     yield "error", e
                     break
                 except RequestError as e:
@@ -986,19 +965,9 @@ class AnthropicCompatible(ModelRequester):
                         headers_with_auth = failover_headers
                         client.headers.update(headers_with_auth)
                         continue
-                    await self._emitter.async_error(
-                        "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
                     yield "error", e
                     break
                 except Exception as e:
-                    await self._emitter.async_error(
-                        "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
                     yield "error", e
                     break
 

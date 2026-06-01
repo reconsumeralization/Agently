@@ -15,6 +15,11 @@
         "compatibility_input_type": "ObservationEvent"
       },
       "runtime_control": {
+        "runtime_event_ownership": {
+          "official_event_producer": "core",
+          "plugin_contract": "plugins return observations/errors/decisions; core maps them to official RuntimeEvent records",
+          "builtin_direct_emitters_for_official_events": false
+        },
         "agent_execution_limits": [
           "max_seconds",
           "max_no_progress_seconds"

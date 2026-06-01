@@ -371,6 +371,54 @@ class BaseAgent:
             }
         )
 
+    def _emit_session_runtime_observation(
+        self,
+        kind: str,
+        *,
+        message: str,
+        payload: dict[str, Any],
+        run: "RunContext | None" = None,
+        level: str = "INFO",
+        error: BaseException | None = None,
+    ):
+        from agently.core.RuntimeEvents import emit_session_observation
+
+        emit_session_observation(
+            {
+                "kind": kind,
+                "source": "SessionExtension",
+                "level": level,
+                "message": message,
+                "payload": payload,
+                "error": error,
+                "run": run,
+            }
+        )
+
+    async def _async_emit_session_runtime_observation(
+        self,
+        kind: str,
+        *,
+        message: str,
+        payload: dict[str, Any],
+        run: "RunContext | None" = None,
+        level: str = "INFO",
+        error: BaseException | None = None,
+    ):
+        from agently.core.RuntimeEvents import async_emit_session_observation
+
+        await async_emit_session_observation(
+            {
+                "kind": kind,
+                "source": "SessionExtension",
+                "level": level,
+                "message": message,
+                "payload": payload,
+                "error": error,
+                "run": run,
+            }
+        )
+
     def get_response(self, *, parent_run_context: "RunContext | None" = None):
         turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._emit_agent_turn_started(turn_run_context)

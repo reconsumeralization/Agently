@@ -43,12 +43,11 @@ class AgentlyToolManager(ToolManager):
             "`tool` APIs remain public surface aliases.",
             stacklevel=2,
         )
-        from agently.base import event_center, plugin_manager
+        from agently.base import plugin_manager
 
         self.settings = settings
         self.plugin_manager = plugin_manager
         self.plugin_settings = SettingsNamespace(self.settings, f"plugins.ToolManager.{ self.name }")
-        self._emitter = event_center.create_emitter(self.name)
 
         self.action_registry = ActionRegistry(name=f"{ self.name }-ActionRegistry")
         self.action_dispatcher = ActionDispatcher(self.action_registry, self.settings)

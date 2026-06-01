@@ -520,11 +520,6 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
         {"input": "hello"},
     )
 
-    async def fake_async_error(*args, **kwargs):
-        del args, kwargs
-        return None
-
-    plugin._emitter.async_error = fake_async_error  # type: ignore[method-assign]
     request_data = plugin.generate_request_data()
 
     events = []
@@ -582,11 +577,6 @@ async def test_stream_idle_timeout_returns_timeout_error_event(monkeypatch: pyte
         {"input": "hello"},
     )
 
-    async def fake_async_error(*args, **kwargs):
-        del args, kwargs
-        return None
-
-    plugin._emitter.async_error = fake_async_error  # type: ignore[method-assign]
     request_data = plugin.generate_request_data()
 
     events = []

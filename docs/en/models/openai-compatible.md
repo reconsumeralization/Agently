@@ -30,7 +30,7 @@ Agently.set_settings("OpenAICompatible", {
 | `model_type` | `"chat"` (default) or `"completion"` for legacy completion endpoints |
 | `request_options` | extra dict forwarded to the underlying HTTP client (timeouts, headers) |
 
-The full set lives in [agently/builtins/plugins/ModelRequester/OpenAICompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible.py).
+The full set lives in the [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/) package.
 
 ## Responses API variant
 

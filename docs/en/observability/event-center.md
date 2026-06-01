@@ -78,6 +78,13 @@ net, not a replacement for explicit flush before CLI/script shutdown.
 
 ## Emit a runtime event
 
+Agently-owned event types such as `model.*`, `request.*`, `action.*`,
+`tool.*`, `session.*`, `agent_turn.*`, `triggerflow.*`, and
+`execution_environment.*` are produced by core runtime coordinators. Custom
+plugins and applications may emit their own Event Center messages, but they
+should use an application/plugin-owned namespace and must not rely on official
+Agently modules consuming those custom messages.
+
 The usual path is an emitter:
 
 ```python

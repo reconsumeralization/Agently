@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import importlib
 from pathlib import Path
 
 from agently.builtins.plugins.ActionExecutor import (
@@ -26,6 +27,9 @@ from agently.builtins.plugins.ExecutionEnvironmentProvider import (
     PythonExecutionEnvironmentProvider,
     SQLiteExecutionEnvironmentProvider,
 )
+from agently.builtins.plugins.ModelRequester.AnthropicCompatible import AnthropicCompatible
+from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
+from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import OpenAIResponsesCompatible
 from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import AgentSkillsRuntimeContext
 from agently.builtins.plugins.SkillsExecutor import AgentlySkillsExecutor
 from agently.types.plugins import (
@@ -167,6 +171,34 @@ def test_builtin_agent_execution_matches_protocol_without_core_builtin_dependenc
     ).read_text(encoding="utf-8")
     assert "builtins" not in protocol_source
     assert "AgentlyAgentOrchestrator" not in protocol_source
+
+
+def test_model_requester_runtime_handler_contract_imports_and_ownership():
+    model_requester_root = Path(__file__).resolve().parents[1] / "agently" / "builtins" / "plugins" / "ModelRequester"
+    openai_package = model_requester_root / "OpenAICompatible"
+
+    openai_module = importlib.import_module("agently.builtins.plugins.ModelRequester.OpenAICompatible")
+    assert openai_module.OpenAICompatible is OpenAICompatible
+    assert openai_package.is_dir()
+    assert not (model_requester_root / "OpenAICompatible.py").exists()
+
+    for requester in (OpenAICompatible, OpenAIResponsesCompatible, AnthropicCompatible):
+        assert callable(getattr(requester, "build_request_handlers"))
+
+    builtin_root = Path(__file__).resolve().parents[1] / "agently" / "builtins"
+    source_files = list(builtin_root.rglob("*.py"))
+    forbidden_terms = [
+        "from agently.base import async_emit_runtime",
+        "from agently.base import emit_runtime",
+        "from agently.core.RuntimeEvents import",
+        "await async_emit_runtime(",
+        "emit_runtime(",
+        "event_center.create_emitter(",
+        "_emitter.async_error(",
+    ]
+    for source_file in source_files:
+        source = source_file.read_text(encoding="utf-8")
+        assert [term for term in forbidden_terms if term in source] == []
 
 
 def test_skills_executor_does_not_embed_business_case_mappings():

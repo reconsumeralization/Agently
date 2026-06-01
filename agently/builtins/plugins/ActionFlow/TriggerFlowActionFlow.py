@@ -15,16 +15,17 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from typing import TYPE_CHECKING, Any
 
 from agently.core.AgentExecution import RuntimeStageStallError
 from agently.core.RuntimeContext import bind_runtime_context, get_current_agent_execution_context, resolve_parent_run_context
-from agently.types.data import ErrorInfo
 
 if TYPE_CHECKING:
     from agently.core import Prompt
     from agently.types.data import ActionResult
+    from agently.types.plugins import ActionFlowObservationHandler
     from agently.utils import Settings
 
 
@@ -59,10 +60,10 @@ class TriggerFlowActionFlow:
         concurrency: int | None = None,
         timeout: float | None = None,
         planning_protocol: str | None = None,
+        runtime_observation_handler: "ActionFlowObservationHandler | None" = None,
     ) -> list["ActionResult"]:
-        from agently.base import async_emit_runtime
         from agently.core.TriggerFlow import TriggerFlow
-        from agently.types.data import ObservationEvent, RunContext
+        from agently.types.data import RunContext
 
         if planning_handler is None:
             raise RuntimeError("[Agently ActionFlow] planning_handler is required.")
@@ -106,60 +107,42 @@ class TriggerFlowActionFlow:
             },
         )
 
-        async def emit_action_loop_event(
-            event_type: str,
+        async def publish_runtime_observation(
+            kind: str,
             *,
             message: str,
             payload: dict[str, Any],
             level: str = "INFO",
             error: BaseException | None = None,
+            run=None,
             compat_event_family: str | None = "tool",
             compat_message: str | None = None,
         ):
-            primary_event = ObservationEvent(
-                event_type=event_type,
-                source="ActionFlow",
-                level=level,  # type: ignore[arg-type]
-                message=message,
-                payload=payload,
-                error=ErrorInfo.from_exception(error) if error is not None else None,
-                run=action_loop_run,
-            )
-            await async_emit_runtime(primary_event)
-
-            tool_aliases = {
-                "action.loop_started": "tool.loop_started",
-                "action.plan_ready": "tool.plan_ready",
-                "action.loop_failed": "tool.loop_failed",
-                "action.loop_completed": "tool.loop_completed",
-            }
-            if compat_event_family != "tool" or event_type not in tool_aliases:
+            if runtime_observation_handler is None:
                 return
-            await async_emit_runtime(
-                ObservationEvent(
-                    event_type=tool_aliases[event_type],
-                    source=primary_event.source,
-                    level=primary_event.level,
-                    message=compat_message or primary_event.message,
-                    payload=primary_event.payload,
-                    error=primary_event.error,
-                    run=primary_event.run,
-                    meta={
-                        "compat_event_alias": True,
-                        "compat_alias_for": primary_event.event_type,
-                        "primary_event_id": primary_event.event_id,
-                        "compat_family": "tool",
-                    },
-                )
+            result = runtime_observation_handler(
+                {
+                    "kind": kind,
+                    "source": "ActionFlow",
+                    "level": level,
+                    "message": message,
+                    "payload": payload,
+                    "error": error,
+                    "run": action_loop_run if run is None else run,
+                    "compat_event_family": compat_event_family,
+                    "compat_message": compat_message,
+                }
             )
+            if inspect.isawaitable(result):
+                await result
 
         with bind_runtime_context(
             parent_run_context=action_loop_run,
             tool_phase_run_context=action_loop_run,
             settings=settings,
         ):
-            await emit_action_loop_event(
-                "action.loop_started",
+            await publish_runtime_observation(
+                "loop_started",
                 message=f"Action loop started for agent '{ agent_name }'.",
                 compat_message=f"Tool loop started for agent '{ agent_name }'.",
                 payload={
@@ -217,8 +200,8 @@ class TriggerFlowActionFlow:
                 )
             )
 
-            await emit_action_loop_event(
-                "action.plan_ready",
+            await publish_runtime_observation(
+                "plan_ready",
                 message=f"Action plan ready for round { round_index }.",
                 compat_message=f"Tool plan ready for round { round_index }.",
                 payload={
@@ -260,21 +243,18 @@ class TriggerFlowActionFlow:
                     },
                 )
                 action_runs.append(action_run)
-                await async_emit_runtime(
-                    {
-                        "event_type": "action.started",
-                        "source": "ActionFlow",
-                        "message": f"Action '{ action_id }' started.",
-                        "payload": {
-                            "agent_name": agent_name,
-                            "round_index": round_index,
-                            "command_index": command_index,
-                            "action_type": "tool",
-                            "action_name": action_id,
-                            "command": command,
-                        },
-                        "run": action_run,
-                    }
+                await publish_runtime_observation(
+                    "action_started",
+                    message=f"Action '{ action_id }' started.",
+                    payload={
+                        "agent_name": agent_name,
+                        "round_index": round_index,
+                        "command_index": command_index,
+                        "action_type": "tool",
+                        "action_name": action_id,
+                        "command": command,
+                    },
+                    run=action_run,
                 )
 
             records = action._normalize_execution_records(
@@ -317,22 +297,19 @@ class TriggerFlowActionFlow:
                         },
                     )
                 )
-                await async_emit_runtime(
-                    {
-                        "event_type": "action.completed" if success else "action.failed",
-                        "source": "ActionFlow",
-                        "level": "INFO" if success else "WARNING",
-                        "message": f"Action '{ action_id }' {'completed' if success else 'failed'}.",
-                        "payload": {
-                            "agent_name": agent_name,
-                            "round_index": round_index,
-                            "record_index": record_index,
-                            "action_type": "tool",
-                            "action_name": str(action_id),
-                            "record": record,
-                        },
-                        "run": action_run,
-                    }
+                await publish_runtime_observation(
+                    "action_completed" if success else "action_failed",
+                    level="INFO" if success else "WARNING",
+                    message=f"Action '{ action_id }' {'completed' if success else 'failed'}.",
+                    payload={
+                        "agent_name": agent_name,
+                        "round_index": round_index,
+                        "record_index": record_index,
+                        "action_type": "tool",
+                        "action_name": str(action_id),
+                        "record": record,
+                    },
+                    run=action_run,
                 )
 
             done_plans.extend(records)
@@ -369,8 +346,8 @@ class TriggerFlowActionFlow:
                 tool_phase_run_context=action_loop_run,
                 settings=settings,
             ):
-                await emit_action_loop_event(
-                    "action.loop_failed",
+                await publish_runtime_observation(
+                    "loop_failed",
                     level="ERROR",
                     message=f"Action loop failed for agent '{ agent_name }'.",
                     compat_message=f"Tool loop failed for agent '{ agent_name }'.",
@@ -391,8 +368,8 @@ class TriggerFlowActionFlow:
             tool_phase_run_context=action_loop_run,
             settings=settings,
         ):
-            await emit_action_loop_event(
-                "action.loop_completed",
+            await publish_runtime_observation(
+                "loop_completed",
                 message=f"Action loop completed for agent '{ agent_name }'.",
                 compat_message=f"Tool loop completed for agent '{ agent_name }'.",
                 payload={

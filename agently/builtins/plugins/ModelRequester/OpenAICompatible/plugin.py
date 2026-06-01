@@ -23,14 +23,15 @@ from typing import (
     TYPE_CHECKING,
     cast,
 )
-from typing_extensions import TypedDict
 
 from httpx import AsyncClient, ReadError, HTTPStatusError, RequestError, Timeout
 from httpx_sse import aconnect_sse, SSEError
 from stamina import retry
 
+from .modules.types import ContentMapping
+from agently.core.AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint
 from agently.types.plugins import ModelRequester
-from agently.types.data import AgentlyRequestData, SerializableValue
+from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState, SerializableValue
 from agently.core.AgentExecution import RuntimeStageStallError
 from agently.types.settings import OpenAICompatibleSettings
 from agently.utils import (
@@ -44,45 +45,6 @@ if TYPE_CHECKING:
     from agently.core.Prompt import Prompt
     from agently.utils import Settings
     from agently.types.data import AgentlyResponseGenerator, AgentlyRequestDataDict, ChatMessage
-
-
-class ContentMapping(TypedDict):
-    id: str | None
-    role: str | None
-    reasoning: str | None
-    delta: str | None
-    tool_calls: str | None
-    done: str | None
-    usage: str | None
-    finish_reason: str | None
-    extra_delta: dict[str, str] | None
-    extra_done: dict[str, str] | None
-
-
-class ModelSettingsMapping(TypedDict):
-    chat: str
-    completions: str
-    embeddings: str
-
-
-class ModelRequesterSettings(TypedDict, total=False):
-    model: str
-    model_type: Literal["chat", "completions", "embeddings"]
-    timeout_mode: Literal["http", "first_token"]
-    stream_idle_timeout: float | None
-    client_options: dict[str, "SerializableValue"]
-    headers: dict[str, "SerializableValue"]
-    proxy: str
-    request_options: dict[str, "SerializableValue"]
-    base_url: str
-    path_mapping: ModelSettingsMapping
-    default_model: ModelSettingsMapping
-    auth: "SerializableValue"
-    stream: bool
-    rich_content: bool
-    strict_role_orders: bool
-    content_mapping: ContentMapping
-    content_mapping_style: Literal["dot", "slash"]
 
 
 class OpenAICompatible(ModelRequester):
@@ -152,13 +114,10 @@ class OpenAICompatible(ModelRequester):
         prompt: "Prompt",
         settings: "Settings",
     ):
-        from agently.base import event_center
-
         self.prompt = prompt
         self.settings = settings
         self.plugin_settings = SettingsNamespace(self.settings, f"plugins.ModelRequester.{ self.name }")
         self.model_type = cast(str, self.plugin_settings.get("model_type"))
-        self._emitter = event_center.create_emitter(self.name)
 
         # check if has attachment prompt
         if self.prompt["attachment"]:
@@ -526,7 +485,32 @@ class OpenAICompatible(ModelRequester):
             return None
         return self._build_headers_with_auth(request_data)
 
+    def _build_full_request_data(self, request_data: "AgentlyRequestData") -> dict[str, Any]:
+        full_request_data = DataFormatter.to_str_key_dict(
+            request_data.data,
+            value_format="serializable",
+            default_value={},
+        )
+        full_request_data.update(request_data.request_options)
+        return full_request_data
+
+    def build_request_handlers(self, request_data: "AgentlyRequestData") -> AttemptHandlers:
+        async def execute(_state: AttemptState) -> AsyncGenerator[tuple[str, Any], None]:
+            async for item in self._request_model_legacy(request_data):
+                yield item
+
+        async def handle_error(error: BaseException, _state: AttemptState) -> AttemptDecision:
+            return AttemptDecision.yield_error(error)
+
+        return AttemptHandlers(execute=execute, handle_error=handle_error)
+
+    @core_attempt_runner_entrypoint
     async def request_model(self, request_data: "AgentlyRequestData") -> AsyncGenerator[tuple[str, Any], None]:
+        runner = AttemptRunner(self.build_request_handlers(request_data))
+        async for item in runner.run_stream():
+            yield item
+
+    async def _request_model_legacy(self, request_data: "AgentlyRequestData") -> AsyncGenerator[tuple[str, Any], None]:
         headers_with_auth = self._build_headers_with_auth(request_data)
 
         # request
@@ -596,11 +580,6 @@ class OpenAICompatible(ModelRequester):
                                 headers_with_auth = failover_headers
                                 client.headers.update(headers_with_auth)
                                 continue
-                            await self._emitter.async_error(
-                                e,
-                                event_type="model.requester.error",
-                                payload={"request_data": full_request_data},
-                            )
                             yield "error", e
                         else:
                             content_type = response.headers.get("Content-Type", "")
@@ -613,20 +592,8 @@ class OpenAICompatible(ModelRequester):
                                 error = error_json["error"]
                                 error_title = f"{ error['code'] if 'code' in error else 'unknown_code' } - { error['type'] if 'type' in error else 'unknown_type' }"
                                 error_detail = error["message"] if "message" in error else ""
-                                await self._emitter.async_error(
-                                    f"Error: { error_title }\n"
-                                    f"Detail: {error_detail }\n"
-                                    f"Request Data: {full_request_data}",
-                                    event_type="model.requester.error",
-                                    payload={"request_data": full_request_data},
-                                )
                                 yield "error", error_detail
                             else:
-                                await self._emitter.async_error(
-                                    "Error: SSE Error\n" f"Detail: {e}\n" f"Request Data: {full_request_data}",
-                                    event_type="model.requester.error",
-                                    payload={"request_data": full_request_data},
-                                )
                                 yield "error", e
                         break
                     except HTTPStatusError as e:
@@ -642,13 +609,6 @@ class OpenAICompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            "Error: HTTP Status Error\n"
-                            f"Detail: { e.response.status_code } - { e.response.text }\n"
-                            f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
                     except TimeoutError as e:
@@ -664,11 +624,6 @@ class OpenAICompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            "Error: Timeout Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
                     except RequestError as e:
@@ -684,19 +639,9 @@ class OpenAICompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
                     except Exception as e:
-                        await self._emitter.async_error(
-                            "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
         # normal request
@@ -734,11 +679,6 @@ class OpenAICompatible(ModelRequester):
                                 headers_with_auth = failover_headers
                                 client.headers.update(headers_with_auth)
                                 continue
-                            await self._emitter.async_error(
-                                e,
-                                event_type="model.requester.error",
-                                payload={"request_data": full_request_data},
-                            )
                             yield "error", e
                         else:
                             yield "message", response.content.decode()
@@ -757,13 +697,6 @@ class OpenAICompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            "Error: HTTP Status Error\n"
-                            f"Detail: { e.response.status_code } - { e.response.text }\n"
-                            f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
                     except RequestError as e:
@@ -779,19 +712,9 @@ class OpenAICompatible(ModelRequester):
                             headers_with_auth = failover_headers
                             client.headers.update(headers_with_auth)
                             continue
-                        await self._emitter.async_error(
-                            "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
                     except Exception as e:
-                        await self._emitter.async_error(
-                            "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                            event_type="model.requester.error",
-                            payload={"request_data": full_request_data},
-                        )
                         yield "error", e
                         break
 
