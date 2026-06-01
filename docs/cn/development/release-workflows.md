@@ -39,6 +39,32 @@ reviewer 需要确认 release note 描述的是本次真正交付的最终产品
 需要做小范围 API / 文档调整，必须先回到 release PR 内完成修改，重新运行相关验证，再
 合并。不要先合并，再把 release-note 修正当作后续 marketing 补丁。
 
+## 验收论证
+
+推荐 release 前，必须为每个用户可见的功能切片写一份 coverage-first 的验收论证。
+论证要先从目标合同出发，而不是先盯着已有 example 或 test。
+
+release reviewer 应先列出 roadmap、spec、issue acceptance criteria、
+compatibility manifest、docs 和 example 规则里的要求，然后把每一项要求映射到证明它的
+证据：
+
+- 带真实 DeepSeek 或本地 Ollama 输出、并包含稳定 `Expected key output` 的场景 example
+- 覆盖兼容性、stream/meta 形状、route lifecycle、budget accounting、错误语义和
+  workspace record 的确定性测试
+- 覆盖公开协议和依赖方向的 protocol/type 测试
+- docs、compatibility manifest、spec reconciliation 和 companion guidance
+- 如果 runtime event、observation payload、lineage 或 companion protocol 变化，还需要
+  DevTools 或其他 companion validation
+
+example 用来证明 release 解决了真实场景，但不能单独证明兼容行为、protocol 边界、
+route lifecycle、错误语义、budget counting 或内部架构归属。如果某个要求没有证据，
+要么在 release 前实现，要么在相关 spec 和 release note 中明确延期，要么移除该 release
+claim。
+
+release PR body 或 review notes 应包含这张覆盖矩阵，或给出简洁链接。不能在没有先检查
+证据覆盖目标合同的情况下，直接用已有 examples、tests 或已关闭 issue 作为 release
+验收结论。
+
 ## Desktop installers
 
 Desktop installers 不属于当前主仓库 release 流程。
