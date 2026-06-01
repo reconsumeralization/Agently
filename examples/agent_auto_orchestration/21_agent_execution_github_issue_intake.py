@@ -16,7 +16,8 @@ latest open issue list through `gh`. The host reads the framework-owned
 ActionRuntime records exposed by AgentExecution, validates the raw `gh` stdout,
 and persists the result to Workspace.
 
-Expected key output from one real DeepSeek run on 2026-06-01:
+Expected key output from one real DeepSeek run on 2026-06-01 after closing
+#277 and #280:
     provider=deepseek
     gh_available=True
     search_agent_used_bash_action=True
@@ -29,7 +30,7 @@ Expected key output from one real DeepSeek run on 2026-06-01:
     all_items_are_open_issues=True
     search_stream_lineage_ok=True
     issue_stream_lineage_ok=True
-    latest_issue_numbers=[280, 278, 277, 276, 274]
+    latest_issue_numbers=[278, 276, 274, 265, 257]
 """
 
 from __future__ import annotations
