@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 
 from agently.core import AttemptRunner
 from agently.types.data import AttemptDecision, AttemptHandlers, AttemptObservation, AttemptState
@@ -65,6 +66,122 @@ async def test_attempt_runner_does_not_retry_after_max_attempts():
 
     with pytest.raises(RuntimeError, match="boom"):
         [event async for event in runner.run_stream()]
+
+
+@pytest.mark.asyncio
+async def test_attempt_runner_does_not_retry_after_output_started_by_default():
+    observations: list[AttemptObservation] = []
+
+    async def execute(state: AttemptState):
+        yield "message", f"partial-{state.attempt_index}"
+        raise RuntimeError("stream broke")
+
+    async def handle_error(error: BaseException, state: AttemptState):
+        assert str(error) == "stream broke"
+        assert state.output_started is True
+        return AttemptDecision.retry(reason="transient")
+
+    async def observe(observation: AttemptObservation, _state: AttemptState):
+        observations.append(observation)
+
+    runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error, on_observation=observe))
+
+    with pytest.raises(RuntimeError, match="stream broke"):
+        [event async for event in runner.run_stream()]
+
+    assert [observation.kind for observation in observations] == ["output_started", "retry_blocked"]
+
+
+@pytest.mark.asyncio
+async def test_attempt_runner_can_retry_after_output_started_when_explicitly_allowed():
+    calls = 0
+
+    async def execute(state: AttemptState):
+        nonlocal calls
+        calls += 1
+        if state.attempt_index == 1:
+            yield "message", "partial"
+            raise RuntimeError("allowed retry")
+        yield "message", "replacement"
+
+    async def handle_error(_error: BaseException, state: AttemptState):
+        assert state.output_started is True
+        return AttemptDecision.retry(reason="explicit", allow_after_output_started=True)
+
+    runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error))
+    events = [event async for event in runner.run_stream()]
+
+    assert calls == 2
+    assert events == [("message", "partial"), ("message", "replacement")]
+
+
+@pytest.mark.asyncio
+async def test_attempt_runner_ingests_typed_decision_observations():
+    observations: list[AttemptObservation] = []
+
+    async def execute(_state: AttemptState):
+        if False:
+            yield "message", "never"
+        raise RuntimeError("observable")
+
+    async def handle_error(error: BaseException, _state: AttemptState):
+        return AttemptDecision.raise_error(
+            error,
+            reason="observed",
+            observations=[AttemptObservation("provider_error", {"code": "E_OBS"})],
+        )
+
+    async def observe(observation: AttemptObservation, _state: AttemptState):
+        observations.append(observation)
+
+    runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error, on_observation=observe))
+
+    with pytest.raises(RuntimeError, match="observable"):
+        [event async for event in runner.run_stream()]
+
+    assert observations == [AttemptObservation("provider_error", {"code": "E_OBS"})]
+
+
+@pytest.mark.asyncio
+async def test_attempt_runner_propagates_cancellation_without_error_handler():
+    handled = False
+
+    async def execute(_state: AttemptState):
+        if False:
+            yield "message", "never"
+        raise asyncio.CancelledError()
+
+    async def handle_error(_error: BaseException, _state: AttemptState):
+        nonlocal handled
+        handled = True
+        return AttemptDecision.yield_error(_error)
+
+    runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error))
+
+    with pytest.raises(asyncio.CancelledError):
+        [event async for event in runner.run_stream()]
+
+    assert handled is False
+
+
+@pytest.mark.asyncio
+async def test_attempt_runner_preserves_timeout_when_error_handler_raises():
+    timeout = TimeoutError("deadline")
+
+    async def execute(_state: AttemptState):
+        if False:
+            yield "message", "never"
+        raise timeout
+
+    async def handle_error(error: BaseException, _state: AttemptState):
+        return AttemptDecision.raise_error(error)
+
+    runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error))
+
+    with pytest.raises(TimeoutError) as exc_info:
+        [event async for event in runner.run_stream()]
+
+    assert exc_info.value is timeout
 
 
 @pytest.mark.asyncio

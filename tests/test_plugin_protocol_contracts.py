@@ -157,12 +157,17 @@ def test_builtin_agent_orchestrator_matches_protocol():
 
 def test_builtin_agent_execution_matches_protocol_without_core_builtin_dependency():
     from agently import Agently
+    from agently.core.AgentExecution import AgentExecutionStream
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import (
+        AgentExecutionStream as CompatAgentExecutionStream,
+    )
 
     agent = Agently.create_agent("protocol-agent-execution")
     execution = agent.input("protocol smoke").create_execution()
 
     assert isinstance(execution, AgentExecution)
     assert execution.mode == "one_turn"
+    assert CompatAgentExecutionStream is AgentExecutionStream
     for method_name in _method_names(AgentExecution):
         assert callable(getattr(execution, method_name))
 
@@ -181,6 +186,16 @@ def test_model_requester_runtime_handler_contract_imports_and_ownership():
     assert openai_module.OpenAICompatible is OpenAICompatible
     assert openai_package.is_dir()
     assert not (model_requester_root / "OpenAICompatible.py").exists()
+    assert (openai_package / "plugin.py").exists()
+    for module_name in [
+        "request_builder.py",
+        "credential.py",
+        "transport.py",
+        "handlers.py",
+        "response_adapter.py",
+    ]:
+        assert (openai_package / "modules" / module_name).exists()
+    assert len((openai_package / "plugin.py").read_text(encoding="utf-8").splitlines()) < 180
 
     for requester in (OpenAICompatible, OpenAIResponsesCompatible, AnthropicCompatible):
         assert callable(getattr(requester, "build_request_handlers"))

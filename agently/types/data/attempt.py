@@ -46,22 +46,51 @@ class AttemptDecision:
     reason: str | None = None
     error: BaseException | None = None
     observations: list[AttemptObservation] = field(default_factory=list)
+    allow_after_output_started: bool = False
 
     @classmethod
-    def retry(cls, *, reason: str | None = None) -> "AttemptDecision":
-        return cls("retry", reason=reason)
+    def retry(
+        cls,
+        *,
+        reason: str | None = None,
+        allow_after_output_started: bool = False,
+        observations: list[AttemptObservation] | None = None,
+    ) -> "AttemptDecision":
+        return cls(
+            "retry",
+            reason=reason,
+            observations=observations or [],
+            allow_after_output_started=allow_after_output_started,
+        )
 
     @classmethod
-    def raise_error(cls, error: BaseException | None = None, *, reason: str | None = None) -> "AttemptDecision":
-        return cls("raise", reason=reason, error=error)
+    def raise_error(
+        cls,
+        error: BaseException | None = None,
+        *,
+        reason: str | None = None,
+        observations: list[AttemptObservation] | None = None,
+    ) -> "AttemptDecision":
+        return cls("raise", reason=reason, error=error, observations=observations or [])
 
     @classmethod
-    def yield_error(cls, error: BaseException | None = None, *, reason: str | None = None) -> "AttemptDecision":
-        return cls("yield_error", reason=reason, error=error)
+    def yield_error(
+        cls,
+        error: BaseException | None = None,
+        *,
+        reason: str | None = None,
+        observations: list[AttemptObservation] | None = None,
+    ) -> "AttemptDecision":
+        return cls("yield_error", reason=reason, error=error, observations=observations or [])
 
     @classmethod
-    def stop(cls, *, reason: str | None = None) -> "AttemptDecision":
-        return cls("stop", reason=reason)
+    def stop(
+        cls,
+        *,
+        reason: str | None = None,
+        observations: list[AttemptObservation] | None = None,
+    ) -> "AttemptDecision":
+        return cls("stop", reason=reason, observations=observations or [])
 
 
 AttemptExecuteHandler = Callable[[AttemptState], AsyncGenerator[tuple[str, Any], None]]

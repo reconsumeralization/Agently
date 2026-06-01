@@ -120,6 +120,11 @@ HTTP 状态码重试另一个 key；自定义 handler 可以检查 provider erro
 - [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py)
 - [agently/builtins/plugins/ModelRequester/AnthropicCompatible.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible.py)
 
+`OpenAICompatible` 是 runtime-handler contract 的参考包结构：`plugin.py`
+是公开 coordinator，私有实现职责分别放在 `modules/request_builder.py`、
+`modules/credential.py`、`modules/transport.py`、`modules/handlers.py`
+和 `modules/response_adapter.py`。
+
 如果某个 provider 不在以上协议族（极少见），可以新增一个 requester 插件；但实际上几乎所有商用端点要么提供 OpenAI 兼容模式、Responses 形态，要么对齐 Anthropic 协议，所以这些内置插件覆盖大部分场景。
 
 ## 另见

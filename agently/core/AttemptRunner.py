@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from typing import Any, AsyncGenerator
 
@@ -87,7 +88,7 @@ class AttemptRunner:
                     yield item
                 return
             except BaseException as error:
-                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                     raise
                 decision = await self._maybe_await(self.handlers.handle_error(error, self.state))
                 if not isinstance(decision, AttemptDecision):
@@ -95,6 +96,18 @@ class AttemptRunner:
                 await self._observe_all(decision.observations)
 
                 if decision.action == "retry":
+                    if self.state.output_started and not decision.allow_after_output_started:
+                        await self._observe(
+                            AttemptObservation(
+                                "retry_blocked",
+                                {
+                                    "attempt_index": self.state.attempt_index,
+                                    "reason": decision.reason,
+                                    "output_started": True,
+                                },
+                            )
+                        )
+                        raise error
                     if self.state.max_attempts is not None and self.state.attempt_index >= self.state.max_attempts:
                         raise error
                     self.state.attempt_index += 1

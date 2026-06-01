@@ -121,6 +121,12 @@ custom handlers can inspect the provider error object and return `"try_next"`,
 - [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py)
 - [agently/builtins/plugins/ModelRequester/AnthropicCompatible.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible.py)
 
+`OpenAICompatible` is the reference package layout for the runtime-handler
+contract: `plugin.py` is the public coordinator, and private implementation
+roles live in `modules/request_builder.py`, `modules/credential.py`,
+`modules/transport.py`, `modules/handlers.py`, and
+`modules/response_adapter.py`.
+
 If a provider is missing or speaks an incompatible protocol, you can add a new requester plugin — but in practice almost every commercial endpoint either ships an OpenAI-compatible mode, a Responses-style mode, or matches Anthropic's protocol, so these built-ins cover most cases.
 
 ## See also

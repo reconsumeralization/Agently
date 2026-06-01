@@ -18,7 +18,7 @@ from agently.core.Prompt import Prompt
 from agently.core.RuntimeContext import bind_runtime_context
 from agently.utils import Settings, SettingsNamespace
 from agently.types.data import StreamingData
-from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import AgentExecutionStream
+from agently.core.AgentExecution import AgentExecutionStream
 from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import HybridRoutePlanner
 from agently.builtins.plugins.ActionFlow.TriggerFlowActionFlow import TriggerFlowActionFlow
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
