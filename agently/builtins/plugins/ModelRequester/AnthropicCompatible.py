@@ -27,6 +27,7 @@ from agently.types.data import AgentlyRequestData, SerializableValue
 from agently.core.AgentExecution import RuntimeStageStallError
 from agently.types.settings import AnthropicCompatibleSettings as TypedAnthropicCompatibleSettings
 from agently.utils import DataFormatter, SettingsNamespace
+from agently.utils.ModelPool import resolve_api_key_failover
 
 if TYPE_CHECKING:
     from agently.core.Prompt import Prompt
@@ -721,6 +722,29 @@ class AnthropicCompatible(ModelRequester):
             headers_with_auth["x-api-key"] = str(auth_api_key)
         return headers_with_auth
 
+    def _build_failover_headers(
+        self,
+        request_data: "AgentlyRequestData",
+        *,
+        error: Any,
+        status_code: int | None,
+        response_text: str | None,
+        full_request_data: dict[str, Any],
+        stream_started: bool,
+    ) -> dict[str, Any] | None:
+        decision = resolve_api_key_failover(
+            self.plugin_settings,
+            error=error,
+            status_code=status_code,
+            response_text=response_text,
+            request_data=full_request_data,
+            provider=self.name,
+            stream_started=stream_started,
+        )
+        if not decision.retry:
+            return None
+        return self._build_headers_with_auth(request_data)
+
     @staticmethod
     def _extract_text_from_content_blocks(content_blocks: Any) -> str:
         if not isinstance(content_blocks, list):
@@ -767,22 +791,134 @@ class AnthropicCompatible(ModelRequester):
 
             async with AsyncClient(**client_options) as client:
                 client.headers.update(headers_with_auth)
-                try:
-                    sse_generator = await self._aiter_sse_with_retry(
-                        client,
-                        "POST",
-                        request_data.request_url,
-                        json=full_request_data,
-                        headers=headers_with_auth,
-                    )
-                    if self._should_use_first_token_timeout(request_data):
-                        sse_generator = self._aiter_with_first_token_timeout(
-                            sse_generator,
-                            timeout_seconds=self._get_first_token_timeout_seconds(),
+                stream_started = False
+                while True:
+                    try:
+                        sse_generator = await self._aiter_sse_with_retry(
+                            client,
+                            "POST",
+                            request_data.request_url,
+                            json=full_request_data,
+                            headers=headers_with_auth,
                         )
-                    async for sse in sse_generator:
-                        yield sse.event, sse.data
-                except SSEError:
+                        if self._should_use_first_token_timeout(request_data):
+                            sse_generator = self._aiter_with_first_token_timeout(
+                                sse_generator,
+                                timeout_seconds=self._get_first_token_timeout_seconds(),
+                            )
+                        async for sse in sse_generator:
+                            stream_started = True
+                            yield sse.event, sse.data
+                        break
+                    except SSEError:
+                        response = await client.post(
+                            request_data.request_url,
+                            json=full_request_data,
+                            headers=headers_with_auth,
+                        )
+                        if response.status_code >= 400:
+                            error = RequestError(
+                                f"Status Code: { response.status_code }\n"
+                                f"Detail: { response.text }\n"
+                                f"Request Data: { full_request_data }"
+                            )
+                            failover_headers = self._build_failover_headers(
+                                request_data,
+                                error=error,
+                                status_code=response.status_code,
+                                response_text=response.text,
+                                full_request_data=full_request_data,
+                                stream_started=stream_started,
+                            )
+                            if failover_headers is not None:
+                                headers_with_auth = failover_headers
+                                client.headers.update(headers_with_auth)
+                                continue
+                            await self._emitter.async_error(
+                                error,
+                                event_type="model.requester.error",
+                                payload={"request_data": full_request_data},
+                            )
+                            yield "error", error
+                        else:
+                            yield "message", response.content.decode()
+                        break
+                    except HTTPStatusError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=e.response.status_code,
+                            response_text=e.response.text,
+                            full_request_data=full_request_data,
+                            stream_started=stream_started,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
+                        await self._emitter.async_error(
+                            "Error: HTTP Status Error\n"
+                            f"Detail: { e.response.status_code } - { e.response.text }\n"
+                            f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
+                    except TimeoutError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=None,
+                            response_text=None,
+                            full_request_data=full_request_data,
+                            stream_started=stream_started,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
+                        await self._emitter.async_error(
+                            "Error: Timeout Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
+                    except RequestError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=None,
+                            response_text=None,
+                            full_request_data=full_request_data,
+                            stream_started=stream_started,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
+                        await self._emitter.async_error(
+                            "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
+                    except Exception as e:
+                        await self._emitter.async_error(
+                            "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
+                            event_type="model.requester.error",
+                            payload={"request_data": full_request_data},
+                        )
+                        yield "error", e
+                        break
+            return
+
+        async with AsyncClient(**request_data.client_options) as client:
+            client.headers.update(headers_with_auth)
+            while True:
+                try:
                     response = await client.post(
                         request_data.request_url,
                         json=full_request_data,
@@ -794,6 +930,18 @@ class AnthropicCompatible(ModelRequester):
                             f"Detail: { response.text }\n"
                             f"Request Data: { full_request_data }"
                         )
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=error,
+                            status_code=response.status_code,
+                            response_text=response.text,
+                            full_request_data=full_request_data,
+                            stream_started=False,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
                         await self._emitter.async_error(
                             error,
                             event_type="model.requester.error",
@@ -802,7 +950,20 @@ class AnthropicCompatible(ModelRequester):
                         yield "error", error
                     else:
                         yield "message", response.content.decode()
+                    break
                 except HTTPStatusError as e:
+                    failover_headers = self._build_failover_headers(
+                        request_data,
+                        error=e,
+                        status_code=e.response.status_code,
+                        response_text=e.response.text,
+                        full_request_data=full_request_data,
+                        stream_started=False,
+                    )
+                    if failover_headers is not None:
+                        headers_with_auth = failover_headers
+                        client.headers.update(headers_with_auth)
+                        continue
                     await self._emitter.async_error(
                         "Error: HTTP Status Error\n"
                         f"Detail: { e.response.status_code } - { e.response.text }\n"
@@ -811,20 +972,27 @@ class AnthropicCompatible(ModelRequester):
                         payload={"request_data": full_request_data},
                     )
                     yield "error", e
-                except TimeoutError as e:
-                    await self._emitter.async_error(
-                        "Error: Timeout Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", e
+                    break
                 except RequestError as e:
+                    failover_headers = self._build_failover_headers(
+                        request_data,
+                        error=e,
+                        status_code=None,
+                        response_text=None,
+                        full_request_data=full_request_data,
+                        stream_started=False,
+                    )
+                    if failover_headers is not None:
+                        headers_with_auth = failover_headers
+                        client.headers.update(headers_with_auth)
+                        continue
                     await self._emitter.async_error(
                         "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
                         event_type="model.requester.error",
                         payload={"request_data": full_request_data},
                     )
                     yield "error", e
+                    break
                 except Exception as e:
                     await self._emitter.async_error(
                         "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
@@ -832,56 +1000,7 @@ class AnthropicCompatible(ModelRequester):
                         payload={"request_data": full_request_data},
                     )
                     yield "error", e
-                finally:
-                    await client.aclose()
-            return
-
-        async with AsyncClient(**request_data.client_options) as client:
-            client.headers.update(headers_with_auth)
-            try:
-                response = await client.post(
-                    request_data.request_url,
-                    json=full_request_data,
-                )
-                if response.status_code >= 400:
-                    error = RequestError(
-                        f"Status Code: { response.status_code }\n"
-                        f"Detail: { response.text }\n"
-                        f"Request Data: { full_request_data }"
-                    )
-                    await self._emitter.async_error(
-                        error,
-                        event_type="model.requester.error",
-                        payload={"request_data": full_request_data},
-                    )
-                    yield "error", error
-                else:
-                    yield "message", response.content.decode()
-            except HTTPStatusError as e:
-                await self._emitter.async_error(
-                    "Error: HTTP Status Error\n"
-                    f"Detail: { e.response.status_code } - { e.response.text }\n"
-                    f"Request Data: { full_request_data }",
-                    event_type="model.requester.error",
-                    payload={"request_data": full_request_data},
-                )
-                yield "error", e
-            except RequestError as e:
-                await self._emitter.async_error(
-                    "Error: Request Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                    event_type="model.requester.error",
-                    payload={"request_data": full_request_data},
-                )
-                yield "error", e
-            except Exception as e:
-                await self._emitter.async_error(
-                    "Error: Unknown Error\n" f"Detail: { e }\n" f"Request Data: { full_request_data }",
-                    event_type="model.requester.error",
-                    payload={"request_data": full_request_data},
-                )
-                yield "error", e
-            finally:
-                await client.aclose()
+                    break
 
     async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResponseGenerator":
         meta: dict[str, Any] = {}

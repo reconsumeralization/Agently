@@ -174,7 +174,12 @@ Agently.set_settings("model_profiles", {
 
 Agently.set_settings("api_key_pools", {
     "deepseek-prod": {
-        "strategy": "round_robin",
+        "selection": {"strategy": "round_robin"},
+        "failover": {
+            "strategy": "try_next",
+            "max_attempts": 2,
+            "retry_status_codes": [401, 403, 429],
+        },
         "keys": [
             {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
             {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
@@ -186,11 +191,49 @@ agent = Agently.create_agent()
 agent.activate_model("reasoning")
 ```
 
-`fixed`, `random`, `round_robin`, and `least_used` are supported. Key selection
-happens before the provider request. Agently does not automatically retry a
-different credential after an auth, quota, or billing failure; applications
-should decide whether switching credentials after a failed business operation
-is safe.
+`selection` controls which key is used for a new independent request. It
+supports `fixed`, `random`, `round_robin`, and `least_used`; the legacy top-level
+`strategy` / `mode` fields remain selection shortcuts.
+
+`failover` controls what happens after the provider request fails. Without a
+`failover` policy, Agently keeps the old behavior and surfaces the provider
+error without trying another credential. The built-in `try_next` policy retries
+the next key only for configured HTTP status codes. By default, use credential
+or quota-oriented codes such as `401`, `403`, and `429`. Status codes such as
+`405` and `422` often mean endpoint, method, payload, or model-capability
+mismatch; add them only when your provider uses them for key or quota failures.
+
+Both layers can use direct Python handlers for application-specific behavior:
+
+```python
+def select_key(context):
+    return context.keys[0]["id"]
+
+
+def failover(error, context):
+    if context.status_code == 429:
+        return "try_next"
+    if context.status_code in {405, 422}:
+        return "raise"
+    return "raise"
+
+
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "selection": select_key,
+        "failover": {"handler": failover, "max_attempts": 2},
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    }
+})
+```
+
+Failover handlers can return `"try_next"` / `"retry_next"`, `"retry_same"`,
+`"raise"`, a key id, a key entry dict, or an explicit wrapper such as
+`{"key_id": "b"}` / `{"key_entry": context.keys[1]}`. Failover retry budget is
+separate from output parsing and validation `max_retries`.
 
 The legacy `model_pool -> key_pool_strategy -> key_pool` form remains accepted.
 

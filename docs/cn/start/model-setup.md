@@ -172,7 +172,12 @@ Agently.set_settings("model_profiles", {
 
 Agently.set_settings("api_key_pools", {
     "deepseek-prod": {
-        "strategy": "round_robin",
+        "selection": {"strategy": "round_robin"},
+        "failover": {
+            "strategy": "try_next",
+            "max_attempts": 2,
+            "retry_status_codes": [401, 403, 429],
+        },
         "keys": [
             {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
             {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
@@ -184,9 +189,46 @@ agent = Agently.create_agent()
 agent.activate_model("reasoning")
 ```
 
-支持 `fixed`、`random`、`round_robin`、`least_used`。key selection 发生在 provider
-请求前。Agently 不会在鉴权、额度或计费失败后自动换另一个 credential 重试；应用应由
-业务侧判断失败后切换 credential 是否安全。
+`selection` 控制一次新的独立请求开始前如何选 key，支持 `fixed`、`random`、
+`round_robin`、`least_used`；旧的顶层 `strategy` / `mode` 仍作为 selection 快捷写法。
+
+`failover` 控制 provider 请求失败后怎么处理。如果没有声明 `failover`，Agently 保持旧行为：
+直接暴露 provider 错误，不自动尝试另一个 credential。内置 `try_next` 只会对配置的 HTTP
+状态码尝试下一个 key。默认建议使用 `401`、`403`、`429` 这类鉴权或额度相关状态码。`405`
+和 `422` 很多时候代表 endpoint、method、payload 或模型能力不匹配，只有当你的 provider
+明确用它们表达 key 或 quota 失败时才加入。
+
+两层策略都可以直接使用 Python handler：
+
+```python
+def select_key(context):
+    return context.keys[0]["id"]
+
+
+def failover(error, context):
+    if context.status_code == 429:
+        return "try_next"
+    if context.status_code in {405, 422}:
+        return "raise"
+    return "raise"
+
+
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "selection": select_key,
+        "failover": {"handler": failover, "max_attempts": 2},
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    }
+})
+```
+
+failover handler 可以返回 `"try_next"` / `"retry_next"`、`"retry_same"`、`"raise"`、
+某个 key id、一个 key entry dict，或 `{"key_id": "b"}` /
+`{"key_entry": context.keys[1]}` 这样的显式包装。provider failover 的 retry
+budget 和输出解析 / validation 的 `max_retries` 是两件事。
 
 旧的 `model_pool -> key_pool_strategy -> key_pool` 写法继续兼容。
 

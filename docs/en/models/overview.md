@@ -104,11 +104,16 @@ result = (
 chain-style `agent.input(...).start()` and `agent.create_execution()`.
 For a one-off override, use `agent.create_request(model_key="deepseek-v4")`.
 
-API keys are selected at request time by `key_pool_strategy`: `fixed`,
-`random`, `round_robin`, or `least_used`. Agently 4.1.3 does not automatically
-retry a failed provider request with another key after auth, quota, or billing
-errors; those failures are surfaced so application code can decide whether
-switching credentials is safe for the business operation.
+API keys are selected at request time by the key-pool `selection` policy:
+`fixed`, `random`, `round_robin`, or `least_used`. The legacy
+`key_pool_strategy` path remains accepted.
+
+Provider-error failover is opt-in through `api_key_pools.<pool>.failover`.
+Without a failover policy, provider errors are surfaced as before. Built-in
+failover policies can retry another key for configured HTTP status codes, and
+custom handlers can inspect the provider error object and return `"try_next"`,
+`"retry_same"`, `"raise"`, a key id, a key entry dict, or a wrapper such as
+`{"key_id": "b"}` / `{"key_entry": context.keys[1]}`.
 
 ## Where the plugin code lives
 

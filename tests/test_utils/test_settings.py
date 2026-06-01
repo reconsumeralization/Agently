@@ -1,9 +1,10 @@
 import pytest
 import yaml
+from typing import Any, cast
 
 from agently.types.settings import OpenAICompatibleSettings
-from agently.utils import Settings
-from agently.utils.ModelPool import resolve_model_pool_settings
+from agently.utils import Settings, SettingsNamespace
+from agently.utils.ModelPool import resolve_api_key_failover, resolve_model_pool_settings
 
 
 def test_settings():
@@ -234,3 +235,136 @@ def test_model_pool_profile_can_switch_provider(monkeypatch):
     assert settings.get("plugins.ModelRequester.AnthropicCompatible.base_url") == "https://api.anthropic.com/v1"
     assert settings.get("plugins.ModelRequester.AnthropicCompatible.api_key") == "anthropic-key-a"
     assert settings.get("plugins.ModelRequester.AnthropicCompatible.max_tokens") == 4096
+
+
+def test_api_key_pool_selection_handler_can_choose_key(monkeypatch):
+    monkeypatch.setenv("REASON_KEY_A", "key-a")
+    monkeypatch.setenv("REASON_KEY_B", "key-b")
+    settings = Settings()
+    settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
+    settings.set("model_pool", {"reason": "deepseek-reason-profile"})
+    settings.set(
+        "model_profiles",
+        {
+            "deepseek-reason-profile": {
+                "provider": "OpenAICompatible",
+                "model": "deepseek-reasoner",
+                "api_key_pool": "deepseek-prod",
+            }
+        },
+    )
+
+    def select_second_key(context):
+        assert context.pool_id == "deepseek-prod"
+        return context.keys[1]["id"]
+
+    settings.set(
+        "api_key_pools",
+        cast(Any, {
+            "deepseek-prod": {
+                "selection": select_second_key,
+                "keys": [
+                    {"id": "reason-a", "value": "${ENV.REASON_KEY_A}"},
+                    {"id": "reason-b", "value": "${ENV.REASON_KEY_B}"},
+                ],
+            }
+        }),
+    )
+
+    resolve_model_pool_settings("reason", settings)
+
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.api_key") == "key-b"
+    runtime = cast(dict[str, Any], settings.get("plugins.ModelRequester.OpenAICompatible._api_key_pool_runtime"))
+    assert runtime["selected_key_id"] == "reason-b"
+
+
+def test_api_key_pool_failover_try_next_updates_request_local_key(monkeypatch):
+    monkeypatch.setenv("REASON_KEY_A", "key-a")
+    monkeypatch.setenv("REASON_KEY_B", "key-b")
+    settings = Settings()
+    settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
+    settings.set("model_pool", {"reason": "deepseek-reason-profile"})
+    settings.set(
+        "model_profiles",
+        {
+            "deepseek-reason-profile": {
+                "provider": "OpenAICompatible",
+                "model": "deepseek-reasoner",
+                "api_key_pool": "deepseek-prod",
+            }
+        },
+    )
+    settings.set(
+        "api_key_pools",
+        {
+            "deepseek-prod": {
+                "selection": {"strategy": "fixed"},
+                "failover": {"strategy": "try_next", "max_attempts": 2, "retry_status_codes": [429]},
+                "keys": [
+                    {"id": "reason-a", "value": "${ENV.REASON_KEY_A}"},
+                    {"id": "reason-b", "value": "${ENV.REASON_KEY_B}"},
+                ],
+            }
+        },
+    )
+    resolve_model_pool_settings("reason", settings)
+    plugin_settings = SettingsNamespace(settings, "plugins.ModelRequester.OpenAICompatible")
+
+    decision = resolve_api_key_failover(
+        plugin_settings,
+        error=RuntimeError("rate limited"),
+        status_code=429,
+        response_text="rate limit",
+        provider="OpenAICompatible",
+    )
+
+    assert decision.retry is True
+    assert decision.key_id == "reason-b"
+    assert decision.api_key == "key-b"
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.api_key") == "key-b"
+
+
+def test_api_key_pool_failover_handler_can_raise_or_choose_specific_key(monkeypatch):
+    monkeypatch.setenv("REASON_KEY_A", "key-a")
+    monkeypatch.setenv("REASON_KEY_B", "key-b")
+    settings = Settings()
+    settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
+    settings.set("model_pool", {"reason": "deepseek-reason-profile"})
+    settings.set(
+        "model_profiles",
+        {
+            "deepseek-reason-profile": {
+                "provider": "OpenAICompatible",
+                "model": "deepseek-reasoner",
+                "api_key_pool": "deepseek-prod",
+            }
+        },
+    )
+
+    def choose_key(error, context):
+        assert isinstance(error, RuntimeError)
+        if context.status_code == 422:
+            return "raise"
+        return {"key_entry": context.keys[1]}
+
+    settings.set(
+        "api_key_pools",
+        cast(Any, {
+            "deepseek-prod": {
+                "failover": {"handler": choose_key, "max_attempts": 2},
+                "keys": [
+                    {"id": "reason-a", "value": "${ENV.REASON_KEY_A}"},
+                    {"id": "reason-b", "value": "${ENV.REASON_KEY_B}"},
+                ],
+            }
+        }),
+    )
+    resolve_model_pool_settings("reason", settings)
+    plugin_settings = SettingsNamespace(settings, "plugins.ModelRequester.OpenAICompatible")
+
+    no_retry = resolve_api_key_failover(plugin_settings, error=RuntimeError("bad request"), status_code=422)
+    retry = resolve_api_key_failover(plugin_settings, error=RuntimeError("quota"), status_code=429)
+
+    assert no_retry.retry is False
+    assert retry.retry is True
+    assert retry.key_id == "reason-b"

@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
 from typing_extensions import TypedDict
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -57,3 +58,32 @@ class AgentlyRequestData(BaseModel):
             return True
         else:
             return False
+
+
+APIKeyFailoverAction = Literal["try_next", "retry_next", "retry_same", "raise", "stop"]
+
+
+@dataclass(frozen=True)
+class APIKeySelectionContext:
+    """Runtime context passed to API-key-pool selection handlers."""
+
+    pool_id: str
+    keys: list[dict[str, Any]]
+    strategy: str
+
+
+@dataclass(frozen=True)
+class APIKeyFailoverContext:
+    """Runtime context passed to API-key-pool failover handlers."""
+
+    pool_id: str
+    keys: list[dict[str, Any]]
+    current_key_id: str | None
+    attempt_index: int
+    max_attempts: int
+    error: Any
+    status_code: int | None = None
+    response_text: str | None = None
+    request_data: dict[str, Any] | None = None
+    provider: str | None = None
+    stream_started: bool = False
