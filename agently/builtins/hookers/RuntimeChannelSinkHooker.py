@@ -22,6 +22,13 @@ if TYPE_CHECKING:
 class RuntimeChannelSinkHooker(EventHooker):
     name = "RuntimeChannelSinkHooker"
     event_types = None
+    delivery_policy = {
+        "mode": "summary",
+        "dispatch": "await",
+        "emit_interval": 0.1,
+        "max_items": 20,
+        "high_frequency_only": True,
+    }
     _buffer: list["ObservationEvent"] = []
 
     @staticmethod

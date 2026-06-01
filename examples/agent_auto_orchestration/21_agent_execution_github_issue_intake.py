@@ -203,11 +203,6 @@ async def main():
                 "max_seconds": 90,
                 "max_no_progress_seconds": 60,
             },
-            output_policy={
-                "delta_emit_interval": 0.1,
-                "delta_max_items": 20,
-                "flush_on_done": True,
-            },
         )
     )
     search_stream_task = asyncio.create_task(collect_lineage_flags(search_repo))
@@ -270,11 +265,6 @@ async def main():
                 "max_model_requests": 3,
                 "max_seconds": 90,
                 "max_no_progress_seconds": 60,
-            },
-            output_policy={
-                "delta_emit_interval": 0.1,
-                "delta_max_items": 20,
-                "flush_on_done": True,
             },
         )
     )

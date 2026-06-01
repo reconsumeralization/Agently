@@ -87,16 +87,20 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
             "action_execution",
             "action_loop_close",
         ],
-        "agent_execution_output_policy": {
-            "parameter": "output_policy",
-            "settings_path": "runtime.output",
+        "event_center_delivery_policy": {
+            "register_hook_parameter": "delivery_policy",
+            "hooker_attribute": "delivery_policy",
             "fields": [
-                "delta_emit_interval",
-                "delta_max_chars",
-                "delta_max_items",
-                "flush_on_done",
+                "mode",
+                "dispatch",
+                "emit_interval",
+                "max_items",
+                "high_frequency_only",
+                "max_summary_items",
             ],
-            "raw_delta_compatibility": "delta_emit_interval=0",
+            "background_reclaim": "idle_flush_and_explicit_flush",
+            "default_delivery": "raw",
+            "summary_marker": "meta.coalesced",
         },
     }
     assert in_development["companions"]["skills"]["authoring_protocol"] == "agently-skills.authoring.v2"

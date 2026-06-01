@@ -19,7 +19,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncGenerator, Generator
-from typing import Any, Literal, TYPE_CHECKING, cast
+from typing import Any, Literal, TYPE_CHECKING
 
 from agently.core.AgentExecution import (
     AgentExecutionContext,
@@ -29,7 +29,6 @@ from agently.core.AgentExecution import (
     normalize_execution_limits,
     normalize_execution_lineage,
     normalize_execution_mode,
-    normalize_output_policy,
 )
 from agently.core.RuntimeContext import bind_runtime_context
 from agently.types.data import AgentExecutionStreamData
@@ -45,7 +44,6 @@ if TYPE_CHECKING:
         AgentExecutionLineage,
         AgentExecutionLimits,
         AgentExecutionMode,
-        AgentExecutionOutputPolicy,
         OutputValidateHandler,
         RunContext,
     )
@@ -61,7 +59,6 @@ class AgentExecution:
         mode: "AgentExecutionMode | str" = "one_turn",
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
-        output_policy: "AgentExecutionOutputPolicy | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
     ):
         self.agent = agent
@@ -69,14 +66,6 @@ class AgentExecution:
         self.mode: "AgentExecutionMode" = normalize_execution_mode(str(mode))
         self.lineage: "AgentExecutionLineage" = normalize_execution_lineage(lineage)
         self.limits: "AgentExecutionLimits" = normalize_execution_limits(limits, mode=self.mode)
-        settings_output_policy = agent.settings.get("runtime.output", {})
-        output_policy_source: dict[str, Any] = (
-            dict(cast(dict[str, Any], settings_output_policy))
-            if isinstance(settings_output_policy, dict)
-            else {}
-        )
-        output_policy_source.update(dict(output_policy or {}))
-        self.output_policy = normalize_output_policy(output_policy_source)
         self.workspace = getattr(agent, "workspace", None)
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
@@ -109,7 +98,6 @@ class AgentExecution:
             execution_id=self.id,
             execution_mode=self.mode,
             lineage=self.lineage,
-            output_policy=self.output_policy,
         )
         self._error: BaseException | None = None
         self._selected_route: tuple[str, dict[str, Any]] | None = None
@@ -558,7 +546,6 @@ class AgentExecution:
             "status": self.status,
             "lineage": DataFormatter.sanitize(self.lineage),
             "limits": DataFormatter.sanitize(self.limits),
-            "output_policy": DataFormatter.sanitize(self.output_policy),
             "route_plan": DataFormatter.sanitize(self.route_plan),
             "route": DataFormatter.sanitize(self.route_info),
             "close_snapshot": DataFormatter.sanitize(self.close_snapshot),

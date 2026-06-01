@@ -142,9 +142,9 @@ single-shot Skill + host orchestration pattern.
   the execution's bound Workspace helper, and builds a ContextPack for
   downstream maintainer work. Runtime stall diagnostics use
   `RuntimeStageStallError`, provider stream-idle settings, and AgentExecution
-  `limits.max_no_progress_seconds`; high-frequency public deltas may be batched
-  with `output_policy` when the host does not need token-level updates. Requires
-  authenticated GitHub CLI.
+  `limits.max_no_progress_seconds`; expensive RuntimeEvent outlets should use
+  EventCenter hook `delivery_policy` for summary delivery when the host does not
+  need token-level updates. Requires authenticated GitHub CLI.
 
 ## Actions / Dynamic-Task DAG examples (not Skills)
 

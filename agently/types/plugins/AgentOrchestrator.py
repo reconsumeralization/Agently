@@ -24,7 +24,6 @@ if TYPE_CHECKING:
         AgentExecutionLineage,
         AgentExecutionLimits,
         AgentExecutionMode,
-        AgentExecutionOutputPolicy,
         RunContext,
     )
     from agently.types.plugins.AgentExecution import AgentExecution
@@ -41,6 +40,5 @@ class AgentOrchestrator(AgentlyPlugin, Protocol):
         mode: "AgentExecutionMode | str" = "one_turn",
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
-        output_policy: "AgentExecutionOutputPolicy | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
     ) -> "AgentExecution": ...

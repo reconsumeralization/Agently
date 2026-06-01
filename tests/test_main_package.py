@@ -210,12 +210,11 @@ async def test_agent_execution_max_no_progress_seconds_raises_typed_stall():
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_stream_output_policy_coalesces_delta_events():
+async def test_agent_execution_stream_keeps_delta_events_raw():
     stream = AgentExecutionStream(
         execution_id="exec-output-policy",
         execution_mode="task_step",
         lineage={"task_id": "issue-intake", "step_id": "collect"},
-        output_policy={"delta_emit_interval": 1.0, "delta_max_items": 3},
     )
 
     await stream.emit(
@@ -237,8 +236,6 @@ async def test_agent_execution_stream_output_policy_coalesces_delta_events():
         meta={"response_id": "response-1", "field_path": "text"},
     )
 
-    assert stream.items == []
-
     await stream.emit(
         "model.text",
         "ABC",
@@ -249,13 +246,12 @@ async def test_agent_execution_stream_output_policy_coalesces_delta_events():
         meta={"response_id": "response-1", "field_path": "text"},
     )
 
-    assert len(stream.items) == 1
+    assert len(stream.items) == 3
     item = stream.items[0]
-    assert item.delta == "ABC"
-    assert item.value == "ABC"
+    assert [item.delta for item in stream.items] == ["A", "B", "C"]
+    assert [item.value for item in stream.items] == ["A", "AB", "ABC"]
     assert item.meta is not None
-    assert item.meta["coalesced"] is True
-    assert item.meta["coalesced_count"] == 3
+    assert "coalesced" not in item.meta
     assert item.meta["execution_id"] == "exec-output-policy"
     assert item.meta["lineage"]["task_id"] == "issue-intake"
 
@@ -265,7 +261,6 @@ async def test_agent_execution_stream_default_delta_path_remains_uncoalesced():
     stream = AgentExecutionStream(
         execution_id="exec-output-default",
         execution_mode="one_turn",
-        output_policy={"delta_emit_interval": 0},
     )
 
     await stream.emit("model.text", "A", delta="A", event_type="delta", is_complete=False)
@@ -275,11 +270,9 @@ async def test_agent_execution_stream_default_delta_path_remains_uncoalesced():
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_output_policy_keeps_progress_visible_before_flush():
+async def test_agent_execution_progress_is_visible_with_raw_stream_delivery():
     agent = Agently.create_agent("execution-output-policy-progress-agent")
-    execution = agent.input("stream").create_execution(
-        output_policy={"delta_emit_interval": 60.0},
-    )
+    execution = agent.input("stream").create_execution()
 
     await execution.emit_stream(
         "model.text",
@@ -290,14 +283,14 @@ async def test_agent_execution_output_policy_keeps_progress_visible_before_flush
         route="model_request",
     )
 
-    assert execution.stream.items == []
+    assert len(execution.stream.items) == 1
     assert execution.execution_context.last_progress_event is not None
     assert execution.execution_context.last_progress_event["stage"] == "model.text"
 
     await execution.close_streams()
 
     assert len(execution.stream.items) == 1
-    assert execution.stream.items[0].meta["coalesced"] is True
+    assert "coalesced" not in (execution.stream.items[0].meta or {})
 
 
 @pytest.mark.asyncio

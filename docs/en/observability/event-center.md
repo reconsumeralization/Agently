@@ -45,6 +45,37 @@ Agently.event_center.unregister_hook("docs.capture")
 
 `event_types` can be a string, a list of strings, or `None`. With `None`, the hook receives every event. Sync callbacks are accepted too; Event Center normalizes them to async calls.
 
+Hooks that forward high-frequency runtime events to an expensive outlet can ask
+Event Center to summarize delivery:
+
+```python
+Agently.event_center.register_hook(
+    capture,
+    event_types="model.response.delta",
+    hook_name="docs.summary_capture",
+    delivery_policy={
+        "mode": "summary",
+        "dispatch": "await",
+        "emit_interval": 0.1,
+        "max_items": 20,
+        "high_frequency_only": True,
+    },
+)
+```
+
+The default delivery policy is raw and awaited. Summary delivery is per hook; it
+does not change the producer's RuntimeEvent records or other hooks that request
+raw events. Summary events carry `meta["coalesced"]`, `coalesced_count`,
+`first_event_id`, and `last_event_id`.
+
+Use `dispatch="background"` only for best-effort outlets that have an explicit
+flush/close point. `await Agently.event_center.async_flush(hook_name)` drains
+buffered summaries and tracked background deliveries before shutdown.
+Event Center also runs an on-demand idle flush monitor while background
+deliveries or summary buffers exist: each new event refreshes the idle timer,
+and a quiet period triggers bounded flushing. This is a long-lived-loop safety
+net, not a replacement for explicit flush before CLI/script shutdown.
+
 ## Emit a runtime event
 
 The usual path is an emitter:
@@ -135,9 +166,9 @@ a fresh handle.
 
 ## Runtime Progress And Stall Diagnostics
 
-Runtime control uses the same vocabulary as RuntimeEvent records, but it does
-not depend on Event Center subscribers being installed. A slow or failing hook
-must not block liveness updates.
+Event Center is the runtime-event intake and outlet dispatch layer. Liveness
+state is updated before expensive hook delivery, so a slow or failing hook must
+not block stall diagnostics.
 
 AgentExecution records progress in `async_get_meta()["diagnostics"]`:
 

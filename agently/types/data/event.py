@@ -22,6 +22,8 @@ from typing_extensions import TypedDict
 
 ObservationEventLevel: TypeAlias = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 RuntimeEventLevel: TypeAlias = ObservationEventLevel
+EventDeliveryMode: TypeAlias = Literal["raw", "summary"]
+EventDispatchMode: TypeAlias = Literal["await", "background"]
 
 _TRIGGERFLOW_WORKFLOW_SUFFIXES = frozenset(
     {
@@ -139,6 +141,17 @@ class ObservationEventDict(TypedDict, total=False):
     run: RunContextDict | None
     meta: dict[str, Any]
     timestamp: int
+
+
+class EventDeliveryPolicy(TypedDict, total=False):
+    mode: EventDeliveryMode
+    dispatch: EventDispatchMode
+    emit_interval: float | None
+    max_items: int | None
+    high_frequency_only: bool
+    max_summary_items: int | None
+    idle_flush_seconds: float | None
+    background_timeout: float | None
 
 
 RuntimeEventDict: TypeAlias = ObservationEventDict

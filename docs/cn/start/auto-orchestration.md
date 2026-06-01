@@ -105,27 +105,24 @@ Agently.set_settings("response.materialization_idle_timeout", 60.0)
 `response.materialization_idle_timeout` 限制最终 text、data、object 或 meta 从
 response parser materialize 出来的等待时间。`None` 表示无限制；`-1` 作为兼容写法可用。
 
-高频 public delta 可以合并输出，而不影响内部 liveness 计时：
+高频 RuntimeEvent 出口应该通过 Event Center 请求摘要投递，而不是让
+AgentExecution 在信号源降频：
 
 ```python
-execution = agent.input("Stream a concise summary.").create_execution(
-    output_policy={
-        "delta_emit_interval": 0.1,
-        "delta_max_chars": 2048,
-        "delta_max_items": 20,
-        "flush_on_done": True,
-    },
+Agently.event_center.register_hook(
+    handler,
+    event_types="model.response.delta",
+    hook_name="app.delta_summary",
+    delivery_policy={"mode": "summary", "emit_interval": 0.1, "max_items": 20},
 )
 ```
 
-`delta_emit_interval=0` 保持逐条 delta 输出。正数 interval 会按兼容相邻 delta
-合并，并在 interval、字符数、item 数或终止事件到达时 flush。合并后的 item 会包含
-`meta["coalesced"]`、`coalesced_count` 和 timing 字段。runtime stall 计时会在
-coalescing 之前刷新，因此 public output 被缓冲不会让健康的 stream 被误判为卡住。
+AgentExecution stream API 保持 raw。某个 hook 主动选择 summary delivery 时，
+Event Center 摘要事件会包含 `meta["coalesced"]`、`coalesced_count` 和源事件 id。
 
 `async_get_meta()` 会包含 `execution_mode`、`lineage`、`limits`、
-`output_policy`、`route`、`route_plan`、`logs`、`diagnostics` 和
-`workspace_refs`。`logs` 是跨 route 稳定检查运行事实的位置，例如模型响应 id、
+`route`、`route_plan`、`logs`、`diagnostics` 和 `workspace_refs`。`logs` 是跨
+route 稳定检查运行事实的位置，例如模型响应 id、
 ActionRuntime action records 和 artifact refs：
 
 ```python

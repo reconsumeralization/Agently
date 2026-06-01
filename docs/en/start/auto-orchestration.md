@@ -115,30 +115,25 @@ identify them.
 object, or meta is materialized from the response parser. `None` is unlimited;
 `-1` is accepted for compatibility.
 
-High-frequency public deltas can be coalesced without changing internal
-liveness tracking:
+High-frequency RuntimeEvent outlets should request Event Center summary
+delivery instead of asking AgentExecution to throttle at the source:
 
 ```python
-execution = agent.input("Stream a concise summary.").create_execution(
-    output_policy={
-        "delta_emit_interval": 0.1,
-        "delta_max_chars": 2048,
-        "delta_max_items": 20,
-        "flush_on_done": True,
-    },
+Agently.event_center.register_hook(
+    handler,
+    event_types="model.response.delta",
+    hook_name="app.delta_summary",
+    delivery_policy={"mode": "summary", "emit_interval": 0.1, "max_items": 20},
 )
 ```
 
-`delta_emit_interval=0` preserves raw delta delivery. A positive interval
-buffers compatible adjacent deltas and flushes by interval, character count,
-item count, or terminal event. Coalesced items include `meta["coalesced"]`,
-`coalesced_count`, and timing fields. Runtime stall timers are refreshed before
-coalescing, so buffered public output does not make a healthy stream appear
-stalled.
+AgentExecution stream APIs stay raw. Event Center outlet summaries include
+`meta["coalesced"]`, `coalesced_count`, and source event ids when a hook opts in
+to summary delivery.
 
 `async_get_meta()` includes `execution_mode`, `lineage`, `limits`,
-`output_policy`, `route`, `route_plan`, `logs`, `diagnostics`, and
-`workspace_refs`. `logs` is the route-independent place to inspect runtime
+`route`, `route_plan`, `logs`, `diagnostics`, and `workspace_refs`. `logs` is
+the route-independent place to inspect runtime
 facts such as model response ids, ActionRuntime action records, and artifact
 refs:
 

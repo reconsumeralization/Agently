@@ -21,7 +21,6 @@ from agently.types.data import (
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMode,
-    AgentExecutionOutputPolicy,
 )
 from agently.utils import DataFormatter
 
@@ -155,26 +154,6 @@ def merge_stream_meta(
     merged.setdefault("execution_mode", mode)
     merged.setdefault("lineage", dict(lineage))
     return DataFormatter.sanitize(merged)
-
-
-def normalize_output_policy(value: AgentExecutionOutputPolicy | dict[str, Any] | None = None) -> AgentExecutionOutputPolicy:
-    source = dict(value or {})
-    return {
-        "delta_emit_interval": _normalize_optional_seconds(
-            source.get("delta_emit_interval", 0.0),
-            key="delta_emit_interval",
-            none_value=0.0,
-        ),
-        "delta_max_chars": _normalize_optional_limit(
-            source.get("delta_max_chars"),
-            key="delta_max_chars",
-        ),
-        "delta_max_items": _normalize_optional_limit(
-            source.get("delta_max_items"),
-            key="delta_max_items",
-        ),
-        "flush_on_done": _bool(source.get("flush_on_done"), default=True),
-    }
 
 
 class AgentExecutionContext:
@@ -322,35 +301,3 @@ def _normalize_seconds_limit(value: Any, *, key: str) -> float | None:
     if seconds < 0:
         raise ValueError(f"AgentExecution limit '{ key }' can not be negative except -1 for unlimited.")
     return seconds
-
-
-def _normalize_optional_seconds(value: Any, *, key: str, none_value: float | None = None) -> float | None:
-    if value is None:
-        return none_value
-    if value == -1 or value == "-1":
-        return None
-    if isinstance(value, bool):
-        raise TypeError(f"AgentExecution output policy '{ key }' must be a number, None, or -1.")
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError) as error:
-        raise TypeError(f"AgentExecution output policy '{ key }' must be a number, None, or -1.") from error
-    if seconds < 0:
-        raise ValueError(f"AgentExecution output policy '{ key }' can not be negative except -1 for unlimited.")
-    return seconds
-
-
-def _normalize_optional_limit(value: Any, *, key: str) -> int | None:
-    if value is None:
-        return None
-    if value == -1 or value == "-1":
-        return None
-    if isinstance(value, bool):
-        raise TypeError(f"AgentExecution output policy '{ key }' must be an integer, None, or -1.")
-    try:
-        integer = int(value)
-    except (TypeError, ValueError) as error:
-        raise TypeError(f"AgentExecution output policy '{ key }' must be an integer, None, or -1.") from error
-    if integer < 0:
-        raise ValueError(f"AgentExecution output policy '{ key }' can not be negative except -1 for unlimited.")
-    return integer

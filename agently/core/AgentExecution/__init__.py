@@ -20,7 +20,6 @@ from .Context import (
     normalize_execution_limits,
     normalize_execution_lineage,
     normalize_execution_mode,
-    normalize_output_policy,
 )
 
 __all__ = [
@@ -31,5 +30,4 @@ __all__ = [
     "normalize_execution_limits",
     "normalize_execution_lineage",
     "normalize_execution_mode",
-    "normalize_output_policy",
 ]

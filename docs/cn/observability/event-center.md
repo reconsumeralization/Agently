@@ -45,6 +45,35 @@ Agently.event_center.unregister_hook("docs.capture")
 
 `event_types` 可传字符串、字符串列表或 `None`。传 `None` 时 hook 接收所有事件。同步函数也能注册；Event Center 会统一转成 async 调用。
 
+如果 hook 要把高频 runtime 事件转发到成本较高的出口，可以让 Event Center
+对这个 hook 做摘要投递：
+
+```python
+Agently.event_center.register_hook(
+    capture,
+    event_types="model.response.delta",
+    hook_name="docs.summary_capture",
+    delivery_policy={
+        "mode": "summary",
+        "dispatch": "await",
+        "emit_interval": 0.1,
+        "max_items": 20,
+        "high_frequency_only": True,
+    },
+)
+```
+
+默认投递策略是 raw 且 awaited。摘要投递只作用于当前 hook；不会改变生产者发出的
+RuntimeEvent，也不会影响其他要求 raw 事件的 hook。摘要事件会带
+`meta["coalesced"]`、`coalesced_count`、`first_event_id` 和 `last_event_id`。
+
+只有具备明确 flush/close 回收点的 best-effort 出口才应使用
+`dispatch="background"`。关闭前可调用
+`await Agently.event_center.async_flush(hook_name)` 来排空摘要 buffer 和已跟踪的后台投递。
+Event Center 在存在后台投递或摘要 buffer 时，也会启动按需 idle flush monitor：
+新事件会刷新 idle 计时，安静一段时间后触发有界 flush。这个机制是长生命周期
+event loop 的兜底，不替代 CLI/script 退出前的显式 flush。
+
 ## 发送 runtime event
 
 常见路径是创建 emitter：
@@ -134,8 +163,8 @@ ensure 一个新 handle。
 
 ## 运行进展与卡死诊断
 
-Runtime control 使用和 RuntimeEvent 一致的词汇，但不依赖 Event Center subscriber
-是否存在。缓慢或失败的 hook 不能阻塞 liveness 更新。
+Event Center 是 runtime event 的接收与出口分发层。liveness 状态会在高成本 hook
+投递前更新，因此缓慢或失败的 hook 不能阻塞卡死诊断。
 
 AgentExecution 会把进展记录在 `async_get_meta()["diagnostics"]`：
 
