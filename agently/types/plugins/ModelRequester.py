@@ -15,6 +15,10 @@
 from typing import Any, Protocol, AsyncGenerator, TYPE_CHECKING
 from .base import AgentlyPlugin
 
+from agently.types.data import AttemptHandlers
+
+ModelRequestHandlers = AttemptHandlers
+
 if TYPE_CHECKING:
     from agently.core import Prompt
     from agently.utils import Settings
@@ -40,6 +44,7 @@ class ModelRequester(AgentlyPlugin, Protocol):
     - `generate_request_data`: Generate request data for the model API based on prompt and settings.
     - `request_model`: Send the model request and return an async generator for streaming responses.
     - `broadcast_response`: Process and broadcast the response stream in a standardized format.
+    - `build_request_handlers` (optional): Return typed attempt handlers for core-owned request execution.
 
     Recommended usage:
     - Plugin developers can inherit from this protocol to implement custom model request logic.
@@ -101,5 +106,18 @@ class ModelRequester(AgentlyPlugin, Protocol):
 
         Returns:
             AsyncGenerator[AgentlyModelResponseMessage, None]: Standardized response message stream.
+        """
+        ...
+
+
+class HandlerDrivenModelRequester(ModelRequester, Protocol):
+    """Optional ModelRequester extension for core-owned attempt execution."""
+
+    def build_request_handlers(self, request_data: "AgentlyRequestData") -> ModelRequestHandlers:
+        """
+        Build the typed handler set used by core request runners.
+
+        Implementing this method is additive. Legacy requesters that only
+        implement request_model remain supported by core.
         """
         ...

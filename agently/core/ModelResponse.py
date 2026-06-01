@@ -143,6 +143,20 @@ class ModelResponse:
             .replace("\\\"", "\""),
         }
 
+    def _build_full_provider_request_data(self, request_data: Any) -> dict[str, Any]:
+        data = DataFormatter.to_str_key_dict(
+            getattr(request_data, "data", {}),
+            value_format="serializable",
+            default_value={},
+        )
+        options = DataFormatter.to_str_key_dict(
+            getattr(request_data, "request_options", {}),
+            value_format="serializable",
+            default_value={},
+        )
+        data.update(options)
+        return data
+
     async def _get_response_generator(self) -> AsyncGenerator["AgentlyModelResponseMessage", None]:
         from agently.base import async_emit_runtime
 
@@ -237,7 +251,41 @@ class ModelResponse:
                         response_id=self.id,
                         run_id=self.model_run_context.run_id,
                     )
-                response_generator = model_requester.request_model(request_data)
+                build_request_handlers = getattr(model_requester, "build_request_handlers", None)
+                if callable(build_request_handlers):
+                    from agently.core.AttemptRunner import AttemptRunner, is_core_attempt_runner_entrypoint
+                    from agently.types.data import AttemptHandlers, AttemptObservation, AttemptState
+
+                    if is_core_attempt_runner_entrypoint(getattr(model_requester, "request_model", None)):
+                        handlers = cast(AttemptHandlers, build_request_handlers(request_data))
+                        full_request_data = self._build_full_provider_request_data(request_data)
+
+                        async def observe_attempt(observation: AttemptObservation, state: AttemptState) -> None:
+                            if handlers.on_observation is not None:
+                                result = handlers.on_observation(observation, state)
+                                if inspect.isawaitable(result):
+                                    await result
+                            if observation.kind == "error_yielded":
+                                from agently.core.RuntimeEvents import async_emit_model_requester_error
+
+                                await async_emit_model_requester_error(
+                                    observation.data.get("error"),
+                                    source=str(getattr(model_requester, "name", ModelRequester.name)),
+                                    request_data=full_request_data,
+                                )
+
+                        response_generator = AttemptRunner(
+                            AttemptHandlers(
+                                execute=handlers.execute,
+                                handle_error=handlers.handle_error,
+                                on_observation=observe_attempt,
+                                is_output_started=handlers.is_output_started,
+                            )
+                        ).run_stream()
+                    else:
+                        response_generator = model_requester.request_model(request_data)
+                else:
+                    response_generator = model_requester.request_model(request_data)
                 broadcast_generator = model_requester.broadcast_response(response_generator)
                 broadcast_prefixes = self.extension_handlers.get("broadcast_prefixes", [])
                 broadcast_suffixes = self.extension_handlers.get("broadcast_suffixes", {})

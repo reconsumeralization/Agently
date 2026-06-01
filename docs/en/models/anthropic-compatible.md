@@ -33,7 +33,7 @@ Agently.set_settings("AnthropicCompatible", {
 | `anthropic_beta` | optional beta-feature header (string or list of strings) |
 | `request_options` | extra dict forwarded to the underlying HTTP client |
 
-The class lives at [agently/builtins/plugins/ModelRequester/AnthropicCompatible.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible.py).
+The public coordinator lives at [agently/builtins/plugins/ModelRequester/AnthropicCompatible/plugin.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible/plugin.py), with private implementation modules under `modules/`.
 
 ## Why a separate plugin
 

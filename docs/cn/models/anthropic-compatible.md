@@ -33,7 +33,7 @@ Agently.set_settings("AnthropicCompatible", {
 | `anthropic_beta` | 可选 beta-feature header（字符串或字符串列表） |
 | `request_options` | 转给底层 HTTP client 的额外 dict |
 
-类在 [agently/builtins/plugins/ModelRequester/AnthropicCompatible.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible.py)。
+公开 coordinator 在 [agently/builtins/plugins/ModelRequester/AnthropicCompatible/plugin.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible/plugin.py)，私有实现模块放在 `modules/` 下。
 
 ## 为什么是独立插件
 

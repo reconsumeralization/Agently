@@ -112,7 +112,7 @@ def test_client_options_can_enable_environment_proxy_explicitly():
 
 
 def test_inherits_model_requester_protocol_instead_of_responses_plugin():
-    assert AnthropicCompatible.__bases__ == (ModelRequester,)
+    assert ModelRequester in AnthropicCompatible.__mro__
 
 
 def test_generate_request_maps_system_and_rich_content():

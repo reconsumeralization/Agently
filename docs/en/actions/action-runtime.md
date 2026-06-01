@@ -212,6 +212,12 @@ async def execution_handler(
 
 Context fields include `prompt`, `settings`, `agent_name`, `round_index`, `max_rounds`, `done_plans`, `last_round_records`, `action`, `runtime`. Request fields include `action_list`, `planning_protocol`, `action_calls`, `async_call_action`, `concurrency`, `timeout`.
 
+Custom `ActionFlow` plugins may accept an optional
+`runtime_observation_handler` keyword. If present, the flow should send
+plain observation dictionaries to that handler instead of emitting official
+`action.*` or `tool.*` RuntimeEvents directly; core maps those observations to
+the official event stream.
+
 There is no legacy positional handler signature — the public contract is `(context, request)` only.
 
 ## Extension guidance

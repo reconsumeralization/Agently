@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from .base import AgentlyPlugin, AgentlyPluginType
-from .ActionFlow import ActionFlow
+from .ActionFlow import ActionFlow, ActionFlowObservationHandler
 from .ActionExecutor import ActionExecutor
 from .ExecutionEnvironmentProvider import ExecutionEnvironmentProvider
 from .ActionRuntime import (
@@ -25,7 +25,7 @@ from .ActionRuntime import (
 )
 from .EventHooker import EventHooker
 from .PromptGenerator import PromptGenerator
-from .ModelRequester import ModelRequester
+from .ModelRequester import HandlerDrivenModelRequester, ModelRequestHandlers, ModelRequester
 from .TaskDAGPlanner import TaskDAGPlanner
 from .SkillsExecutor import (
     SkillsEffortStrategyHandler,

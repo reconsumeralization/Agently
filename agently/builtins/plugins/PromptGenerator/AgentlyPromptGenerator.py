@@ -121,12 +121,9 @@ class AgentlyPromptGenerator(PromptGenerator):
         prompt: "Prompt",
         settings: "Settings",
     ):
-        from agently.base import event_center
-
         self.prompt = prompt
         self.settings = settings
         self.plugin_settings = SettingsNamespace(self.settings, f"plugins.PromptGenerator.{ self.name }")
-        self._emitter = event_center.create_emitter(self.name)
 
     @staticmethod
     def _on_register():

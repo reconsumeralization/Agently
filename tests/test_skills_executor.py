@@ -9,7 +9,7 @@ import pytest
 
 from agently import Agently
 from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import create_agent_skills_runtime_context
-from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import AgentExecutionStream
+from agently.core.AgentExecution import AgentExecutionStream
 from agently.builtins.plugins.SkillsExecutor import SkillInstallError, SkillNormalizationError
 from agently.core import PluginManager
 from agently.types.data import AgentlyRequestData

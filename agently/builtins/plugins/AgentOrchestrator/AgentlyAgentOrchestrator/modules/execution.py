@@ -24,6 +24,7 @@ from typing import Any, Literal, TYPE_CHECKING
 from agently.core.AgentExecution import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
+    AgentExecutionStream,
     RuntimeStageStallError,
     merge_stream_meta,
     normalize_execution_limits,
@@ -37,7 +38,6 @@ from agently.utils import DataFormatter, FunctionShifter
 
 from .routing import HybridRoutePlanner
 from .routes import run_dynamic_task_route, run_model_request_route, run_skills_route
-from .stream import AgentExecutionStream
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent

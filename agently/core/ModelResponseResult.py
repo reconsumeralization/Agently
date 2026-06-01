@@ -96,6 +96,9 @@ class ModelResponseResult:
         self._finally_handlers_ran = False
         self._finally_handlers_lock = asyncio.Lock()
         self._run_finally_handlers_once_sync = FunctionShifter.syncify(self._run_finally_handlers_once)
+        self._drain_response_parser_observations_sync = FunctionShifter.syncify(
+            self._drain_response_parser_observations
+        )
         self.prompt = prompt
         self._auto_ensure_keys_cache: dict[str, list[str]] = {}
         self._validate_outcome: dict[str, Any] | None = None
@@ -265,6 +268,28 @@ class ModelResponseResult:
                 "run": self.model_run_context or self.request_run_context,
             }
         )
+
+    async def _drain_response_parser_observations(self):
+        drain = getattr(self._response_parser, "drain_runtime_observations", None)
+        if not callable(drain):
+            return
+        observations = drain()
+        if inspect.isawaitable(observations):
+            observations = await observations
+        if not isinstance(observations, list):
+            return
+
+        from agently.core.RuntimeEvents import async_emit_response_parser_observation
+
+        run = self.model_run_context or self.request_run_context
+        for observation in observations:
+            if isinstance(observation, Mapping):
+                await async_emit_response_parser_observation(
+                    dict(observation),
+                    agent_name=self.agent_name,
+                    response_id=self._response_id,
+                    run=run,
+                )
 
     def _normalize_validate_result(
         self,
@@ -725,6 +750,7 @@ class ModelResponseResult:
                     self._response_parser.async_get_data(type=type),
                     stage="response_materialization",
                 )
+                await self._drain_response_parser_observations()
                 # Auto-mode degradation also applies in non-constraint flow
                 if type in ("parsed", "all") and _retry_count < max_retries:
                     degraded_data = await self._try_auto_degradation(
@@ -740,6 +766,7 @@ class ModelResponseResult:
                         return degraded_data
                 return data
             finally:
+                await self._drain_response_parser_observations()
                 await self._run_finally_handlers_once()
 
         try:
@@ -747,6 +774,7 @@ class ModelResponseResult:
                 self._response_parser.async_get_data(type=type),
                 stage="response_materialization",
             )
+            await self._drain_response_parser_observations()
 
             # Auto-mode format degradation
             if type in ("parsed", "all") and _retry_count < max_retries:
@@ -839,6 +867,7 @@ class ModelResponseResult:
                 )
             return data
         finally:
+            await self._drain_response_parser_observations()
             await self._run_finally_handlers_once()
 
     @overload
@@ -886,43 +915,47 @@ class ModelResponseResult:
             active_ensure_keys = []
         else:
             active_ensure_keys = self._merge_ensure_keys(auto_ensure_keys, ensure_keys)
-        if active_ensure_keys or strict_output or bool(active_validate_handlers) or self._validate_outcome is not None:
-            await self.async_get_data(
-                ensure_keys=active_ensure_keys,
-                validate_handler=validate_handler,
-                key_style=key_style,
-                max_retries=max_retries,
-                _retry_count=0,
-                raise_ensure_failure=raise_ensure_failure,
-            )
-            result_object = await self._await_materialization(
+        try:
+            if active_ensure_keys or strict_output or bool(active_validate_handlers) or self._validate_outcome is not None:
+                await self.async_get_data(
+                    ensure_keys=active_ensure_keys,
+                    validate_handler=validate_handler,
+                    key_style=key_style,
+                    max_retries=max_retries,
+                    _retry_count=0,
+                    raise_ensure_failure=raise_ensure_failure,
+                )
+                return await self._await_materialization(
+                    self._response_parser.async_get_data_object(),
+                    stage="response_materialization",
+                )
+            return await self._await_materialization(
                 self._response_parser.async_get_data_object(),
                 stage="response_materialization",
             )
+        finally:
+            await self._drain_response_parser_observations()
             await self._run_finally_handlers_once()
-            return result_object
-        result_object = await self._await_materialization(
-            self._response_parser.async_get_data_object(),
-            stage="response_materialization",
-        )
-        await self._run_finally_handlers_once()
-        return result_object
 
     async def async_get_meta(self):
-        meta = await self._await_materialization(
-            self._response_parser.async_get_meta(),
-            stage="response_materialization",
-        )
-        await self._run_finally_handlers_once()
-        return meta
+        try:
+            return await self._await_materialization(
+                self._response_parser.async_get_meta(),
+                stage="response_materialization",
+            )
+        finally:
+            await self._drain_response_parser_observations()
+            await self._run_finally_handlers_once()
 
     async def async_get_text(self):
-        text = await self._await_materialization(
-            self._response_parser.async_get_text(),
-            stage="final_response_text_materialization",
-        )
-        await self._run_finally_handlers_once()
-        return text
+        try:
+            return await self._await_materialization(
+                self._response_parser.async_get_text(),
+                stage="final_response_text_materialization",
+            )
+        finally:
+            await self._drain_response_parser_observations()
+            await self._run_finally_handlers_once()
 
     @overload
     def get_generator(
@@ -976,11 +1009,16 @@ class ModelResponseResult:
                 type = "delta"
         parsed_generator = self._response_parser.get_generator(type=type, specific=specific)
         completed = False
-        for data in parsed_generator:
-            yield data
-        completed = True
-        if completed:
-            self._run_finally_handlers_once_sync()
+        try:
+            for data in parsed_generator:
+                self._drain_response_parser_observations_sync()
+                yield data
+                self._drain_response_parser_observations_sync()
+            completed = True
+        finally:
+            self._drain_response_parser_observations_sync()
+            if completed:
+                self._run_finally_handlers_once_sync()
 
     @overload
     def get_async_generator(
@@ -1034,8 +1072,13 @@ class ModelResponseResult:
                 type = "delta"
         parsed_generator = self._response_parser.get_async_generator(type=type, specific=specific)
         completed = False
-        async for data in parsed_generator:
-            yield data
-        completed = True
-        if completed:
-            await self._run_finally_handlers_once()
+        try:
+            async for data in parsed_generator:
+                await self._drain_response_parser_observations()
+                yield data
+                await self._drain_response_parser_observations()
+            completed = True
+        finally:
+            await self._drain_response_parser_observations()
+            if completed:
+                await self._run_finally_handlers_once()

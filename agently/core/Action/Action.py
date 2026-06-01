@@ -1198,6 +1198,11 @@ class Action:
     def _should_continue(decision: "ActionDecision", *, round_index: int, max_rounds: int | None):
         return should_continue(decision, round_index=round_index, max_rounds=max_rounds)
 
+    async def _async_emit_action_flow_observation(self, observation: dict[str, Any]):
+        from agently.core.RuntimeEvents import async_emit_action_flow_observation
+
+        await async_emit_action_flow_observation(observation)
+
     async def async_plan_and_execute(
         self,
         *,
@@ -1225,20 +1230,30 @@ class Action:
             action_execution_handler if action_execution_handler is not None else tool_execution_handler
         )
 
-        return await self.action_flow.async_run(
-            action=self,
-            prompt=prompt,
-            settings=settings,
-            action_list=resolved_action_list,
-            agent_name=agent_name,
-            parent_run_context=parent_run_context,
-            planning_handler=self.action_runtime.resolve_planning_handler(selected_planning_handler),
-            execution_handler=self.action_runtime.resolve_execution_handler(selected_execution_handler),
-            max_rounds=max_rounds,
-            concurrency=concurrency,
-            timeout=timeout,
-            planning_protocol=planning_protocol,
-        )
+        run_kwargs = {
+            "action": self,
+            "prompt": prompt,
+            "settings": settings,
+            "action_list": resolved_action_list,
+            "agent_name": agent_name,
+            "parent_run_context": parent_run_context,
+            "planning_handler": self.action_runtime.resolve_planning_handler(selected_planning_handler),
+            "execution_handler": self.action_runtime.resolve_execution_handler(selected_execution_handler),
+            "max_rounds": max_rounds,
+            "concurrency": concurrency,
+            "timeout": timeout,
+            "planning_protocol": planning_protocol,
+        }
+        try:
+            accepts_runtime_observation_handler = (
+                "runtime_observation_handler" in inspect.signature(self.action_flow.async_run).parameters
+            )
+        except (TypeError, ValueError):
+            accepts_runtime_observation_handler = False
+        if accepts_runtime_observation_handler:
+            run_kwargs["runtime_observation_handler"] = self._async_emit_action_flow_observation
+
+        return await self.action_flow.async_run(**run_kwargs)
 
 
 ToolCommand = ActionCall

@@ -203,6 +203,11 @@ async def execution_handler(
 
 context 字段含 `prompt`、`settings`、`agent_name`、`round_index`、`max_rounds`、`done_plans`、`last_round_records`、`action`、`runtime`。request 字段含 `action_list`、`planning_protocol`、`action_calls`、`async_call_action`、`concurrency`、`timeout`。
 
+自定义 `ActionFlow` 插件可以接受可选的 `runtime_observation_handler`
+关键字参数。若提供，flow 应把普通 observation dict 交给这个 handler，
+不要直接发送官方 `action.*` 或 `tool.*` RuntimeEvent；core 会把这些
+observation 映射到官方事件流。
+
 没有 legacy positional 签名 —— 公开契约只是 `(context, request)`。
 
 ## 扩展指南

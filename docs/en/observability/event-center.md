@@ -19,6 +19,12 @@ Naming compatibility:
 - `ObservationEvent` is the DevTools bridge projection derived from `RuntimeEvent`.
 - Existing `emit_observation` / `async_emit_observation` code continues to work as a compatibility alias.
 
+Run and retry naming:
+
+- `agent_turn` is a run lineage kind for one Agent-facing turn.
+- `attempt_index` describes a retryable model-request attempt inside a request; it is not an Agent turn counter.
+- DevTools should preserve both fields as separate semantics: render `agent_turn` from `run.run_kind`, and read model retry attempts from `payload.attempt_index` or `run.meta.attempt_index` on `model_request` runs.
+
 ## Register a hook
 
 ```python
@@ -77,6 +83,17 @@ and a quiet period triggers bounded flushing. This is a long-lived-loop safety
 net, not a replacement for explicit flush before CLI/script shutdown.
 
 ## Emit a runtime event
+
+Agently-owned event types such as `model.*`, `request.*`, `action.*`,
+`tool.*`, `session.*`, `agent_turn.*`, `triggerflow.*`, and
+`execution_environment.*` are produced by core runtime coordinators. Custom
+plugins and applications may emit their own Event Center messages, but they
+should use an application/plugin-owned namespace and must not rely on official
+Agently modules consuming those custom messages.
+
+Built-in plugins report facts to core through typed observations, handler
+decisions, or route stream callbacks. Core-owned coordinators map those facts
+into official RuntimeEvent records and AgentExecution stream items.
 
 The usual path is an emitter:
 

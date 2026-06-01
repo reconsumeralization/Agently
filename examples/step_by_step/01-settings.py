@@ -35,7 +35,7 @@ print(agent_model_requester_settings.get("model"))  # qwen3:latest
 # Default Global Settings: agently/_default_settings.yaml
 # Default Plugin Settings can be defined in attribution "DEFAULT_SETTINGS" in Plugin Class
 # Core Plugins with Settings:
-# Model Requester: agently/builtins/plugins/ModelRequester/OpenAICompatible.py
+# Model Requester: agently/builtins/plugins/ModelRequester/OpenAICompatible/
 
 # Expected output (deterministic — no model call is made):
 # http://127.0.0.1:11434/v1
