@@ -33,6 +33,10 @@ fix、update 或 refactor；验收后合入 `dev`。随后从 `dev` 组装 relea
 当前工作版本核对 release notes、compatibility manifests、examples、docs 和 companion
 repositories。
 
+如果开始新的版本开发工作时，前一个公开版本已经发布，但当前工作版本或预期任务分支没有被
+明确指定，不要根据本地历史自行推断。必须先暂停并向维护者确认，要求同时指定当前工作版本
+和任务分支，然后才能修改代码、spec、docs、examples 或 compatibility metadata。
+
 当某个分支只是实现大 roadmap 目标的一部分时，需要同时记录两层事实：feature spec 描述
 更大的目标，而 `compatibility/in-development.json` 描述将要发布这个已验收切片的当前工作
 版本。
