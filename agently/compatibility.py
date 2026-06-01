@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.3.1"
-CURRENT_RELEASE_TRAIN = "2026-05-4.1.3.1"
+CURRENT_FRAMEWORK_VERSION = "4.1.3.2"
+CURRENT_RELEASE_TRAIN = "2026-05-4.1.3.2"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -18,7 +18,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
     "framework": "agently",
     "framework_version": CURRENT_FRAMEWORK_VERSION,
     "release_train": CURRENT_RELEASE_TRAIN,
-    "released_at": "2026-05-31",
+    "released_at": "2026-06-01",
     "notes": (
         "This manifest is the offline compatibility surface for the installed "
         "Agently package. Historical release manifests live in the source "
@@ -29,12 +29,43 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
             "companion_package": "agently-devtools",
             "runtime_protocol": DEVTOOLS_RUNTIME_PROTOCOL,
             "event_naming": {
-                "preferred_event_type": "ObservationEvent",
-                "legacy_event_type": "RuntimeEvent",
-                "legacy_compatibility": "Agently 4.1.x",
-                "replacement_line": "Agently 4.2",
+                "preferred_event_type": "RuntimeEvent",
+                "devtools_projection_type": "ObservationEvent",
+                "event_center_dispatch": "RuntimeEvent",
+                "compatibility_input_type": "ObservationEvent",
             },
-            "recommended_version_specifier": ">=0.1.5,<0.2.0",
+            "runtime_control": {
+                "agent_execution_limits": ["max_seconds", "max_no_progress_seconds"],
+                "provider_stream_idle_timeout": [
+                    "OpenAICompatible.stream_idle_timeout",
+                    "OpenAIResponsesCompatible.stream_idle_timeout",
+                ],
+                "response_materialization_idle_timeout": "response.materialization_idle_timeout",
+                "typed_stall_error": "RuntimeStageStallError",
+                "typed_provider_stall_stages": ["response_first_event", "response_stream"],
+                "action_runtime_stall_stages": [
+                    "action_planning",
+                    "tool_call_selection",
+                    "action_execution",
+                    "action_loop_close",
+                ],
+                "event_center_delivery_policy": {
+                    "register_hook_parameter": "delivery_policy",
+                    "hooker_attribute": "delivery_policy",
+                    "fields": [
+                        "mode",
+                        "dispatch",
+                        "emit_interval",
+                        "max_items",
+                        "high_frequency_only",
+                        "max_summary_items",
+                    ],
+                    "background_reclaim": "idle_flush_and_explicit_flush",
+                    "default_delivery": "raw",
+                    "summary_marker": "meta.coalesced",
+                },
+            },
+            "recommended_version_specifier": ">=0.1.6,<0.2.0",
         },
         "skills": {
             "repository": "Agently-Skills",
