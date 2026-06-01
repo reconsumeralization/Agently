@@ -13,9 +13,10 @@
 # limitations under the License.
 
 from .modules.types import ContentMapping, ModelRequesterSettings, ModelSettingsMapping
-from .plugin import OpenAICompatible
+from .plugin import AsyncClient, OpenAICompatible
 
 __all__ = [
+    "AsyncClient",
     "ContentMapping",
     "ModelRequesterSettings",
     "ModelSettingsMapping",

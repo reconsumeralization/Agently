@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal, cast
 
@@ -51,7 +52,11 @@ class OpenAICompatibleTransportMixin:
     def _create_async_client(self, **client_options: Any):
         from .. import plugin as plugin_module
 
-        return plugin_module.AsyncClient(**client_options)
+        package_module = sys.modules.get(plugin_module.__package__ or "")
+        package_client = getattr(package_module, "AsyncClient", AsyncClient)
+        plugin_client = getattr(plugin_module, "AsyncClient", AsyncClient)
+        client_factory = package_client if package_client is not AsyncClient else plugin_client
+        return client_factory(**client_options)
 
     def _get_timeout_mode(self) -> Literal["http", "first_token"]:
         timeout_mode = self.plugin_settings.get("timeout_mode", "first_token")
