@@ -57,6 +57,139 @@ meta = await execution.async_get_meta()
 The execution object follows the same consumption style as model responses:
 `get_data`, `get_text`, `get_meta`, `get_generator`, and async equivalents.
 
+`create_execution()` defaults to `mode="one_turn"`, which preserves the
+ordinary one-turn Agent behavior. When a developer-owned loop or future
+AgentTaskLoop needs one bounded step, use `mode="task_step"` with explicit
+lineage and limits:
+
+```python
+execution = agent.input("Try one bounded fix step.").create_execution(
+    mode="task_step",
+    lineage={
+        "task_id": "issue-123",
+        "iteration_id": "iter-2",
+        "step_id": "execute-fix",
+        "parent_execution_id": "exec-prev",
+    },
+    limits={
+        "max_model_requests": 3,
+        "max_seconds": 180,
+        "max_no_progress_seconds": 60,
+    },
+)
+```
+
+`mode="task_step"` is still one Agent execution, not a multi-turn loop. It adds
+stable lineage, route metadata, diagnostics, and shared model-request budget
+counting across direct model routes, Dynamic Task model tasks, and Skills model
+stages. Use `None` for an unlimited budget; `-1` is accepted as a compatibility
+spelling but should not be used in new examples.
+
+If a task-step exceeds its model-request budget, Agently raises
+`AgentExecutionLimitExceeded` from `agently.core.AgentExecution`. The execution
+meta remains inspectable and records `status="blocked"` plus the limit event in
+`diagnostics`.
+
+For stuck executions, `limits.max_seconds` is a hard deadline for the whole
+AgentExecution. `limits.max_no_progress_seconds` is an idle stall boundary: any
+accepted runtime progress from route selection, model streaming, Dynamic Task,
+Skills, or ActionRuntime refreshes the timer. If either boundary is exceeded,
+Agently raises `RuntimeStageStallError` from `agently.core.AgentExecution`.
+`async_get_meta()` remains inspectable and records `status="timed_out"` or
+`status="stalled"` with `diagnostics["timeouts"]` / `diagnostics["stalls"]` and
+the last progress event.
+
+Provider and response materialization waits have separate knobs:
+
+```python
+Agently.set_settings("OpenAICompatible.stream_idle_timeout", 60.0)
+Agently.set_settings("OpenAIResponsesCompatible.stream_idle_timeout", 60.0)
+Agently.set_settings("response.materialization_idle_timeout", 60.0)
+```
+
+`stream_idle_timeout` bounds the gap after the first provider stream event.
+First-event timeout and stream-idle timeout both raise
+`RuntimeStageStallError` with provider/model fields when the requester can
+identify them.
+`response.materialization_idle_timeout` bounds the wait while final text, data,
+object, or meta is materialized from the response parser. `None` is unlimited;
+`-1` is accepted for compatibility.
+
+High-frequency RuntimeEvent outlets should request Event Center summary
+delivery instead of asking AgentExecution to throttle at the source:
+
+```python
+Agently.event_center.register_hook(
+    handler,
+    event_types="model.response.delta",
+    hook_name="app.delta_summary",
+    delivery_policy={"mode": "summary", "emit_interval": 0.1, "max_items": 20},
+)
+```
+
+AgentExecution stream APIs stay raw. Event Center outlet summaries include
+`meta["coalesced"]`, `coalesced_count`, and source event ids when a hook opts in
+to summary delivery.
+
+`async_get_meta()` includes `execution_mode`, `lineage`, `limits`,
+`route`, `route_plan`, `logs`, `diagnostics`, and `workspace_refs`. `logs` is
+the route-independent place to inspect runtime
+facts such as model response ids, ActionRuntime action records, and artifact
+refs:
+
+```python
+meta = await execution.async_get_meta()
+meta["route"]["selected_route"]
+meta["logs"]["model_response_ids"]
+meta["logs"]["action_logs"]
+meta["logs"]["artifact_refs"]
+```
+
+When a `model_request` route uses Actions, the execution exposes the action
+records through both meta and stream events such as `actions.<action_id>`.
+Hosts that need to persist business evidence should read the framework action
+record or artifact, then explicitly write the selected observation to
+Workspace. Do not ask the model to copy raw action stdout just to make the host
+able to store it.
+
+Every process-stream item also receives correlation metadata:
+
+```python
+item.meta["execution_id"]
+item.meta["execution_mode"]
+item.meta["lineage"]["task_id"]
+```
+
+When `agent.use_workspace(...)` is configured before `create_execution()`, the
+execution receives that Workspace binding. AgentExecution still does not decide
+what becomes memory automatically; persist explicitly from the execution side:
+
+```python
+workspace_record = await execution.async_record_workspace(
+    collection="observations",
+    kind="agent_execution_observation",
+    content={"result": data},
+    checkpoint=True,
+)
+```
+
+This writes through the existing generic Workspace APIs and updates
+`meta["workspace_refs"]` with the record and checkpoint ids. Workspace remains
+the durable substrate and does not need to know AgentExecution semantics. Call
+`workspace.build_context(...)` for the next step.
+
+For development diagnostics, attach an EventCenter observation hook or
+temporarily enable console details:
+
+```python
+Agently.event_center.register_hook(print, event_types=None, hook_name="debug")
+agent.set_settings("debug", "detail")
+```
+
+Use this only while debugging route selection, model requests, ActionRuntime, or
+Workspace persistence. Remove debug hooks/settings from examples and production
+snippets once the problem is understood.
+
 ## Submitted Dynamic Task Input
 
 Submitted Dynamic Task DAGs keep using DAG runtime placeholders such as

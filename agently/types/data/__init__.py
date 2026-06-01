@@ -70,6 +70,9 @@ from .response import (
 from .event import (
     ObservationEventLevel,
     RuntimeEventLevel,
+    EventDeliveryMode,
+    EventDispatchMode,
+    EventDeliveryPolicy,
     RunKind,
     ErrorInfoDict,
     RunContextDict,
@@ -79,6 +82,7 @@ from .event import (
     RunContext,
     ObservationEvent,
     RuntimeEvent,
+    RuntimeEventHook,
     EventHook,
     ObservationEventHook,
 )
@@ -147,4 +151,16 @@ from .workspace import (
     WorkspaceRecallPlan,
     WorkspaceRecordRef,
     WorkspaceSearchResult,
+)
+
+from .agent_execution import (
+    AgentExecutionDiagnostics,
+    AgentExecutionLineage,
+    AgentExecutionLimits,
+    AgentExecutionMeta,
+    AgentExecutionMode,
+    AgentExecutionStatus,
+    AgentExecutionStreamMeta,
+    AgentExecutionWorkspaceRecord,
+    AgentExecutionWorkspaceRefs,
 )

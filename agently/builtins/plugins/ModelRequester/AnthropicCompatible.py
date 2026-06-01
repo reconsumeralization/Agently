@@ -24,6 +24,7 @@ from stamina import retry
 
 from agently.types.plugins import ModelRequester
 from agently.types.data import AgentlyRequestData, SerializableValue
+from agently.core.AgentExecution import RuntimeStageStallError
 from agently.utils import DataFormatter, SettingsNamespace
 
 if TYPE_CHECKING:
@@ -143,6 +144,22 @@ class AnthropicCompatible(ModelRequester):
     def _should_use_first_token_timeout(self, request_data: "AgentlyRequestData") -> bool:
         return self._get_timeout_mode() == "first_token" and bool(request_data.stream)
 
+    def _build_stream_stall_error(
+        self,
+        *,
+        timeout_seconds: float,
+        message: str,
+    ) -> RuntimeStageStallError:
+        return RuntimeStageStallError(
+            message,
+            stage="response_first_event",
+            status="stalled",
+            idle_seconds=timeout_seconds,
+            timeout_seconds=timeout_seconds,
+            provider=self.name,
+            model=cast(str | None, self.plugin_settings.get("model", None)),
+        )
+
     async def _aiter_with_first_token_timeout(
         self,
         generator: AsyncGenerator[Any, None],
@@ -158,7 +175,10 @@ class AnthropicCompatible(ModelRequester):
             first_item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
         except asyncio.TimeoutError as e:
             await generator.aclose()
-            raise TimeoutError(f"First token timeout after { timeout_seconds } seconds.") from e
+            raise self._build_stream_stall_error(
+                timeout_seconds=timeout_seconds,
+                message=f"First token timeout after { timeout_seconds } seconds.",
+            ) from e
 
         yield first_item
         async for item in generator:

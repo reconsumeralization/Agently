@@ -32,6 +32,7 @@ from agently.types.plugins import (
     ActionExecutor,
     ActionFlow,
     ActionRuntime,
+    AgentExecution,
     AgentOrchestrator,
     ExecutionEnvironmentProvider,
     SkillsExecutor,
@@ -148,6 +149,24 @@ def test_builtin_agent_orchestrator_matches_protocol():
     assert isinstance(orchestrator, AgentOrchestrator)
     for method_name in _method_names(AgentOrchestrator):
         assert callable(getattr(orchestrator, method_name))
+
+
+def test_builtin_agent_execution_matches_protocol_without_core_builtin_dependency():
+    from agently import Agently
+
+    agent = Agently.create_agent("protocol-agent-execution")
+    execution = agent.input("protocol smoke").create_execution()
+
+    assert isinstance(execution, AgentExecution)
+    assert execution.mode == "one_turn"
+    for method_name in _method_names(AgentExecution):
+        assert callable(getattr(execution, method_name))
+
+    protocol_source = (
+        Path(__file__).resolve().parents[1] / "agently" / "types" / "plugins" / "AgentExecution.py"
+    ).read_text(encoding="utf-8")
+    assert "builtins" not in protocol_source
+    assert "AgentlyAgentOrchestrator" not in protocol_source
 
 
 def test_skills_executor_does_not_embed_business_case_mappings():

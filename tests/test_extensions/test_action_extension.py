@@ -230,6 +230,38 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     assert Agently.execution_environment.list(scope="action_call") == []
 
 
+def test_action_extension_enable_shell_supports_multi_token_command_prefixes(tmp_path):
+    agent = Agently.create_agent()
+    agent.enable_shell(root=tmp_path, commands=["echo allowed"], action_id="test_prefix_bash")
+
+    allowed = agent.action.execute_action(
+        "test_prefix_bash",
+        {"cmd": "echo allowed value", "workdir": str(tmp_path)},
+    )
+    blocked = agent.action.execute_action(
+        "test_prefix_bash",
+        {"cmd": "echo denied value", "workdir": str(tmp_path)},
+    )
+
+    assert allowed.get("status") == "success"
+    assert "allowed value" in str(allowed.get("data", {}).get("stdout", ""))
+    assert blocked.get("status") == "approval_required"
+    assert blocked.get("error") == "cmd_not_allowed"
+
+
+def test_action_extension_enable_shell_uses_root_as_default_workdir(tmp_path):
+    agent = Agently.create_agent()
+    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="default_workdir_bash")
+
+    result = agent.action.execute_action(
+        "default_workdir_bash",
+        {"cmd": ["pwd"]},
+    )
+
+    assert result.get("status") == "success"
+    assert str(tmp_path) in str(result.get("data", {}).get("stdout", ""))
+
+
 def test_action_extension_enable_helper_desc_modes():
     agent = Agently.create_agent()
 
