@@ -11,12 +11,17 @@ from agently.compatibility import (
     get_skills_compatibility_manifest,
 )
 from agently.core.AgentExecution import RuntimeStageStallError
+from agently.core.AgentExecution import AgentExecutionContext
 from agently.core.ExtensionHandlers import ExtensionHandlers
 from agently.core.ModelResponseResult import ModelResponseResult
 from agently.core.Prompt import Prompt
-from agently.utils import Settings
+from agently.core.RuntimeContext import bind_runtime_context
+from agently.utils import Settings, SettingsNamespace
 from agently.types.data import StreamingData
+from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import AgentExecutionStream
 from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import HybridRoutePlanner
+from agently.builtins.plugins.ActionFlow.TriggerFlowActionFlow import TriggerFlowActionFlow
+from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
 
 
 _RUNTIME_LOG_KEYS = (
@@ -202,6 +207,221 @@ async def test_agent_execution_max_no_progress_seconds_raises_typed_stall():
     assert meta["status"] == "stalled"
     assert meta["diagnostics"]["stalls"][0]["status"] == "stalled"
     assert meta["diagnostics"]["last_progress"]["event_type"] == raised.value.last_progress_event
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_stream_output_policy_coalesces_delta_events():
+    stream = AgentExecutionStream(
+        execution_id="exec-output-policy",
+        execution_mode="task_step",
+        lineage={"task_id": "issue-intake", "step_id": "collect"},
+        output_policy={"delta_emit_interval": 1.0, "delta_max_items": 3},
+    )
+
+    await stream.emit(
+        "model.text",
+        "A",
+        delta="A",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+        meta={"response_id": "response-1", "field_path": "text"},
+    )
+    await stream.emit(
+        "model.text",
+        "AB",
+        delta="B",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+        meta={"response_id": "response-1", "field_path": "text"},
+    )
+
+    assert stream.items == []
+
+    await stream.emit(
+        "model.text",
+        "ABC",
+        delta="C",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+        meta={"response_id": "response-1", "field_path": "text"},
+    )
+
+    assert len(stream.items) == 1
+    item = stream.items[0]
+    assert item.delta == "ABC"
+    assert item.value == "ABC"
+    assert item.meta is not None
+    assert item.meta["coalesced"] is True
+    assert item.meta["coalesced_count"] == 3
+    assert item.meta["execution_id"] == "exec-output-policy"
+    assert item.meta["lineage"]["task_id"] == "issue-intake"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_stream_default_delta_path_remains_uncoalesced():
+    stream = AgentExecutionStream(
+        execution_id="exec-output-default",
+        execution_mode="one_turn",
+        output_policy={"delta_emit_interval": 0},
+    )
+
+    await stream.emit("model.text", "A", delta="A", event_type="delta", is_complete=False)
+    await stream.emit("model.text", "AB", delta="B", event_type="delta", is_complete=False)
+
+    assert [item.delta for item in stream.items] == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_output_policy_keeps_progress_visible_before_flush():
+    agent = Agently.create_agent("execution-output-policy-progress-agent")
+    execution = agent.input("stream").create_execution(
+        output_policy={"delta_emit_interval": 60.0},
+    )
+
+    await execution.emit_stream(
+        "model.text",
+        "partial",
+        delta="partial",
+        event_type="delta",
+        is_complete=False,
+        route="model_request",
+    )
+
+    assert execution.stream.items == []
+    assert execution.execution_context.last_progress_event is not None
+    assert execution.execution_context.last_progress_event["stage"] == "model.text"
+
+    await execution.close_streams()
+
+    assert len(execution.stream.items) == 1
+    assert execution.stream.items[0].meta["coalesced"] is True
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_first_event_timeout_is_typed_stall():
+    async def slow_generator():
+        await asyncio.sleep(0.05)
+        yield {"delta": "late"}
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    requester.plugin_settings = SettingsNamespace(
+        Settings({"plugins": {"ModelRequester": {"OpenAICompatible": {"model": "deepseek-chat"}}}}),
+        "plugins.ModelRequester.OpenAICompatible",
+    )
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        async for _ in requester._aiter_with_first_token_timeout(slow_generator(), timeout_seconds=0.001):
+            pass
+
+    assert raised.value.stage == "response_first_event"
+    assert raised.value.status == "stalled"
+    assert raised.value.provider == "OpenAICompatible"
+    assert raised.value.model == "deepseek-chat"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_stream_idle_timeout_is_typed_stall():
+    async def idle_generator():
+        yield {"delta": "first"}
+        await asyncio.sleep(0.05)
+        yield {"delta": "late"}
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    requester.plugin_settings = SettingsNamespace(
+        Settings({"plugins": {"ModelRequester": {"OpenAICompatible": {"model": "deepseek-chat"}}}}),
+        "plugins.ModelRequester.OpenAICompatible",
+    )
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        async for _ in requester._aiter_with_stream_idle_timeout(idle_generator(), timeout_seconds=0.001):
+            pass
+
+    assert raised.value.stage == "response_stream"
+    assert raised.value.status == "stalled"
+    assert raised.value.provider == "OpenAICompatible"
+
+
+@pytest.mark.asyncio
+async def test_action_runtime_planning_handler_timeout_is_typed_stage_stall():
+    async def slow_planning_handler(_context, _request):
+        await asyncio.sleep(0.05)
+        return {"next_action": "response", "execution_commands": []}
+
+    agent = Agently.create_agent("action-runtime-stage-stall-agent")
+    runtime = agent.action.action_runtime
+    context = AgentExecutionContext(
+        execution_id="action-runtime-stall",
+        mode="task_step",
+        lineage={"task_id": "issue-intake", "step_id": "plan"},
+        limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 0.001},
+    )
+
+    with bind_runtime_context(agent_execution_context=context):
+        with pytest.raises(RuntimeStageStallError) as raised:
+            await runtime.async_generate_action_call(
+                prompt=agent.request.prompt,
+                settings=agent.settings,
+                action_list=[{"name": "search", "desc": "Search issues.", "kwargs": {}}],
+                planning_handler=slow_planning_handler,
+                planning_protocol="native_tool_calls",
+            )
+
+    assert raised.value.stage == "tool_call_selection"
+    assert raised.value.status == "stalled"
+    assert raised.value.planning_protocol == "native_tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_action_runtime_structured_planning_timeout_is_typed_stage_stall():
+    async def slow_planning_handler(_context, _request):
+        await asyncio.sleep(0.05)
+        return {"next_action": "response", "execution_commands": []}
+
+    agent = Agently.create_agent("action-runtime-structured-stage-stall-agent")
+    runtime = agent.action.action_runtime
+    context = AgentExecutionContext(
+        execution_id="action-runtime-structured-stall",
+        mode="task_step",
+        lineage={"task_id": "issue-intake", "step_id": "plan"},
+        limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 0.001},
+    )
+
+    with bind_runtime_context(agent_execution_context=context):
+        with pytest.raises(RuntimeStageStallError) as raised:
+            await runtime.async_generate_action_call(
+                prompt=agent.request.prompt,
+                settings=agent.settings,
+                action_list=[{"name": "search", "desc": "Search issues.", "kwargs": {}}],
+                planning_handler=slow_planning_handler,
+                planning_protocol="structured_plan",
+            )
+
+    assert raised.value.stage == "action_planning"
+    assert raised.value.status == "stalled"
+    assert raised.value.planning_protocol == "structured_plan"
+
+
+@pytest.mark.asyncio
+async def test_action_flow_close_timeout_is_typed_stage_stall():
+    flow = TriggerFlowActionFlow(plugin_manager=Agently.plugin_manager, settings=Agently.settings)
+    context = AgentExecutionContext(
+        execution_id="action-flow-close-stall",
+        mode="task_step",
+        lineage={"task_id": "issue-intake", "step_id": "execute"},
+        limits={"max_model_requests": None, "max_nested_agent_steps": 0},
+    )
+
+    with bind_runtime_context(agent_execution_context=context):
+        flow._record_agent_execution_progress("action_loop_close", "started", "structured_plan")
+        error = flow._build_action_loop_close_stall(0.001, "structured_plan")
+
+    assert error.stage == "action_loop_close"
+    assert error.status == "stalled"
+    assert error.timeout_seconds == 0.001
+    assert error.planning_protocol == "structured_plan"
 
 
 def test_agent_execution_sync_wrapper_raises_typed_stall():

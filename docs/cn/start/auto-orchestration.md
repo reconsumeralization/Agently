@@ -100,12 +100,33 @@ Agently.set_settings("response.materialization_idle_timeout", 60.0)
 ```
 
 `stream_idle_timeout` 限制首个 provider stream event 之后相邻事件之间的空闲间隔。
+首事件超时和 stream idle timeout 都会抛出 `RuntimeStageStallError`，在 requester
+能够识别时带上 provider/model 字段。
 `response.materialization_idle_timeout` 限制最终 text、data、object 或 meta 从
 response parser materialize 出来的等待时间。`None` 表示无限制；`-1` 作为兼容写法可用。
 
-`async_get_meta()` 会包含 `execution_mode`、`lineage`、`limits`、`route`、
-`route_plan`、`logs`、`diagnostics` 和 `workspace_refs`。`logs` 是跨 route
-稳定检查运行事实的位置，例如模型响应 id、ActionRuntime action records 和 artifact refs：
+高频 public delta 可以合并输出，而不影响内部 liveness 计时：
+
+```python
+execution = agent.input("Stream a concise summary.").create_execution(
+    output_policy={
+        "delta_emit_interval": 0.1,
+        "delta_max_chars": 2048,
+        "delta_max_items": 20,
+        "flush_on_done": True,
+    },
+)
+```
+
+`delta_emit_interval=0` 保持逐条 delta 输出。正数 interval 会按兼容相邻 delta
+合并，并在 interval、字符数、item 数或终止事件到达时 flush。合并后的 item 会包含
+`meta["coalesced"]`、`coalesced_count` 和 timing 字段。runtime stall 计时会在
+coalescing 之前刷新，因此 public output 被缓冲不会让健康的 stream 被误判为卡住。
+
+`async_get_meta()` 会包含 `execution_mode`、`lineage`、`limits`、
+`output_policy`、`route`、`route_plan`、`logs`、`diagnostics` 和
+`workspace_refs`。`logs` 是跨 route 稳定检查运行事实的位置，例如模型响应 id、
+ActionRuntime action records 和 artifact refs：
 
 ```python
 meta = await execution.async_get_meta()

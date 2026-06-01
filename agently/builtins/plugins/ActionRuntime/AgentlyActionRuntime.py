@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import TYPE_CHECKING, Any, cast
 
-from agently.core.RuntimeContext import get_current_tool_phase_run_context
+from agently.core.AgentExecution import RuntimeStageStallError
+from agently.core.RuntimeContext import get_current_agent_execution_context, get_current_tool_phase_run_context
 from agently.utils import FunctionShifter, SettingsNamespace
 
 if TYPE_CHECKING:
@@ -73,13 +75,37 @@ class AgentlyActionRuntime:
         selected = handler if handler is not None else self._planning_handler
         if selected is None:
             raise RuntimeError("[Agently Action] Action planning handler is required.")
-        return FunctionShifter.asyncify(selected)
+        resolved = FunctionShifter.asyncify(selected)
+
+        async def wrapped(context, request):
+            settings = context.get("settings", self.settings) if isinstance(context, dict) else self.settings
+            planning_protocol = self.resolve_planning_protocol(settings, request.get("planning_protocol"))
+            stage = "tool_call_selection" if planning_protocol == "native_tool_calls" else "action_planning"
+            return await self._run_runtime_stage(
+                stage,
+                resolved(cast(Any, context), cast(Any, request)),
+                settings=settings,
+                planning_protocol=planning_protocol,
+            )
+
+        return wrapped
 
     def resolve_execution_handler(self, handler=None):
         selected = handler if handler is not None else self._execution_handler
         if selected is None:
             raise RuntimeError("[Agently Action] Action execution handler is required.")
-        return FunctionShifter.asyncify(selected)
+        resolved = FunctionShifter.asyncify(selected)
+
+        async def wrapped(context, request):
+            settings = context.get("settings", self.settings) if isinstance(context, dict) else self.settings
+            return await self._run_runtime_stage(
+                "action_execution",
+                resolved(cast(Any, context), cast(Any, request)),
+                settings=settings,
+                planning_protocol=request.get("planning_protocol") if isinstance(request, dict) else None,
+            )
+
+        return wrapped
 
     def resolve_planning_protocol(self, settings: "Settings", planning_protocol: str | None = None):
         candidate = planning_protocol
@@ -93,6 +119,107 @@ class AgentlyActionRuntime:
         if candidate not in {"structured_plan", "native_tool_calls"}:
             return "structured_plan"
         return candidate
+
+    async def _run_runtime_stage(
+        self,
+        stage: str,
+        awaitable,
+        *,
+        settings: "Settings",
+        planning_protocol: str | None = None,
+    ):
+        context = cast(Any, get_current_agent_execution_context())
+        if callable(getattr(context, "record_progress", None)):
+            context.record_progress(
+                stage=stage,
+                status="started",
+                event_type=f"{ stage }.started",
+                meta={"planning_protocol": planning_protocol},
+            )
+        idle_limit = self._resolve_stage_idle_timeout(settings, context)
+        if idle_limit is None:
+            result = await awaitable
+            if callable(getattr(context, "record_progress", None)):
+                context.record_progress(
+                    stage=stage,
+                    status="completed",
+                    event_type=f"{ stage }.completed",
+                    meta={"planning_protocol": planning_protocol},
+                )
+            return result
+
+        task = asyncio.create_task(awaitable)
+        try:
+            while True:
+                last_progress_at = float(getattr(context, "last_progress_at", time.monotonic()))
+                timeout = max(0.0, (last_progress_at + idle_limit) - time.monotonic())
+                try:
+                    result = await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+                    if callable(getattr(context, "record_progress", None)):
+                        context.record_progress(
+                            stage=stage,
+                            status="completed",
+                            event_type=f"{ stage }.completed",
+                            meta={"planning_protocol": planning_protocol},
+                        )
+                    return result
+                except asyncio.TimeoutError as error:
+                    if task.done():
+                        return await task
+                    now = time.monotonic()
+                    idle_seconds = now - float(getattr(context, "last_progress_at", now))
+                    if idle_seconds < idle_limit:
+                        continue
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    last_event = getattr(context, "last_progress_event", None) or {}
+                    raise RuntimeStageStallError(
+                        (
+                            f"ActionRuntime stage '{ stage }' made no progress before idle deadline: "
+                            f"max_no_progress_seconds={ idle_limit }."
+                        ),
+                        stage=stage,
+                        status="stalled",
+                        idle_seconds=idle_seconds,
+                        timeout_seconds=idle_limit,
+                        last_progress_event=(
+                            str(last_event.get("event_type"))
+                            if isinstance(last_event, dict) and last_event.get("event_type") is not None
+                            else None
+                        ),
+                        planning_protocol=planning_protocol,
+                    ) from error
+        except BaseException:
+            if not task.done():
+                task.cancel()
+            raise
+
+    def _resolve_stage_idle_timeout(self, settings: "Settings", context: Any) -> float | None:
+        for namespace in (
+            SettingsNamespace(settings, "action"),
+            self.action_settings,
+            SettingsNamespace(settings, "runtime"),
+        ):
+            raw_timeout = namespace.get("stage_idle_timeout", None)
+            timeout = self._normalize_timeout(raw_timeout)
+            if timeout is not None:
+                return timeout
+        limits = getattr(context, "limits", None)
+        if isinstance(limits, dict):
+            return self._normalize_timeout(limits.get("max_no_progress_seconds"))
+        return None
+
+    @staticmethod
+    def _normalize_timeout(value: Any) -> float | None:
+        if value is None or value == -1 or value == "-1":
+            return None
+        if isinstance(value, bool):
+            return None
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout > 0 else None
 
     async def _default_structured_planning_handler(
         self,

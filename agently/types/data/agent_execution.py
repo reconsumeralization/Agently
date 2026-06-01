@@ -40,6 +40,13 @@ class AgentExecutionLimits(TypedDict, total=False):
     max_no_progress_seconds: float | None
 
 
+class AgentExecutionOutputPolicy(TypedDict, total=False):
+    delta_emit_interval: float | None
+    delta_max_chars: int | None
+    delta_max_items: int | None
+    flush_on_done: bool
+
+
 class AgentExecutionWorkspaceRefs(TypedDict, total=False):
     observations: list[str]
     artifacts: list[str]
@@ -83,6 +90,7 @@ class AgentExecutionMeta(TypedDict, total=False):
     status: AgentExecutionStatus
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
+    output_policy: AgentExecutionOutputPolicy
     route_plan: dict[str, Any]
     route: AgentExecutionRouteInfo
     close_snapshot: dict[str, Any]

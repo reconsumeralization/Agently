@@ -16,7 +16,7 @@ latest open issue list through `gh`. The host reads the framework-owned
 ActionRuntime records exposed by AgentExecution, validates the raw `gh` stdout,
 and persists the result to Workspace.
 
-Expected key output from one real DeepSeek run on 2026-05-31:
+Expected key output from one real DeepSeek run on 2026-06-01:
     provider=deepseek
     gh_available=True
     search_agent_used_bash_action=True
@@ -27,6 +27,8 @@ Expected key output from one real DeepSeek run on 2026-05-31:
     workspace_issue_ref_recorded=True
     workspace_context_item_count=1
     all_items_are_open_issues=True
+    search_stream_lineage_ok=True
+    issue_stream_lineage_ok=True
     latest_issue_numbers=[280, 278, 277, 276, 274]
 """
 
@@ -201,6 +203,11 @@ async def main():
                 "max_seconds": 90,
                 "max_no_progress_seconds": 60,
             },
+            output_policy={
+                "delta_emit_interval": 0.1,
+                "delta_max_items": 20,
+                "flush_on_done": True,
+            },
         )
     )
     search_stream_task = asyncio.create_task(collect_lineage_flags(search_repo))
@@ -263,6 +270,11 @@ async def main():
                 "max_model_requests": 3,
                 "max_seconds": 90,
                 "max_no_progress_seconds": 60,
+            },
+            output_policy={
+                "delta_emit_interval": 0.1,
+                "delta_max_items": 20,
+                "flush_on_done": True,
             },
         )
     )

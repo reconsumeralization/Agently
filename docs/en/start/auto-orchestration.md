@@ -108,14 +108,39 @@ Agently.set_settings("response.materialization_idle_timeout", 60.0)
 ```
 
 `stream_idle_timeout` bounds the gap after the first provider stream event.
+First-event timeout and stream-idle timeout both raise
+`RuntimeStageStallError` with provider/model fields when the requester can
+identify them.
 `response.materialization_idle_timeout` bounds the wait while final text, data,
 object, or meta is materialized from the response parser. `None` is unlimited;
 `-1` is accepted for compatibility.
 
-`async_get_meta()` includes `execution_mode`, `lineage`, `limits`, `route`,
-`route_plan`, `logs`, `diagnostics`, and `workspace_refs`. `logs` is the
-route-independent place to inspect runtime facts such as model response ids,
-ActionRuntime action records, and artifact refs:
+High-frequency public deltas can be coalesced without changing internal
+liveness tracking:
+
+```python
+execution = agent.input("Stream a concise summary.").create_execution(
+    output_policy={
+        "delta_emit_interval": 0.1,
+        "delta_max_chars": 2048,
+        "delta_max_items": 20,
+        "flush_on_done": True,
+    },
+)
+```
+
+`delta_emit_interval=0` preserves raw delta delivery. A positive interval
+buffers compatible adjacent deltas and flushes by interval, character count,
+item count, or terminal event. Coalesced items include `meta["coalesced"]`,
+`coalesced_count`, and timing fields. Runtime stall timers are refreshed before
+coalescing, so buffered public output does not make a healthy stream appear
+stalled.
+
+`async_get_meta()` includes `execution_mode`, `lineage`, `limits`,
+`output_policy`, `route`, `route_plan`, `logs`, `diagnostics`, and
+`workspace_refs`. `logs` is the route-independent place to inspect runtime
+facts such as model response ids, ActionRuntime action records, and artifact
+refs:
 
 ```python
 meta = await execution.async_get_meta()

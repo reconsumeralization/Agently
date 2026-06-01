@@ -77,6 +77,27 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
         ],
         "response_materialization_idle_timeout": "response.materialization_idle_timeout",
         "typed_stall_error": "RuntimeStageStallError",
+        "typed_provider_stall_stages": [
+            "response_first_event",
+            "response_stream",
+        ],
+        "action_runtime_stall_stages": [
+            "action_planning",
+            "tool_call_selection",
+            "action_execution",
+            "action_loop_close",
+        ],
+        "agent_execution_output_policy": {
+            "parameter": "output_policy",
+            "settings_path": "runtime.output",
+            "fields": [
+                "delta_emit_interval",
+                "delta_max_chars",
+                "delta_max_items",
+                "flush_on_done",
+            ],
+            "raw_delta_compatibility": "delta_emit_interval=0",
+        },
     }
     assert in_development["companions"]["skills"]["authoring_protocol"] == "agently-skills.authoring.v2"
     assert in_development["companions"]["skills"]["authoring_format"] == "standard SKILL.md only"
