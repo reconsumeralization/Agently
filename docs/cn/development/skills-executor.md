@@ -245,6 +245,19 @@ execution = await agent.async_run_skills_task(
 )
 ```
 
+当 Skills 由 Agent auto-orchestration 自动选中时，通过
+`create_execution(options=...)` 传入同一个 effort 选择：
+
+```python
+from agently.types.options import ExecutionOptions, SkillsRouteOptions
+
+execution = agent.input("Draft a release decision.").create_execution(
+    options=ExecutionOptions(
+        routes={"skills": SkillsRouteOptions(effort="normal")},
+    )
+)
+```
+
 需要完全自定义行动策略时，可以在 Skills Executor 上注册 effort strategy handler，
 再通过 `effort=` 调用。handler 会拿到 Agent runtime context、选中的 Skills plan、
 解析后的 effort config 和 output format；它可以请求模型、通过 context 调用

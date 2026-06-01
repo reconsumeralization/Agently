@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         RunContext,
         TaskDAG,
     )
+    from agently.types.options import ExecutionOptions
 
 
 class BaseAgent:
@@ -556,6 +557,7 @@ class BaseAgent:
         mode: "AgentExecutionMode | str" = "one_turn",
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: "ExecutionOptions | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
     ):
         plugin_name = str(self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator"))
@@ -566,6 +568,7 @@ class BaseAgent:
             mode=mode,
             lineage=lineage,
             limits=limits,
+            options=options,
             parent_run_context=parent_run_context,
         )
 

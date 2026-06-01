@@ -25,6 +25,7 @@ from stamina import retry
 from agently.types.plugins import ModelRequester
 from agently.types.data import AgentlyRequestData, SerializableValue
 from agently.core.AgentExecution import RuntimeStageStallError
+from agently.types.settings import AnthropicCompatibleSettings as TypedAnthropicCompatibleSettings
 from agently.utils import DataFormatter, SettingsNamespace
 
 if TYPE_CHECKING:
@@ -53,6 +54,9 @@ class AnthropicCompatibleSettings(TypedDict, total=False):
 
 class AnthropicCompatible(ModelRequester):
     name = "AnthropicCompatible"
+    SETTINGS_SCHEMAS = {
+        "plugins.ModelRequester.AnthropicCompatible": TypedAnthropicCompatibleSettings,
+    }
 
     DEFAULT_SETTINGS = {
         "$mappings": {

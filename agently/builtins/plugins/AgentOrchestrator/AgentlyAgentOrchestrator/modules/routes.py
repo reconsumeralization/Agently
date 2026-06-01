@@ -98,6 +98,11 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     agent = cast(Any, execution.agent)
     output = execution.prompt_snapshot.get("output")
     output_format = execution.prompt_snapshot.get("output_format") or "auto"
+    route_options = execution.route_options("skills")
+    effort = route_options.get("effort")
+    if effort is not None:
+        effort = str(effort)
+        execution.record_consumed_option("routes.skills.effort", effort, owner="AgentlySkillsExecutor")
     plan = await agent.async_resolve_skills_plan(
         task,
         mode=mode,
@@ -121,6 +126,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
                 plan=plan,
                 output_format=output_format,
                 stream_handler=bridge_runtime_stream,
+                effort=effort,
             )
             execution.raise_if_limit_exceeded()
             execution.close_snapshot = skills_execution.close_snapshot
@@ -151,6 +157,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         plan=plan,
         output_format=output_format,
         stream_handler=bridge_runtime_stream,
+        effort=effort,
     )
     execution.raise_if_limit_exceeded()
     for log in skills_execution.skill_logs:

@@ -2,6 +2,9 @@ from typing import Any
 import pytest
 from agently import Agently
 from agently.core import PluginManager
+from agently.types.config import options_schema_registry, settings_schema_registry
+from agently.types.options import ExecutionOptions
+from agently.types.settings import OpenAICompatibleSettings
 
 
 def test_plugin_manager():
@@ -12,6 +15,8 @@ def test_plugin_manager():
 
     class TestPromptGenerator(PromptGenerator):
         name = "Test"
+        SETTINGS_SCHEMAS = {"tests.plugin.settings": OpenAICompatibleSettings}
+        OPTIONS_SCHEMAS = {"tests.plugin.options": ExecutionOptions}
 
         def to_text(self, *args, **kwargs) -> str:
             return "OK"
@@ -23,6 +28,13 @@ def test_plugin_manager():
 
     assert plugin_manager.get_plugin_list() == {"PromptGenerator": ["Test"]}
     assert plugin_manager.get_plugin("PromptGenerator", "Test") == TestPromptGenerator
+    assert settings_schema_registry.get("tests.plugin.settings") is OpenAICompatibleSettings
+    assert options_schema_registry.get("tests.plugin.options") is ExecutionOptions
+
+    plugin_manager.unregister("PromptGenerator", TestPromptGenerator)
+
+    assert settings_schema_registry.get("tests.plugin.settings") is None
+    assert options_schema_registry.get("tests.plugin.options") is None
 
 
 if __name__ == "__main__":

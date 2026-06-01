@@ -18,6 +18,7 @@ from agently.utils import (
     StateData,
     Settings,
 )
+from agently.types.config import options_schema_registry, settings_schema_registry
 from agently.types.plugins import AgentlyPlugin, AgentlyPluginType
 
 
@@ -61,6 +62,11 @@ class PluginManager:
                 }
             }
         )
+        schema_owner = f"{ plugin_type }:{ plugin_class.name }"
+        for namespace, schema in getattr(plugin_class, "SETTINGS_SCHEMAS", {}).items():
+            settings_schema_registry.register(namespace, schema, owner=schema_owner)
+        for namespace, schema in getattr(plugin_class, "OPTIONS_SCHEMAS", {}).items():
+            options_schema_registry.register(namespace, schema, owner=schema_owner)
         if activate:
             self.settings.set(
                 f"plugins.{ plugin_type }.activate",
@@ -99,6 +105,13 @@ class PluginManager:
 
         if hasattr(plugin_class, "_on_unregister"):
             plugin_class._on_unregister()
+        schema_owner = f"{ plugin_type }:{ plugin_class.name }"
+        for namespace in getattr(plugin_class, "SETTINGS_SCHEMAS", {}):
+            if settings_schema_registry.owner(namespace) == schema_owner:
+                settings_schema_registry.unregister(namespace)
+        for namespace in getattr(plugin_class, "OPTIONS_SCHEMAS", {}):
+            if options_schema_registry.owner(namespace) == schema_owner:
+                options_schema_registry.unregister(namespace)
         del self.plugins[plugin_type][plugin_class_name]
 
     def get_plugin(self, plugin_type: AgentlyPluginType, plugin_name: str) -> AgentlyPlugin:
