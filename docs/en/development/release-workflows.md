@@ -10,6 +10,38 @@ keywords: Agently, release, GitHub Actions, PyPI, docs
 
 This page records the current main-repository automation surfaces.
 
+## Development Version And Branching
+
+Agently development work should separate three concepts:
+
+- **Current work version**: the next intended public release batch, recorded in
+  `compatibility/in-development.json`. For example, `4.1.3.3` can be the
+  current work version even when the larger roadmap target is `4.1.4`.
+- **Version target**: the product or architecture goal the current batch moves
+  toward, such as AgentTask V1 for `4.1.4`.
+- **Task branches**: implementation branches named by work type and scope, not
+  by the version number.
+
+Do not create routine development branches named after the version, such as
+`4.1.3.3` or `release/4.1.3.3`, unless the work is an actual release-prep
+branch. Use task-scoped branch names instead:
+
+- `feature/<scope>`
+- `bug-fix/<scope>`
+- `update/<scope>`
+- `refactor/<scope>`
+
+A current work version may contain several accepted task branches. Each branch
+should carry one coherent feature, fix, update, or refactor; after acceptance it
+is merged into `dev`. The version release candidate is then assembled from
+`dev`, with release notes, compatibility manifests, examples, docs, and
+companion repositories reconciled against the current work version.
+
+When a branch implements a slice of a larger roadmap target, record both facts:
+the feature spec should describe the larger target, while
+`compatibility/in-development.json` should describe the current work version
+that will publish the accepted slice.
+
 ## Documentation
 
 GitHub Pages uses the `docs/` directory from the `main` branch.

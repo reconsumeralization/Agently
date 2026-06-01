@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.4",
-  "release_train": "2026-06-4.1.4-dev",
-  "notes": "Current public development-line manifest for typed settings/options contracts, AgentExecution options, layered model profiles, and API key pools.",
+  "target_version": "4.1.3.3",
+  "release_train": "2026-06-4.1.3.3-dev",
+  "notes": "Current public development-line manifest for the 4.1.3.3 work batch preparing the 4.1.4 AgentTask target, including typed settings/options contracts, AgentExecution options, layered model profiles, and API key pools.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
