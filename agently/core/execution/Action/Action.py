@@ -69,11 +69,12 @@ from agently.types.plugins import (
     StandardActionPlanningHandler,
 )
 from agently.utils import DeprecationWarnings, FunctionShifter, Settings, SettingsNamespace
-from agently.utils import DataFormatter, LazyImport
-from agently.utils.MCP import normalize_mcp_transport
+from agently.utils import DataFormatter
 
 from .ActionArtifactManager import ActionArtifactManager
 from .ActionDispatcher import ActionDispatcher
+from .ActionFlowController import ActionFlowController
+from .ActionResourceRegistrar import ActionResourceRegistrar
 from .ActionNormalization import (
     is_execution_error_result,
     is_next_action_path,
@@ -144,6 +145,8 @@ class Action:
         self.action_funcs: dict[str, Callable[..., Any]] = {}
         self.tool_funcs = self.action_funcs
         self._artifact_manager = ActionArtifactManager(registry=self.action_registry)
+        self._resource_registrar = ActionResourceRegistrar(self)
+        self._flow_controller = ActionFlowController(self)
         self._action_artifacts = self._artifact_manager._artifacts  # backward-compat alias
         self._deprecated_action_manager = _DeprecatedActionManagerProxy(self, "action_manager")
         self._deprecated_tool_manager = _DeprecatedActionManagerProxy(self, "tool_manager")
@@ -725,49 +728,17 @@ class Action:
         replay_safe: bool = True,
         expose_to_model: bool = True,
     ):
-        LazyImport.import_package("fastmcp", version_constraint=">=3")
-        from fastmcp import Client
-
-        transport = normalize_mcp_transport(transport, headers=headers)
-        normalized_tags = self._normalize_tags(tags)
-
-        async with Client(transport) as client:  # type: ignore[arg-type]
-            tool_list = await client.list_tools()
-            for tool in tool_list:
-                tool_tags = []
-                if hasattr(tool, "_meta") and tool._meta:  # type: ignore[attr-defined]
-                    tool_tags = tool._meta.get("_fastmcp", {}).get("tags", [])  # type: ignore[index]
-                tool_tags.extend(normalized_tags)
-                self.register_action(
-                    action_id=tool.name,
-                    desc=tool.description,
-                    kwargs=DataFormatter.from_schema_to_kwargs_format(tool.inputSchema),
-                    returns=DataFormatter.from_schema_to_kwargs_format(tool.outputSchema),
-                    executor=self._create_executor(
-                        "MCPActionExecutor",
-                        action_id=tool.name,
-                        transport=transport,
-                    ),
-                    tags=tool_tags,
-                    default_policy=default_policy,
-                    side_effect_level=side_effect_level,
-                    approval_required=approval_required,
-                    sandbox_required=sandbox_required,
-                    replay_safe=replay_safe,
-                    expose_to_model=expose_to_model,
-                    execution_environments=cast(list[ExecutionEnvironmentRequirement], [
-                        {
-                            "requirement_id": f"mcp:{ tool.name }",
-                            "kind": "mcp",
-                            "scope": "agent",
-                            "resource_key": tool.name,
-                            "config": {"transport": transport},
-                            "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
-                            "approval_required": approval_required,
-                        }
-                    ]),
-                )
-        return self
+        return await self._resource_registrar.async_use_action_mcp(
+            transport,
+            headers=headers,
+            tags=tags,
+            default_policy=default_policy,
+            side_effect_level=side_effect_level,
+            approval_required=approval_required,
+            sandbox_required=sandbox_required,
+            replay_safe=replay_safe,
+            expose_to_model=expose_to_model,
+        )
 
     async def async_use_mcp(
         self,
@@ -776,8 +747,7 @@ class Action:
         headers: dict[str, str] | None = None,
         tags: str | list[str] | None = None,
     ):
-        await self.async_use_action_mcp(transport, headers=headers, tags=tags)
-        return self
+        return await self._resource_registrar.async_use_mcp(transport, headers=headers, tags=tags)
 
     def register_python_sandbox_action(
         self,
@@ -791,37 +761,16 @@ class Action:
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
     ):
-        self.register_action(
+        return self._resource_registrar.register_python_sandbox_action(
             action_id=action_id,
             desc=desc,
-            kwargs={"python_code": (str, "Python code to execute in the sandbox.")},
-            executor=self._create_executor(
-                "PythonSandboxActionExecutor",
-                preset_objects=preset_objects,
-                base_vars=base_vars,
-                allowed_return_types=allowed_return_types,
-            ),
             tags=tags,
             default_policy=default_policy,
-            side_effect_level="exec",
-            sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
-                {
-                    "requirement_id": f"python:{ action_id }",
-                    "kind": "python",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "preset_objects": preset_objects,
-                        "base_vars": base_vars,
-                        "allowed_return_types": allowed_return_types,
-                    },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
-                }
-            ]),
+            preset_objects=preset_objects,
+            base_vars=base_vars,
+            allowed_return_types=allowed_return_types,
         )
-        return self
 
     def register_bash_sandbox_action(
         self,
@@ -836,43 +785,17 @@ class Action:
         timeout: int = 20,
         env: dict[str, str] | None = None,
     ):
-        self.register_action(
+        return self._resource_registrar.register_bash_sandbox_action(
             action_id=action_id,
             desc=desc,
-            kwargs={
-                "cmd": ("str | list[str]", "Command to run inside the sandbox."),
-                "workdir": ("str | None", "Working directory inside allowed roots."),
-                "allow_unsafe": ("bool", "Bypass the command allowlist."),
-            },
-            executor=self._create_executor(
-                "BashSandboxActionExecutor",
-                allowed_cmd_prefixes=allowed_cmd_prefixes,
-                allowed_workdir_roots=allowed_workdir_roots,
-                timeout=timeout,
-                env=env,
-            ),
             tags=tags,
             default_policy=default_policy,
-            side_effect_level="exec",
-            sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
-                {
-                    "requirement_id": f"bash:{ action_id }",
-                    "kind": "bash",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "allowed_cmd_prefixes": allowed_cmd_prefixes,
-                        "allowed_workdir_roots": allowed_workdir_roots,
-                        "timeout": timeout,
-                        "env": env,
-                    },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
-                }
-            ]),
+            allowed_cmd_prefixes=allowed_cmd_prefixes,
+            allowed_workdir_roots=allowed_workdir_roots,
+            timeout=timeout,
+            env=env,
         )
-        return self
 
     def register_nodejs_action(
         self,
@@ -887,36 +810,17 @@ class Action:
         timeout: int = 20,
         env: dict[str, str] | None = None,
     ):
-        self.register_action(
+        return self._resource_registrar.register_nodejs_action(
             action_id=action_id,
             desc=desc,
-            kwargs={
-                "js_code": (str, "JavaScript code to execute with Node.js."),
-                "args": ("list[str]", "Optional command-line arguments."),
-            },
-            executor=self._create_executor("NodeJSActionExecutor", timeout=timeout),
             tags=tags,
             default_policy=default_policy,
-            side_effect_level="exec",
-            sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
-                {
-                    "requirement_id": f"node:{ action_id }",
-                    "kind": "node",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "node_binary": node_binary,
-                        "cwd": cwd,
-                        "timeout": timeout,
-                        "env": env,
-                    },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
-                }
-            ]),
+            node_binary=node_binary,
+            cwd=cwd,
+            timeout=timeout,
+            env=env,
         )
-        return self
 
     def register_docker_action(
         self,
@@ -931,39 +835,17 @@ class Action:
         docker_binary: str = "docker",
         default_args: list[str] | None = None,
     ):
-        self.register_action(
+        return self._resource_registrar.register_docker_action(
             action_id=action_id,
             desc=desc,
-            kwargs={
-                "image": ("str | None", "Docker image. Defaults to the configured image."),
-                "cmd": ("str | list[str]", "Command to run in the container."),
-                "workdir": ("str | None", "Container working directory."),
-                "env": ("dict[str, str] | None", "Container environment variables."),
-            },
-            executor=self._create_executor("DockerActionExecutor", image=image, timeout=timeout),
             tags=tags,
             default_policy=default_policy,
-            side_effect_level="exec",
-            approval_required=True,
-            sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
-                {
-                    "requirement_id": f"docker:{ action_id }",
-                    "kind": "docker",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "docker_binary": docker_binary,
-                        "timeout": timeout,
-                        "default_args": default_args or [],
-                    },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
-                    "approval_required": True,
-                }
-            ]),
+            image=image,
+            timeout=timeout,
+            docker_binary=docker_binary,
+            default_args=default_args,
         )
-        return self
 
     def register_sqlite_action(
         self,
@@ -977,57 +859,28 @@ class Action:
         read_only: bool = True,
         uri: bool = False,
     ):
-        merged_policy: ActionPolicy = cast(ActionPolicy, dict(default_policy or {}))
-        merged_policy.setdefault("read_only", read_only)
-        self.register_action(
+        return self._resource_registrar.register_sqlite_action(
             action_id=action_id,
             desc=desc,
-            kwargs={
-                "query": (str, "SQLite query to execute."),
-                "params": ("list | dict | None", "Optional SQLite query parameters."),
-            },
-            executor=self._create_executor("SQLiteActionExecutor", read_only=read_only),
             tags=tags,
-            default_policy=merged_policy,
-            side_effect_level="read" if read_only else "write",
+            default_policy=default_policy,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
-                {
-                    "requirement_id": f"sqlite:{ action_id }",
-                    "kind": "sqlite",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "database": database,
-                        "uri": uri,
-                    },
-                    "policy": cast(ExecutionEnvironmentPolicy, merged_policy),
-                }
-            ]),
+            database=database,
+            read_only=read_only,
+            uri=uri,
         )
-        return self
 
     def _create_action_runtime(self, plugin_name: str | None = None):
-        runtime_name = plugin_name
-        if not isinstance(runtime_name, str) or runtime_name.strip() == "":
-            runtime_name = str(self.settings["plugins.ActionRuntime.activate"])
-        runtime_plugin = cast(type[Any], self.plugin_manager.get_plugin("ActionRuntime", runtime_name))
-        return runtime_plugin(action=self, plugin_manager=self.plugin_manager, settings=self.settings)
+        return self._flow_controller.create_action_runtime(plugin_name)
 
     def create_action_runtime(self, plugin_name: str, **kwargs):
-        runtime_plugin = cast(type[Any], self.plugin_manager.get_plugin("ActionRuntime", plugin_name))
-        return runtime_plugin(action=self, plugin_manager=self.plugin_manager, settings=self.settings, **kwargs)
+        return self._flow_controller.create_named_action_runtime(plugin_name, **kwargs)
 
     def _create_action_flow(self, plugin_name: str | None = None):
-        flow_name = plugin_name
-        if not isinstance(flow_name, str) or flow_name.strip() == "":
-            flow_name = str(self.settings["plugins.ActionFlow.activate"])
-        flow_plugin = cast(type[Any], self.plugin_manager.get_plugin("ActionFlow", flow_name))
-        return flow_plugin(plugin_manager=self.plugin_manager, settings=self.settings)
+        return self._flow_controller.create_action_flow(plugin_name)
 
     def create_action_flow(self, plugin_name: str, **kwargs):
-        flow_plugin = cast(type[Any], self.plugin_manager.get_plugin("ActionFlow", plugin_name))
-        return flow_plugin(plugin_manager=self.plugin_manager, settings=self.settings, **kwargs)
+        return self._flow_controller.create_named_action_flow(plugin_name, **kwargs)
 
     def set_loop_options(
         self,
@@ -1036,63 +889,44 @@ class Action:
         concurrency: int | None = None,
         timeout: float | None = None,
     ):
-        if max_rounds is not None:
-            if not isinstance(max_rounds, int) or max_rounds < 0:
-                raise ValueError("max_rounds must be an integer >= 0.")
-            self.action_settings.set("loop.max_rounds", max_rounds)
-            self.tool_settings.set("loop.max_rounds", max_rounds)
-        if concurrency is not None:
-            if not isinstance(concurrency, int) or concurrency <= 0:
-                raise ValueError("concurrency must be an integer > 0.")
-            self.action_settings.set("loop.concurrency", concurrency)
-            self.tool_settings.set("loop.concurrency", concurrency)
-        if timeout is not None:
-            if not isinstance(timeout, (int, float)) or timeout <= 0:
-                raise ValueError("timeout must be a number > 0.")
-            self.action_settings.set("loop.timeout", float(timeout))
-            self.tool_settings.set("loop.timeout", float(timeout))
-        return self
+        return self._flow_controller.set_loop_options(
+            max_rounds=max_rounds,
+            concurrency=concurrency,
+            timeout=timeout,
+        )
 
     def register_action_planning_handler(self, handler: "ActionPlanningHandler | None"):
-        self.action_runtime.register_action_planning_handler(handler)
-        return self
+        return self._flow_controller.register_action_planning_handler(handler)
 
     def register_plan_analysis_handler(self, handler: "ActionPlanningHandler | None"):
         return self.register_action_planning_handler(handler)
 
     def register_action_execution_handler(self, handler: "ActionExecutionHandler | None"):
-        self.action_runtime.register_action_execution_handler(handler)
-        return self
+        return self._flow_controller.register_action_execution_handler(handler)
 
     def register_tool_execution_handler(self, handler: "ActionExecutionHandler | None"):
         return self.register_action_execution_handler(handler)
 
     def _resolve_planning_protocol(self, settings: "Settings", planning_protocol: str | None = None):
-        return self.action_runtime.resolve_planning_protocol(settings, planning_protocol)
+        return self._flow_controller.resolve_planning_protocol(settings, planning_protocol)
 
     async def _default_structured_planning_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
-        runtime = cast(Any, self.action_runtime)
-        return await runtime._default_structured_planning_handler(context, request)
+        return await self._flow_controller.default_structured_planning_handler(context, request)
 
     async def _default_native_tool_call_planning_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
-        runtime = cast(Any, self.action_runtime)
-        return await runtime._default_native_tool_call_planning_handler(context, request)
+        return await self._flow_controller.default_native_tool_call_planning_handler(context, request)
 
     async def _default_planning_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
-        runtime = cast(Any, self.action_runtime)
-        return await runtime._default_planning_handler(context, request)
+        return await self._flow_controller.default_planning_handler(context, request)
 
     async def _default_plan_analysis_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
-        runtime = cast(Any, self.action_runtime)
-        return await runtime._default_structured_planning_handler(context, request)
+        return await self._flow_controller.default_structured_planning_handler(context, request)
 
     async def _default_action_execution_handler(self, context: ActionRunContext, request: ActionExecutionRequest):
-        runtime = cast(Any, self.action_runtime)
-        return await runtime._default_action_execution_handler(context, request)
+        return await self._flow_controller.default_action_execution_handler(context, request)
 
     async def _default_tool_execution_handler(self, context: ActionRunContext, request: ActionExecutionRequest):
-        runtime = cast(Any, self.action_runtime)
-        return await runtime._default_action_execution_handler(context, request)
+        return await self._flow_controller.default_action_execution_handler(context, request)
 
     @staticmethod
     def _is_next_action_path(path: Any) -> bool:
@@ -1135,7 +969,7 @@ class Action:
         max_rounds: int | None = None,
         planning_protocol: str | None = None,
     ) -> list[ActionCall]:
-        return await self.action_runtime.async_generate_action_call(
+        return await self._flow_controller.async_generate_action_call(
             prompt=prompt,
             settings=settings,
             action_list=action_list,
@@ -1161,7 +995,7 @@ class Action:
         round_index: int = 0,
         max_rounds: int | None = None,
     ) -> list[ActionCall]:
-        return await self.action_runtime.async_generate_tool_command(
+        return await self._flow_controller.async_generate_tool_command(
             prompt=prompt,
             settings=settings,
             tool_list=tool_list,
@@ -1199,9 +1033,7 @@ class Action:
         return should_continue(decision, round_index=round_index, max_rounds=max_rounds)
 
     async def _async_emit_action_flow_observation(self, observation: dict[str, Any]):
-        from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
-
-        await async_emit_action_flow_observation(observation)
+        await self._flow_controller.async_emit_action_flow_observation(observation)
 
     async def async_plan_and_execute(
         self,
@@ -1221,39 +1053,22 @@ class Action:
         timeout: float | None = None,
         planning_protocol: str | None = None,
     ) -> list["ActionResult"]:
-        resolved_action_list = action_list if isinstance(action_list, list) else tool_list if isinstance(tool_list, list) else []
-        if len(resolved_action_list) == 0:
-            return []
-
-        selected_planning_handler = planning_handler if planning_handler is not None else plan_analysis_handler
-        selected_execution_handler = (
-            action_execution_handler if action_execution_handler is not None else tool_execution_handler
+        return await self._flow_controller.async_plan_and_execute(
+            prompt=prompt,
+            settings=settings,
+            action_list=action_list,
+            tool_list=tool_list,
+            agent_name=agent_name,
+            parent_run_context=parent_run_context,
+            planning_handler=planning_handler,
+            plan_analysis_handler=plan_analysis_handler,
+            action_execution_handler=action_execution_handler,
+            tool_execution_handler=tool_execution_handler,
+            max_rounds=max_rounds,
+            concurrency=concurrency,
+            timeout=timeout,
+            planning_protocol=planning_protocol,
         )
-
-        run_kwargs = {
-            "action": self,
-            "prompt": prompt,
-            "settings": settings,
-            "action_list": resolved_action_list,
-            "agent_name": agent_name,
-            "parent_run_context": parent_run_context,
-            "planning_handler": self.action_runtime.resolve_planning_handler(selected_planning_handler),
-            "execution_handler": self.action_runtime.resolve_execution_handler(selected_execution_handler),
-            "max_rounds": max_rounds,
-            "concurrency": concurrency,
-            "timeout": timeout,
-            "planning_protocol": planning_protocol,
-        }
-        try:
-            accepts_runtime_observation_handler = (
-                "runtime_observation_handler" in inspect.signature(self.action_flow.async_run).parameters
-            )
-        except (TypeError, ValueError):
-            accepts_runtime_observation_handler = False
-        if accepts_runtime_observation_handler:
-            run_kwargs["runtime_observation_handler"] = self._async_emit_action_flow_observation
-
-        return await self.action_flow.async_run(**run_kwargs)
 
 
 ToolCommand = ActionCall
