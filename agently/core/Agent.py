@@ -18,11 +18,10 @@ import uuid
 from collections.abc import Mapping
 from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
 
-from agently.core.Prompt import Prompt
-from agently.core.ExtensionHandlers import ExtensionHandlers
-from agently.core.DynamicTask import DynamicTask
-from agently.core.ModelRequest import ModelRequest, _resolve_quick_prompt_input, _UNSET
-from agently.core.RuntimeContext import resolve_parent_run_context
+from agently.core.extension import ExtensionHandlers
+from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
+from agently.core.orchestration import DynamicTask
+from agently.core.runtime import resolve_parent_run_context
 from agently.utils import DataFormatter, Settings
 
 if TYPE_CHECKING:
@@ -381,7 +380,7 @@ class BaseAgent:
         level: str = "INFO",
         error: BaseException | None = None,
     ):
-        from agently.core.RuntimeEvents import emit_session_observation
+        from agently.core.runtime import emit_session_observation
 
         emit_session_observation(
             {
@@ -405,7 +404,7 @@ class BaseAgent:
         level: str = "INFO",
         error: BaseException | None = None,
     ):
-        from agently.core.RuntimeEvents import async_emit_session_observation
+        from agently.core.runtime import async_emit_session_observation
 
         await async_emit_session_observation(
             {

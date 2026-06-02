@@ -19,8 +19,8 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, cast
 
-from agently.core.AgentExecution import RuntimeStageStallError
-from agently.core.RuntimeContext import get_current_agent_execution_context, get_current_tool_phase_run_context
+from agently.core.application.AgentExecution import RuntimeStageStallError
+from agently.core.runtime.RuntimeContext import get_current_agent_execution_context, get_current_tool_phase_run_context
 from agently.utils import FunctionShifter, SettingsNamespace
 
 if TYPE_CHECKING:

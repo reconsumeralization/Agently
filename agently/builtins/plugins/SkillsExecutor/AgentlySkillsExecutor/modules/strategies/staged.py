@@ -26,7 +26,7 @@ import re
 import uuid
 from typing import Any
 
-from agently.core.TriggerFlow import TriggerFlow
+from agently.core.orchestration.TriggerFlow import TriggerFlow
 from agently.builtins.blocks import ReasonBlock, ReadBlock, FinalizeBlock
 from agently.utils.Settings import Settings
 

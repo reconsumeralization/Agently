@@ -17,7 +17,7 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Coroutine, Literal, ParamSpec, TypeVar, cast, get_args, get_origin, get_type_hints
 
-from agently.core.Action import ActionDispatcher, ActionRegistry
+from agently.core.execution.Action import ActionDispatcher, ActionRegistry
 from agently.types.plugins import ToolManager
 from agently.utils import DataFormatter, DeprecationWarnings, FunctionShifter, LazyImport, SettingsNamespace
 from agently.utils.MCP import normalize_mcp_transport

@@ -74,7 +74,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
             "official_event_producer": "core",
             "plugin_contract": "plugins return observations/errors/decisions; core maps them to official RuntimeEvent records",
             "builtin_direct_emitters_for_official_events": False,
-            "agent_execution_stream_owner": "agently.core.AgentExecution.AgentExecutionStream",
+            "agent_execution_stream_owner": "agently.core.application.AgentExecution.AgentExecutionStream",
         },
         "runtime_naming": {
             "agent_turn": "run_kind for one Agent-facing turn",

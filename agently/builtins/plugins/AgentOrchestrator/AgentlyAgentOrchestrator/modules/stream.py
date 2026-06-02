@@ -14,6 +14,6 @@
 
 """Compatibility import for the core-owned AgentExecution stream bridge."""
 
-from agently.core.AgentExecution import AgentExecutionStream
+from agently.core.application.AgentExecution import AgentExecutionStream
 
 __all__ = ["AgentExecutionStream"]

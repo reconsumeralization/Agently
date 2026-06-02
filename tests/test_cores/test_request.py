@@ -10,7 +10,7 @@ from contextlib import suppress
 from typing import AsyncGenerator, cast
 
 from agently import Agently
-from agently.core.ModelRequest import ModelRequest
+from agently.core.model.ModelRequest import ModelRequest
 from agently.utils import SerializableStateDataNamespace
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
     ModelRequesterSettings,

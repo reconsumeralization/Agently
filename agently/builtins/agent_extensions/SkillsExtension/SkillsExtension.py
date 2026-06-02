@@ -269,7 +269,7 @@ class SkillsExtension(BaseAgent):
         In *sequential* mode, TriggerFlow executes each plan in order and folds
         the previous result into the next task context.
         """
-        from agently.core.TriggerFlow import TriggerFlow
+        from agently.core.orchestration.TriggerFlow import TriggerFlow
 
         if mode == "sequential":
             flow = TriggerFlow(name="skills-plans-sequential")

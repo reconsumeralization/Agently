@@ -27,8 +27,8 @@ from agently.types.data import (
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.Action import Action
-    from agently.core.PluginManager import PluginManager
+    from agently.core.execution.Action import Action
+    from agently.core.extension.PluginManager import PluginManager
     from agently.utils import Settings
 
 

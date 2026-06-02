@@ -19,8 +19,8 @@ import inspect
 import time
 from typing import TYPE_CHECKING, Any
 
-from agently.core.AgentExecution import RuntimeStageStallError
-from agently.core.RuntimeContext import bind_runtime_context, get_current_agent_execution_context, resolve_parent_run_context
+from agently.core.application.AgentExecution import RuntimeStageStallError
+from agently.core.runtime.RuntimeContext import bind_runtime_context, get_current_agent_execution_context, resolve_parent_run_context
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -62,7 +62,7 @@ class TriggerFlowActionFlow:
         planning_protocol: str | None = None,
         runtime_observation_handler: "ActionFlowObservationHandler | None" = None,
     ) -> list["ActionResult"]:
-        from agently.core.TriggerFlow import TriggerFlow
+        from agently.core.orchestration.TriggerFlow import TriggerFlow
         from agently.types.data import RunContext
 
         if planning_handler is None:

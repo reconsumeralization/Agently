@@ -4,7 +4,7 @@ import json
 import pytest
 
 from agently import Agently
-from agently.core.Prompt import Prompt
+from agently.core.model.Prompt import Prompt
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import (
     AnthropicCompatible,

@@ -17,11 +17,11 @@ from uuid import uuid4
 from typing import TYPE_CHECKING, Sequence
 
 from agently.core import BaseAgent, Session
-from agently.core.RuntimeContext import get_current_request_run_context
+from agently.core.runtime.RuntimeContext import get_current_request_run_context
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.ModelRequest import ModelResponseResult
+    from agently.core.model.ModelRequest import ModelResponseResult
     from agently.types.data import ChatMessage, ChatMessageDict
     from agently.utils import Settings
     from agently.types.plugins import SessionAnalysisHandler, SessionResizeHandler

@@ -25,7 +25,7 @@ from httpx import AsyncClient, HTTPStatusError, ReadError, RequestError, Timeout
 from httpx_sse import SSEError, aconnect_sse
 from stamina import retry
 
-from agently.core.AgentExecution import RuntimeStageStallError
+from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.types.data import AgentlyRequestData, SerializableValue
 from agently.utils import DataFormatter
 

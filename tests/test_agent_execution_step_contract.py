@@ -9,7 +9,7 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.core.AgentExecution import AgentExecutionLimitExceeded
+from agently.core.application.AgentExecution import AgentExecutionLimitExceeded
 from agently.types.data import AgentlyRequestData
 from agently.types.options import ExecutionOptions, SkillsRouteOptions
 from agently.utils import DataFormatter

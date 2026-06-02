@@ -4,7 +4,7 @@ from textwrap import indent
 
 from itertools import repeat
 
-from agently.core.Session import Session
+from agently.core.session import Session
 
 
 @pytest.mark.asyncio

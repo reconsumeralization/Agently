@@ -30,7 +30,7 @@ Agently 的 action 栈在编排层之下有三个可替换插件层：
 | `ActionExecutor` | 单个 action 实际怎么跑 | local function、MCP、Python/Bash sandbox、Search/Browse、Node.js、Docker、SQLite executors |
 | `ExecutionEnvironment` | executor 调用前需要准备的托管执行依赖 | MCP、Bash、Python、Node、Docker、Browser、SQLite providers |
 
-`agently.core.Action` 是门面，连线：
+`Action` 是 `agently.core` 根导出的执行门面，连线：
 
 - `ActionRegistry` 与 `ActionDispatcher`（稳定核心原语）
 - 一个 active `ActionRuntime` 插件

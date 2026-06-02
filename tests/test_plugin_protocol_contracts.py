@@ -157,7 +157,7 @@ def test_builtin_agent_orchestrator_matches_protocol():
 
 def test_builtin_agent_execution_matches_protocol_without_core_builtin_dependency():
     from agently import Agently
-    from agently.core.AgentExecution import AgentExecutionStream
+    from agently.core.application.AgentExecution import AgentExecutionStream
     from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import (
         AgentExecutionStream as CompatAgentExecutionStream,
     )
@@ -209,7 +209,11 @@ def test_model_requester_runtime_handler_contract_imports_and_ownership():
     forbidden_terms = [
         "from agently.base import async_emit_runtime",
         "from agently.base import emit_runtime",
-        "from agently.core.RuntimeEvents import",
+        "from agently.core.runtime import async_emit_action_flow_observation",
+        "from agently.core.runtime import async_emit_model_requester_error",
+        "from agently.core.runtime import async_emit_response_parser_observation",
+        "from agently.core.runtime import async_emit_session_observation",
+        "from agently.core.runtime import emit_session_observation",
         "await async_emit_runtime(",
         "emit_runtime(",
         "event_center.create_emitter(",
