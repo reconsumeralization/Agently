@@ -26,44 +26,34 @@ def basic_delta_streaming():
 
 ## Instant / Streaming-Parse for Structured Output
 def instant_structured_streaming():
-    # Agently provides instant streaming for structured output.
-    # Stream nodes as they are generated, no need to wait for the whole response.
-    # Great for dashboards, partial rendering, or realtime UI updates.
-    # Two typical scenes:
-    # 1) In chat UIs, some content is for users while other nodes drive functions,
-    #    special UI cards, or animations without being shown directly.
-    # 2) In complex workflows (e.g., planning multiple tasks), you can trigger
-    #    downstream work as soon as one task is generated, instead of waiting
-    #    for the full plan.
+    # Instant streaming emits structured StreamingData patches while the
+    # response is still generating. It is useful for dashboards, SSE/WebSocket
+    # UIs, long reports, and workflow panels that can render one field before
+    # the full structured result is ready.
     gen = (
-        agent.input("Explain recursion with a short definition and two tips.")
+        agent.input(
+            "Turn this support note into a customer-safe update: "
+            "enterprise billing export failed twice; CFO is waiting."
+        )
         .output(
             {
-                "definition": (str, "Short definition"),
-                "tips": [(str, "Short tip")],
-            }
+                "status_summary": (str, "One sentence status for a support dashboard", True),
+                "risk_flags": [(str, "Concrete risk flag", True)],
+                "next_actions": [(str, "Support team action", True)],
+                "customer_reply": (str, "Polished reply to the customer", True),
+            },
+            format="json",
         )
         .get_generator(type="instant")
     )
-    current_path = None
-    change_path = False
+
+    field_buffers: dict[str, str] = {}
     for data in gen:
-        if current_path != data.path:
-            current_path = data.path
-            change_path = True
-        else:
-            change_path = False
-        if data.wildcard_path == "tips[*]":
-            if change_path:
-                index = data.path.split("[", 1)[1].split("]", 1)[0]
-                print(f"\nTip {int(index) + 1}: ", end="", flush=True)
-            if data.delta:
-                print(data.delta, end="", flush=True)
-        if data.path == "definition":
-            if change_path:
-                print("\nDefinition: ", end="", flush=True)
-            if data.delta:
-                print(data.delta, end="", flush=True)
+        if data.delta:
+            field_buffers[data.path] = field_buffers.get(data.path, "") + data.delta
+            print(f"[patch] {data.path}: +{data.delta!r}")
+        if data.is_complete:
+            print(f"[done]  {data.path}: {data.value!r}")
     print()
 
 
@@ -117,7 +107,11 @@ async def async_streaming():
 #      .path          : dotted key path of the currently streaming field ("definition", "tips[0]", …)
 #      .wildcard_path : path with array indices replaced by * ("tips[*]")
 #      .delta         : the latest token fragment at this path
-#    Use wildcard_path to dispatch rendering per field type without hard-coding indices.
+#      .value         : parser's current value at this path
+#      .is_complete   : True when this field/path is closed
+#    Use wildcard_path to dispatch rendering per field type without hard-coding
+#    indices. Treat instant events as provisional UI state; read get_data() /
+#    async_get_data() at the end for durable business state.
 #
 # 3. type="specific" — yields (event, data) tuples; recognized event names:
 #      "delta"           : text token

@@ -16,18 +16,21 @@ Agently is async-native at the runtime layer. Sync methods are convenience wrapp
 ## When async is the default
 
 - Inside FastAPI, ASGI workers, SSE / WebSocket handlers, or any code already running in `asyncio`.
-- Streaming UI where you want to react to fields as they complete instead of waiting for the full response.
+- Streaming UI where you want to react to field deltas instead of waiting for the full response.
 - Combining model output with TriggerFlow events, runtime stream, or external pubsub.
 
 ## Recommended pairing
 
 The combination worth learning first:
 
-- `response.get_async_generator(type="instant")` — yields completed structured nodes (not raw tokens).
+- `response.get_async_generator(type="instant")` — yields structured `StreamingData` patches with `path`, `delta`, `value`, and `is_complete`.
 - `data.async_emit(...)` — turns nodes into TriggerFlow signals.
 - `data.async_put_into_stream(...)` — forwards intermediate state to UI / SSE / logs.
 
-`instant` events are field-level: each item arrives only after its leaf has fully parsed, so downstream code never sees a half-string.
+`instant` events are field-level, not raw provider tokens. They can carry partial
+field text in `.delta` while the field is still growing, then emit a completion
+event when `.is_complete` becomes true. Treat these events as progressive UI
+state; read `async_get_data()` at the end for the durable parsed object.
 
 ## API surface map
 
@@ -63,8 +66,10 @@ async def main():
     )
 
     async for item in response.get_async_generator(type="instant"):
+        if item.delta:
+            print(item.path, "+", item.delta)
         if item.is_complete:
-            print(item.path, item.value)
+            print(item.path, "done")
 
     final = await response.async_get_data()
     print(final)

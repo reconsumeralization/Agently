@@ -32,16 +32,29 @@ downstream code relies on a specific wire shape, set the format explicitly.
 ### Instant Streaming
 
 Use `get_generator(type="instant")` or `get_async_generator(type="instant")`
-when the caller benefits from field-level updates before the full response is
-finished: progress panels, live forms, long reports with independently
-renderable sections, model-stage dashboards, or workflow UIs that can show a
-field as soon as it is complete. For one freeform text artifact, use
-`type="delta"` instead; plain text has no structured field paths for instant
-events.
+when the caller benefits from field-level structured updates before the full
+response is finished: progress panels, live forms, long reports with
+independently renderable sections, model-stage dashboards, or workflow UIs that
+can route one field while the rest of the response is still generating. For one
+freeform text artifact, use `type="delta"` instead; plain text has no structured
+field paths for instant events.
+
+`instant` events are not "final result chunks". They are `StreamingData` patches:
+
+- `path` identifies the field, such as `customer_reply` or `risk_flags[0]`;
+- `wildcard_path` normalizes indexes, such as `risk_flags[*]`;
+- `delta` is the new fragment for progressive rendering;
+- `value` is the parser's current value for that path;
+- `is_complete` / `event_type == "done"` marks a field as closed.
+
+Use the stream for provisional UI/progress. Use `get_data()` /
+`async_get_data()` after the stream for durable business state; it reads the
+cached final parse from the same response and does not issue a second model
+request.
 
 | Output Mode | Instant Support | Practical Guidance |
 |---|---|---|
-| `auto` | Yes, after auto resolves to `json`, `flat_markdown`, or `hybrid`. | Good default for UI streaming when callers consume Agently `StreamingData` rather than raw model text. If auto later degrades to JSON during final parsing, treat instant events as provisional UI data and use the final parsed result for durable writes. |
+| `auto` | Yes, after auto resolves to `json`, `flat_markdown`, or `hybrid`. | Good for UI streaming when callers consume Agently `StreamingData` rather than raw model text. If auto later degrades to JSON during final parsing, discard or overwrite provisional UI state with the final parsed result. |
 | `flat_markdown` | Yes, field-level text deltas by `### field` sections. | Strong fit for long scalar fields such as code, HTML, Markdown, or report sections. First update for a field appears after the model emits that field header; pure-numeric scalar schemas have higher header-adherence risk. |
 | `hybrid` | Yes, field-level text deltas by section. JSON block contents stream as text and are parsed into lists/objects at finalization. | Best for mixed prose plus structured records. Use instant for UI/progress, then use `get_data()` / `async_get_data()` for the finalized typed structure. |
 | `json` | Yes, via incremental JSON parsing. | Best when arrays or nested objects need path-level updates. More sensitive to malformed or delayed JSON syntax while streaming; final repair still happens at completion. |
@@ -88,6 +101,38 @@ agent.input("Create an EDA netlist with design notes.").output({
 
 # Plain text: one artifact, no structured parser.
 html = agent.input("Write a complete landing page as HTML.").start()
+```
+
+Progressive UI example:
+
+```python
+response = (
+    agent
+    .input("Turn this incident note into a customer-safe update: ...")
+    .output(
+        {
+            "status_summary": (str, "one sentence status", True),
+            "risk_flags": [(str, "risk flag", True)],
+            "customer_reply": (str, "customer-safe reply", True),
+        },
+        format="json",
+    )
+    .get_response()
+)
+
+ui_state = {}
+
+async for item in response.get_async_generator(type="instant"):
+    if item.delta:
+        ui_state[item.path] = ui_state.get(item.path, "") + item.delta
+        await websocket.send_json({
+            "path": item.path,
+            "delta": item.delta,
+            "done": item.is_complete,
+        })
+
+final = await response.async_get_data()
+await save_case_update(final)
 ```
 
 ## The pipeline

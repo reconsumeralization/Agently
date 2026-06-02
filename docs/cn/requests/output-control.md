@@ -32,13 +32,24 @@ dict 输出仍走 `json`。Auto 不检查字段名或描述里的业务含义。
 
 当调用方需要在完整响应结束前看到字段级更新时，使用
 `get_generator(type="instant")` 或 `get_async_generator(type="instant")`：
-进度面板、实时表单、可分区渲染的长报告、模型阶段 dashboard，或能在字段完成后
-立即展示的 workflow UI。对于单一自由文本成品，用 `type="delta"`；纯文本没有
-结构化字段路径可供 instant 事件使用。
+进度面板、实时表单、可分区渲染的长报告、模型阶段 dashboard，或能在剩余响应还在
+生成时先路由某个字段的 workflow UI。对于单一自由文本成品，用 `type="delta"`；
+纯文本没有结构化字段路径可供 instant 事件使用。
+
+`instant` 事件不是“最终结果分块”。它是 `StreamingData` patch：
+
+- `path` 标识字段，例如 `customer_reply` 或 `risk_flags[0]`；
+- `wildcard_path` 归一化数组下标，例如 `risk_flags[*]`；
+- `delta` 是这次新增的片段，用于渐进渲染；
+- `value` 是该 path 当前的 parser 值；
+- `is_complete` / `event_type == "done"` 表示字段关闭。
+
+把 stream 当作临时 UI / 进度状态。结束后用 `get_data()` / `async_get_data()`
+读取可靠业务状态；它读取同一个 response 的最终缓存解析结果，不会重新发模型请求。
 
 | 输出模式 | Instant 支持 | 使用建议 |
 |---|---|---|
-| `auto` | 支持，auto 先解析为 `json`、`flat_markdown` 或 `hybrid` 后使用对应流式解析器。 | UI streaming 的默认选择，前提是调用方消费 Agently 的 `StreamingData`，而不是依赖模型原始文本。如果 auto 最终降级到 JSON 重试，把 instant 事件当作临时 UI 数据，持久写入以最终解析结果为准。 |
+| `auto` | 支持，auto 先解析为 `json`、`flat_markdown` 或 `hybrid` 后使用对应流式解析器。 | 适合 UI streaming，前提是调用方消费 Agently 的 `StreamingData`，而不是依赖模型原始文本。如果 auto 最终降级到 JSON 重试，用最终解析结果覆盖或丢弃临时 UI 状态。 |
 | `flat_markdown` | 支持，按 `### field` 章节输出字段级 text delta。 | 适合代码、HTML、Markdown、报告章节等长标量字段。字段的首个更新会在模型输出该字段 header 后出现；纯数字标量 schema 的 header 遵循风险更高。 |
 | `hybrid` | 支持，按章节输出字段级 text delta。JSON block 内容先按文本流出，最终再解析成 list/object。 | 适合 prose + 结构化 records 的混合输出。instant 用于 UI/进度，最终 typed 结构用 `get_data()` / `async_get_data()`。 |
 | `json` | 支持，走增量 JSON parser。 | 适合数组或嵌套对象的路径级更新。流式阶段更依赖模型及时输出合法 JSON 片段；完成后仍会做最终 repair/parse。 |
@@ -85,6 +96,38 @@ agent.input("Create an EDA netlist with design notes.").output({
 
 # 纯文本：一个成品文档，不走结构化 parser。
 html = agent.input("Write a complete landing page as HTML.").start()
+```
+
+渐进式 UI 示例：
+
+```python
+response = (
+    agent
+    .input("把这条事故记录改写成客户可读状态更新：...")
+    .output(
+        {
+            "status_summary": (str, "一句话状态", True),
+            "risk_flags": [(str, "风险点", True)],
+            "customer_reply": (str, "客户回复", True),
+        },
+        format="json",
+    )
+    .get_response()
+)
+
+ui_state = {}
+
+async for item in response.get_async_generator(type="instant"):
+    if item.delta:
+        ui_state[item.path] = ui_state.get(item.path, "") + item.delta
+        await websocket.send_json({
+            "path": item.path,
+            "delta": item.delta,
+            "done": item.is_complete,
+        })
+
+final = await response.async_get_data()
+await save_case_update(final)
 ```
 
 ## 流水线

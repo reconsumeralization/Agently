@@ -44,7 +44,9 @@ The surrounding flow is async. Calling sync `start()` inside a chunk works but b
 
 ## Streaming structured fields into the runtime stream
 
-When the UI consuming the runtime stream benefits from incremental updates, push completed structured fields out as they arrive:
+When the UI consuming the runtime stream benefits from incremental updates,
+bridge structured field patches from the model response into the TriggerFlow
+runtime stream:
 
 ```python
 async def draft_with_streaming(data: TriggerFlowRuntimeData):
@@ -59,15 +61,22 @@ async def draft_with_streaming(data: TriggerFlowRuntimeData):
     )
 
     async for item in response.get_async_generator(type="instant"):
-        if item.is_complete:
-            await data.async_put_into_stream({"path": item.path, "value": item.value})
+        if item.delta:
+            await data.async_put_into_stream({
+                "path": item.path,
+                "delta": item.delta,
+                "done": item.is_complete,
+            })
 
     final = await response.async_get_data()
     await data.async_set_state("draft", final)
     return final
 ```
 
-`type="instant"` yields per-leaf events as each field finishes parsing — the consumer of the runtime stream sees `title` complete before `body` is done. After the stream ends, `async_get_data()` returns the cached parsed dict (no second request).
+`type="instant"` yields structured `StreamingData` patches, not raw provider
+tokens. Consumers can render `title` deltas while `body` is still generating.
+After the stream ends, `async_get_data()` returns the cached final parsed dict
+from the same response (no second request).
 
 ## Reusing one response across the chunk
 
