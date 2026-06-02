@@ -80,13 +80,15 @@ model task、Skills model stage 共享的模型请求预算计数。无限预算
 表达；`-1` 作为兼容写法可用，但新示例不推荐。
 
 如果 task-step 超出模型请求预算，Agently 会抛出
-`agently.core.AgentExecution.AgentExecutionLimitExceeded`。execution meta
-仍然可以检查，并会记录 `status="blocked"`，以及 `diagnostics` 里的 limit event。
+`AgentExecutionLimitExceeded`，可以从 `agently.core` 根导出或
+`agently.core.application.AgentExecution` 引入。execution meta 仍然可以检查，
+并会记录 `status="blocked"`，以及 `diagnostics` 里的 limit event。
 
 对于卡住的执行，`limits.max_seconds` 是整个 AgentExecution 的硬截止时间。
 `limits.max_no_progress_seconds` 是 idle stall 边界：route selection、模型流、
 Dynamic Task、Skills、ActionRuntime 任何被接受的运行进展都会刷新计时。如果任一边界
-被超过，Agently 会抛出 `agently.core.AgentExecution.RuntimeStageStallError`。
+被超过，Agently 会抛出 `RuntimeStageStallError`，可以从 `agently.core` 根导出或
+`agently.core.application.AgentExecution` 引入。
 `async_get_meta()` 仍然可检查，并记录 `status="timed_out"` 或
 `status="stalled"`，以及 `diagnostics["timeouts"]` / `diagnostics["stalls"]`
 和最后一次进展事件。

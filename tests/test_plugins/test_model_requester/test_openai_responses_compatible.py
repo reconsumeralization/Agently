@@ -6,7 +6,7 @@ import pytest
 from types import SimpleNamespace
 
 from agently import Agently
-from agently.core.Prompt import Prompt
+from agently.core.model.Prompt import Prompt
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import (
     OpenAIResponsesCompatible,

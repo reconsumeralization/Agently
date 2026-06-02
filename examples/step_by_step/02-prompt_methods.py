@@ -61,7 +61,7 @@ def what_happen_when_start():
     # It's the same as response.result.get_data()
 
     ## Notice
-    # If you wonder what methods that agent instance, request instance and response instance provide for short, I highly recommend checking codes in 'agently/core/Agent.py' and 'agently/core/ModelRequest.py'
+    # If you wonder what methods that agent instance, request instance and response instance provide for short, I highly recommend checking codes in 'agently/core/Agent/Agent.py' and 'agently/core/Model/ModelRequest.py'
 
 
 # what_happen_when_start()
@@ -211,7 +211,7 @@ def quick_prompt_methods():
     # .attachment() ! notice: .attachment() is a special method for VLM file attachment
     # .set_chat_history() / .add_chat_history() / .reset_chat_history()
     #
-    # Highly recommend to check code in codes in 'agently/core/Agent.py' and 'agently/core/ModelRequest.py' to dive deeper.
+    # Highly recommend to check code in codes in 'agently/core/Agent/Agent.py' and 'agently/core/Model/ModelRequest.py' to dive deeper.
 
 
 # quick_prompt_methods()

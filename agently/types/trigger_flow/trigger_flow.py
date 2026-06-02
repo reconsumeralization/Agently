@@ -21,7 +21,7 @@ from agently.types.data import AVOID_COPY
 
 if TYPE_CHECKING:
     from agently.core import TriggerFlowExecution
-    from agently.core.TriggerFlow.Signal import TriggerFlowSignal
+    from agently.core.orchestration.TriggerFlow.Signal import TriggerFlowSignal
     from agently.types.data import RunContext
 
 from agently.utils import StateData

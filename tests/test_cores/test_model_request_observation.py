@@ -7,7 +7,7 @@ import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.core import ModelRequest, PluginManager
-from agently.core.AttemptRunner import core_attempt_runner_entrypoint
+from agently.core.runtime.AttemptRunner import core_attempt_runner_entrypoint
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState, RunContext
 from agently.types.data.event import normalize_triggerflow_event_type
 from agently.utils import Settings

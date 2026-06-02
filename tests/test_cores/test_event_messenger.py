@@ -15,7 +15,7 @@ from agently.builtins.hookers.RuntimeConsoleSinkHooker import (
     should_render_storage_event,
 )
 from agently.core import EventCenter, ObservationEventEmitter, RuntimeEventEmitter
-from agently.core.RuntimeContext import bind_runtime_context
+from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.types.data import ObservationEvent, RuntimeEvent
 from agently.utils import Settings
 

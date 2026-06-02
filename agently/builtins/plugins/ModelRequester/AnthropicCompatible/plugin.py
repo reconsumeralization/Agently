@@ -30,7 +30,7 @@ from .modules.transport import AnthropicCompatibleTransportMixin
 from .modules.types import AnthropicCompatibleSettings
 
 if TYPE_CHECKING:
-    from agently.core.Prompt import Prompt
+    from agently.core.model.Prompt import Prompt
     from agently.utils import Settings
 
 

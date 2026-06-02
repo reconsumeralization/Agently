@@ -8,7 +8,7 @@ load_dotenv(find_dotenv())
 
 from typing import cast
 from agently import Agently
-from agently.core.Prompt import Prompt
+from agently.core.model.Prompt import Prompt
 from agently.utils import SerializableStateDataNamespace
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import (

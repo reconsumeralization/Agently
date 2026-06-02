@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
-from agently.core.AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint
+from agently.core.runtime.AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState
 
 

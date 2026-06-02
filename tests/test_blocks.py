@@ -15,7 +15,7 @@ from agently.builtins.blocks import (
     ActBlock,
     ObserveBlock,
 )
-from agently.core.TriggerFlow.BluePrint import TriggerFlowBlueprint
+from agently.core.orchestration.TriggerFlow.BluePrint import TriggerFlowBlueprint
 
 
 class MockContext:

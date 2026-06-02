@@ -21,7 +21,7 @@ import uuid
 from collections.abc import AsyncGenerator, Generator
 from typing import Any, Literal, TYPE_CHECKING
 
-from agently.core.AgentExecution import (
+from agently.core.application.AgentExecution import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
     AgentExecutionStream,
@@ -31,7 +31,7 @@ from agently.core.AgentExecution import (
     normalize_execution_lineage,
     normalize_execution_mode,
 )
-from agently.core.RuntimeContext import bind_runtime_context
+from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.types.data import AgentExecutionStreamData
 from agently.types.options import normalize_execution_options
 from agently.utils import DataFormatter, FunctionShifter

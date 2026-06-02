@@ -26,7 +26,7 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any
 
-from agently.core.RuntimeContext import bind_runtime_context, resolve_parent_run_context
+from agently.core.runtime.RuntimeContext import bind_runtime_context, resolve_parent_run_context
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -68,8 +68,8 @@ class DAGActionFlow:
         planning_protocol: str | None = None,
         runtime_observation_handler: "ActionFlowObservationHandler | None" = None,
     ) -> list["ActionResult"]:
-        from agently.core.TaskDAGExecutor import TaskDAGExecutor
-        from agently.core.TriggerFlow import TriggerFlow
+        from agently.core.orchestration.TaskDAGExecutor import TaskDAGExecutor
+        from agently.core.orchestration.TriggerFlow import TriggerFlow
         from agently.types.data import RunContext
         from agently.types.data.task_dag import TaskDAGNode
 

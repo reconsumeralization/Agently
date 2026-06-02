@@ -30,7 +30,7 @@ from .modules.response_adapter import OpenAICompatibleResponseAdapterMixin
 from .modules.transport import OpenAICompatibleTransportMixin
 
 if TYPE_CHECKING:
-    from agently.core.Prompt import Prompt
+    from agently.core.model.Prompt import Prompt
     from agently.utils import Settings
 
 

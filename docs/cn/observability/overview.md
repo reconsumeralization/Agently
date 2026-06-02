@@ -25,4 +25,4 @@ Agently 里有几种看起来像“事件”的接口。它们相关，但职责
 - chunk 要把 live 输出推给外部消费者，用 TriggerFlow runtime stream。
 - 想要现成的观测、评估或交互 UI，用 DevTools。
 
-RuntimeEvent 的源码结构在 [`agently/types/data/event.py`](../../../agently/types/data/event.py)，事件分发在 [`agently/core/EventCenter.py`](../../../agently/core/EventCenter.py)。DevTools 示例在 [`examples/devtools/`](../../../examples/devtools/)。
+RuntimeEvent 的源码结构在 [`agently/types/data/event.py`](../../../agently/types/data/event.py)，事件分发在 [`agently/core/Runtime/EventCenter.py`](../../../agently/core/Runtime/EventCenter.py)。DevTools 示例在 [`examples/devtools/`](../../../examples/devtools/)。
