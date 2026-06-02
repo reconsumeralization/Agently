@@ -54,8 +54,8 @@ This is also how `.validate(...)` runs only once per response — the cached res
 | `type` | What you get | Use it for |
 |---|---|---|
 | `"delta"` | raw token deltas | terminal-style typing UX |
-| `"instant"` | structured nodes after each leaf finishes parsing | field-level UI updates |
-| `"streaming_parse"` | the same node tree, updated in place as it grows | incremental dict reads |
+| `"instant"` | structured `StreamingData` events with `path`, `delta`, `value`, and `is_complete` | field-level UI updates |
+| `"streaming_parse"` | alias for the same structured streaming parser used by `instant` | compatibility / incremental dict reads |
 | `"specific"` | `(event, data)` tuples filtered by event type (`delta`, `reasoning_delta`, `tool_calls`, etc.) | pick exactly the events you care about |
 | `"original"` | raw provider events | debugging / passthrough |
 | `"all"` | every event with type tag | exhaustive logging |
@@ -80,11 +80,69 @@ gen = (
     .get_generator(type="instant")
 )
 for item in gen:
+    if item.delta:
+        print(f"[{item.path}] + {item.delta}")
     if item.is_complete:
-        print(item.path, "=", item.value)
+        print(f"[{item.path}] done")
 ```
 
-`item` exposes `.path` (e.g. `"tips[0]"`), `.wildcard_path` (`"tips[*]"`), `.value`, `.delta`, and `.is_complete`. Use `.is_complete` to react only when a leaf has fully parsed.
+`item` exposes `.path` (e.g. `"tips[0]"`), `.wildcard_path` (`"tips[*]"`),
+`.value`, `.delta`, `.is_complete`, and `.event_type`. Use `.delta` to update
+the visible field while it is growing. Use `.is_complete` / `event_type=="done"`
+when downstream work should wait until the field is closed.
+
+### High-value pattern: stream fields to UI, then read the durable result
+
+Use `instant` when the application can show or route individual structured
+fields before the whole answer is finished. The stream is for progressive UI
+state; the final business object should still come from `async_get_data()`.
+
+```python
+import asyncio
+from collections import defaultdict
+from agently import Agently
+
+agent = Agently.create_agent()
+
+
+async def stream_triage_card(ticket_text: str):
+    response = (
+        agent
+        .input(ticket_text)
+        .output(
+            {
+                "status_summary": (str, "One sentence status for the user", True),
+                "risk_flags": [(str, "Concrete risk flag", True)],
+                "next_actions": [(str, "Action the support team should take", True)],
+                "customer_reply": (str, "Polished reply to the customer", True),
+            },
+            format="json",
+        )
+        .get_response()
+    )
+
+    ui_state: dict[str, str] = defaultdict(str)
+
+    async for item in response.get_async_generator(type="instant"):
+        if item.delta:
+            # Render a field-level patch to your UI / SSE / WebSocket channel.
+            ui_state[item.path] += item.delta
+            print({"path": item.path, "delta": item.delta})
+        if item.is_complete:
+            print({"path": item.path, "status": "done", "value": item.value})
+
+    # No second request: this reads the cached final parse from the same response.
+    final_data = await response.async_get_data()
+    return final_data
+
+
+asyncio.run(stream_triage_card(
+    "Ticket T-104: enterprise billing export failed twice; CFO waiting."
+))
+```
+
+Prefer async consumption for services. Synchronous `get_generator(type="instant")`
+is fine for scripts and notebooks.
 
 ### Specific example (events)
 

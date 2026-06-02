@@ -54,8 +54,8 @@ meta = response.result.get_meta()        # 已缓存
 | `type` | 你拿到的 | 适合 |
 |---|---|---|
 | `"delta"` | 原始 token delta | 终端打字机 UX |
-| `"instant"` | 每个叶子解析完成后的结构化节点 | 字段级 UI 更新 |
-| `"streaming_parse"` | 节点树就地增量更新 | 增量 dict 读取 |
+| `"instant"` | 带 `path`、`delta`、`value`、`is_complete` 的结构化 `StreamingData` 事件 | 字段级 UI 更新 |
+| `"streaming_parse"` | 与 `instant` 使用同一个结构化流式 parser 的兼容别名 | 兼容 / 增量 dict 读取 |
 | `"specific"` | `(event, data)` 元组，按事件过滤（`delta`、`reasoning_delta`、`tool_calls` 等） | 精确订阅特定事件 |
 | `"original"` | 原始 provider 事件 | 调试 / passthrough |
 | `"all"` | 所有事件带类型标签 | 完整日志 |
@@ -80,11 +80,68 @@ gen = (
     .get_generator(type="instant")
 )
 for item in gen:
+    if item.delta:
+        print(f"[{item.path}] + {item.delta}")
     if item.is_complete:
-        print(item.path, "=", item.value)
+        print(f"[{item.path}] done")
 ```
 
-`item` 暴露 `.path`（如 `"tips[0]"`）、`.wildcard_path`（`"tips[*]"`）、`.value`、`.delta`、`.is_complete`。`.is_complete` 用来「叶子完整解析后才反应」。
+`item` 暴露 `.path`（如 `"tips[0]"`）、`.wildcard_path`（`"tips[*]"`）、
+`.value`、`.delta`、`.is_complete` 和 `.event_type`。用 `.delta` 更新正在增长
+的字段；只有下游动作必须等字段关闭时，才用 `.is_complete` /
+`event_type=="done"` 做触发条件。
+
+### 高价值模式：先流式更新 UI，再读取最终可靠结果
+
+当应用可以在完整回答结束前展示或路由单个结构化字段时，用 `instant`。流式事件用于
+渐进式 UI 状态；最终业务对象仍然应该来自 `async_get_data()`。
+
+```python
+import asyncio
+from collections import defaultdict
+from agently import Agently
+
+agent = Agently.create_agent()
+
+
+async def stream_triage_card(ticket_text: str):
+    response = (
+        agent
+        .input(ticket_text)
+        .output(
+            {
+                "status_summary": (str, "给用户看的一句话状态", True),
+                "risk_flags": [(str, "明确风险点", True)],
+                "next_actions": [(str, "支持团队下一步动作", True)],
+                "customer_reply": (str, "发给客户的回复", True),
+            },
+            format="json",
+        )
+        .get_response()
+    )
+
+    ui_state: dict[str, str] = defaultdict(str)
+
+    async for item in response.get_async_generator(type="instant"):
+        if item.delta:
+            # 把字段级 patch 推给 UI / SSE / WebSocket。
+            ui_state[item.path] += item.delta
+            print({"path": item.path, "delta": item.delta})
+        if item.is_complete:
+            print({"path": item.path, "status": "done", "value": item.value})
+
+    # 不会发第二次请求：这里读取的是同一个 response 的最终缓存解析结果。
+    final_data = await response.async_get_data()
+    return final_data
+
+
+asyncio.run(stream_triage_card(
+    "Ticket T-104: enterprise billing export failed twice; CFO waiting."
+))
+```
+
+服务里优先用 async 消费。同步 `get_generator(type="instant")` 适合脚本和
+notebook。
 
 ### Specific 例子（事件）
 

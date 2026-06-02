@@ -18,18 +18,20 @@ Agently 在运行时层是 async-native。Sync 方法是通过 `FunctionShifter.
 ## 什么时候 async 是默认
 
 - 在 FastAPI、ASGI worker、SSE / WebSocket 处理器，或任何已经在 `asyncio` 里跑的代码。
-- 流式 UI——希望字段一旦解析完就立刻反应到界面，而不是等整个响应。
+- 流式 UI——希望字段 delta 先反应到界面，而不是等整个响应。
 - 把模型输出和 TriggerFlow 事件、runtime stream 或外部 pubsub 结合起来。
 
 ## 推荐组合
 
 最值得先掌握的组合：
 
-- `response.get_async_generator(type="instant")`——逐字段流出已完成的结构化节点（不是裸 token）。
+- `response.get_async_generator(type="instant")`——逐字段流出带 `path`、`delta`、`value`、`is_complete` 的结构化 `StreamingData` patch。
 - `data.async_emit(...)`——把节点变成 TriggerFlow 信号。
 - `data.async_put_into_stream(...)`——把中间状态推给 UI / SSE / 日志。
 
-`instant` 事件是字段级的：每条都在该叶子完整解析之后才到，下游永远拿不到半截字符串。
+`instant` 是字段级事件，不是原始 provider token。它可以在字段还在增长时通过
+`.delta` 提供部分字段文本，然后在 `.is_complete` 为 true 时发完成事件。把这些
+事件当作渐进式 UI 状态；最终可靠对象在结束后用 `async_get_data()` 读取。
 
 ## API 对照
 
@@ -65,8 +67,10 @@ async def main():
     )
 
     async for item in response.get_async_generator(type="instant"):
+        if item.delta:
+            print(item.path, "+", item.delta)
         if item.is_complete:
-            print(item.path, item.value)
+            print(item.path, "done")
 
     final = await response.async_get_data()
     print(final)

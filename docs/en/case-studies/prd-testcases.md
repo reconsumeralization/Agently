@@ -121,8 +121,13 @@ async def cases_for_one(data):
     req = data.input
     response = agent.info({"requirement": req}, always=False).input("...").output({...}).get_response()
     async for item in response.get_async_generator(type="instant"):
-        if item.is_complete:
-            await data.async_put_into_stream({"req_id": req["id"], "path": item.path, "value": item.value})
+        if item.delta:
+            await data.async_put_into_stream({
+                "req_id": req["id"],
+                "path": item.path,
+                "delta": item.delta,
+                "done": item.is_complete,
+            })
     return await response.async_get_data()
 ```
 
