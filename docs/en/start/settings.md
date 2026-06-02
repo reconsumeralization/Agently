@@ -43,6 +43,36 @@ Agently.set_settings("OpenAICompatible", {
 })
 ```
 
+## Typed settings helpers
+
+Dict settings remain the durable compatibility contract. For editor hints and
+early validation, Agently also exposes typed helper classes under
+`agently.types.settings`. The helper is converted back to the same dict
+namespace before it enters the settings store:
+
+```python
+from agently import Agently
+from agently.types.settings import OpenAICompatibleSettings
+
+Agently.set_settings(
+    OpenAICompatibleSettings(
+        base_url="https://api.deepseek.com/v1",
+        api_key="${ENV.DEEPSEEK_API_KEY}",
+        model="deepseek-chat",
+    )
+)
+```
+
+The old form stays valid and is the right choice for generated config files:
+
+```python
+Agently.set_settings("OpenAICompatible", {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "${ENV.DEEPSEEK_API_KEY}",
+    "model": "deepseek-chat",
+})
+```
+
 ## Reading settings back
 
 ```python

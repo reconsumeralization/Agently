@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
+from agently.types.options import SkillsRouteOptions
 from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
 from agently.utils import DeprecationWarnings, Settings
 
@@ -30,6 +31,9 @@ from .modules.registry import SkillRegistry
 class AgentlySkillsExecutor(SkillsExecutor):
     name = "AgentlySkillsExecutor"
     DEFAULT_SETTINGS: dict[str, Any] = {}
+    OPTIONS_SCHEMAS = {
+        "routes.skills": SkillsRouteOptions,
+    }
 
     def __init__(self, *, plugin_manager: Any = None, settings: Settings):
         self.plugin_manager = plugin_manager

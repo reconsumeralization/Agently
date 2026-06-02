@@ -21,7 +21,7 @@ from agently.utils import DeprecationWarnings, FunctionShifter
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.Tool import ToolCommand, ToolExecutionRecord
+    from agently.core.execution.Action import ToolCommand, ToolExecutionRecord
     from agently.types.data import ActionCall, ActionResult, AgentlyModelResult, KwargsType, MCPConfigs, ReturnType
 
 from agently.base import action as global_action

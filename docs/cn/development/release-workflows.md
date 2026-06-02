@@ -10,6 +10,40 @@ keywords: Agently, release, GitHub Actions, PyPI, docs
 
 本文记录当前主仓库的自动化入口。
 
+## 开发版本与分支模式
+
+Agently 的版本开发要区分三个概念：
+
+- **当前工作版本**：下一次预定公开发布的工作批次，记录在
+  `compatibility/in-development.json`。例如，即使更大的 roadmap 目标是
+  `4.1.4`，当前工作版本也可以是 `4.1.3.3`。
+- **版本目标**：当前工作批次推进的产品或架构目标，例如 `4.1.4` 的 AgentTask V1。
+- **任务分支**：按工作类型和范围命名的实现分支，而不是按版本号命名。
+
+日常开发不要创建 `4.1.3.3` 或 `release/4.1.3.3` 这类版本号分支，除非该分支确实是
+release-prep 分支。使用任务范围命名：
+
+- `feature/<scope>`
+- `bug-fix/<scope>`
+- `update/<scope>`
+- `refactor/<scope>`
+
+一个当前工作版本可以包含多个已验收任务分支。每个分支应承载一个边界清晰的 feature、
+fix、update 或 refactor；验收后合入 `dev`。随后从 `dev` 组装 release candidate，并按
+当前工作版本核对 release notes、compatibility manifests、examples、docs 和 companion
+repositories。
+
+如果开始新的版本开发工作时，前一个公开版本已经发布，只要还没有进入更新批次的
+release-prep 或 release promotion 动作，就把 `compatibility/in-development.json` 视为
+明确的当前工作版本来源，不要在每个任务里反复要求维护者重申该版本。如果 in-development
+manifest 缺失、过期或正在被替换，必须先暂停并确认当前工作版本。如果预期任务分支没有被
+明确指定，必须先暂停并确认分支，然后才能修改代码、spec、docs、examples 或 compatibility
+metadata。
+
+当某个分支只是实现大 roadmap 目标的一部分时，需要同时记录两层事实：feature spec 描述
+更大的目标，而 `compatibility/in-development.json` 描述将要发布这个已验收切片的当前工作
+版本。
+
 ## 文档
 
 GitHub Pages 使用 `main` 分支里的 `docs/` 目录。

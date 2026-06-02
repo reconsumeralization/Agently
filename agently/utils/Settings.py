@@ -25,6 +25,8 @@ from .DataFormatter import DataFormatter
 if TYPE_CHECKING:
     from agently.types.data import SerializableMapping, SerializableValue
 
+_UNSET = object()
+
 
 class Settings(SerializableStateData):
 
@@ -191,14 +193,21 @@ class Settings(SerializableStateData):
 
     def set_settings(
         self,
-        key: str,
-        value: "SerializableValue",
+        key: Any,
+        value: "SerializableValue | object" = _UNSET,
         *,
         auto_load_env: bool = False,
         raise_empty: bool = False,
     ):
+        if value is _UNSET:
+            from agently.types.config import settings_model_to_pair
+
+            key, value = settings_model_to_pair(key)
+        if not isinstance(key, str):
+            raise TypeError(f"[Agently Settings] key must be str, got: { type(key) }")
         if auto_load_env:
             value = self._substitute_env_placeholder(value, raise_empty=raise_empty)
+        value = cast("SerializableValue", value)
         if key in self._path_mappings:
             self.update({str(self._path_mappings[key]): value})
             return self

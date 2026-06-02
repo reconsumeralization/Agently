@@ -8,14 +8,14 @@ load_dotenv(find_dotenv())
 
 from typing import cast
 from agently import Agently
-from agently.core.Prompt import Prompt
+from agently.core.model.Prompt import Prompt
 from agently.utils import SerializableStateDataNamespace
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
     OpenAICompatible,
     ModelRequesterSettings,
 )
-import agently.builtins.plugins.ModelRequester.OpenAICompatible as openai_module
+import agently.builtins.plugins.ModelRequester.OpenAICompatible.plugin as openai_module
 from collections import Counter
 from types import SimpleNamespace
 
@@ -71,6 +71,62 @@ async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict,
     async for _event, _payload in plugin.request_model(request_data):
         pass
     return captured
+
+
+@pytest.mark.asyncio
+async def test_non_stream_request_retries_next_api_key_on_failover(monkeypatch):
+    calls: list[dict[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, content: bytes):
+            self.status_code = status_code
+            self.content = content
+            self.text = content.decode()
+            self.headers = {"Content-Type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(dict(self.headers if headers is None else headers))
+            if len(calls) == 1:
+                return FakeResponse(429, b'{"error":{"message":"rate limited"}}')
+            return FakeResponse(200, b'{"choices":[{"delta":{"content":"ok"}}]}')
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "api_key": "key-a",
+            "stream": False,
+            "_api_key_pool_runtime": {
+                "pool_id": "example",
+                "failover": {"strategy": "try_next", "max_attempts": 2, "retry_status_codes": [429]},
+                "keys": [
+                    {"id": "a", "value": "key-a", "index": 0},
+                    {"id": "b", "value": "key-b", "index": 1},
+                ],
+                "selected_key_id": "a",
+                "attempts": [{"key_id": "a", "action": "initial"}],
+            },
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert [headers.get("Authorization") for headers in calls] == ["Bearer key-a", "Bearer key-b"]
+    assert events == [("message", '{"choices":[{"delta":{"content":"ok"}}]}'), ("message", "[DONE]")]
 
 
 @pytest.mark.asyncio
@@ -377,11 +433,6 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
         },
         {"input": "hello"},
     )
-    async def fake_async_error(*args, **kwargs):
-        del args, kwargs
-        return None
-
-    plugin._emitter.async_error = fake_async_error  # type: ignore[method-assign]
     request_data = plugin.generate_request_data()
 
     events = []
@@ -433,11 +484,6 @@ async def test_stream_idle_timeout_returns_timeout_error_event(monkeypatch: pyte
         {"input": "hello"},
     )
 
-    async def fake_async_error(*args, **kwargs):
-        del args, kwargs
-        return None
-
-    plugin._emitter.async_error = fake_async_error  # type: ignore[method-assign]
     request_data = plugin.generate_request_data()
 
     events = []

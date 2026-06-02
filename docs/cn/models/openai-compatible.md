@@ -30,7 +30,7 @@ Agently.set_settings("OpenAICompatible", {
 | `model_type` | `"chat"`（默认）或 `"completion"`（旧 completion 端点） |
 | `request_options` | 转给底层 HTTP client 的额外 dict（timeout、header） |
 
-完整集合在 [agently/builtins/plugins/ModelRequester/OpenAICompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible.py)。
+完整集合在 [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/) 包目录中。公开插件类由 `plugin.py` 导出，请求构造、鉴权、transport、handler 绑定和 response mapping 放在私有 `modules/` 包下。
 
 ## Responses API 变体
 

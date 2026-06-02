@@ -104,17 +104,28 @@ result = (
 chain-style `agent.input(...).start()` and `agent.create_execution()`.
 For a one-off override, use `agent.create_request(model_key="deepseek-v4")`.
 
-API keys are selected at request time by `key_pool_strategy`: `fixed`,
-`random`, `round_robin`, or `least_used`. Agently 4.1.3 does not automatically
-retry a failed provider request with another key after auth, quota, or billing
-errors; those failures are surfaced so application code can decide whether
-switching credentials is safe for the business operation.
+API keys are selected at request time by the key-pool `selection` policy:
+`fixed`, `random`, `round_robin`, or `least_used`. The legacy
+`key_pool_strategy` path remains accepted.
+
+Provider-error failover is opt-in through `api_key_pools.<pool>.failover`.
+Without a failover policy, provider errors are surfaced as before. Built-in
+failover policies can retry another key for configured HTTP status codes, and
+custom handlers can inspect the provider error object and return `"try_next"`,
+`"retry_same"`, `"raise"`, a key id, a key entry dict, or a wrapper such as
+`{"key_id": "b"}` / `{"key_entry": context.keys[1]}`.
 
 ## Where the plugin code lives
 
-- [agently/builtins/plugins/ModelRequester/OpenAICompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible.py)
-- [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py)
-- [agently/builtins/plugins/ModelRequester/AnthropicCompatible.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible.py)
+- [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/)
+- [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible/)
+- [agently/builtins/plugins/ModelRequester/AnthropicCompatible/](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible/)
+
+Each built-in requester uses the runtime-handler package layout: `plugin.py` is
+the public coordinator, and private implementation roles live in
+`modules/request_builder.py`, `modules/credential.py`,
+`modules/transport.py`, `modules/handlers.py`, and
+`modules/response_adapter.py`.
 
 If a provider is missing or speaks an incompatible protocol, you can add a new requester plugin — but in practice almost every commercial endpoint either ships an OpenAI-compatible mode, a Responses-style mode, or matches Anthropic's protocol, so these built-ins cover most cases.
 

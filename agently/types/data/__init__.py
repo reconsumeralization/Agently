@@ -45,6 +45,9 @@ from .prompt import (
     ToolMeta,
 )
 from .request import (
+    APIKeyFailoverAction,
+    APIKeyFailoverContext,
+    APIKeySelectionContext,
     AgentlyRequestData,
     AgentlyRequestDataDict,
 )
@@ -163,4 +166,12 @@ from .agent_execution import (
     AgentExecutionStreamMeta,
     AgentExecutionWorkspaceRecord,
     AgentExecutionWorkspaceRefs,
+)
+
+from .attempt import (
+    AttemptDecision,
+    AttemptDecisionAction,
+    AttemptHandlers,
+    AttemptObservation,
+    AttemptState,
 )

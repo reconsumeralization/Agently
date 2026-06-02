@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 
 # Basic Initialize
 
+_SETTINGS_VALUE_UNSET = object()
+
 settings = Settings(
     name="global_settings",
 )
@@ -233,22 +235,25 @@ class AgentlyMain(Generic[A]):
             logging.getLogger("httpcore").setLevel(level)
 
         def set_settings(
-            key: str,
-            value: "SerializableValue",
+            key: Any,
+            value: "SerializableValue | object" = _SETTINGS_VALUE_UNSET,
             *,
             auto_load_env: bool = False,
             raise_empty: bool = False,
         ):
-            if key == "debug":
+            if isinstance(key, str) and key == "debug" and value is not _SETTINGS_VALUE_UNSET:
                 _apply_debug_profile(
                     self.settings,
-                    value,
+                    cast("SerializableValue", value),
                     auto_load_env=auto_load_env,
                     raise_empty=raise_empty,
                 )
             else:
-                self.settings.set_settings(key, value, auto_load_env=auto_load_env, raise_empty=raise_empty)
-            if key in ("runtime.httpx_log_level", "debug"):
+                if value is _SETTINGS_VALUE_UNSET:
+                    self.settings.set_settings(key, auto_load_env=auto_load_env, raise_empty=raise_empty)
+                else:
+                    self.settings.set_settings(key, value, auto_load_env=auto_load_env, raise_empty=raise_empty)
+            if isinstance(key, str) and key in ("runtime.httpx_log_level", "debug"):
                 refresh_httpx_log_level()
             return self
 

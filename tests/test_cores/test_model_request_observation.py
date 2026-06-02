@@ -7,7 +7,8 @@ import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.core import ModelRequest, PluginManager
-from agently.types.data import AgentlyRequestData, RunContext
+from agently.core.runtime.AttemptRunner import core_attempt_runner_entrypoint
+from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState, RunContext
 from agently.types.data.event import normalize_triggerflow_event_type
 from agently.utils import Settings
 
@@ -204,6 +205,64 @@ class MockSlowCancelableRequester:
             yield event, data
 
 
+class MockHandlerDrivenRequester:
+    name = "MockHandlerDrivenRequester"
+    DEFAULT_SETTINGS: dict[str, Any] = {}
+
+    def __init__(self, prompt, settings):
+        self.prompt = prompt
+        self.settings = settings
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    def generate_request_data(self):
+        return AgentlyRequestData(
+            client_options={},
+            headers={},
+            data={"prompt_text": self.prompt.to_text()},
+            request_options={"stream": True},
+            request_url="mock://handler-driven-requester",
+        )
+
+    def build_request_handlers(self, request_data: AgentlyRequestData):
+        async def execute(state: AttemptState):
+            del state
+            if "fail" in str(request_data.data.get("prompt_text", "")):
+                raise RuntimeError("handler provider failed")
+            yield "message", "handler output"
+
+        async def handle_error(error: BaseException, _state: AttemptState):
+            return AttemptDecision.yield_error(error)
+
+        return AttemptHandlers(execute=execute, handle_error=handle_error)
+
+    @core_attempt_runner_entrypoint
+    async def request_model(self, request_data: AgentlyRequestData):
+        handlers = self.build_request_handlers(request_data)
+        async for item in handlers.execute(AttemptState()):
+            yield item
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, Any], None],
+    ):
+        response_text = ""
+        async for event, data in response_generator:
+            if event == "error":
+                yield event, data
+                continue
+            if event == "message":
+                response_text += str(data)
+        if response_text:
+            yield "done", response_text
+
+
 def _create_request():
     settings = Settings(name="ObservationTestSettings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="ObservationTestPluginManager")
@@ -246,6 +305,18 @@ def _create_think_structured_request():
         plugin_manager,
         agent_name="think-structured-agent",
         agent_id="agent-think-structured",
+        parent_settings=settings,
+    )
+
+
+def _create_handler_driven_request():
+    settings = Settings(name="HandlerDrivenTestSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="HandlerDrivenPluginManager")
+    plugin_manager.register("ModelRequester", MockHandlerDrivenRequester, activate=True)
+    return ModelRequest(
+        plugin_manager,
+        agent_name="handler-driven-agent",
+        agent_id="agent-handler-driven",
         parent_settings=settings,
     )
 
@@ -309,6 +380,51 @@ async def test_model_request_events_include_prompt_and_child_run_lineage():
         meta_event = next(event for event in model_events if event.event_type == "model.meta")
         assert meta_event.payload["meta"]["provider"] == "mock-observation"
         assert meta_event.payload["meta"]["model"] == "mock-1"
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_legacy_model_requester_without_handlers_still_streams():
+    MockObservationRequester.reset()
+    request = _create_request()
+    request.input("Legacy requester still works.")
+
+    response = request.get_response()
+    assert await response.async_get_text() == "Morning briefing prepared.\nHighlight GPU demand.\n"
+
+
+@pytest.mark.asyncio
+async def test_handler_driven_model_requester_streams_through_core_attempt_runner():
+    request = _create_handler_driven_request()
+    request.input("ok")
+
+    response = request.get_response()
+    assert await response.async_get_text() == "handler output"
+
+
+@pytest.mark.asyncio
+async def test_handler_driven_provider_error_becomes_core_runtime_event():
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.handler_error_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        request = _create_handler_driven_request()
+        request.input("fail")
+        response = request.get_response()
+
+        with pytest.raises(RuntimeError, match="handler provider failed"):
+            await response.async_get_text()
+
+        requester_errors = [event for event in captured if event.event_type == "model.requester.error"]
+        assert len(requester_errors) == 1
+        assert requester_errors[0].source == "MockHandlerDrivenRequester"
+        assert requester_errors[0].error is not None
+        assert requester_errors[0].error.message == "handler provider failed"
     finally:
         Agently.event_center.unregister_hook(hook_name)
 

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agently import Agently, TriggerFlow
-from agently.core.Session import Session
+from agently.core.session import Session
 from agently.utils import (
     DeprecationWarnings,
     log_deprecated_once,

@@ -36,6 +36,9 @@ class AgentExecution(Protocol):
     mode: AgentExecutionMode
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
+    options: dict[str, Any]
+    effective_options: dict[str, Any]
+    consumed_options: dict[str, Any]
     status: str
 
     async def async_start(

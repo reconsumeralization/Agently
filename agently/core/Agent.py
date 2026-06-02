@@ -13,16 +13,17 @@
 # limitations under the License.
 
 import json
+import os
 import uuid
 
 from collections.abc import Mapping
 from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
 
-from agently.core.Prompt import Prompt
-from agently.core.ExtensionHandlers import ExtensionHandlers
-from agently.core.DynamicTask import DynamicTask
-from agently.core.ModelRequest import ModelRequest, _resolve_quick_prompt_input, _UNSET
-from agently.core.RuntimeContext import resolve_parent_run_context
+from agently.core.extension import ExtensionHandlers
+from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
+from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
+from agently.core.orchestration import DynamicTask
+from agently.core.runtime import resolve_parent_run_context
 from agently.utils import DataFormatter, Settings
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
         RunContext,
         TaskDAG,
     )
+    from agently.types.options import ExecutionOptions
 
 
 class BaseAgent:
@@ -370,6 +372,54 @@ class BaseAgent:
             }
         )
 
+    def _emit_session_runtime_observation(
+        self,
+        kind: str,
+        *,
+        message: str,
+        payload: dict[str, Any],
+        run: "RunContext | None" = None,
+        level: str = "INFO",
+        error: BaseException | None = None,
+    ):
+        from agently.core.runtime import emit_session_observation
+
+        emit_session_observation(
+            {
+                "kind": kind,
+                "source": "SessionExtension",
+                "level": level,
+                "message": message,
+                "payload": payload,
+                "error": error,
+                "run": run,
+            }
+        )
+
+    async def _async_emit_session_runtime_observation(
+        self,
+        kind: str,
+        *,
+        message: str,
+        payload: dict[str, Any],
+        run: "RunContext | None" = None,
+        level: str = "INFO",
+        error: BaseException | None = None,
+    ):
+        from agently.core.runtime import async_emit_session_observation
+
+        await async_emit_session_observation(
+            {
+                "kind": kind,
+                "source": "SessionExtension",
+                "level": level,
+                "message": message,
+                "payload": payload,
+                "error": error,
+                "run": run,
+            }
+        )
+
     def get_response(self, *, parent_run_context: "RunContext | None" = None):
         turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._emit_agent_turn_started(turn_run_context)
@@ -556,6 +606,7 @@ class BaseAgent:
         mode: "AgentExecutionMode | str" = "one_turn",
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: "ExecutionOptions | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
     ):
         plugin_name = str(self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator"))
@@ -566,6 +617,7 @@ class BaseAgent:
             mode=mode,
             lineage=lineage,
             limits=limits,
+            options=options,
             parent_run_context=parent_run_context,
         )
 
@@ -797,6 +849,32 @@ class BaseAgent:
             self.agent_prompt.set("attachment", prompt, mappings=mappings)
         else:
             self.request_prompt.set("attachment", prompt, mappings=mappings)
+        return self
+
+    def image(
+        self,
+        *,
+        question: str,
+        file: str | os.PathLike[str] | None = None,
+        url: str | None = None,
+        files: list[str | os.PathLike[str]] | tuple[str | os.PathLike[str], ...] | None = None,
+        urls: list[str] | tuple[str, ...] | None = None,
+        detail: ImageDetail | None = None,
+        mappings: dict[str, Any] | None = None,
+        always: bool = False,
+    ):
+        attachment = build_image_attachment(
+            question=question,
+            file=file,
+            url=url,
+            files=files,
+            urls=urls,
+            detail=detail,
+        )
+        if always:
+            self.agent_prompt.set("attachment", attachment, mappings=mappings)
+        else:
+            self.request_prompt.set("attachment", attachment, mappings=mappings)
         return self
 
     def options(

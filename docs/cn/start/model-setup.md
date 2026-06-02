@@ -118,6 +118,120 @@ from agently import Agently
 Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 ```
 
+## Typed provider settings
+
+Provider settings 可以继续用 dict，也可以用 typed helper class。typed class 只负责
+构造提示和提前校验；进入 Agently 后仍会存成同一个 provider namespace 下的 dict。
+
+```python
+from agently import Agently
+from agently.types.settings import OpenAICompatibleSettings
+
+Agently.set_settings(
+    OpenAICompatibleSettings(
+        base_url="https://api.deepseek.com/v1",
+        api_key="${ENV.DEEPSEEK_API_KEY}",
+        model="deepseek-chat",
+        request_options={"temperature": 0},
+    )
+)
+```
+
+内置 provider helper 位于 `agently.types.settings`。第三方插件可以从自己的插件包
+导出 settings class，并通过插件的 `SETTINGS_SCHEMAS` 注册。
+
+## Model profiles 与 key pools
+
+需要按业务场景路由模型时，使用分层配置：
+
+- `model_pool`：业务 key 到 model profile id 的映射。
+- `model_profiles`：保存 provider、model、endpoint、request options 和 key pool。
+- `api_key_pools`：保存 API key 池与轮换策略。
+
+```python
+Agently.set_settings("model_pool", {
+    "support-chat": "deepseek-chat-prod",
+    "reasoning": "deepseek-reason-prod",
+})
+
+Agently.set_settings("model_profiles", {
+    "deepseek-chat-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_pool": "deepseek-prod",
+    },
+    "deepseek-reason-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-reasoner",
+        "api_key_pool": "deepseek-prod",
+        "request_options": {"temperature": 0},
+    },
+})
+
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "selection": {"strategy": "round_robin"},
+        "failover": {
+            "strategy": "try_next",
+            "max_attempts": 2,
+            "retry_status_codes": [401, 403, 429],
+        },
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    }
+})
+
+agent = Agently.create_agent()
+agent.activate_model("reasoning")
+```
+
+`selection` 控制一次新的独立请求开始前如何选 key，支持 `fixed`、`random`、
+`round_robin`、`least_used`；旧的顶层 `strategy` / `mode` 仍作为 selection 快捷写法。
+
+`failover` 控制 provider 请求失败后怎么处理。如果没有声明 `failover`，Agently 保持旧行为：
+直接暴露 provider 错误，不自动尝试另一个 credential。内置 `try_next` 只会对配置的 HTTP
+状态码尝试下一个 key。默认建议使用 `401`、`403`、`429` 这类鉴权或额度相关状态码。`405`
+和 `422` 很多时候代表 endpoint、method、payload 或模型能力不匹配，只有当你的 provider
+明确用它们表达 key 或 quota 失败时才加入。
+
+两层策略都可以直接使用 Python handler：
+
+```python
+def select_key(context):
+    return context.keys[0]["id"]
+
+
+def failover(error, context):
+    if context.status_code == 429:
+        return "try_next"
+    if context.status_code in {405, 422}:
+        return "raise"
+    return "raise"
+
+
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "selection": select_key,
+        "failover": {"handler": failover, "max_attempts": 2},
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    }
+})
+```
+
+failover handler 可以返回 `"try_next"` / `"retry_next"`、`"retry_same"`、`"raise"`、
+某个 key id、一个 key entry dict，或 `{"key_id": "b"}` /
+`{"key_entry": context.keys[1]}` 这样的显式包装。provider failover 的 retry
+budget 和输出解析 / validation 的 `max_retries` 是两件事。
+
+旧的 `model_pool -> key_pool_strategy -> key_pool` 写法继续兼容。
+
 ## 验证连通性
 
 ```python

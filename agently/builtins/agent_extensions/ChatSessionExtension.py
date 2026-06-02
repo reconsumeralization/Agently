@@ -25,7 +25,7 @@ from agently.utils import DeprecationWarnings, StateData, DataPathBuilder
 if TYPE_CHECKING:
     from agently.types.data import ChatMessage, AgentlyModelResult, PromptStandardSlot
     from agently.core import Prompt
-    from agently.core.ModelRequest import ModelResponseResult
+    from agently.core.model.ModelRequest import ModelResponseResult
     from agently.utils import Settings
 
 PromptPathArg = str | tuple[str, str | None]

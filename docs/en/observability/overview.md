@@ -25,4 +25,4 @@ Agently has several event-like surfaces. They are related, but they do different
 - Use TriggerFlow runtime stream when a chunk needs to push live output to an external consumer.
 - Use DevTools when you want a ready-made observation, evaluation, or interactive UI path.
 
-The source-backed RuntimeEvent shape lives in [`agently/types/data/event.py`](../../../agently/types/data/event.py), and the event dispatcher lives in [`agently/core/EventCenter.py`](../../../agently/core/EventCenter.py). DevTools examples live under [`examples/devtools/`](../../../examples/devtools/).
+The source-backed RuntimeEvent shape lives in [`agently/types/data/event.py`](../../../agently/types/data/event.py), and the event dispatcher lives in [`agently/core/Runtime/EventCenter.py`](../../../agently/core/Runtime/EventCenter.py). DevTools examples live under [`examples/devtools/`](../../../examples/devtools/).

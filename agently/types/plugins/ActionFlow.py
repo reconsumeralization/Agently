@@ -12,15 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from .base import AgentlyPlugin
 from .ActionRuntime import ActionExecutionHandler, ActionPlanningHandler
 
+ActionFlowObservationHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
+
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.Action import Action
-    from agently.core.PluginManager import PluginManager
+    from agently.core.execution.Action import Action
+    from agently.core.extension.PluginManager import PluginManager
     from agently.types.data import ActionResult
     from agently.utils import Settings
 
@@ -56,4 +58,5 @@ class ActionFlow(AgentlyPlugin, Protocol):
         concurrency: int | None = None,
         timeout: float | None = None,
         planning_protocol: str | None = None,
+        runtime_observation_handler: ActionFlowObservationHandler | None = None,
     ) -> list["ActionResult"]: ...

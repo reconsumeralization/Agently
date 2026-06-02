@@ -9,7 +9,7 @@ import pytest
 
 from agently import Agently
 from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import create_agent_skills_runtime_context
-from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import AgentExecutionStream
+from agently.core.application.AgentExecution import AgentExecutionStream
 from agently.builtins.plugins.SkillsExecutor import SkillInstallError, SkillNormalizationError
 from agently.core import PluginManager
 from agently.types.data import AgentlyRequestData
@@ -20,6 +20,7 @@ class MockSkillsRequester:
     name = "MockSkillsRequester"
     DEFAULT_SETTINGS: dict[str, object] = {}
     requests: list[str] = []
+    settings_snapshots: list[dict[str, Any]] = []
 
     def __init__(self, prompt, settings):
         self.prompt = prompt
@@ -28,12 +29,21 @@ class MockSkillsRequester:
     @staticmethod
     def _on_register():
         MockSkillsRequester.requests = []
+        MockSkillsRequester.settings_snapshots = []
 
     @staticmethod
     def _on_unregister():
         pass
 
     def generate_request_data(self):
+        MockSkillsRequester.settings_snapshots.append(
+            {
+                "active": self.settings.get("plugins.ModelRequester.activate"),
+                "model": self.settings.get("plugins.ModelRequester.MockSkillsRequester.model"),
+                "base_url": self.settings.get("plugins.ModelRequester.MockSkillsRequester.base_url"),
+                "api_key": self.settings.get("plugins.ModelRequester.MockSkillsRequester.api_key"),
+            }
+        )
         return AgentlyRequestData(
             client_options={},
             headers={},
@@ -111,6 +121,7 @@ def isolated_skills(tmp_path):
         allowed_trust_levels=["local"],
     )
     MockSkillsRequester.requests = []
+    MockSkillsRequester.settings_snapshots = []
 
 
 def test_install_standard_skill_preserves_root_structure_and_writes_agently_metadata(tmp_path):
@@ -613,6 +624,52 @@ async def test_custom_effort_strategy_handler_executes(tmp_path):
         "test.custom_strategy.checkpoint",
         "skills.custom_strategy.done",
     ]
+
+
+@pytest.mark.asyncio
+async def test_skills_stage_model_key_resolves_model_profile_base_url_and_key_pool(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    agent = _create_agent()
+    agent.set_settings("skills.runtime.stage_model_keys", {"finalizer": "hosted-finalizer"})
+    agent.set_settings("model_pool", {"hosted-finalizer": "mock-finalizer-profile"})
+    agent.set_settings(
+        "model_profiles",
+        {
+            "mock-finalizer-profile": {
+                "provider": "MockSkillsRequester",
+                "model": "mock-finalizer-model",
+                "base_url": "mock://finalizer",
+                "api_key_pool": "mock-finalizer-keys",
+            }
+        },
+    )
+    agent.set_settings(
+        "api_key_pools",
+        {
+            "mock-finalizer-keys": {
+                "strategy": "fixed",
+                "keys": [{"id": "primary", "value": "mock-finalizer-key"}],
+            }
+        },
+    )
+
+    execution = await agent.async_run_skills_task(
+        "handle release",
+        skills=["alpha-skill"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert any(
+        snapshot == {
+            "active": "MockSkillsRequester",
+            "model": "mock-finalizer-model",
+            "base_url": "mock://finalizer",
+            "api_key": "mock-finalizer-key",
+        }
+        for snapshot in MockSkillsRequester.settings_snapshots
+    )
 
 
 def test_effort_strategy_registration_rejects_duplicate_names():

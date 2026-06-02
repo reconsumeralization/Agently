@@ -48,7 +48,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agently import Agently
-from agently.core.AgentExecution import RuntimeStageStallError
+from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.utils import DataFormatter
 from examples.dynamic_task._shared import configure_model
 

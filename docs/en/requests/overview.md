@@ -35,6 +35,29 @@ result = (
 
 This single chain covers all four parts. `input()` fills the prompt's input slot, `output()` defines the schema (with `ensure` flags), and `start()` runs the request, applies the validation pipeline, retries if needed, and returns the parsed dict.
 
+## Image input
+
+For VLM requests, use `.image(...)` when the request is a question plus one or more images. It accepts local image files and remote image URLs:
+
+```python
+from agently import Agently
+
+agent = Agently.create_agent()
+
+result = (
+    agent
+    .image(
+        question="Compare these two screenshots and list the visible differences.",
+        files=["./before.png", "./after.png"],
+    )
+    .start()
+)
+```
+
+Use `file="..."` or `url="..."` for a single image, and `files=[...]` or `urls=[...]` for multiple images. Local files are converted to `data:<mime>;base64,...` image URLs before being sent through the existing rich-content prompt path. Supported local image MIME types are PNG, JPEG, WebP, GIF, and BMP.
+
+`.attachment([...])` remains the low-level input for callers that already have provider-style rich content blocks or need exact mixed ordering. Common non-image files such as PDF, Markdown/text, Word, presentations, and spreadsheets are a 4.1.4 target rather than part of the 4.1.3.3 image slice.
+
 ## When to reach for which page
 
 | You want to … | Read |

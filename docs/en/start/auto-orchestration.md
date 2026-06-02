@@ -86,15 +86,17 @@ stages. Use `None` for an unlimited budget; `-1` is accepted as a compatibility
 spelling but should not be used in new examples.
 
 If a task-step exceeds its model-request budget, Agently raises
-`AgentExecutionLimitExceeded` from `agently.core.AgentExecution`. The execution
-meta remains inspectable and records `status="blocked"` plus the limit event in
+`AgentExecutionLimitExceeded`, available from the root `agently.core` export or
+from `agently.core.application.AgentExecution`. The execution meta remains
+inspectable and records `status="blocked"` plus the limit event in
 `diagnostics`.
 
 For stuck executions, `limits.max_seconds` is a hard deadline for the whole
 AgentExecution. `limits.max_no_progress_seconds` is an idle stall boundary: any
 accepted runtime progress from route selection, model streaming, Dynamic Task,
 Skills, or ActionRuntime refreshes the timer. If either boundary is exceeded,
-Agently raises `RuntimeStageStallError` from `agently.core.AgentExecution`.
+Agently raises `RuntimeStageStallError`, available from the root `agently.core`
+export or from `agently.core.application.AgentExecution`.
 `async_get_meta()` remains inspectable and records `status="timed_out"` or
 `status="stalled"` with `diagnostics["timeouts"]` / `diagnostics["stalls"]` and
 the last progress event.

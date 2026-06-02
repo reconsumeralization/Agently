@@ -61,7 +61,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.2"
+    assert in_development["target_version"] == "4.1.3.3"
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",
@@ -70,6 +70,16 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
         "compatibility_input_type": "ObservationEvent",
     }
     assert in_development["companions"]["devtools"]["runtime_control"] == {
+        "runtime_event_ownership": {
+            "official_event_producer": "core",
+            "plugin_contract": "plugins return observations/errors/decisions; core maps them to official RuntimeEvent records",
+            "builtin_direct_emitters_for_official_events": False,
+            "agent_execution_stream_owner": "agently.core.application.AgentExecution.AgentExecutionStream",
+        },
+        "runtime_naming": {
+            "agent_turn": "run_kind for one Agent-facing turn",
+            "attempt_index": "model-request retry attempt metadata; not an agent turn counter",
+        },
         "agent_execution_limits": ["max_seconds", "max_no_progress_seconds"],
         "provider_stream_idle_timeout": [
             "OpenAICompatible.stream_idle_timeout",

@@ -45,6 +45,35 @@ Agently.set_settings("OpenAICompatible", {
 })
 ```
 
+## Typed settings helper
+
+dict settings 仍然是长期兼容契约。为了获得编辑器提示和更早的类型校验，
+Agently 也在 `agently.types.settings` 下提供 typed helper class。helper 会在
+进入 settings store 前转换回同一个 dict namespace：
+
+```python
+from agently import Agently
+from agently.types.settings import OpenAICompatibleSettings
+
+Agently.set_settings(
+    OpenAICompatibleSettings(
+        base_url="https://api.deepseek.com/v1",
+        api_key="${ENV.DEEPSEEK_API_KEY}",
+        model="deepseek-chat",
+    )
+)
+```
+
+旧写法继续有效；生成式配置文件或 YAML/TOML/JSON 配置仍建议用 dict：
+
+```python
+Agently.set_settings("OpenAICompatible", {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "${ENV.DEEPSEEK_API_KEY}",
+    "model": "deepseek-chat",
+})
+```
+
 ## 读取设置
 
 ```python

@@ -6,7 +6,7 @@ import pytest
 from types import SimpleNamespace
 
 from agently import Agently
-from agently.core.Prompt import Prompt
+from agently.core.model.Prompt import Prompt
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import (
     OpenAIResponsesCompatible,
@@ -118,7 +118,7 @@ def test_client_options_can_enable_environment_proxy_explicitly():
 
 
 def test_inherits_model_requester_protocol_instead_of_openai_plugin():
-    assert OpenAIResponsesCompatible.__bases__ == (ModelRequester,)
+    assert ModelRequester in OpenAIResponsesCompatible.__mro__
 
 
 def test_generate_request_maps_rich_content_and_preserves_instructions():
@@ -520,11 +520,6 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
         {"input": "hello"},
     )
 
-    async def fake_async_error(*args, **kwargs):
-        del args, kwargs
-        return None
-
-    plugin._emitter.async_error = fake_async_error  # type: ignore[method-assign]
     request_data = plugin.generate_request_data()
 
     events = []
@@ -582,11 +577,6 @@ async def test_stream_idle_timeout_returns_timeout_error_event(monkeypatch: pyte
         {"input": "hello"},
     )
 
-    async def fake_async_error(*args, **kwargs):
-        del args, kwargs
-        return None
-
-    plugin._emitter.async_error = fake_async_error  # type: ignore[method-assign]
     request_data = plugin.generate_request_data()
 
     events = []

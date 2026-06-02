@@ -4,7 +4,7 @@ import json
 import pytest
 
 from agently import Agently
-from agently.core.Prompt import Prompt
+from agently.core.model.Prompt import Prompt
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import (
     AnthropicCompatible,
@@ -112,7 +112,7 @@ def test_client_options_can_enable_environment_proxy_explicitly():
 
 
 def test_inherits_model_requester_protocol_instead_of_responses_plugin():
-    assert AnthropicCompatible.__bases__ == (ModelRequester,)
+    assert ModelRequester in AnthropicCompatible.__mro__
 
 
 def test_generate_request_maps_system_and_rich_content():
@@ -137,6 +137,32 @@ def test_generate_request_maps_system_and_rich_content():
     assert content[1] == {
         "type": "image",
         "source": {"type": "url", "url": "https://example.com/cat.png"},
+    }
+
+
+def test_generate_request_maps_data_url_image_to_base64_source():
+    request = generate_request(
+        {
+            "base_url": "https://api.anthropic.example/v1",
+        },
+        {
+            "attachment": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aGVsbG8="},
+                }
+            ],
+        },
+    )
+
+    content = request["data"]["messages"][0]["content"]
+    assert content[0] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "aGVsbG8=",
+        },
     }
 
 

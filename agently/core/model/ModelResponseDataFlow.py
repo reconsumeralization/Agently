@@ -1,0 +1,756 @@
+# Copyright 2023-2026 AgentEra(Agently.Tech)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import warnings
+
+from collections.abc import Mapping, Sequence
+from typing import Any, Awaitable, Literal, TYPE_CHECKING, cast
+
+from agently.core.application.AgentExecution import RuntimeStageStallError
+from agently.core.runtime import bind_runtime_context
+from agently.utils import DataFormatter, DataLocator, DataPathBuilder
+
+if TYPE_CHECKING:
+    from agently.types.data import OutputValidateHandler, OutputValidateResult
+    from .ModelResponseResult import ModelResponseResult
+
+
+class ModelResponseDataFlow:
+    def __init__(self, result: "ModelResponseResult"):
+        self._result = result
+
+    def get_auto_ensure_keys(self, *, key_style: Literal["dot", "slash"] = "dot") -> list[str]:
+        result = self._result
+        cache_key = key_style
+        if cache_key in result._auto_ensure_keys_cache:
+            return result._auto_ensure_keys_cache[cache_key]
+
+        try:
+            prompt_output = result.prompt.to_prompt_object().output
+        except Exception:
+            prompt_output = None
+
+        if not isinstance(prompt_output, (Mapping, Sequence)) or isinstance(prompt_output, str):
+            result._auto_ensure_keys_cache[cache_key] = []
+            return []
+
+        try:
+            ensure_keys = DataPathBuilder.extract_ensure_paths(prompt_output, style=key_style)
+        except Exception:
+            ensure_keys = []
+
+        result._auto_ensure_keys_cache[cache_key] = ensure_keys
+        return ensure_keys
+
+    @staticmethod
+    def merge_ensure_keys(auto_keys: list[str], explicit_keys: list[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for key in [*auto_keys, *explicit_keys]:
+            if key not in seen:
+                seen.add(key)
+                merged.append(key)
+        return merged
+
+    def is_strict_output_enabled(self) -> bool:
+        try:
+            prompt_object = self._result.prompt.to_prompt_object()
+            return bool(getattr(prompt_object, "ensure_all_keys", False)) and prompt_object.output_format == "json"
+        except Exception:
+            return False
+
+    @staticmethod
+    def handler_name(handler: Any, index: int) -> str:
+        name = getattr(handler, "__name__", None)
+        if isinstance(name, str) and name:
+            return name
+        return f"validate_handler_{ index + 1 }"
+
+    def resolve_validate_handlers(
+        self,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+    ) -> list["OutputValidateHandler"]:
+        handlers = self._result._extension_handlers.get("validate_handlers", [])
+        resolved: list["OutputValidateHandler"] = list(handlers) if isinstance(handlers, list) else []
+        if validate_handler is None:
+            return resolved
+        if isinstance(validate_handler, list):
+            resolved.extend(validate_handler)
+        else:
+            resolved.append(validate_handler)
+        return resolved
+
+    async def build_validate_result_snapshot(self) -> dict[str, Any]:
+        result = self._result
+        parsed_result = result._response_parser.full_result_data.get("parsed_result")
+        if isinstance(parsed_result, dict):
+            return parsed_result.copy()
+        if isinstance(parsed_result, Mapping):
+            return dict(parsed_result)
+        result_object = result._response_parser.full_result_data.get("result_object")
+        model_dump = getattr(result_object, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+        return {"value": parsed_result}
+
+    async def build_validate_context(
+        self,
+        *,
+        value: dict[str, Any],
+        retry_count: int,
+        max_retries: int,
+        meta: dict[str, Any] | None = None,
+    ):
+        from agently.types.data import OutputValidateContext
+
+        result = self._result
+        response_text = await result._response_parser.async_get_text()
+        return OutputValidateContext(
+            value=value,
+            agent_name=result.agent_name,
+            response_id=result._response_id,
+            attempt_index=result.attempt_index,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            prompt=result.prompt,
+            settings=result.settings,
+            request_run_context=result.request_run_context,
+            model_run_context=result.model_run_context,
+            response_text=response_text,
+            parsed_result=result._response_parser.full_result_data.get("parsed_result"),
+            result_object=result._response_parser.full_result_data.get("result_object"),
+            meta=meta,
+        )
+
+    @staticmethod
+    def exception_to_raise(error: BaseException | str | None):
+        if error is None:
+            return None
+        if isinstance(error, BaseException):
+            return error
+        return ValueError(str(error))
+
+    def materialization_idle_timeout(self) -> float | None:
+        raw_timeout = self._result.settings.get("response.materialization_idle_timeout", None)
+        if raw_timeout is None or raw_timeout == -1 or raw_timeout == "-1":
+            return None
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float, str)):
+            return None
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout >= 0 else None
+
+    async def await_materialization(self, awaitable: Awaitable[Any], *, stage: str):
+        result = self._result
+        timeout = self.materialization_idle_timeout()
+        try:
+            if timeout is None:
+                return await awaitable
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError as error:
+            stall_error = RuntimeStageStallError(
+                f"Response materialization idle timeout after { timeout } seconds.",
+                stage=stage,
+                status="stalled",
+                response_id=result._response_id,
+                run_id=result.model_run_context.run_id if result.model_run_context is not None else None,
+                agent_name=result.agent_name,
+                idle_seconds=timeout,
+                timeout_seconds=timeout,
+            )
+            await self.emit_materialization_stall(stall_error)
+            raise stall_error from error
+
+    async def emit_materialization_stall(self, error: RuntimeStageStallError):
+        from agently.base import async_emit_runtime
+
+        result = self._result
+        await async_emit_runtime(
+            {
+                "event_type": "model.response_materialization_stalled",
+                "source": "ModelResponseResult",
+                "level": "ERROR",
+                "message": str(error),
+                "payload": error.to_diagnostic(),
+                "error": error,
+                "run": result.model_run_context or result.request_run_context,
+            }
+        )
+
+    def normalize_validate_result(
+        self,
+        raw_result: "OutputValidateResult",
+        *,
+        validator_name: str,
+    ) -> dict[str, Any]:
+        if isinstance(raw_result, bool):
+            return {
+                "ok": raw_result,
+                "kind": "passed" if raw_result else "failed",
+                "reason": None if raw_result else f"Validation failed in { validator_name }.",
+                "payload": None,
+                "validator_name": validator_name,
+                "retryable": not raw_result,
+                "no_retry": False,
+                "stop": False,
+                "raise_value": None,
+                "error": None,
+            }
+
+        if isinstance(raw_result, dict):
+            ok = bool(raw_result.get("ok", False))
+            reason_value = raw_result.get("reason")
+            reason = str(reason_value) if reason_value is not None else None
+            payload = raw_result.get("payload")
+            validation_payload = payload if isinstance(payload, dict) else None
+            no_retry = bool(raw_result.get("no_retry", False))
+            stop = bool(raw_result.get("stop", False))
+            explicit_raise = raw_result.get("raise", raw_result.get("error", raw_result.get("exception")))
+            validator_name_value = raw_result.get("validator_name")
+            return {
+                "ok": ok,
+                "kind": "passed" if ok else "failed",
+                "reason": reason if reason is not None else (None if ok else f"Validation failed in { validator_name }."),
+                "payload": validation_payload,
+                "validator_name": str(validator_name_value) if validator_name_value is not None else validator_name,
+                "retryable": False if ok else not (no_retry or stop or explicit_raise is not None),
+                "no_retry": no_retry,
+                "stop": stop,
+                "raise_value": None if ok else explicit_raise,
+                "error": None,
+            }
+
+        return {
+            "ok": False,
+            "kind": "error",
+            "reason": f"Unsupported validation result from { validator_name }: { type(raw_result).__name__ }",
+            "payload": {"return_type": type(raw_result).__name__},
+            "validator_name": validator_name,
+            "retryable": True,
+            "no_retry": False,
+            "stop": False,
+            "raise_value": None,
+            "error": None,
+        }
+
+    def normalize_validate_error(
+        self,
+        error: BaseException,
+        *,
+        validator_name: str,
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "kind": "error",
+            "reason": str(error) if str(error) else f"Validation handler { validator_name } raised an exception.",
+            "payload": None,
+            "validator_name": validator_name,
+            "retryable": True,
+            "no_retry": False,
+            "stop": False,
+            "raise_value": None,
+            "error": error,
+        }
+
+    async def emit_validation_runtime_event(
+        self,
+        event_type: str,
+        *,
+        level: str,
+        message: str,
+        outcome: dict[str, Any],
+        retry_count: int,
+        max_retries: int,
+        response_text: str,
+    ):
+        from agently.base import async_emit_runtime
+
+        result = self._result
+        error = outcome.get("error")
+        await async_emit_runtime(
+            {
+                "event_type": event_type,
+                "source": "ModelResponseResult",
+                "level": level,
+                "message": message,
+                "payload": {
+                    "agent_name": result.agent_name,
+                    "response_id": result._response_id,
+                    "attempt_index": result.attempt_index,
+                    "retry_count": retry_count,
+                    "max_retries": max_retries,
+                    "validator_name": outcome.get("validator_name"),
+                    "reason": outcome.get("reason"),
+                    "stop": outcome.get("stop", False),
+                    "no_retry": outcome.get("no_retry", False),
+                    "error_kind": type(error).__name__ if isinstance(error, BaseException) else None,
+                    "validation_payload": DataFormatter.sanitize(outcome.get("payload")),
+                    "response_text": response_text,
+                },
+                "error": error if isinstance(error, BaseException) else None,
+                "run": result.request_run_context,
+            }
+        )
+
+    async def run_validate_handlers_once(
+        self,
+        handlers: list["OutputValidateHandler"],
+        *,
+        retry_count: int,
+        max_retries: int,
+    ) -> dict[str, Any] | None:
+        result = self._result
+        if result._validate_outcome is not None:
+            signature = tuple(id(handler) for handler in handlers)
+            if len(handlers) > 0 and result._validate_handler_signature is not None and signature != result._validate_handler_signature:
+                warnings.warn(
+                    "Validation already finalized for this response result. New validate handlers are ignored.",
+                    stacklevel=2,
+                )
+            return result._validate_outcome
+
+        if len(handlers) == 0:
+            return None
+
+        signature = tuple(id(handler) for handler in handlers)
+        async with result._validate_lock:
+            if result._validate_outcome is not None:
+                if result._validate_handler_signature is not None and signature != result._validate_handler_signature:
+                    warnings.warn(
+                        "Validation already finalized for this response result. New validate handlers are ignored.",
+                        stacklevel=2,
+                    )
+                return result._validate_outcome
+
+            validate_value = await self.build_validate_result_snapshot()
+            response_text = await result._response_parser.async_get_text()
+            for index, handler in enumerate(handlers):
+                validator_name = self.handler_name(handler, index)
+                context = await self.build_validate_context(
+                    value=validate_value,
+                    retry_count=retry_count,
+                    max_retries=max_retries,
+                    meta={"validator_name": validator_name},
+                )
+                try:
+                    raw_result = handler(validate_value, context)
+                    if inspect.isawaitable(raw_result):
+                        raw_result = await raw_result
+                    outcome = self.normalize_validate_result(
+                        cast("OutputValidateResult", raw_result),
+                        validator_name=validator_name,
+                    )
+                except BaseException as error:
+                    outcome = self.normalize_validate_error(error, validator_name=validator_name)
+
+                if not outcome["ok"]:
+                    event_type = "model.validation_error" if outcome["kind"] == "error" else "model.validation_failed"
+                    level = "ERROR" if outcome["kind"] == "error" else "WARNING"
+                    await self.emit_validation_runtime_event(
+                        event_type,
+                        level=level,
+                        message=f"Output validation failed in { outcome['validator_name'] }.",
+                        outcome=outcome,
+                        retry_count=retry_count,
+                        max_retries=max_retries,
+                        response_text=response_text,
+                    )
+                    result._validate_outcome = outcome
+                    result._validate_handler_signature = signature
+                    return outcome
+
+            result._validate_outcome = {
+                "ok": True,
+                "kind": "passed",
+                "reason": None,
+                "payload": None,
+                "validator_name": None,
+                "retryable": False,
+                "no_retry": False,
+                "stop": False,
+                "raise_value": None,
+                "error": None,
+            }
+            result._validate_handler_signature = signature
+            return result._validate_outcome
+
+    async def emit_retrying_event(
+        self,
+        *,
+        retry_count: int,
+        response_text: str,
+        active_ensure_keys: list[str],
+        strict_output: bool,
+        key_style: Literal["dot", "slash"],
+        validation_outcome: dict[str, Any] | None = None,
+        retry_reason: str = "output_constraints",
+        message: str | None = None,
+    ):
+        from agently.base import async_emit_runtime
+
+        result = self._result
+        payload = {
+            "agent_name": result.agent_name,
+            "response_id": result._response_id,
+            "retry_count": retry_count,
+            "attempt_index": result.attempt_index,
+            "next_attempt_index": result.attempt_index + 1,
+            "model_run_id": result.model_run_context.run_id if result.model_run_context is not None else None,
+            "response_text": response_text,
+            "ensure_keys": active_ensure_keys,
+            "strict_output": strict_output,
+            "key_style": key_style,
+            "retry_reason": retry_reason,
+        }
+        if validation_outcome is not None:
+            payload.update(
+                {
+                    "validator_name": validation_outcome.get("validator_name"),
+                    "validation_reason": validation_outcome.get("reason"),
+                    "validation_stop": validation_outcome.get("stop", False),
+                    "validation_no_retry": validation_outcome.get("no_retry", False),
+                    "validation_payload": DataFormatter.sanitize(validation_outcome.get("payload")),
+                }
+            )
+        with bind_runtime_context(
+            parent_run_context=result.request_run_context,
+            request_run_context=result.request_run_context,
+            model_run_context=result.model_run_context,
+            settings=result.settings,
+        ):
+            await async_emit_runtime(
+                {
+                    "event_type": "model.retrying",
+                    "source": "ModelResponseResult",
+                    "level": "WARNING",
+                    "message": (
+                        message
+                        if message is not None
+                        else (
+                            "Output validation failed. Preparing retry."
+                            if validation_outcome is not None
+                            else "No target data in response. Preparing retry."
+                        )
+                    ),
+                    "payload": payload,
+                    "run": result.request_run_context,
+                }
+            )
+
+    async def try_auto_degradation(
+        self,
+        *,
+        data: Any,
+        active_ensure_keys: list[str],
+        validate_handler: Any,
+        key_style: Literal["dot", "slash"],
+        max_retries: int,
+        raise_ensure_failure: bool,
+        retry_count: int,
+    ) -> Any | None:
+        """If auto-resolved format failed, degrade to json and retry.
+
+        Returns the retried data on success, ``None`` if no degradation needed.
+        """
+        result = self._result
+        try:
+            prompt_object = result.prompt.to_prompt_object()
+            if not (
+                getattr(prompt_object, "output_format_resolved_from_auto", False)
+                and prompt_object.output_format in ("flat_markdown", "hybrid")
+            ):
+                return None
+            parsed_result = result._response_parser.full_result_data.get("parsed_result")
+            if parsed_result is not None:
+                return None
+
+            result.prompt.set("output_format", "json")
+            await self.emit_retrying_event(
+                retry_count=retry_count,
+                response_text=await result._response_parser.async_get_text(),
+                active_ensure_keys=active_ensure_keys,
+                strict_output=False,
+                key_style=key_style,
+                retry_reason="format_degradation",
+                message=(
+                    f"Auto-format '{prompt_object.output_format}' parse failed. "
+                    f"Degrading to json."
+                ),
+            )
+            return await self.retry_get_data(
+                type="parsed",
+                ensure_keys=active_ensure_keys,
+                validate_handler=validate_handler,
+                key_style=key_style,
+                max_retries=max_retries,
+                raise_ensure_failure=raise_ensure_failure,
+                retry_count=retry_count + 1,
+            )
+        except Exception:
+            return None
+
+    def build_validation_failure_exception(self, outcome: dict[str, Any]):
+        explicit_error = self.exception_to_raise(cast(BaseException | str | None, outcome.get("raise_value")))
+        if explicit_error is not None:
+            return explicit_error
+        validator_name = outcome.get("validator_name")
+        reason = outcome.get("reason")
+        if validator_name:
+            return ValueError(f"Output validation failed in { validator_name }: { reason or 'unknown reason' }")
+        return ValueError(reason or "Output validation failed.")
+
+    @staticmethod
+    def build_output_retry_failure_exception(
+        *,
+        active_ensure_keys: list[str],
+        strict_output: bool,
+        max_retries: int,
+    ) -> ValueError:
+        constraints: list[str] = []
+        if strict_output:
+            constraints.append("strict output")
+        if active_ensure_keys:
+            constraints.append(f"ensure keys { active_ensure_keys }")
+        constraint_text = " and ".join(constraints) if constraints else "output constraints"
+        return ValueError(f"Can not satisfy { constraint_text } within { max_retries } retries.")
+
+    async def retry_get_data(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"],
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None",
+        key_style: Literal["dot", "slash"],
+        max_retries: int,
+        raise_ensure_failure: bool,
+        retry_count: int,
+    ) -> Any:
+        from agently.core.model.ModelResponse import ModelResponse
+
+        result = self._result
+        return await ModelResponse(
+            result.agent_name,
+            result.plugin_manager,
+            result.settings,
+            result.prompt,
+            result._extension_handlers,
+            run_context=result.request_run_context,
+            attempt_index=result.attempt_index + 1,
+        ).result.async_get_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            _retry_count=retry_count,
+        )
+
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        retry_count: int = 0,
+    ) -> Any:
+        result = self._result
+        auto_ensure_keys = self.get_auto_ensure_keys(key_style=key_style)
+        strict_output = self.is_strict_output_enabled()
+        active_validate_handlers = self.resolve_validate_handlers(validate_handler)
+        if ensure_keys is None:
+            active_ensure_keys = auto_ensure_keys
+        elif len(ensure_keys) == 0:
+            active_ensure_keys = []
+        else:
+            active_ensure_keys = self.merge_ensure_keys(auto_ensure_keys, ensure_keys)
+        should_validate = bool(active_validate_handlers) or result._validate_outcome is not None
+        needs_constraint_flow = (type in ("parsed", "all") and (active_ensure_keys or strict_output)) or should_validate
+        if not needs_constraint_flow:
+            try:
+                data = await self.await_materialization(
+                    result._response_parser.async_get_data(type=type),
+                    stage="response_materialization",
+                )
+                await result._drain_response_parser_observations()
+                if type in ("parsed", "all") and retry_count < max_retries:
+                    degraded_data = await self.try_auto_degradation(
+                        data=data,
+                        active_ensure_keys=active_ensure_keys,
+                        validate_handler=validate_handler,
+                        key_style=key_style,
+                        max_retries=max_retries,
+                        raise_ensure_failure=raise_ensure_failure,
+                        retry_count=retry_count,
+                    )
+                    if degraded_data is not None:
+                        return degraded_data
+                return data
+            finally:
+                await result._drain_response_parser_observations()
+                await result._run_finally_handlers_once()
+
+        try:
+            data = await self.await_materialization(
+                result._response_parser.async_get_data(type=type),
+                stage="response_materialization",
+            )
+            await result._drain_response_parser_observations()
+
+            if type in ("parsed", "all") and retry_count < max_retries:
+                degraded_data = await self.try_auto_degradation(
+                    data=data,
+                    active_ensure_keys=active_ensure_keys,
+                    validate_handler=validate_handler,
+                    key_style=key_style,
+                    max_retries=max_retries,
+                    raise_ensure_failure=raise_ensure_failure,
+                    retry_count=retry_count,
+                )
+                if degraded_data is not None:
+                    return degraded_data
+
+            try:
+                if strict_output:
+                    parsed_result = result._response_parser.full_result_data.get("parsed_result")
+                    result_object = result._response_parser.full_result_data.get("result_object")
+                    if parsed_result is None or result_object is None:
+                        raise ValueError(
+                            "Strict output validation failed: parsed result or strict result object is missing."
+                        )
+                if active_ensure_keys:
+                    for ensure_key in active_ensure_keys:
+                        empty = object()
+                        if DataLocator.locate_path_in_dict(data, ensure_key, key_style, default=empty) is empty:
+                            raise ValueError(f"Missing ensure key: { ensure_key }")
+            except Exception:
+                await self.emit_retrying_event(
+                    retry_count=retry_count,
+                    response_text=await result._response_parser.async_get_text(),
+                    active_ensure_keys=active_ensure_keys,
+                    strict_output=strict_output,
+                    key_style=key_style,
+                    retry_reason="output_constraints",
+                )
+
+                if retry_count < max_retries:
+                    return await self.retry_get_data(
+                        type=type,
+                        ensure_keys=active_ensure_keys,
+                        validate_handler=validate_handler,
+                        key_style=key_style,
+                        max_retries=max_retries,
+                        raise_ensure_failure=raise_ensure_failure,
+                        retry_count=retry_count + 1,
+                    )
+                if raise_ensure_failure:
+                    raise self.build_output_retry_failure_exception(
+                        active_ensure_keys=active_ensure_keys,
+                        strict_output=strict_output,
+                        max_retries=max_retries,
+                    )
+                return await self.await_materialization(
+                    result._response_parser.async_get_data(type=type),
+                    stage="response_materialization",
+                )
+
+            validation_outcome = await self.run_validate_handlers_once(
+                active_validate_handlers,
+                retry_count=retry_count,
+                max_retries=max_retries,
+            )
+            if validation_outcome is not None and not validation_outcome["ok"]:
+                if validation_outcome.get("retryable", True) and retry_count < max_retries:
+                    await self.emit_retrying_event(
+                        retry_count=retry_count,
+                        response_text=await result._response_parser.async_get_text(),
+                        active_ensure_keys=active_ensure_keys,
+                        strict_output=strict_output,
+                        key_style=key_style,
+                        validation_outcome=validation_outcome,
+                        retry_reason="validate",
+                    )
+                    return await self.retry_get_data(
+                        type=type,
+                        ensure_keys=active_ensure_keys,
+                        validate_handler=validate_handler,
+                        key_style=key_style,
+                        max_retries=max_retries,
+                        raise_ensure_failure=raise_ensure_failure,
+                        retry_count=retry_count + 1,
+                    )
+                if validation_outcome.get("raise_value") is not None or raise_ensure_failure:
+                    raise self.build_validation_failure_exception(validation_outcome)
+                return await self.await_materialization(
+                    result._response_parser.async_get_data(type=type),
+                    stage="response_materialization",
+                )
+            return data
+        finally:
+            await result._drain_response_parser_observations()
+            await result._run_finally_handlers_once()
+
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ):
+        result = self._result
+        auto_ensure_keys = self.get_auto_ensure_keys(key_style=key_style)
+        strict_output = self.is_strict_output_enabled()
+        active_validate_handlers = self.resolve_validate_handlers(validate_handler)
+        if ensure_keys is None:
+            active_ensure_keys = auto_ensure_keys
+        elif len(ensure_keys) == 0:
+            active_ensure_keys = []
+        else:
+            active_ensure_keys = self.merge_ensure_keys(auto_ensure_keys, ensure_keys)
+        try:
+            if active_ensure_keys or strict_output or bool(active_validate_handlers) or result._validate_outcome is not None:
+                await result.async_get_data(
+                    ensure_keys=active_ensure_keys,
+                    validate_handler=validate_handler,
+                    key_style=key_style,
+                    max_retries=max_retries,
+                    _retry_count=0,
+                    raise_ensure_failure=raise_ensure_failure,
+                )
+                return await self.await_materialization(
+                    result._response_parser.async_get_data_object(),
+                    stage="response_materialization",
+                )
+            return await self.await_materialization(
+                result._response_parser.async_get_data_object(),
+                stage="response_materialization",
+            )
+        finally:
+            await result._drain_response_parser_observations()
+            await result._run_finally_handlers_once()

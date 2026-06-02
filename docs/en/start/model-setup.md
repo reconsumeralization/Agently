@@ -116,6 +116,127 @@ from agently import Agently
 Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 ```
 
+## Typed provider settings
+
+Provider settings can be supplied as dicts or typed helper classes. The typed
+class only improves construction and validation; internally Agently stores the
+same dict under the provider namespace.
+
+```python
+from agently import Agently
+from agently.types.settings import OpenAICompatibleSettings
+
+Agently.set_settings(
+    OpenAICompatibleSettings(
+        base_url="https://api.deepseek.com/v1",
+        api_key="${ENV.DEEPSEEK_API_KEY}",
+        model="deepseek-chat",
+        request_options={"temperature": 0},
+    )
+)
+```
+
+Built-in provider helpers live in `agently.types.settings`. Third-party plugins
+can expose their own settings classes from their plugin package and register
+them through the plugin's `SETTINGS_SCHEMAS`.
+
+## Model profiles and key pools
+
+For applications that route by business scenario, use the layered settings
+shape:
+
+- `model_pool`: maps a business key to a model profile id.
+- `model_profiles`: stores provider, model, endpoint, request options, and the
+  key pool to use.
+- `api_key_pools`: stores credential pools and their selection strategy.
+
+```python
+Agently.set_settings("model_pool", {
+    "support-chat": "deepseek-chat-prod",
+    "reasoning": "deepseek-reason-prod",
+})
+
+Agently.set_settings("model_profiles", {
+    "deepseek-chat-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_pool": "deepseek-prod",
+    },
+    "deepseek-reason-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-reasoner",
+        "api_key_pool": "deepseek-prod",
+        "request_options": {"temperature": 0},
+    },
+})
+
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "selection": {"strategy": "round_robin"},
+        "failover": {
+            "strategy": "try_next",
+            "max_attempts": 2,
+            "retry_status_codes": [401, 403, 429],
+        },
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    }
+})
+
+agent = Agently.create_agent()
+agent.activate_model("reasoning")
+```
+
+`selection` controls which key is used for a new independent request. It
+supports `fixed`, `random`, `round_robin`, and `least_used`; the legacy top-level
+`strategy` / `mode` fields remain selection shortcuts.
+
+`failover` controls what happens after the provider request fails. Without a
+`failover` policy, Agently keeps the old behavior and surfaces the provider
+error without trying another credential. The built-in `try_next` policy retries
+the next key only for configured HTTP status codes. By default, use credential
+or quota-oriented codes such as `401`, `403`, and `429`. Status codes such as
+`405` and `422` often mean endpoint, method, payload, or model-capability
+mismatch; add them only when your provider uses them for key or quota failures.
+
+Both layers can use direct Python handlers for application-specific behavior:
+
+```python
+def select_key(context):
+    return context.keys[0]["id"]
+
+
+def failover(error, context):
+    if context.status_code == 429:
+        return "try_next"
+    if context.status_code in {405, 422}:
+        return "raise"
+    return "raise"
+
+
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "selection": select_key,
+        "failover": {"handler": failover, "max_attempts": 2},
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    }
+})
+```
+
+Failover handlers can return `"try_next"` / `"retry_next"`, `"retry_same"`,
+`"raise"`, a key id, a key entry dict, or an explicit wrapper such as
+`{"key_id": "b"}` / `{"key_entry": context.keys[1]}`. Failover retry budget is
+separate from output parsing and validation `max_retries`.
+
+The legacy `model_pool -> key_pool_strategy -> key_pool` form remains accepted.
+
 ## Verify connectivity
 
 ```python

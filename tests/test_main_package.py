@@ -10,15 +10,15 @@ from agently.compatibility import (
     get_devtools_compatibility_manifest,
     get_skills_compatibility_manifest,
 )
-from agently.core.AgentExecution import RuntimeStageStallError
-from agently.core.AgentExecution import AgentExecutionContext
-from agently.core.ExtensionHandlers import ExtensionHandlers
-from agently.core.ModelResponseResult import ModelResponseResult
-from agently.core.Prompt import Prompt
-from agently.core.RuntimeContext import bind_runtime_context
+from agently.core.application.AgentExecution import RuntimeStageStallError
+from agently.core.application.AgentExecution import AgentExecutionContext
+from agently.core.extension.ExtensionHandlers import ExtensionHandlers
+from agently.core.model.ModelResponseResult import ModelResponseResult
+from agently.core.model.Prompt import Prompt
+from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import Settings, SettingsNamespace
 from agently.types.data import StreamingData
-from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import AgentExecutionStream
+from agently.core.application.AgentExecution import AgentExecutionStream
 from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import HybridRoutePlanner
 from agently.builtins.plugins.ActionFlow.TriggerFlowActionFlow import TriggerFlowActionFlow
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible

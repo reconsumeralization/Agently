@@ -550,7 +550,7 @@ class RuntimeConsoleSinkHooker(EventHooker):
     @staticmethod
     async def handler(event: "ObservationEvent"):
         from agently.base import settings
-        from agently.core.RuntimeContext import get_current_settings
+        from agently.core.runtime.RuntimeContext import get_current_settings
 
         current_settings = get_current_settings()
         active_settings = current_settings if current_settings is not None else settings

@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.3.2"
-CURRENT_RELEASE_TRAIN = "2026-05-4.1.3.2"
+CURRENT_FRAMEWORK_VERSION = "4.1.3.3"
+CURRENT_RELEASE_TRAIN = "2026-06-4.1.3.3"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -18,7 +18,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
     "framework": "agently",
     "framework_version": CURRENT_FRAMEWORK_VERSION,
     "release_train": CURRENT_RELEASE_TRAIN,
-    "released_at": "2026-06-01",
+    "released_at": "2026-06-02",
     "notes": (
         "This manifest is the offline compatibility surface for the installed "
         "Agently package. Historical release manifests live in the source "
@@ -35,6 +35,18 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
                 "compatibility_input_type": "ObservationEvent",
             },
             "runtime_control": {
+                "runtime_event_ownership": {
+                    "official_event_producer": "core",
+                    "plugin_contract": (
+                        "plugins return observations/errors/decisions; core maps them to official RuntimeEvent records"
+                    ),
+                    "builtin_direct_emitters_for_official_events": False,
+                    "agent_execution_stream_owner": "agently.core.application.AgentExecution.AgentExecutionStream",
+                },
+                "runtime_naming": {
+                    "agent_turn": "run_kind for one Agent-facing turn",
+                    "attempt_index": "model-request retry attempt metadata; not an agent turn counter",
+                },
                 "agent_execution_limits": ["max_seconds", "max_no_progress_seconds"],
                 "provider_stream_idle_timeout": [
                     "OpenAICompatible.stream_idle_timeout",
@@ -87,6 +99,46 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
             "repository": "docs",
             "public_surface_protocol": DOCS_PUBLIC_SURFACE_PROTOCOL,
         },
+        "configuration": {
+            "settings_contract": "dict-compatible typed helpers under agently.types.settings",
+            "options_contract": "dict-compatible typed helpers under agently.types.options",
+            "plugin_schema_registration": [
+                "SETTINGS_SCHEMAS",
+                "OPTIONS_SCHEMAS",
+            ],
+            "model_routing_layers": [
+                "model_pool",
+                "model_profiles",
+                "api_key_pools",
+            ],
+            "api_key_pools": [
+                "selection_policy",
+                "failover_policy",
+                "selection_handler",
+                "failover_handler",
+            ],
+        },
+    },
+    "request_input": {
+        "image": {
+            "status": "released",
+            "surface": [
+                "ModelRequest.image",
+                "Agent.image",
+            ],
+            "shape": "image(question=..., file=...|url=...|files=[...]|urls=[...])",
+            "attachment_contract": (
+                "Builds text plus image_url rich-content blocks and keeps attachment as the low-level passthrough."
+            ),
+            "local_image_mime_types": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif",
+                "image/bmp",
+            ],
+            "common_file_handling_target": "4.1.4",
+        }
     },
 }
 

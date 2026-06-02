@@ -14,14 +14,9 @@ Agently.set_settings(
 
 agent = Agently.create_agent()
 
-result = agent.attachment(
-    [
-        {"type": "text", "text": "What's this？"},
-        {
-            "type": "image_url",
-            "image_url": {"url": "https://cdn.deepseek.com/logo.png?x-image-process=image%2Fresize%2Cw_1920"},
-        },
-    ],
+result = agent.image(
+    question="What's this?",
+    url="https://cdn.deepseek.com/logo.png?x-image-process=image%2Fresize%2Cw_1920",
 ).start()
 
 print(result)
@@ -31,10 +26,9 @@ print(result)
 # Content is non-deterministic; the model should mention a logo or branding element.
 #
 # How it works:
-# .attachment([...]) accepts an OpenAI-style multi-modal content list:
-#   {"type": "text", "text": "..."}        — text part of the user message
-#   {"type": "image_url", "image_url": {"url": "..."}}  — image by URL
-# The list is assembled as the user-turn content and sent to the VLM endpoint.
+# .image(question="...", url="...") builds the OpenAI-style multimodal content
+# list for you: one text part plus one image_url part.
+# Use file="..." for a local image or files=[...] / urls=[...] for multi-image input.
 # Any OpenAI-compatible VLM can be used here; swap base_url, model, and auth
 # to use a different provider (Ollama, OpenAI, DeepSeek-VL, etc.).
 # debug=True prints the raw request/response stream to console.

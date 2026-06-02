@@ -105,16 +105,25 @@ result = (
 `agent.input(...).start()` 和 `agent.create_execution()`。如果只想覆盖单次调用，
 使用 `agent.create_request(model_key="deepseek-v4")`。
 
-API key 会在请求时根据 `key_pool_strategy` 自动选择：`fixed`、`random`、
-`round_robin` 或 `least_used`。Agently 4.1.3 不会在 provider 返回鉴权、额度或费用
-类错误后自动换另一个 key 重试；这类失败会暴露给应用代码，由业务系统决定该操作是否
-适合更换凭据重试。
+API key 会在请求时根据 key pool 的 `selection` 策略选择：`fixed`、`random`、
+`round_robin` 或 `least_used`。旧的 `key_pool_strategy` 路径继续兼容。
+
+provider 错误后的 failover 需要通过 `api_key_pools.<pool>.failover` 显式开启。没有
+failover 策略时，provider 错误会按旧行为直接暴露。内置 failover 策略可以针对配置的
+HTTP 状态码重试另一个 key；自定义 handler 可以检查 provider error object，并返回
+`"try_next"`、`"retry_same"`、`"raise"`、某个 key id、一个 key entry dict，或
+`{"key_id": "b"}` / `{"key_entry": context.keys[1]}` 这样的包装。
 
 ## 插件源码位置
 
-- [agently/builtins/plugins/ModelRequester/OpenAICompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible.py)
-- [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible.py)
-- [agently/builtins/plugins/ModelRequester/AnthropicCompatible.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible.py)
+- [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/)
+- [agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAIResponsesCompatible/)
+- [agently/builtins/plugins/ModelRequester/AnthropicCompatible/](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible/)
+
+每个内置 requester 都使用 runtime-handler 包结构：`plugin.py` 是公开
+coordinator，私有实现职责分别放在 `modules/request_builder.py`、
+`modules/credential.py`、`modules/transport.py`、`modules/handlers.py`
+和 `modules/response_adapter.py`。
 
 如果某个 provider 不在以上协议族（极少见），可以新增一个 requester 插件；但实际上几乎所有商用端点要么提供 OpenAI 兼容模式、Responses 形态，要么对齐 Anthropic 协议，所以这些内置插件覆盖大部分场景。
 
