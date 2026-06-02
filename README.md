@@ -38,6 +38,7 @@ RuntimeEvent delivery on top of the 4.1.3 runtime line. Application code can
 run explicit `mode="task_step"` executions with lineage, limits, stream
 correlation, and Workspace checkpoints while DevTools and companion Skills stay
 aligned with the same runtime event vocabulary. Read the
+[4.1.3.3 Release Notes](docs/en/development/release-notes-4.1.3.3.md),
 [4.1.3.2 Release Notes](docs/en/development/release-notes-4.1.3.2.md),
 [4.1.3.1 Release Notes](docs/en/development/release-notes-4.1.3.1.md), and
 [4.1.3 Release Notes](docs/en/development/release-notes-4.1.3.md) for the full

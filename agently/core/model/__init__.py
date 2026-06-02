@@ -16,12 +16,16 @@ from .Prompt import Prompt
 from .ModelResponseResult import ModelResponseResult
 from .ModelResponse import ModelResponse
 from .ModelRequest import ModelRequest, _UNSET, _resolve_quick_prompt_input
+from .AttachmentInput import ImageDetail, build_image_attachment, image_file_to_data_url
 
 __all__ = [
     "Prompt",
     "ModelRequest",
     "ModelResponse",
     "ModelResponseResult",
+    "ImageDetail",
+    "build_image_attachment",
+    "image_file_to_data_url",
     "_UNSET",
     "_resolve_quick_prompt_input",
 ]

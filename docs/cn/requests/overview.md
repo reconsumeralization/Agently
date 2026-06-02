@@ -35,6 +35,29 @@ result = (
 
 这一条链覆盖了上述四部分。`input()` 填 prompt 的 input 槽，`output()` 定义 schema（含 `ensure` 标记），`start()` 发送请求、跑 validation 流水线、必要时重试，并返回解析后的 dict。
 
+## 图片输入
+
+VLM 请求如果是“一个问题 + 一张或多张图片”，推荐用 `.image(...)`。它支持本地图片文件和远程图片 URL：
+
+```python
+from agently import Agently
+
+agent = Agently.create_agent()
+
+result = (
+    agent
+    .image(
+        question="对比这两张截图，列出可见差异。",
+        files=["./before.png", "./after.png"],
+    )
+    .start()
+)
+```
+
+单图用 `file="..."` 或 `url="..."`，多图用 `files=[...]` 或 `urls=[...]`。本地文件会先转成 `data:<mime>;base64,...` image URL，再走现有 rich-content prompt 通道。当前本地图片支持 PNG、JPEG、WebP、GIF 和 BMP。
+
+`.attachment([...])` 仍然保留为底层输入方案，适合调用方已经准备好 provider 风格 rich content block，或者需要精确控制混合内容顺序的场景。PDF、Markdown/text、Word、演示文稿、表格等常见非图片文件属于 4.1.4 目标，不放进 4.1.3.3 的图片切片。
+
 ## 该读哪一页
 
 | 你想 … | 去看 |

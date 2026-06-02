@@ -208,7 +208,8 @@ def quick_prompt_methods():
     # .examples()
     # .output()
     # .options() ! notice: .options() is a special method to set temp model request options parameters for this request / this agent
-    # .attachment() ! notice: .attachment() is a special method for VLM file attachment
+    # .image() ! notice: .image() is the recommended method for VLM image questions
+    # .attachment() ! notice: .attachment() is the low-level rich-content input method
     # .set_chat_history() / .add_chat_history() / .reset_chat_history()
     #
     # Highly recommend to check code in codes in 'agently/core/Agent/Agent.py' and 'agently/core/Model/ModelRequest.py' to dive deeper.

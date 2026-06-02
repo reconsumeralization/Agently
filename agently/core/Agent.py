@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import json
+import os
 import uuid
 
 from collections.abc import Mapping
 from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
 
 from agently.core.extension import ExtensionHandlers
+from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
 from agently.core.orchestration import DynamicTask
 from agently.core.runtime import resolve_parent_run_context
@@ -847,6 +849,32 @@ class BaseAgent:
             self.agent_prompt.set("attachment", prompt, mappings=mappings)
         else:
             self.request_prompt.set("attachment", prompt, mappings=mappings)
+        return self
+
+    def image(
+        self,
+        *,
+        question: str,
+        file: str | os.PathLike[str] | None = None,
+        url: str | None = None,
+        files: list[str | os.PathLike[str]] | tuple[str | os.PathLike[str], ...] | None = None,
+        urls: list[str] | tuple[str, ...] | None = None,
+        detail: ImageDetail | None = None,
+        mappings: dict[str, Any] | None = None,
+        always: bool = False,
+    ):
+        attachment = build_image_attachment(
+            question=question,
+            file=file,
+            url=url,
+            files=files,
+            urls=urls,
+            detail=detail,
+        )
+        if always:
+            self.agent_prompt.set("attachment", attachment, mappings=mappings)
+        else:
+            self.request_prompt.set("attachment", attachment, mappings=mappings)
         return self
 
     def options(

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, AsyncGenerator, Literal, TYPE_CHECKING, overload, Generator, Mapping
 
 from agently.core.extension import ExtensionHandlers
@@ -23,6 +24,7 @@ from agently.utils import Settings, FunctionShifter
 from .Prompt import Prompt
 from .ModelResponse import ModelResponse
 from .ModelResponseResult import ModelResponseResult
+from .AttachmentInput import ImageDetail, build_image_attachment
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
@@ -281,6 +283,31 @@ class ModelRequest:
         mappings: dict[str, Any] | None = None,
         ):
         self.prompt.set("attachment", prompt, mappings=mappings)
+        return self
+
+    def image(
+        self,
+        *,
+        question: str,
+        file: str | os.PathLike[str] | None = None,
+        url: str | None = None,
+        files: list[str | os.PathLike[str]] | tuple[str | os.PathLike[str], ...] | None = None,
+        urls: list[str] | tuple[str, ...] | None = None,
+        detail: ImageDetail | None = None,
+        mappings: dict[str, Any] | None = None,
+    ):
+        self.prompt.set(
+            "attachment",
+            build_image_attachment(
+                question=question,
+                file=file,
+                url=url,
+                files=files,
+                urls=urls,
+                detail=detail,
+            ),
+            mappings=mappings,
+        )
         return self
 
     def validate(self, handler: "OutputValidateHandler"):

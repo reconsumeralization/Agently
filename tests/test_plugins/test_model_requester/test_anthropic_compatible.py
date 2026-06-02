@@ -140,6 +140,32 @@ def test_generate_request_maps_system_and_rich_content():
     }
 
 
+def test_generate_request_maps_data_url_image_to_base64_source():
+    request = generate_request(
+        {
+            "base_url": "https://api.anthropic.example/v1",
+        },
+        {
+            "attachment": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aGVsbG8="},
+                }
+            ],
+        },
+    )
+
+    content = request["data"]["messages"][0]["content"]
+    assert content[0] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "aGVsbG8=",
+        },
+    }
+
+
 def test_prompt_tools_are_converted_and_explicit_tools_override_by_name():
     request = generate_request(
         {

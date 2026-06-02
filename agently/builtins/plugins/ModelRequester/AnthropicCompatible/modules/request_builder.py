@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args, get_origin
 
 from agently.types.data import AgentlyRequestData, AgentlyRequestDataDict
@@ -181,6 +182,26 @@ class AnthropicCompatibleRequestBuilderMixin:
     def _content_text_block(text: Any) -> dict[str, Any]:
         return {"type": "text", "text": str(text)}
 
+    @staticmethod
+    def _content_image_block(image_url: str) -> dict[str, Any]:
+        data_url_match = re.fullmatch(r"data:(image/[a-zA-Z0-9.+-]+);base64,(.+)", image_url, re.DOTALL)
+        if data_url_match:
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": data_url_match.group(1),
+                    "data": data_url_match.group(2),
+                },
+            }
+        return {
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": image_url,
+            },
+        }
+
     @classmethod
     def _normalize_content_part(cls, part: Any) -> dict[str, Any]:
         if isinstance(part, str):
@@ -195,21 +216,9 @@ class AnthropicCompatibleRequestBuilderMixin:
             image_value = part.get("image_url")
             if isinstance(image_value, dict):
                 if isinstance(image_value.get("url"), str) and image_value["url"]:
-                    return {
-                        "type": "image",
-                        "source": {
-                            "type": "url",
-                            "url": image_value["url"],
-                        },
-                    }
+                    return cls._content_image_block(image_value["url"])
             elif isinstance(image_value, str) and image_value:
-                return {
-                    "type": "image",
-                    "source": {
-                        "type": "url",
-                        "url": image_value,
-                    },
-                }
+                return cls._content_image_block(image_value)
             raise TypeError(
                 f"Plugin Name: { cls.name }\n"
                 f"Error: Anthropic image_url content requires a non-empty URL.\n"
@@ -218,13 +227,7 @@ class AnthropicCompatibleRequestBuilderMixin:
         if part_type == "input_image":
             image_url = part.get("image_url")
             if isinstance(image_url, str) and image_url:
-                return {
-                    "type": "image",
-                    "source": {
-                        "type": "url",
-                        "url": image_url,
-                    },
-                }
+                return cls._content_image_block(image_url)
             raise TypeError(
                 f"Plugin Name: { cls.name }\n"
                 f"Error: Anthropic input_image content currently requires 'image_url'.\n"

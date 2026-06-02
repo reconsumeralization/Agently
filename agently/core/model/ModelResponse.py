@@ -114,9 +114,9 @@ class ModelResponse:
 
     def _build_prompt_payload(self) -> dict[str, Any]:
         prompt_snapshot = self.prompt.to_serializable_prompt_data()
-        prompt_messages = self.prompt.to_messages()
-        prompt_text = self.prompt.to_text()
         prompt_object = self.prompt.to_prompt_object()
+        prompt_messages = self.prompt.to_messages(rich_content=bool(prompt_object.attachment))
+        prompt_text = self.prompt.to_text()
         return {
             "prompt": prompt_snapshot,
             "prompt_messages": DataFormatter.sanitize(prompt_messages),
