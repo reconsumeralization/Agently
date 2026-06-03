@@ -61,7 +61,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.3"
+    assert in_development["target_version"] == "4.1.3.4"
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",
@@ -115,6 +115,13 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     }
     assert in_development["companions"]["skills"]["authoring_protocol"] == "agently-skills.authoring.v2"
     assert in_development["companions"]["skills"]["authoring_format"] == "standard SKILL.md only"
+    runtime_capability_contract = in_development["companions"]["skills"]["runtime_capability_contract"]
+    assert "agent.configure_skill_capabilities" in runtime_capability_contract["host_policy_surface"]
+    assert "agent.configure_policy_approval" in runtime_capability_contract["host_policy_surface"]
+    assert runtime_capability_contract["policy_modes"] == ["allow", "approval", "off"]
+    assert "capability_needs" in runtime_capability_contract["skill_capability_needs"]
+    assert "script_run" in runtime_capability_contract["auto_loadable_needs"]
+    assert "allowed-actions" in runtime_capability_contract["removed_private_skill_fields"]
     assert (
         in_development["companions"]["skills"]["devtools_guidance_protocol"]
         == current["companions"]["skills"]["devtools_guidance_protocol"]

@@ -19,6 +19,7 @@ from .application import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
     AgentExecutionStream,
+    AgentTask,
     RuntimeStageStallError,
     SkillsExecutor,
 )
@@ -30,6 +31,7 @@ from .execution import (
     ExecutionEnvironmentApprovalRequired,
     ExecutionEnvironmentError,
     ExecutionEnvironmentManager,
+    PolicyApprovalManager,
     Tool,
 )
 from .extension import ExtensionHandlers, PluginManager
@@ -80,6 +82,7 @@ __all__ = [
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
     "AgentExecutionStream",
+    "AgentTask",
     "AttemptRunner",
     "BaseAgent",
     "CompiledTaskDAG",
@@ -100,6 +103,7 @@ __all__ = [
     "ModelResponseResult",
     "ObservationEventEmitter",
     "PluginManager",
+    "PolicyApprovalManager",
     "Prompt",
     "RecallProfile",
     "RuleRecallPlanner",

@@ -33,6 +33,74 @@ by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
 protocol. This keeps Skills, Dynamic Task, and future route implementations
 replaceable without teaching core about builtin plugin internals.
 
+## AgentTask Loop
+
+Use `agent.create_task(...)` when the business goal needs a bounded multi-round
+loop instead of one Agent turn. AgentTask V1 runs one task owned by one Agent:
+plan, execute one bounded step, write Workspace evidence, verify, replan when
+needed, then finish as complete or blocked.
+
+```python
+task = agent.create_task(
+    goal="Upgrade a legacy Agently script so it runs on the current 4.1.x API.",
+    success_criteria=[
+        "The original failure is recorded.",
+        "The script no longer uses incompatible legacy API calls.",
+        "The fixed script runs and produces the expected structured result.",
+    ],
+    workspace="./.agently/tasks/legacy-script-upgrade",
+    max_iterations=4,
+    verify="before_done",
+    options={
+        "agent_task": {
+            "stream_progress": True,
+            "stream_progress_background": True,
+            "stream_snapshots": True,
+            # Optional: use a separate model key to narrate progress from snapshots.
+            # Omit this key to use template progress with no model requests.
+            # "progress_model_key": "cheap-progress-model",
+        },
+    },
+)
+
+async for item in task.stream():
+    if (item.meta or {}).get("stream_kind") == "progress":
+        print("[PROGRESS]", item.value["message"])
+    elif (item.meta or {}).get("stream_kind") == "snapshot":
+        print("[SNAPSHOT]", item.path, item.value["snapshot"])
+
+result = await task.run()
+meta = await task.meta()
+```
+
+Each iteration writes planning decisions, execution observations, verification
+evidence, and checkpoints to Workspace. The next iteration receives a
+ContextPack from `workspace.build_context(...)`, so the loop can carry evidence
+forward without turning Workspace into an autonomous planner.
+
+`task.stream()` emits structured result events and, by default, compact
+intermediate `snapshot` items. Natural-language `progress` items are opt-in with
+`options={"agent_task": {"stream_progress": True}}`; the built-in descriptions
+are template-based when no `progress_model_key` is configured, so they do not
+add model requests or token usage. When `progress_model_key` is set, AgentTask
+uses that separate model key in a background task to summarize the already
+emitted snapshot and task metadata. The main loop does not produce extra fields
+for progress narration and does not wait for progress narration to finish.
+Progress narrator failures are side-channel diagnostics and warning-level
+runtime events; they do not turn the main task into `model.request_failed`.
+
+Terminal task status and artifact acceptance are separate. `completed` means
+the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`).
+`max_iterations` can still leave a useful Workspace file or checkpoint, but it
+is a partial artifact (`accepted=False`, `artifact_status="partial"`), not a
+completed business result.
+
+The first public slice is intentionally narrow: single task, one Agent owner,
+roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps
+may use Actions, Skills, or Dynamic Task candidates that the host already
+enabled on the Agent. AgentTask does not provide multi-task coordination,
+background autonomy, distributed leases, or long-term memory management.
+
 ## Execution Object
 
 Use `agent.create_execution()` when the caller needs route diagnostics, multiple

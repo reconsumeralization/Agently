@@ -29,6 +29,69 @@ Task、model-decision Skills 和普通 Actions 时，默认由模型选择 route
 Skills、Dynamic Task 和后续 route 实现都可以替换，而不需要 core 知道内置
 plugin 的内部实现。
 
+## AgentTask Loop
+
+当业务目标需要一个有边界的多轮闭环，而不是一次 Agent turn 时，使用
+`agent.create_task(...)`。AgentTask V1 运行一个由单个 Agent 持有的任务：计划、
+执行一个 bounded step、写入 Workspace 证据、验证、必要时 replan，最后以 complete
+或 blocked 结束。
+
+```python
+task = agent.create_task(
+    goal="将旧版 Agently 脚本迁移到当前 4.1.x API，并确保它可以运行。",
+    success_criteria=[
+        "原始失败已被记录。",
+        "脚本不再使用不兼容的旧 API。",
+        "修复后的脚本可以运行，并产出预期结构化结果。",
+    ],
+    workspace="./.agently/tasks/legacy-script-upgrade",
+    max_iterations=4,
+    verify="before_done",
+    options={
+        "agent_task": {
+            "stream_progress": True,
+            "stream_progress_background": True,
+            "stream_snapshots": True,
+            # 可选：用单独 model key 基于 snapshot 生成自然语言进展。
+            # 不设置时使用模板 progress，不增加模型请求。
+            # "progress_model_key": "cheap-progress-model",
+        },
+    },
+)
+
+async for item in task.stream():
+    if (item.meta or {}).get("stream_kind") == "progress":
+        print("[PROGRESS]", item.value["message"])
+    elif (item.meta or {}).get("stream_kind") == "snapshot":
+        print("[SNAPSHOT]", item.path, item.value["snapshot"])
+
+result = await task.run()
+meta = await task.meta()
+```
+
+每轮会把 planning decision、execution observation、verification evidence 和
+checkpoint 写入 Workspace。下一轮通过 `workspace.build_context(...)` 取得
+ContextPack，因此 loop 可以把证据带入下一轮，但 Workspace 不会变成自主规划器。
+
+`task.stream()` 会发出结构化结果事件，并默认发出紧凑中间状态 `snapshot` item。
+自然语言 `progress` item 需要通过
+`options={"agent_task": {"stream_progress": True}}` 显式打开；内置描述是模板文本，
+未配置 `progress_model_key` 时不会增加模型请求或 token 消耗。设置
+`progress_model_key` 后，AgentTask 会用这个单独 model key 在后台基于已产生的
+snapshot 和任务元数据总结进展；主循环不会为了 progress 多产出字段，也不会等待
+progress 总结完成。progress narrator 失败属于 side-channel diagnostics 和
+warning 级 runtime event，不会把主任务标记成 `model.request_failed`。
+
+任务终态和 artifact 验收是两件事。`completed` 表示 verifier 已验收结果
+（`accepted=True`、`artifact_status="accepted"`）。`max_iterations` 仍可能留下
+有用的 Workspace 文件或 checkpoint，但它只是 partial artifact
+（`accepted=False`、`artifact_status="partial"`），不是已完成的业务结果。
+
+第一版公开 slice 有明确边界：单任务、单 Agent owner、约 2-5 次迭代，并通过
+`AgentExecution` 执行 bounded step。这些 step 可以使用调用方已经在 Agent 上启用的
+Actions、Skills 或 Dynamic Task 候选。AgentTask 不提供多任务协同、后台自治、分布式
+租约或长期记忆管理。
+
 ## Execution 对象
 
 当调用方需要路线诊断、多种结果视图或过程流式输出时，使用
