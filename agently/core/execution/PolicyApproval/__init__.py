@@ -12,16 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .ExecutionEnvironment import (
-    ExecutionEnvironmentApprovalDenied,
-    ExecutionEnvironmentApprovalRequired,
-    ExecutionEnvironmentError,
-    ExecutionEnvironmentManager,
-)
+from .PolicyApproval import PolicyApprovalManager
 
-__all__ = [
-    "ExecutionEnvironmentApprovalDenied",
-    "ExecutionEnvironmentApprovalRequired",
-    "ExecutionEnvironmentError",
-    "ExecutionEnvironmentManager",
-]
+__all__ = ["PolicyApprovalManager"]

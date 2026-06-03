@@ -17,20 +17,35 @@ from typing import Any, Literal
 
 from agently.utils import LazyImport, FunctionShifter
 
+SearchBackend = Literal[
+    "auto",
+    "all",
+    "bing",
+    "brave",
+    "duckduckgo",
+    "google",
+    "grokipedia",
+    "mojeek",
+    "startpage",
+    "wikipedia",
+    "yahoo",
+    "yandex",
+]
+NewsSearchBackend = Literal["auto", "all", "bing", "duckduckgo", "yahoo"]
+
 
 class Search:
+    DEFAULT_TEXT_FALLBACK_BACKENDS = ("yahoo", "brave", "duckduckgo", "google", "startpage", "mojeek")
+    DEFAULT_NEWS_FALLBACK_BACKENDS = ("yahoo", "duckduckgo", "bing")
+
     def __init__(
         self,
         *,
         proxy: str | None = None,
         timeout: int | None = None,
-        backend: (
-            Literal["auto", "bing", "duckduckgo", "yahoo", "google", "mullvad_google", "yandex", "wikipedia"] | None
-        ) = "auto",
-        search_backend: (
-            Literal["auto", "bing", "duckduckgo", "yahoo", "google", "mullvad_google", "yandex", "wikipedia"] | None
-        ) = None,
-        news_backend: Literal["auto", "bing", "duckduckgo", "yahoo"] | None = None,
+        backend: SearchBackend | str | None = "auto",
+        search_backend: SearchBackend | str | None = None,
+        news_backend: NewsSearchBackend | str | None = None,
         region: Literal[
             "xa-ar",
             "xa-en",
@@ -100,6 +115,9 @@ class Search:
             "ve-es",
             "vn-vi",
         ] = "us-en",
+        fallback_backends: list[str] | tuple[str, ...] | str | None = None,
+        search_fallback_backends: list[str] | tuple[str, ...] | str | None = None,
+        news_fallback_backends: list[str] | tuple[str, ...] | str | None = None,
         options: dict[str, Any] | None = None,
     ):
         self.proxy = proxy
@@ -110,6 +128,10 @@ class Search:
             "news": news_backend if news_backend is not None else backend,
         }
         self.region = region
+        self.fallback_backends = {
+            "search": search_fallback_backends if search_fallback_backends is not None else fallback_backends,
+            "news": news_fallback_backends if news_fallback_backends is not None else fallback_backends,
+        }
         self._extra_options = options or {}
 
     def _get_ddgs(self):
@@ -192,6 +214,9 @@ class Search:
                 meta={
                     "component": "builtins.actions.Search",
                     "legacy_tool_facade": "agently.builtins.tools.Search",
+                    "provider": "ddgs",
+                    "ddgs_min_version": "9.10.0",
+                    "ddgs_latest_recommended": True,
                     "base_action_id": base_action_id,
                     "backend": self.backends.get("search" if base_action_id != "search_news" else "news", "auto"),
                     "region": self.region,
@@ -217,16 +242,13 @@ class Search:
         Returns:
             List of dictionaries with search results.
         """
-        ddgs = self._get_ddgs()
-        search_text = FunctionShifter.auto_options_func(ddgs.text)
-        return search_text(
+        return self._call_ddgs_with_fallback_result(
+            category="search",
+            method_name="text",
             query=query,
             timelimit=timelimit,
             max_results=max_results,
-            backend=self.backends.get("search", "auto"),
-            region=self.region,
-            **self._extra_options,
-        )
+        )["data"]
 
     async def search_news(
         self,
@@ -245,16 +267,50 @@ class Search:
         Returns:
             List of dictionaries with news search results.
         """
-        ddgs = self._get_ddgs()
-        search_news = FunctionShifter.auto_options_func(ddgs.news)
-        return search_news(
+        return self._call_ddgs_with_fallback_result(
+            category="news",
+            method_name="news",
             query=query,
             timelimit=timelimit,
             max_results=max_results,
-            backend=self.backends.get("news", "auto"),
-            region=self.region,
-            **self._extra_options,
-        )
+        )["data"]
+
+    async def _execute_action_method(self, method_name: str, **kwargs) -> dict[str, Any] | list[dict[str, Any]]:
+        custom_method = self.__dict__.get(method_name)
+        if callable(custom_method):
+            output = await FunctionShifter.asyncify(custom_method)(**kwargs)
+            if isinstance(output, dict) and "status" in output:
+                return output
+            return {
+                "ok": True,
+                "success": True,
+                "status": "success",
+                "data": output,
+                "result": output,
+                "diagnostics": [],
+                "meta": {
+                    "provider": "custom",
+                    "method": method_name,
+                },
+            }
+        if method_name == "search":
+            return self._call_ddgs_with_fallback_result(
+                category="search",
+                method_name="text",
+                query=str(kwargs.get("query") or ""),
+                timelimit=kwargs.get("timelimit"),
+                max_results=kwargs.get("max_results", 10),
+            )
+        if method_name == "search_news":
+            return self._call_ddgs_with_fallback_result(
+                category="news",
+                method_name="news",
+                query=str(kwargs.get("query") or ""),
+                timelimit=kwargs.get("timelimit"),
+                max_results=kwargs.get("max_results", 10),
+            )
+        method = getattr(self, method_name)
+        return method(**kwargs)
 
     async def search_wikipedia(
         self,
@@ -275,14 +331,161 @@ class Search:
         """
         ddgs = self._get_ddgs()
         search_wikipedia = FunctionShifter.auto_options_func(ddgs.text)
-        return search_wikipedia(
-            query=query,
-            timelimit=timelimit,
-            max_results=max_results,
-            backend="wikipedia",
-            region=self.region,
-            **self._extra_options,
+        try:
+            return search_wikipedia(
+                query=query,
+                timelimit=timelimit,
+                max_results=max_results,
+                backend="wikipedia",
+                region=self.region,
+                **self._extra_options,
+            )
+        except Exception as error:
+            if self._is_no_results_error(error):
+                return []
+            raise
+
+    def _call_ddgs_with_fallback_result(
+        self,
+        *,
+        category: Literal["search", "news"],
+        method_name: Literal["text", "news"],
+        query: str,
+        timelimit: str | None = None,
+        max_results: int | None = 10,
+    ) -> dict[str, Any]:
+        ddgs = self._get_ddgs()
+        method = FunctionShifter.auto_options_func(getattr(ddgs, method_name))
+        errors: list[dict[str, str]] = []
+        empty_backends: list[str] = []
+        candidates = self._candidate_backends(category)
+        for backend in self._candidate_backends(category):
+            try:
+                result = method(
+                    query=query,
+                    timelimit=timelimit,
+                    max_results=max_results,
+                    backend=backend,
+                    region=self.region,
+                    **self._extra_options,
+                )
+            except Exception as error:
+                errors.append(
+                    {
+                        "backend": backend,
+                        "type": error.__class__.__name__,
+                        "message": str(error),
+                    }
+                )
+                continue
+            results = result if isinstance(result, list) else list(result) if result is not None else []
+            if results:
+                diagnostics = [
+                    {
+                        "code": "search_backend_failed",
+                        "backend": item["backend"],
+                        "error_type": item["type"],
+                        "message": item["message"],
+                    }
+                    for item in errors
+                ]
+                diagnostics.extend(
+                    {
+                        "code": "search_backend_empty",
+                        "backend": backend_name,
+                        "message": "Backend returned no parsed results.",
+                    }
+                    for backend_name in empty_backends
+                )
+                status = "partial_success" if diagnostics else "success"
+                return {
+                    "ok": True,
+                    "success": True,
+                    "status": status,
+                    "data": results,
+                    "result": results,
+                    "diagnostics": diagnostics,
+                    "meta": {
+                        "provider": "ddgs",
+                        "category": category,
+                        "backend": backend,
+                        "attempted_backends": candidates,
+                        "failed_backends": [item["backend"] for item in errors],
+                        "empty_backends": empty_backends,
+                    },
+                }
+            empty_backends.append(backend)
+        if errors and all(self._is_no_results_message(item["message"]) for item in errors):
+            errors = []
+        if errors:
+            raise RuntimeError(
+                "Search failed after trying backends: "
+                + "; ".join(f"{item['backend']}={item['type']}({item['message']})" for item in errors)
+            )
+        return {
+            "ok": True,
+            "success": True,
+            "status": "success",
+            "data": [],
+            "result": [],
+            "diagnostics": [
+                {
+                    "code": "search_backend_empty",
+                    "backend": backend,
+                    "message": "Backend returned no parsed results.",
+                }
+                for backend in empty_backends
+            ],
+            "meta": {
+                "provider": "ddgs",
+                "category": category,
+                "backend": None,
+                "attempted_backends": candidates,
+                "failed_backends": [],
+                "empty_backends": empty_backends,
+            },
+        }
+
+    def _candidate_backends(self, category: Literal["search", "news"]) -> list[str]:
+        configured = self.backends.get(category, "auto")
+        configured_items = self._normalize_backend_list(configured)
+        explicit_fallback = self._normalize_backend_list(self.fallback_backends.get(category))
+        default_fallback = (
+            list(self.DEFAULT_NEWS_FALLBACK_BACKENDS)
+            if category == "news"
+            else list(self.DEFAULT_TEXT_FALLBACK_BACKENDS)
         )
+        if not configured_items or any(item in {"auto", "all"} for item in configured_items):
+            candidates = explicit_fallback or default_fallback
+        else:
+            candidates = configured_items + (explicit_fallback or default_fallback)
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for item in candidates:
+            backend = str(item).strip()
+            if not backend or backend in seen:
+                continue
+            seen.add(backend)
+            normalized.append(backend)
+        return normalized or ["auto"]
+
+    @staticmethod
+    def _normalize_backend_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return [str(value).strip()] if str(value).strip() else []
+
+    @classmethod
+    def _is_no_results_error(cls, error: Exception) -> bool:
+        return cls._is_no_results_message(str(error))
+
+    @staticmethod
+    def _is_no_results_message(message: str) -> bool:
+        return "No results found" in message
 
     async def search_arxiv(
         self,

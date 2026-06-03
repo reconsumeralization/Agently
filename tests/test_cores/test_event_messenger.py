@@ -484,6 +484,8 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
         settings,
     )
     assert should_render_console_event(RuntimeEvent(event_type="action.completed", level="INFO"), settings)
+    assert should_render_console_event(RuntimeEvent(event_type="action.approval_required", level="WARNING"), settings)
+    assert should_render_console_event(RuntimeEvent(event_type="action.blocked", level="WARNING"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="action.failed", level="WARNING"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="tool.loop_started", message="started"), settings)
     assert not should_render_console_event(RuntimeEvent(event_type="tool.plan_ready", message="ready"), settings)

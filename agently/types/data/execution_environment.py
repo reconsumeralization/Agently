@@ -40,6 +40,7 @@ ExecutionEnvironmentStatus: TypeAlias = Literal[
 
 class ExecutionEnvironmentPolicy(TypedDict, total=False):
     approval_mode: Literal["auto", "always", "never"]
+    policy_approval_handler: str
     workspace_roots: list[str]
     path_allowlist: list[str]
     path_denylist: list[str]

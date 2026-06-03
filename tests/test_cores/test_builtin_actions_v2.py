@@ -80,6 +80,123 @@ def test_agent_use_actions_accepts_browse_package():
     assert result.get("data") == "content from https://example.com"
 
 
+@pytest.mark.asyncio
+async def test_action_runtime_default_planning_uses_configured_model_key(monkeypatch):
+    import agently.core as agently_core
+
+    agent = Agently.create_agent()
+    agent.settings.set("action.planning_model_key", "task-main")
+    seen_model_keys: list[str | None] = []
+
+    class FakeResult:
+        async def async_get_data(self):
+            return {"next_action": "response", "execution_commands": []}
+
+    class FakeResponse:
+        result = FakeResult()
+
+        async def get_async_generator(self, *_, **__):
+            if False:
+                yield None
+
+    class FakeModelRequest:
+        def __init__(self, *_, model_key=None, **__):
+            seen_model_keys.append(model_key)
+
+        def input(self, *_args, **_kwargs):
+            return self
+
+        def info(self, *_args, **_kwargs):
+            return self
+
+        def instruct(self, *_args, **_kwargs):
+            return self
+
+        def output(self, *_args, **_kwargs):
+            return self
+
+        def get_response(self, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(agently_core, "ModelRequest", FakeModelRequest)
+    prompt = Agently.create_prompt()
+    prompt.set("input", "collect evidence")
+
+    decision = await agent.action.action_runtime._default_structured_planning_handler(
+        {
+            "prompt": prompt,
+            "settings": agent.settings,
+            "agent_name": agent.name,
+            "round_index": 0,
+            "max_rounds": 1,
+            "done_plans": [],
+            "last_round_records": [],
+        },
+        {"action_list": [{"name": "search"}]},
+    )
+
+    assert seen_model_keys == ["task-main"]
+    assert decision["next_action"] == "response"
+
+
+@pytest.mark.asyncio
+async def test_action_runtime_native_tool_planning_uses_configured_model_key(monkeypatch):
+    import agently.core as agently_core
+
+    agent = Agently.create_agent()
+    agent.settings.set("action.planning_model_key", "task-main")
+    seen_model_keys: list[str | None] = []
+
+    class FakePrompt:
+        def set(self, *_args, **_kwargs):
+            return None
+
+    class FakeResponse:
+        def get_async_generator(self, *_, **__):
+            async def generate():
+                yield "done", None
+
+            return generate()
+
+    class FakeModelRequest:
+        prompt = FakePrompt()
+
+        def __init__(self, *_, model_key=None, **__):
+            seen_model_keys.append(model_key)
+
+        def input(self, *_args, **_kwargs):
+            return self
+
+        def info(self, *_args, **_kwargs):
+            return self
+
+        def instruct(self, *_args, **_kwargs):
+            return self
+
+        def get_response(self, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(agently_core, "ModelRequest", FakeModelRequest)
+    prompt = Agently.create_prompt()
+    prompt.set("input", "collect evidence")
+
+    decision = await agent.action.action_runtime._default_native_tool_call_planning_handler(
+        {
+            "prompt": prompt,
+            "settings": agent.settings,
+            "agent_name": agent.name,
+            "round_index": 0,
+            "max_rounds": 1,
+            "done_plans": [],
+            "last_round_records": [],
+        },
+        {"action_list": [{"name": "search"}]},
+    )
+
+    assert seen_model_keys == ["task-main"]
+    assert decision["next_action"] == "response"
+
+
 def test_agent_enable_sqlite_registers_managed_sqlite_action(tmp_path):
     db_path = tmp_path / "items.db"
     connection = sqlite3.connect(db_path)
@@ -233,3 +350,107 @@ def test_search_package_does_not_load_backend_during_registration(monkeypatch):
     agent.use_actions(Search(timeout=1))
 
     assert calls == []
+
+
+def test_search_package_falls_back_when_ddgs_backend_has_no_results(monkeypatch):
+    class FakeDDGS:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text(self, query: str, **kwargs):
+            backend = kwargs.get("backend")
+            if backend == "yahoo":
+                raise RuntimeError("No results found.")
+            return [{"title": query, "href": "https://example.com", "body": f"backend={backend}"}]
+
+    class FakeDDGSModule:
+        DDGS = FakeDDGS
+
+    search_module = importlib.import_module("agently.builtins.actions.Search")
+    monkeypatch.setattr(search_module.LazyImport, "import_package", lambda *args, **kwargs: FakeDDGSModule)
+
+    agent = Agently.create_agent().use_actions(Search(backend="yahoo", search_fallback_backends=["brave"]))
+
+    result = agent.action.execute_action("search", {"query": "Agently", "max_results": 2})
+
+    assert result.get("status") == "partial_success"
+    assert result.get("success") is True
+    assert result.get("data") == [{"title": "Agently", "href": "https://example.com", "body": "backend=brave"}]
+
+
+def test_search_package_reports_partial_success_when_fallback_recovers(monkeypatch):
+    class FakeDDGS:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text(self, query: str, **kwargs):
+            backend = kwargs.get("backend")
+            if backend == "yahoo":
+                raise RuntimeError("HTTP 429")
+            return [{"title": query, "href": "https://example.com", "body": f"backend={backend}"}]
+
+    class FakeDDGSModule:
+        DDGS = FakeDDGS
+
+    search_module = importlib.import_module("agently.builtins.actions.Search")
+    monkeypatch.setattr(search_module.LazyImport, "import_package", lambda *args, **kwargs: FakeDDGSModule)
+
+    agent = Agently.create_agent().use_actions(Search(backend="yahoo", search_fallback_backends=["google"]))
+
+    result = agent.action.execute_action("search", {"query": "Agently", "max_results": 2})
+
+    assert result.get("status") == "partial_success"
+    assert result.get("success") is True
+    assert result.get("ok") is True
+    assert result.get("data") == [{"title": "Agently", "href": "https://example.com", "body": "backend=google"}]
+    assert result.get("meta", {}).get("backend") == "google"
+    assert result.get("meta", {}).get("failed_backends") == ["yahoo"]
+    assert result.get("diagnostics", [])[0].get("code") == "search_backend_failed"
+
+
+def test_search_package_continues_after_empty_backend(monkeypatch):
+    class FakeDDGS:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text(self, query: str, **kwargs):
+            backend = kwargs.get("backend")
+            if backend == "yahoo":
+                return []
+            return [{"title": query, "href": "https://example.com", "body": f"backend={backend}"}]
+
+    class FakeDDGSModule:
+        DDGS = FakeDDGS
+
+    search_module = importlib.import_module("agently.builtins.actions.Search")
+    monkeypatch.setattr(search_module.LazyImport, "import_package", lambda *args, **kwargs: FakeDDGSModule)
+
+    agent = Agently.create_agent().use_actions(Search(backend="yahoo", search_fallback_backends=["google"]))
+
+    result = agent.action.execute_action("search", {"query": "Agently", "max_results": 2})
+
+    assert result.get("status") == "partial_success"
+    assert result.get("data") == [{"title": "Agently", "href": "https://example.com", "body": "backend=google"}]
+    assert result.get("meta", {}).get("empty_backends") == ["yahoo"]
+
+
+def test_search_package_treats_no_results_as_empty_success(monkeypatch):
+    class FakeDDGS:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def news(self, query: str, **kwargs):
+            raise RuntimeError("No results found.")
+
+    class FakeDDGSModule:
+        DDGS = FakeDDGS
+
+    search_module = importlib.import_module("agently.builtins.actions.Search")
+    monkeypatch.setattr(search_module.LazyImport, "import_package", lambda *args, **kwargs: FakeDDGSModule)
+
+    agent = Agently.create_agent().use_actions(Search(news_backend="yahoo", news_fallback_backends=["duckduckgo"]))
+
+    result = agent.action.execute_action("search_news", {"query": "Agently Moxin", "max_results": 2})
+
+    assert result.get("status") == "success"
+    assert result.get("data") == []

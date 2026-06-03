@@ -170,7 +170,11 @@ Action Runtime lifecycle events use `action.*` as the primary namespace. When th
 
 Paired compatibility events include `meta.compat_event_alias=True`, `meta.compat_alias_for`, and `meta.primary_event_id` so consumers can deduplicate them from the primary `action.*` event.
 
-Concrete action execution continues to use `action.started`, `action.completed`, and `action.failed`. For tool-backed actions, `payload.action_type` may be `"tool"`; that does not change the event family.
+Concrete action execution uses `action.started`, `action.completed`, and
+`action.failed`. Policy or sandbox gates that stop an action before normal
+execution use `action.approval_required` or `action.blocked` instead of being
+reported as ordinary failures. For tool-backed actions, `payload.action_type`
+may be `"tool"`; that does not change the event family.
 
 ## Execution environment events
 

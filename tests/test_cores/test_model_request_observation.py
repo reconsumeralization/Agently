@@ -8,6 +8,7 @@ import pytest
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.core import ModelRequest, PluginManager
 from agently.core.runtime.AttemptRunner import core_attempt_runner_entrypoint
+from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState, RunContext
 from agently.types.data.event import normalize_triggerflow_event_type
 from agently.utils import Settings
@@ -657,6 +658,71 @@ async def test_tool_runtime_uses_action_runs_under_request_scope():
         assert action_run.run_kind == "action"
         assert action_run.parent_run_id == action_loop_start.run.run_id
         assert action_run.meta.get("action_type") == "tool"
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_action_flow_reports_approval_required_without_failed_event():
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.action_approval_required_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        agent = Agently.create_agent("action-flow-approval-event-agent")
+
+        async def fake_plan_handler(context, request):
+            _ = request
+            if context.get("round_index", 0) == 0:
+                return {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "validate shell command",
+                            "action_id": "run_shell",
+                            "action_input": {"cmd": "python legacy_script.py", "workdir": "."},
+                        }
+                    ],
+                }
+            return {"next_action": "response", "execution_commands": []}
+
+        async def fake_execution_handler(context, request):
+            _ = context
+            command = request["action_calls"][0]
+            return [
+                {
+                    "purpose": command["purpose"],
+                    "action_id": command["action_id"],
+                    "kwargs": command["action_input"],
+                    "status": "approval_required",
+                    "success": False,
+                    "result": None,
+                    "error": "workdir_not_allowed",
+                    "approval": {"required": True, "reason": "workdir_not_allowed"},
+                }
+            ]
+
+        await Agently.action_flow.async_run(
+            action=agent.action,
+            prompt=agent.request.prompt,
+            settings=agent.settings,
+            action_list=[{"name": "run_shell", "desc": "Run shell command.", "kwargs": {}}],
+            agent_name=agent.name,
+            planning_handler=fake_plan_handler,
+            execution_handler=fake_execution_handler,
+            max_rounds=2,
+            runtime_observation_handler=async_emit_action_flow_observation,
+        )
+
+        action_event_types = [event.event_type for event in captured if event.event_type.startswith("action.")]
+        assert "action.approval_required" in action_event_types
+        assert "action.failed" not in action_event_types
+        approval_event = next(event for event in captured if event.event_type == "action.approval_required")
+        assert approval_event.level == "WARNING"
+        assert approval_event.payload["record"]["status"] == "approval_required"
     finally:
         Agently.event_center.unregister_hook(hook_name)
 

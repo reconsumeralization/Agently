@@ -36,8 +36,6 @@ async def run_react_strategy(
     artifact_inline_limit = to_int(ec.get("artifact_inline_limit") or executor.registry.settings.get("skills.artifact_inline_limit", 65536), 65536)
     capture_context = RuntimeStreamCaptureContext(context, runtime_stream)
 
-    allowed_tools, allowed_actions, allow_scripts = executor._extract_react_affordances(plan)
-
     try:
         result = await run_react_execution(
             task=task,
@@ -46,9 +44,9 @@ async def run_react_strategy(
             settings=executor.registry.settings,
             step_budget=step_budget,
             model_key=model_key,
-            allowed_tools=allowed_tools,
-            allowed_actions=allowed_actions,
-            allow_scripts=allow_scripts,
+            allowed_tools=[],
+            allowed_actions=[],
+            allow_scripts=False,
             artifact_inline_limit=artifact_inline_limit,
         )
     except Exception as error:

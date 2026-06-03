@@ -55,7 +55,19 @@ class MockSkillsRequester:
     async def request_model(self, request_data: AgentlyRequestData):
         request_text = json.dumps(request_data.data, ensure_ascii=False)
         MockSkillsRequester.requests.append(request_text)
-        if "candidate_skill_cards" in request_text:
+        if "capability_need_discovery" in request_text:
+            response = {
+                "capability_needs": [
+                    {
+                        "skill_id": "ambiguous-research-skill",
+                        "need": "http_request",
+                        "evidence": "The Skill asks for integration discovery that may require read-only API inspection.",
+                        "risk": "network",
+                        "confidence": 0.72,
+                    }
+                ]
+            }
+        elif "candidate_skill_cards" in request_text:
             response = {"selected_skill_ids": ["beta-skill", "alpha-skill"], "reason": "Beta fits first."}
         elif "finalize" in request_text and "Produce the final user-facing result" in request_text:
             response = {
@@ -373,20 +385,22 @@ def test_discover_skills_pack_does_not_install_full_skill(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_skill_declared_http_mcp_mounts_through_agent_runtime(monkeypatch, tmp_path):
+async def test_private_skill_capability_fields_do_not_mount_by_default(monkeypatch, tmp_path):
     source = tmp_path / "source"
     _write(
         source / "SKILL.md",
         """---
-name: MCP Skill
-description: Uses a remote MCP service.
+name: Private Capability Skill
+description: Contains Agently-private capability fields.
 mcp: https://example.com/mcp
-allowed-tools: [remote_tool]
+allowed-tools: [Bash, calculate_budget]
+allowed-actions: [send_email]
+allow-scripts: true
 ---
 
-# MCP Skill
+# Private Capability Skill
 
-Use the declared MCP service.
+Use the guidance.
 """,
     )
     Agently.skills_executor.install_skills(source)
@@ -400,155 +414,675 @@ Use the declared MCP service.
     monkeypatch.setattr(agent, "async_use_mcp", fake_use_mcp)
 
     execution = await agent.async_run_skills_task(
-        "use mcp",
+        "use private fields",
+        skills=["private-capability-skill"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert mounted == []
+    assert not agent.action.action_registry.has("Bash")
+    assert not agent.action.action_registry.has("calculate_budget")
+    assert not agent.action.action_registry.has("send_email")
+
+
+def test_skill_capability_needs_discovered_from_guidance_resources_and_public_metadata(tmp_path):
+    source = tmp_path / "research-writer"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Research Writer
+description: Research public context and write a report.
+compatibility:
+  network: required for HTTP API inspection
+metadata:
+  environment: MCP server may be useful when configured by the host.
+---
+
+# Research Writer
+
+Search public sources, browse relevant pages, run scripts/helper.py when the
+host allows it, and write the final Markdown deliverable to a workspace file.
+""",
+    )
+    _write(source / "scripts" / "helper.py", "print('helper')\n")
+    Agently.skills_executor.install_skills(source)
+
+    plan = _create_agent().resolve_skills_plan(
+        "prepare a research report",
+        skills=["research-writer"],
+        mode="required",
+    )
+
+    needs = cast(list[dict[str, Any]], plan.get("capability_needs", []))
+    need_names = {item["need"] for item in needs}
+    assert {"web_search", "web_browse", "workspace_write", "script_run", "python", "http_request", "mcp"} <= need_names
+    assert any(item["source"] == "body" and item["need"] == "web_search" for item in needs)
+    assert any(item["source"] == "resource_index" and item["resource_path"] == "scripts/helper.py" for item in needs)
+    assert any(item["source"] == "compatibility" and item["need"] == "http_request" for item in needs)
+    assert any(item["source"] == "metadata" and item["need"] == "mcp" for item in needs)
+
+
+def test_skill_capability_needs_can_use_model_assisted_discovery(tmp_path):
+    source = tmp_path / "ambiguous-research-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Ambiguous Research Skill
+description: Evaluate integration readiness for a partner system.
+---
+
+# Ambiguous Research Skill
+
+Understand the partner integration surface and identify what host-side
+inspection capabilities are needed before producing recommendations.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent()
+    agent.settings.set("skills.capability_discovery.model_assisted", True)
+
+    plan = agent.resolve_skills_plan(
+        "prepare integration readiness notes",
+        skills=["ambiguous-research-skill"],
+        mode="required",
+    )
+
+    needs = cast(list[dict[str, Any]], plan.get("capability_needs", []))
+    assert any(
+        item["need"] == "http_request"
+        and item["source"] == "model_inference"
+        and item["risk"] == "network"
+        for item in needs
+    )
+    assert "capability_need_discovery" in MockSkillsRequester.requests[-1]
+
+
+@pytest.mark.asyncio
+async def test_skill_capability_policy_allows_builtin_action_loading(tmp_path):
+    source = tmp_path / "research-writer"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Research Writer
+description: Research public context and write a report.
+---
+
+# Research Writer
+
+Search public sources, browse relevant pages, run Python for small data shaping,
+and write the final Markdown deliverable to a workspace file.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(
+        auto_load={
+            "web_search": "allow",
+            "web_browse": "allow",
+            "workspace_write": "allow",
+            "python": "allow",
+        },
+        workspace_root=str(tmp_path / "workspace"),
+    )
+
+    execution = await agent.async_run_skills_task(
+        "prepare a research report",
+        skills=["research-writer"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert agent.action.action_registry.has("search")
+    assert agent.action.action_registry.has("browse")
+    assert agent.action.action_registry.has("write_file")
+    assert agent.action.action_registry.has("run_python")
+    mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
+    assert {item["need"] for item in mounted} >= {"web_search", "web_browse", "workspace_write", "python"}
+    search_spec = agent.action.action_registry.get_spec("search")
+    assert search_spec is not None
+    assert search_spec.get("meta", {}).get("provider") == "ddgs"
+    assert search_spec.get("meta", {}).get("backend") == "auto"
+
+
+@pytest.mark.asyncio
+async def test_skill_web_search_can_refresh_ddgs_without_forcing_backend(monkeypatch, tmp_path):
+    source = tmp_path / "search-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Search Skill
+description: Search public sources.
+---
+
+# Search Skill
+
+Search public sources before answering.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(
+        auto_load={"web_search": "allow"},
+        search={"refresh_ddgs": "allow"},
+    )
+    refresh_calls: list[dict[str, Any]] = []
+
+    def fake_enable_shell(**kwargs):
+        refresh_calls.append(dict(kwargs))
+        agent.action.register_action(
+            action_id=kwargs["action_id"],
+            desc="Refresh ddgs.",
+            kwargs={"cmd": (list, "Command.")},
+            func=lambda cmd: {"stdout": "Requirement already satisfied: ddgs", "cmd": cmd},
+            tags=[f"agent-{ agent.name }"],
+            expose_to_model=bool(kwargs.get("expose_to_model", True)),
+            side_effect_level="exec",
+        )
+        return agent
+
+    monkeypatch.setattr(agent, "enable_shell", fake_enable_shell)
+
+    execution = await agent.async_run_skills_task(
+        "answer with public context",
+        skills=["search-skill"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert refresh_calls
+    assert refresh_calls[0]["commands"] == ["python -m pip install --upgrade ddgs"]
+    assert refresh_calls[0]["expose_to_model"] is False
+    search_spec = agent.action.action_registry.get_spec("search")
+    assert search_spec is not None
+    assert search_spec.get("meta", {}).get("provider") == "ddgs"
+    assert search_spec.get("meta", {}).get("backend") == "auto"
+    mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
+    assert any("refresh_ddgs_dependency" in item.get("action_ids", []) for item in mounted)
+
+
+@pytest.mark.asyncio
+async def test_skill_capability_policy_requires_approval_for_script_run(tmp_path):
+    source = tmp_path / "script-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Script Skill
+description: Uses a bundled helper.
+---
+
+# Script Skill
+
+Run scripts/helper.sh when the host permits script execution.
+""",
+    )
+    _write(source / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(auto_load={"script_run": "approval"})
+
+    execution = await agent.async_run_skills_task(
+        "run helper",
+        skills=["script-skill"],
+        mode="required",
+    )
+
+    assert execution.status == "blocked"
+    assert not agent.action.action_registry.has("run_script_skill_script")
+    diagnostics = cast(dict[str, Any], execution.output).get("diagnostics", [])
+    assert diagnostics[0]["code"] == "approval_required"
+    assert diagnostics[0]["need"] == "script_run"
+
+
+@pytest.mark.asyncio
+async def test_skill_capability_approval_auto_approve_mounts_requested_capability(tmp_path):
+    source = tmp_path / "script-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Script Skill
+description: Uses a bundled helper.
+---
+
+# Script Skill
+
+Run scripts/helper.sh when the host permits script execution.
+""",
+    )
+    _write(source / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
+    Agently.skills_executor.install_skills(source)
+    agent = (
+        _create_agent()
+        .configure_skill_capabilities(auto_load={"script_run": "approval"})
+        .configure_policy_approval(handler="auto_approve")
+    )
+
+    execution = await agent.async_run_skills_task(
+        "run helper",
+        skills=["script-skill"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert agent.action.action_registry.has("run_script_skill_script")
+    assert any(item.get("type") == "skills.capability.approved" for item in execution.runtime_stream)
+    assert any(
+        item.get("type") == "skills.capability.mounted"
+        and item.get("need") == "script_run"
+        and item.get("policy") == "approval"
+        for item in execution.runtime_stream
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_capability_policy_wraps_script_resource_as_shell_action(tmp_path):
+    source = tmp_path / "script-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Script Skill
+description: Uses a bundled helper.
+---
+
+# Script Skill
+
+Run scripts/helper.sh when the host permits script execution.
+""",
+    )
+    _write(source / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(auto_load={"script_run": "allow"})
+
+    execution = await agent.async_run_skills_task(
+        "run helper",
+        skills=["script-skill"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert agent.action.action_registry.has("run_script_skill_script")
+    spec = agent.action.action_registry.get_spec("run_script_skill_script")
+    assert spec is not None
+    assert spec.get("side_effect_level") == "exec"
+    assert any(
+        item.get("type") == "skills.capability.mounted"
+        and item.get("need") == "script_run"
+        and "run_script_skill_script" in item.get("action_ids", [])
+        for item in execution.runtime_stream
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_capability_policy_allows_http_request_loading(tmp_path):
+    source = tmp_path / "http-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: HTTP Skill
+description: Inspects read-only HTTP APIs.
+---
+
+# HTTP Skill
+
+Use an HTTP API request to inspect read-only public data.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(auto_load={"http_request": "allow"})
+
+    execution = await agent.async_run_skills_task(
+        "inspect the public API",
+        skills=["http-skill"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert agent.action.action_registry.has("http_request")
+    assert any(
+        item.get("type") == "skills.capability.mounted"
+        and item.get("need") == "http_request"
+        and "http_request" in item.get("action_ids", [])
+        for item in execution.runtime_stream
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_capability_policy_allows_configured_mcp_loading(monkeypatch, tmp_path):
+    source = tmp_path / "mcp-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: MCP Skill
+description: Uses MCP when the host configures it.
+---
+
+# MCP Skill
+
+Use MCP tools when the host has configured the server.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    mcp_config = {"mcpServers": {"demo": {"url": "https://example.com/mcp"}}}
+    agent = _create_agent().configure_skill_capabilities(
+        auto_load={"mcp": "allow"},
+        mcp_config=mcp_config,
+    )
+    mounted: list[Any] = []
+
+    async def fake_use_mcp(config, **kwargs):
+        mounted.append(config)
+        return agent
+
+    monkeypatch.setattr(agent, "async_use_mcp", fake_use_mcp)
+
+    execution = await agent.async_run_skills_task(
+        "use configured mcp",
         skills=["mcp-skill"],
         mode="required",
     )
 
     assert execution.status == "success"
-    assert mounted == ["https://example.com/mcp"]
-
-
-@pytest.mark.asyncio
-async def test_skill_declared_bash_mounts_runtime_action_when_auto_allowed(tmp_path):
-    source = tmp_path / "source"
-    _write(
-        source / "SKILL.md",
-        """---
-name: Bash Skill
-description: Uses a bundled script through Bash.
-allowed-tools: [Bash]
----
-
-# Bash Skill
-
-Use Bash only when the task needs the bundled helper.
-""",
-    )
-    _write(source / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
-    Agently.skills_executor.install_skills(source)
-    agent = _create_agent()
-
-    execution = await agent.async_run_skills_task(
-        "use bash",
-        skills=[{"id": "bash-skill", "auto_allow": True}],
-        mode="required",
-    )
-
-    assert execution.status == "success"
-    assert agent.action.action_registry.has("Bash")
-    bash_spec = agent.action.action_registry.get_spec("Bash")
-    assert bash_spec is not None
-    assert bash_spec.get("side_effect_level") == "exec"
+    assert mounted == [mcp_config]
     assert any(
-        item.get("capability") == "bash_action" and item.get("action_id") == "Bash"
+        item.get("type") == "skills.capability.mounted"
+        and item.get("need") == "mcp"
+        and "mcp" in item.get("action_ids", [])
         for item in execution.runtime_stream
     )
 
 
 @pytest.mark.asyncio
-async def test_skill_declared_bash_requires_auto_allow(tmp_path):
-    source = tmp_path / "source"
+async def test_skill_capability_policy_off_blocks_missing_builtin_loading(tmp_path):
+    source = tmp_path / "search-skill"
     _write(
         source / "SKILL.md",
         """---
-name: Bash Skill
-description: Uses a bundled script through Bash.
-allowed-tools: [Bash]
+name: Search Skill
+description: Searches public context.
 ---
 
-# Bash Skill
+# Search Skill
 
-Use Bash only when the task needs the bundled helper.
+Search public sources before answering.
 """,
     )
-    _write(source / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
     Agently.skills_executor.install_skills(source)
-    agent = _create_agent()
+    agent = _create_agent().configure_skill_capabilities(auto_load={"web_search": "off"})
 
     execution = await agent.async_run_skills_task(
-        "use bash",
-        skills=["bash-skill"],
+        "answer with public context",
+        skills=["search-skill"],
         mode="required",
     )
 
     assert execution.status == "blocked"
-    assert not agent.action.action_registry.has("Bash")
-    assert isinstance(execution.output, dict)
-    diagnostics = execution.output.get("diagnostics", [])
-    assert diagnostics[0]["code"] == "approval_required"
-    assert diagnostics[0]["capability"] == "bash_action"
+    assert not agent.action.action_registry.has("search")
+    diagnostics = cast(dict[str, Any], execution.output).get("diagnostics", [])
+    assert diagnostics[0]["code"] == "capability_disabled"
+    assert diagnostics[0]["need"] == "web_search"
 
 
 @pytest.mark.asyncio
-async def test_missing_pure_python_capability_synthesizes_sandbox_action(tmp_path):
-    source = tmp_path / "source"
+async def test_skill_workspace_capability_prefers_workspace_owned_file_actions(monkeypatch, tmp_path):
+    source = tmp_path / "writer-skill"
     _write(
         source / "SKILL.md",
         """---
-name: Budget Skill
-description: Calculates budget totals.
-allowed-tools: [calculate_budget]
+name: Writer Skill
+description: Writes the requested report.
 ---
 
-# Budget Skill
+# Writer Skill
 
-Use calculate_budget for deterministic in-memory budget math.
+Write the final Markdown deliverable to a workspace file.
 """,
     )
     Agently.skills_executor.install_skills(source)
-    agent = _create_agent()
+    agent = _create_agent().use_workspace(tmp_path / "workspace").configure_skill_capabilities(
+        auto_load={"workspace_write": "allow"},
+    )
+    workspace = agent.workspace
+    assert workspace is not None
+    calls: list[dict[str, Any]] = []
+    original = workspace.enable_file_actions
+
+    def wrapped_enable_file_actions(agent_arg, **kwargs):
+        calls.append(dict(kwargs))
+        return original(agent_arg, **kwargs)
+
+    monkeypatch.setattr(workspace, "enable_file_actions", wrapped_enable_file_actions)
 
     execution = await agent.async_run_skills_task(
-        "calculate a budget",
-        skills=["budget-skill"],
+        "write the report to outputs/report.md",
+        skills=["writer-skill"],
         mode="required",
     )
 
     assert execution.status == "success"
-    assert agent.action.action_registry.has("calculate_budget")
-    spec = agent.action.action_registry.get_spec("calculate_budget")
+    assert calls and calls[0]["write"] is True
+    assert agent.action.action_registry.has("write_file")
+    spec = agent.action.action_registry.get_spec("write_file")
     assert spec is not None
-    assert spec.get("sandbox_required") is True
-    assert any(
-        item.get("capability") == "python_sandbox_action"
-        and item.get("action_id") == "calculate_budget"
-        for item in execution.runtime_stream
-    )
+    assert spec.get("meta", {}).get("root") == str(workspace.files_root)
 
 
 @pytest.mark.asyncio
-async def test_missing_business_capability_fails_closed(tmp_path):
-    source = tmp_path / "source"
+async def test_interview_skill_uses_policy_loaded_research_and_workspace_actions(monkeypatch, tmp_path):
+    source = tmp_path / "interview-question-preparer"
     _write(
         source / "SKILL.md",
         """---
-name: Email Skill
-description: Sends business email.
-allowed-tools: [send_email]
+name: interview-question-preparer
+description: Prepare an evidence-backed blog/media interview preparation brief for a specified person.
 ---
 
-# Email Skill
+# Interview Question Preparer
 
-Use send_email only through a real mail backend.
+Use this Skill to prepare a serious blog/media interview brief for a specified
+person, author, founder, maintainer, or project owner. This is not a hiring
+interview, recruiting screen, or candidate evaluation.
+
+## Workflow
+
+1. Clarify the interview target, audience, and intended article angle.
+2. Research public context before drafting. Search broadly first, then browse
+   the most relevant pages.
+3. Keep compact source notes.
+4. Reflect on whether the information is sufficient before finalizing.
+5. Write the final Markdown deliverable to the requested workspace path.
+6. After writing or revising the requested file, read file back from the
+   workspace when a workspace read capability is available and include a
+   concise validation checklist.
+
+## Output Requirements
+
+The final Markdown file must include source notes, a story/interview angle,
+sufficiency reflection, grouped blog/media interview questions, and at least
+eight concrete questions.
 """,
     )
     Agently.skills_executor.install_skills(source)
-    agent = _create_agent()
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent().configure_skill_capabilities(
+        auto_load={
+            "web_search": "allow",
+            "web_browse": "allow",
+            "workspace_read": "allow",
+            "workspace_write": "allow",
+        },
+        workspace_root=str(workspace_root),
+    )
+    agent.set_settings("effort_presets", {"react": {"step_budget": 5}})
+
+    action_rounds: list[set[str]] = []
+
+    async def fake_plan_and_execute(**kwargs):
+        action_ids = {
+            str(item.get("action_id") or item.get("name") or "")
+            for item in kwargs.get("action_list", [])
+        }
+        action_rounds.append(action_ids)
+        round_no = len(action_rounds)
+        if round_no == 1:
+            assert {"search", "browse", "read_file", "write_file"} <= action_ids
+            return [
+                {
+                    "status": "success",
+                    "success": True,
+                    "action_id": "search",
+                    "purpose": "find public context",
+                    "result": [
+                        {
+                            "title": "Anthropic public context",
+                            "href": "https://www.anthropic.com/company",
+                            "body": "Jared Kaplan is associated with Anthropic and frontier AI research.",
+                        },
+                        {
+                            "title": "OpenAI public context",
+                            "href": "https://openai.com/about/",
+                            "body": "Sam Altman is OpenAI CEO.",
+                        }
+                    ],
+                    "data": [
+                        {
+                            "title": "Anthropic public context",
+                            "href": "https://www.anthropic.com/company",
+                        },
+                        {
+                            "title": "OpenAI public context",
+                            "href": "https://openai.com/about/",
+                        }
+                    ],
+                }
+            ]
+        if round_no == 2:
+            return [
+                {
+                    "status": "success",
+                    "success": True,
+                    "action_id": "browse",
+                    "purpose": "read selected source",
+                    "result": {
+                        "url": "https://www.anthropic.com/company",
+                        "title": "Anthropic",
+                        "content": "Anthropic public company context for blog interview preparation.",
+                    },
+                    "data": {
+                        "url": "https://www.anthropic.com/company",
+                        "title": "Anthropic",
+                    },
+                }
+            ]
+        if round_no == 3:
+            markdown = """# Jared Kaplan and Sam Altman Blog Interview Preparation
+
+## Source Notes
+
+- https://www.anthropic.com/company - public Anthropic context.
+- https://openai.com/about/ - public OpenAI context.
+
+## Story / Interview Angle
+
+Compare how Anthropic and OpenAI frame frontier model scaling, safety,
+productization, developer adoption, and governance tradeoffs.
+
+## Sufficiency Reflection
+
+Public information is enough for a first blog interview brief, but internal
+roadmap choices, safety-review details, and product decision evidence need
+direct follow-up.
+
+## Blog Interview Questions
+
+1. Jared Kaplan: How has Anthropic's research culture shaped its model-scaling choices?
+2. Jared Kaplan: Which safety lessons from frontier model development are most under-discussed?
+3. Jared Kaplan: How should developers reason about capability gains versus deployment risk?
+4. Jared Kaplan: What evidence would change your mind about current scaling assumptions?
+5. Sam Altman: How does OpenAI prioritize product speed against governance constraints?
+6. Sam Altman: What should developers expect from OpenAI's platform roadmap?
+7. Sam Altman: Which user-facing AI product failures have most shaped OpenAI's strategy?
+8. Sam Altman: How should startups decide between building on OpenAI APIs and open models?
+9. Comparative: Where do Anthropic and OpenAI genuinely disagree about safe deployment?
+10. Comparative: How should enterprise developers evaluate trust, reliability, and cost?
+11. Comparative: What should regulators understand about frontier lab incentives?
+12. Comparative: What developer ecosystem signals matter most over the next two years?
+
+## Follow-up Probes
+
+- Ask both speakers for concrete examples rather than slogans.
+- Separate public claims from internal evidence they can discuss.
+"""
+            write_result = agent.action.execute_action(
+                "write_file",
+                {
+                    "path": "outputs/kaplan_altman_interview_questions.md",
+                    "content": markdown,
+                },
+            )
+            return [
+                {
+                    "status": write_result.get("status"),
+                    "success": write_result.get("status") == "success",
+                    "action_id": "write_file",
+                    "purpose": "write final blog interview brief",
+                    "result": write_result.get("data"),
+                    "data": write_result.get("data"),
+                }
+            ]
+        if round_no == 4:
+            read_result = agent.action.execute_action(
+                "read_file",
+                {
+                    "path": "outputs/kaplan_altman_interview_questions.md",
+                    "max_bytes": 20000,
+                },
+            )
+            return [
+                {
+                    "status": read_result.get("status"),
+                    "success": read_result.get("status") == "success",
+                    "action_id": "read_file",
+                    "purpose": "read back final blog interview brief",
+                    "result": read_result.get("data"),
+                    "data": read_result.get("data"),
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(agent.action, "async_plan_and_execute", fake_plan_and_execute)
 
     execution = await agent.async_run_skills_task(
-        "send a customer email",
-        skills=[{"id": "email-skill", "auto_allow": True}],
+        (
+            "Prepare a comparative blog interview preparation brief for Jared Kaplan from Anthropic "
+            "and Sam Altman from OpenAI. Search and browse public evidence, reflect on "
+            "information sufficiency, and write Markdown to outputs/kaplan_altman_interview_questions.md."
+        ),
+        skills=["interview-question-preparer"],
         mode="required",
+        effort="react",
     )
 
-    assert execution.status == "blocked"
-    assert not agent.action.action_registry.has("send_email")
-    assert isinstance(execution.output, dict)
-    diagnostics = execution.output.get("diagnostics", [])
-    assert diagnostics[0]["code"] == "capability_missing"
-    assert diagnostics[0]["capability"] == "business_action"
-    assert diagnostics[0]["required"] == ["send_email"]
+    output_path = workspace_root / "outputs" / "kaplan_altman_interview_questions.md"
+    file_text = output_path.read_text(encoding="utf-8")
+    plan_needs = cast(list[dict[str, Any]], execution.plan.get("capability_needs", []))
+    mounted_needs = {
+        item.get("need")
+        for item in execution.runtime_stream
+        if item.get("type") == "skills.capability.mounted"
+    }
+
+    assert execution.status == "success"
+    assert output_path.is_file()
+    assert {"web_search", "web_browse", "workspace_read", "workspace_write"} <= {item.get("need") for item in plan_needs}
+    assert {"web_search", "web_browse", "workspace_read", "workspace_write"} <= mounted_needs
+    assert any(item.get("type") == "skills.react.action_runtime_round" for item in execution.runtime_stream)
+    assert len(action_rounds) >= 4
+    assert "allowed-actions" not in (source / "SKILL.md").read_text(encoding="utf-8")
+    assert "allow-scripts" not in (source / "SKILL.md").read_text(encoding="utf-8")
+    assert "mcpServers" not in (source / "SKILL.md").read_text(encoding="utf-8")
+    assert file_text.count("？") + file_text.count("?") >= 12
+    assert "Sufficiency Reflection" in file_text
+    assert "Jared Kaplan" in file_text
+    assert "Sam Altman" in file_text
+    assert "https://www.anthropic.com/company" in file_text
+    assert "https://openai.com/about/" in file_text
 
 
 @pytest.mark.asyncio
@@ -735,7 +1269,7 @@ def test_required_plan_defaults_plain_skill_to_single_shot(tmp_path):
     assert plan.get("execution_stages") == []
 
 
-def test_required_plan_extracts_staged_strategy_and_declared_stages(tmp_path):
+def test_required_plan_ignores_private_staged_strategy_and_declared_stages(tmp_path):
     source = tmp_path / "multi-step-writer"
     _write(
         source / "SKILL.md",
@@ -762,15 +1296,41 @@ Use the declared stages in order.
         mode="required",
     )
 
-    assert plan.get("execution_strategy") == "staged"
-    assert plan.get("execution_stages") == [
-        {"description": "Read and analyze the task requirements."},
-        {"description": "Write a complete first draft."},
-        {"description": "Review and polish the result."},
-    ]
+    assert plan.get("execution_strategy") == "single_shot"
+    assert plan.get("execution_stages") == []
 
 
-def test_required_plan_prefers_react_when_skill_declares_allowed_tools(tmp_path):
+def test_required_plan_ignores_private_strategy_fields_by_default(tmp_path):
+    source = tmp_path / "private-fields"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Private Fields
+description: Contains non-standard Agently strategy fields.
+execution: staged
+allowed-tools: [search]
+stages:
+  - Analyze.
+---
+
+# Private Fields
+
+Use the guidance.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+
+    plan = _create_agent().resolve_skills_plan(
+        "use the skill",
+        skills=["private-fields"],
+        mode="required",
+    )
+
+    assert plan.get("execution_strategy") == "single_shot"
+    assert plan.get("execution_stages") == []
+
+
+def test_required_plan_ignores_private_react_and_staged_fields(tmp_path):
     staged = tmp_path / "staged"
     _write(
         staged / "SKILL.md",
@@ -811,7 +1371,7 @@ Use the declared tools when needed.
         mode="required",
     )
 
-    assert plan.get("execution_strategy") == "react"
+    assert plan.get("execution_strategy") == "single_shot"
     assert plan.get("execution_stages") == []
 
 

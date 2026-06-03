@@ -2,7 +2,12 @@ import pytest
 from typing import Any, cast
 
 from agently import Agently
-from agently.core import ExecutionEnvironmentApprovalRequired, ExecutionEnvironmentError, ExecutionEnvironmentManager
+from agently.core import (
+    ExecutionEnvironmentApprovalDenied,
+    ExecutionEnvironmentApprovalRequired,
+    ExecutionEnvironmentError,
+    ExecutionEnvironmentManager,
+)
 from agently.types.data import ExecutionEnvironmentRequirement
 from agently.utils import Settings
 
@@ -107,10 +112,10 @@ async def test_execution_environment_rechecks_health_before_reuse():
 
 
 @pytest.mark.asyncio
-async def test_execution_environment_approval_required_does_not_start():
+async def test_execution_environment_default_policy_denies_and_does_not_start():
     manager = _create_manager()
 
-    with pytest.raises(ExecutionEnvironmentApprovalRequired):
+    with pytest.raises(ExecutionEnvironmentApprovalDenied):
         await manager.async_ensure(
             {
                 "kind": "python",
@@ -153,7 +158,7 @@ def test_action_bash_sandbox_uses_execution_environment(tmp_path):
     assert Agently.execution_environment.list(scope="action_call") == []
 
 
-def test_action_environment_approval_returns_action_result():
+def test_action_environment_default_policy_denies_as_blocked_action_result():
     action_id = "approval_env_action"
     Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)
     spec = Agently.action.action_registry.get_spec(action_id)
@@ -162,9 +167,8 @@ def test_action_environment_approval_returns_action_result():
 
     result = Agently.action.execute_action(action_id, {"python_code": "result = 1"})
 
-    assert result.get("status") == "approval_required"
-    approval = cast(dict[str, Any], result.get("approval"))
-    assert approval["required"] is True
+    assert result.get("status") == "blocked"
+    assert "non-interactive environment" in str(result.get("error", ""))
 
 
 @pytest.mark.asyncio
@@ -250,14 +254,20 @@ async def test_execution_environment_approval_denied_returns_blocked_action_resu
     assert spec is not None
     spec.get("execution_environments", [])[0]["approval_required"] = True
 
-    Agently.execution_environment.set_decision_handler(lambda req, pol: False)
+    Agently.policy_approval.register_handler(
+        "deny_execution_environment_test",
+        lambda request: {"status": "denied", "reason": "Denied by test policy."},
+        replace=True,
+    )
+    Agently.configure_policy_approval(handler="deny_execution_environment_test")
     try:
         result = Agently.action.execute_action(action_id, {"python_code": "result = 1"})
     finally:
-        Agently.execution_environment.set_decision_handler(None)
+        Agently.configure_policy_approval(handler="input_timeout_fail")
+        Agently.policy_approval.unregister_handler("deny_execution_environment_test")
 
     assert result.get("status") == "blocked"
-    assert Agently.execution_environment.list() == []
+    assert Agently.execution_environment.list(scope="action_call") == []
 
 
 @pytest.mark.asyncio

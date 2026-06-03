@@ -319,6 +319,23 @@ class DAGActionFlow:
             for record_index, record in enumerate(records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
                 success = bool(record.get("success"))
+                status = str(record.get("status", "") or "")
+                if success:
+                    event_kind = "action_completed"
+                    event_level = "INFO"
+                    event_message = f"Action '{action_id}' completed."
+                elif status == "approval_required":
+                    event_kind = "action_approval_required"
+                    event_level = "WARNING"
+                    event_message = f"Action '{action_id}' requires approval."
+                elif status == "blocked":
+                    event_kind = "action_blocked"
+                    event_level = "WARNING"
+                    event_message = f"Action '{action_id}' blocked."
+                else:
+                    event_kind = "action_failed"
+                    event_level = "WARNING"
+                    event_message = f"Action '{action_id}' failed."
                 action_run = action_loop_run.create_child(
                     run_kind="action",
                     meta={
@@ -329,9 +346,9 @@ class DAGActionFlow:
                     },
                 )
                 await publish_runtime_observation(
-                    "action_completed" if success else "action_failed",
-                    level="INFO" if success else "WARNING",
-                    message=f"Action '{action_id}' {'completed' if success else 'failed'}.",
+                    event_kind,
+                    level=event_level,
+                    message=event_message,
                     payload={
                         "agent_name": agent_name,
                         "round_index": round_index,

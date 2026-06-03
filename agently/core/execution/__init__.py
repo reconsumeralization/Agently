@@ -33,10 +33,10 @@ from .Action import (
 from .ExecutionEnvironment import (
     ExecutionEnvironmentApprovalDenied,
     ExecutionEnvironmentApprovalRequired,
-    ExecutionEnvironmentDecisionHandler,
     ExecutionEnvironmentError,
     ExecutionEnvironmentManager,
 )
+from .PolicyApproval import PolicyApprovalManager
 
 __all__ = [
     "Action",
@@ -47,9 +47,9 @@ __all__ = [
     "ActionResult",
     "ExecutionEnvironmentApprovalDenied",
     "ExecutionEnvironmentApprovalRequired",
-    "ExecutionEnvironmentDecisionHandler",
     "ExecutionEnvironmentError",
     "ExecutionEnvironmentManager",
+    "PolicyApprovalManager",
     "StandardActionExecutionHandler",
     "StandardActionPlanningHandler",
     "StandardToolExecutionHandler",

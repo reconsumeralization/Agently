@@ -89,6 +89,33 @@ class SkillsExtension(BaseAgent):
             self.__session_skills_pack_selectors.append({"selector": _copy_public(item), "mode": mode})
         return self
 
+    def configure_skill_capabilities(
+        self,
+        *,
+        auto_load: dict[str, str] | None = None,
+        workspace_root: str | None = None,
+        mcp_config: Any = None,
+        python: dict[str, Any] | None = None,
+        search: dict[str, Any] | None = None,
+    ):
+        policy = _ensure_dict(self.settings.get("skills.capability_policy", {}))
+        if auto_load is not None:
+            policy["auto_load"] = dict(auto_load)
+        if workspace_root is not None:
+            workspace = _ensure_dict(policy.get("workspace"))
+            workspace["root"] = workspace_root
+            policy["workspace"] = workspace
+        if mcp_config is not None:
+            mcp = _ensure_dict(policy.get("mcp"))
+            mcp["config"] = _copy_public(mcp_config)
+            policy["mcp"] = mcp
+        if python is not None:
+            policy["python"] = dict(python)
+        if search is not None:
+            policy["web_search"] = dict(search)
+        self.settings.set("skills.capability_policy", policy)
+        return self
+
     def _skills_prompt_defaults(
         self,
         task: str | None,

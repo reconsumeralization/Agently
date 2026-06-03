@@ -221,6 +221,15 @@ class AgentlyActionRuntime:
             return None
         return timeout if timeout > 0 else None
 
+    @staticmethod
+    def _resolve_planning_model_key(settings: Any) -> str | None:
+        value = settings.get("action.planning_model_key", None)
+        if value is None:
+            value = settings.get("tool.planning_model_key", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
     async def _default_structured_planning_handler(
         self,
         context: "ActionRunContext",
@@ -242,6 +251,7 @@ class AgentlyActionRuntime:
             self.plugin_manager,
             parent_settings=settings,
             agent_name=agent_name,
+            model_key=self._resolve_planning_model_key(settings),
         )
         action_plan_request.input(
             {
@@ -317,6 +327,7 @@ class AgentlyActionRuntime:
             self.plugin_manager,
             parent_settings=settings,
             agent_name=agent_name,
+            model_key=self._resolve_planning_model_key(settings),
         )
         action_request.input(
             {

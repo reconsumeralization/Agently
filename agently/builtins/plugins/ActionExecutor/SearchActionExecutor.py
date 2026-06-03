@@ -41,5 +41,8 @@ class SearchActionExecutor:
         action_input = action_call.get("action_input", {})
         if not isinstance(action_input, dict):
             action_input = {}
+        action_method = getattr(self.search, "_execute_action_method", None)
+        if callable(action_method):
+            return await FunctionShifter.asyncify(action_method)(self.method_name, **action_input)
         method = getattr(self.search, self.method_name)
         return await FunctionShifter.asyncify(method)(**action_input)

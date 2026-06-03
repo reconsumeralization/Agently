@@ -86,7 +86,7 @@ Use the action-native import path for new code:
 ```python
 from agently.builtins.actions import Browse, Search
 
-agent.use_actions(Search(timeout=15, backend="duckduckgo"))
+agent.use_actions(Search(timeout=15, backend="auto"))
 agent.use_actions(Browse())
 ```
 
@@ -98,6 +98,19 @@ metadata, but it should not own built-in capability implementation. `agent.use_t
 `agent.tool_func`, and `Agently.tool` remain supported compatibility surfaces.
 Do not use `tool_info_list` / `BuiltInTool` as the new authoring API for built-in
 capabilities.
+
+Search is backed by the `ddgs` package. Keep `backend="auto"` for the default
+strategy, or pass a specific ddgs backend such as `yahoo`, `brave`,
+`duckduckgo`, `google`, `startpage`, `mojeek`, `wikipedia`, or `yandex`.
+HTTP 200 from a backend does not guarantee parsed search results; when a backend
+returns no usable result, Search falls back through configured/default ddgs
+backends. A true no-result search returns `[]` as a successful action result
+instead of failing the action loop.
+
+When an earlier backend fails but a later fallback returns usable results, the
+Action result uses `status="partial_success"` with `success=True` and backend
+diagnostics. Treat that as usable evidence plus observability, not as an
+`action.failed` terminal condition.
 
 For shell access, prefer `agent.enable_shell(...)`, which mounts a managed
 `run_bash` action. `Cmd` remains available as a low-level compatibility package

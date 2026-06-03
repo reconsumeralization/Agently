@@ -133,8 +133,9 @@ plan = await agent.async_resolve_skills_plan(
 Use `run_skills_task(...)` when the task must be answered through selected
 Skills. By default, execution is `single_shot`: Agently injects the selected
 `SKILL.md` guidance, decision cards, resource summaries, and the task into one
-model request. Skills that declare `execution: staged` or `allowed-tools` can
-run through the TriggerFlow-backed `staged` and `react` strategies.
+model request. Host execution options such as `effort="react"` or configured
+route options select multi-step strategies; Skills do not declare Agently
+execution strategies through private frontmatter.
 When actions are available, `react` delegates tool/action planning and
 execution to the Agent ActionRuntime, so kwargs schemas, MCP tools, policy,
 approvals, concurrency, and execution-environment handling stay on the Action
@@ -350,23 +351,69 @@ When Skills are selected through Agent auto-orchestration, model field stream
 items are bridged to stable paths like `skills.model.fields.<field_path>`.
 
 Bundled scripts and resources are never executed just because a Skill is
-installed. When a selected Skill declares `mcp`, `mcpServers`, `allowed-tools:
-[Bash]`, or `allow-scripts`, the Skills Executor mounts the required runtime
-actions on the current Agent before execution: MCP declarations route through
-`agent.use_mcp(...)`, and Bash/script declarations route through a managed
-`enable_shell(...)` action scoped to the installed Skill directory. Local
-command and script capabilities are high-risk and require `auto_allow=True` or
-an approval handler; remote HTTP MCP can mount without that local-command
-approval.
+installed. When a selected standard Skill describes a need for search, browse,
+HTTP, Workspace file access, Python, shell/script execution, or MCP, Skills
+Executor records structured `capability_needs` in the plan. The Skill still
+does not grant capability. Before execution, Agently compares those needs with
+host policy and can auto-load only the built-in capabilities explicitly marked
+`allow`; `approval` and `off` fail closed with diagnostics.
 
-If a selected Skill declares a missing capability and no existing Action/MCP
-tool matches it, the executor takes one conservative fallback step. Names that
-look like pure in-memory computation, parsing, validation, transformation, or
-format conversion can be synthesized as ephemeral Python sandbox actions.
-Business-system, network, file, messaging, payment, database, browser, or
-otherwise external capabilities are never synthesized; they fail closed with
-`capability_missing` until the host provides a real Action, MCP server, or
-connector package.
+```python
+agent.configure_skill_capabilities(
+    auto_load={
+        "web_search": "allow",
+        "web_browse": "allow",
+        "workspace_write": "allow",
+        "script_run": "approval",
+        "shell": "approval",
+        "mcp": "approval",
+    },
+    workspace_root="./.agently/tasks/research",
+    search={
+        "backend": "auto",
+        "refresh_ddgs": "allow",
+    },
+)
+agent.configure_policy_approval(handler="input_timeout_fail")
+```
+
+For search-oriented Skills, Agently mounts the framework Search package backed
+by the `ddgs` Python package. Keep `ddgs` upgraded before real search runs:
+`python -m pip install --upgrade ddgs`. The backend strategy is not fixed to one
+provider; use `backend="auto"` by default, or configure any ddgs-supported
+backend through host policy. Search treats backend-level "no results" as an
+empty successful result and falls back through configured/default ddgs backends
+when a selected backend returns no usable parsed result. If fallback recovers
+after one or more backend failures, Search reports `status="partial_success"`
+with `success=True` and backend diagnostics so the task can continue while the
+operator still sees the degraded providers.
+
+Workspace file operations are Workspace-owned. When an Agent has a Workspace,
+SkillsExecutor exposes file actions through the Workspace file boundary before
+falling back to `agent.enable_workspace_file_actions(...)`.
+
+`approval` is handled by the framework-wide PolicyApproval handler, not by a
+SkillsExecutor-local handler. The default is `input_timeout_fail`: interactive
+CLI runs ask for input and fail after timeout, while non-interactive services
+fail immediately. Tests and trusted local fixtures can use `auto_approve`.
+Production services should register a handler that matches the service wrapping
+the TriggerFlow execution, such as a database-backed pending approval record,
+HTTP callback, webhook resume, SSE/WebSocket wait, or save-and-return interrupt
+id. Use `fail_closed` when the host wants a pending diagnostic or a TriggerFlow
+`policy_approval` interrupt instead of local input.
+
+Skills Executor does not treat Skill frontmatter such as `mcp`, `mcpServers`,
+`allow-scripts`, or Agently-specific `allowed-actions` as capability grants.
+Public `compatibility` and `metadata` may contribute evidence to
+`capability_needs`, but loading remains host-policy controlled.
+Hosts that want model judgment in addition to deterministic Skill reading can
+enable `skills.capability_discovery.model_assisted=True`; model-inferred needs
+are still only evidence and must pass the same host policy gate.
+
+The public Agent Skills `allowed-tools` field is experimental. If Agently
+supports it, it can only restrict or pre-approve already-mounted host tools; it
+does not mount new Actions, create MCP clients, enable shell/file access, or
+synthesize missing backends.
 
 ## Acceptance Example
 

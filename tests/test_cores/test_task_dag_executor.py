@@ -321,17 +321,21 @@ async def test_task_dag_executor_approval_task_resumes_to_downstream_tasks():
     execution = TaskDAGExecutor({"local": consume_approval}).compile(graph).create_execution(
         auto_close=False
     )
-    await execution.async_start({"request": "publish"})
+    Agently.configure_policy_approval(handler="fail_closed")
+    try:
+        await execution.async_start({"request": "publish"})
 
-    for _ in range(20):
-        interrupts = execution.get_pending_interrupts()
-        if interrupts:
-            break
-        await asyncio.sleep(0.01)
-    assert len(interrupts) == 1
-    interrupt_id = next(iter(interrupts))
-    await execution.async_continue_with(interrupt_id, {"approved": True})
-    snapshot = await execution.async_close(timeout=1)
+        for _ in range(20):
+            interrupts = execution.get_pending_interrupts()
+            if interrupts:
+                break
+            await asyncio.sleep(0.01)
+        assert len(interrupts) == 1
+        interrupt_id = next(iter(interrupts))
+        await execution.async_continue_with(interrupt_id, {"approved": True})
+        snapshot = await execution.async_close(timeout=1)
+    finally:
+        Agently.configure_policy_approval(handler="input_timeout_fail")
 
     assert snapshot["task_results"]["approve_write"] == {"approved": True}
     assert snapshot["task_results"]["write_report"] == "approved=True"

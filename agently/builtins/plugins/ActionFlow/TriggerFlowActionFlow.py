@@ -228,6 +228,134 @@ class TriggerFlowActionFlow:
             if not isinstance(last_round_records, list):
                 last_round_records = []
 
+            approval_decisions = data.get_state("policy_approval_decisions", {})
+            if not isinstance(approval_decisions, dict):
+                approval_decisions = {}
+            pending_approval_key = str(data.get_state("pending_policy_approval_key", "") or "")
+            if getattr(data, "is_resume", False) and pending_approval_key:
+                from agently.base import policy_approval
+
+                resume_value = getattr(getattr(data, "resume", None), "value", None)
+                resume_decision = policy_approval.normalize_decision(resume_value, handler="triggerflow_resume")
+                if resume_decision.get("status") == "approved":
+                    approval_decisions[pending_approval_key] = resume_decision
+                    data.set_state("policy_approval_decisions", approval_decisions)
+                    data.set_state("pending_policy_approval_key", "")
+                else:
+                    pending_action = data.get_state("pending_policy_approval_action", {})
+                    if not isinstance(pending_action, dict):
+                        pending_action = {}
+                    blocked_action_id = str(pending_action.get("action_id", pending_action.get("tool_name", "unknown")))
+                    blocked_record = {
+                        "ok": False,
+                        "status": "blocked",
+                        "success": False,
+                        "purpose": str(pending_action.get("purpose", f"Use { blocked_action_id }")),
+                        "action_id": blocked_action_id,
+                        "tool_name": str(pending_action.get("tool_name", blocked_action_id)),
+                        "kwargs": pending_action.get("action_input", {}),
+                        "result": None,
+                        "data": None,
+                        "error": str(resume_decision.get("reason", "Policy approval was denied.")),
+                        "approval": {"required": True, "decision": resume_decision},
+                    }
+                    records = action._normalize_execution_records([blocked_record], [pending_action])
+                    done_plans.extend(records)
+                    data.set_state("done_plans", done_plans)
+                    data.set_state("last_round_records", records)
+                    data.set_state("round_index", round_index + 1)
+                    data.set_state("pending_policy_approval_key", "")
+                    data.set_state("pending_policy_approval_action", {})
+                    await data.async_emit("PLAN", None)
+                    return records
+
+            from agently.base import policy_approval
+            from agently.core.orchestration.TriggerFlow.Control import TriggerFlowPauseSignal
+
+            for command_index, command in enumerate(action_calls):
+                action_id = str(command.get("action_id", command.get("tool_name", "")))
+                if not action_id:
+                    continue
+                spec = action.action_registry.get_spec(action_id)
+                if spec is None:
+                    continue
+                policy_override = command.get("policy_override", {})
+                if not isinstance(policy_override, dict):
+                    policy_override = {}
+                policy = action.action_dispatcher._merge_policy(settings, spec, policy_override)
+                policy_approval_handler = settings.get("policy_approval.handler", None)
+                if policy_approval_handler is not None and not policy.get("policy_approval_handler"):
+                    policy["policy_approval_handler"] = str(policy_approval_handler)
+                approval_needed = spec.get("approval_required") is True or policy.get("approval_mode") == "always"
+                approval_key = f"{ round_index }:{ command_index }:{ action_id }"
+                if not approval_needed:
+                    continue
+                if approval_key in approval_decisions:
+                    approved_override = dict(policy_override)
+                    approved_override["policy_approval_granted"] = True
+                    approved_override["policy_approval_decision"] = approval_decisions[approval_key]
+                    command["policy_override"] = approved_override
+                    continue
+                data.set_state("pending_policy_approval_key", approval_key)
+                data.set_state("pending_policy_approval_action", dict(command))
+                gate_result = await policy_approval.async_gate(
+                    data,
+                    {
+                        "source": "action",
+                        "capability": action_id,
+                        "subject": str(spec.get("name") or action_id),
+                        "risk": str(spec.get("side_effect_level", "")),
+                        "payload": {
+                            "action_call": dict(command),
+                            "round_index": round_index,
+                            "command_index": command_index,
+                        },
+                        "policy": dict(policy),
+                        "lineage": {
+                            "agent_name": agent_name,
+                            "round_index": round_index,
+                            "command_index": command_index,
+                        },
+                        "execution_id": str(getattr(data.execution, "id", "")),
+                    },
+                    handler=str(policy.get("policy_approval_handler") or "") or None,
+                    resume_to="self",
+                )
+                if isinstance(gate_result, TriggerFlowPauseSignal):
+                    return gate_result
+                if gate_result.get("status") == "approved":
+                    approval_decisions[approval_key] = gate_result
+                    data.set_state("policy_approval_decisions", approval_decisions)
+                    approved_override = dict(policy_override)
+                    approved_override["policy_approval_granted"] = True
+                    approved_override["policy_approval_decision"] = gate_result
+                    command["policy_override"] = approved_override
+                    data.set_state("pending_policy_approval_key", "")
+                    data.set_state("pending_policy_approval_action", {})
+                    continue
+                blocked_record = {
+                    "ok": False,
+                    "status": "blocked",
+                    "success": False,
+                    "purpose": str(command.get("purpose", f"Use { action_id }")),
+                    "action_id": action_id,
+                    "tool_name": str(command.get("tool_name", action_id)),
+                    "kwargs": command.get("action_input", {}),
+                    "result": None,
+                    "data": None,
+                    "error": str(gate_result.get("reason", "Policy approval was denied.")),
+                    "approval": {"required": True, "decision": gate_result},
+                }
+                records = action._normalize_execution_records([blocked_record], [command])
+                done_plans.extend(records)
+                data.set_state("done_plans", done_plans)
+                data.set_state("last_round_records", records)
+                data.set_state("round_index", round_index + 1)
+                data.set_state("pending_policy_approval_key", "")
+                data.set_state("pending_policy_approval_action", {})
+                await data.async_emit("PLAN", None)
+                return records
+
             action_runs = []
             for command_index, command in enumerate(action_calls):
                 action_id = str(command.get("action_id", command.get("tool_name", "unknown")))
@@ -284,6 +412,23 @@ class TriggerFlowActionFlow:
             for record_index, record in enumerate(records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
                 success = bool(record.get("success"))
+                status = str(record.get("status", "") or "")
+                if success:
+                    event_kind = "action_completed"
+                    event_level = "INFO"
+                    event_message = f"Action '{ action_id }' completed."
+                elif status == "approval_required":
+                    event_kind = "action_approval_required"
+                    event_level = "WARNING"
+                    event_message = f"Action '{ action_id }' requires approval."
+                elif status == "blocked":
+                    event_kind = "action_blocked"
+                    event_level = "WARNING"
+                    event_message = f"Action '{ action_id }' blocked."
+                else:
+                    event_kind = "action_failed"
+                    event_level = "WARNING"
+                    event_message = f"Action '{ action_id }' failed."
                 action_run = (
                     action_runs[record_index]
                     if record_index < len(action_runs)
@@ -298,9 +443,9 @@ class TriggerFlowActionFlow:
                     )
                 )
                 await publish_runtime_observation(
-                    "action_completed" if success else "action_failed",
-                    level="INFO" if success else "WARNING",
-                    message=f"Action '{ action_id }' {'completed' if success else 'failed'}.",
+                    event_kind,
+                    level=event_level,
+                    message=event_message,
                     payload={
                         "agent_name": agent_name,
                         "round_index": round_index,

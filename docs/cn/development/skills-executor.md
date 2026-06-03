@@ -120,9 +120,9 @@ plan = await agent.async_resolve_skills_plan(
 
 当任务必须通过 selected Skills 回答时，用 `run_skills_task(...)`。默认执行策略是
 `single_shot`：Agently 会把 selected Skills 的 `SKILL.md` guidance、
-decision cards、资源摘要和任务放进一次模型请求。声明了 `execution: staged`
-或 `allowed-tools` 的 Skill 可以走 TriggerFlow 支撑的 `staged` / `react`
-策略。
+decision cards、资源摘要和任务放进一次模型请求。多步策略由宿主侧执行选项
+选择，例如 `effort="react"` 或 route options；Skill 不能通过 Agently 私有
+frontmatter 声明执行策略。
 当可用 action 存在时，`react` 会把 tool/action 规划和执行委托给 Agent
 ActionRuntime，因此 kwargs schema、MCP tools、policy、approval、concurrency 和
 Execution Environment 处理仍由 Action 层拥有，而不是由 Skills 重新实现。
@@ -326,19 +326,65 @@ Skills runtime 内部模型调用使用符号阶段 key：`planner`、`research`
 通过 Agent 自动编排选中 Skills route 时，模型字段流会桥接到稳定路径，例如
 `skills.model.fields.<field_path>`。
 
-安装 Skill 不会自动执行 bundled scripts 或资源。选中的 Skill 如果声明了
-`mcp`、`mcpServers`、`allowed-tools: [Bash]` 或 `allow-scripts`，Skills
-Executor 会在执行前自动把所需运行时 actions 挂到当前 Agent：MCP 声明走
-`agent.use_mcp(...)`，Bash/scripts 声明走受管的 `enable_shell(...)` action，并把
-工作目录限制在该 Skill 的安装目录。stdio MCP、本地命令和脚本属于高风险能力，
-需要 `auto_allow=True` 或审批 handler；远程 HTTP MCP 不需要这个本地命令审批。
+安装 Skill 不会自动执行 bundled scripts 或资源。标准 Skill 如果在正文、资源、
+`compatibility` 或公开 `metadata` 里表达了 search、browse、HTTP、Workspace file、
+Python、shell/script 或 MCP 需求，Skills Executor 会在 plan 里记录结构化
+`capability_needs`。Skill 仍然不授予能力。执行前，Agently 会把这些需求和宿主
+policy 对照；只有明确标记为 `allow` 的内置能力会被自动加载，`approval` 和 `off`
+都会 fail closed 并返回诊断。
 
-如果选中的 Skill 声明了缺失能力，并且当前没有匹配的 Action/MCP tool，executor
-会先做一层保守 fallback：看起来是纯内存计算、解析、校验、转换或格式化的能力，
-可以被合成为 execution-scoped 的 Python sandbox action。业务系统、网络、文件、
-消息、支付、数据库、浏览器或其他外部副作用能力不会被合成；它们会 fail closed，
-返回 `capability_missing`，直到宿主提供真实 Action、MCP server 或 connector
-package。
+```python
+agent.configure_skill_capabilities(
+    auto_load={
+        "web_search": "allow",
+        "web_browse": "allow",
+        "workspace_write": "allow",
+        "script_run": "approval",
+        "shell": "approval",
+        "mcp": "approval",
+    },
+    workspace_root="./.agently/tasks/research",
+    search={
+        "backend": "auto",
+        "refresh_ddgs": "allow",
+    },
+)
+agent.configure_policy_approval(handler="input_timeout_fail")
+```
+
+面向搜索的 Skills，Agently 会装载由 `ddgs` Python package 支撑的框架 Search
+能力。真实搜索前建议保持 `ddgs` 最新：
+`python -m pip install --upgrade ddgs`。backend 策略不能被固定成某一个 provider；
+默认使用 `backend="auto"`，也可以由宿主 policy 配置任何 ddgs 支持的 backend。
+Search 会把 backend 层面的“无结果”视为成功空结果，并在选定 backend 没有解析到
+可用结果时继续尝试配置或默认的 ddgs fallback backends。如果一个或多个 backend
+失败后由 fallback backend 找到可用结果，Search 会返回
+`status="partial_success"`、`success=True` 和 backend diagnostics，让任务继续
+使用证据，同时让操作者看到哪些搜索源发生了降级。
+
+Workspace 文件操作归 Workspace 边界所有。Agent 已绑定 Workspace 时，
+SkillsExecutor 会优先通过 Workspace 文件边界暴露文件 actions，再退回
+`agent.enable_workspace_file_actions(...)`。
+
+`approval` 由框架全局 PolicyApproval handler 处理，不由 SkillsExecutor 私有 handler
+处理。默认 handler 是 `input_timeout_fail`：交互式 CLI 会等待输入并在超时后失败，
+非交互服务环境会立即失败。测试和可信本地 fixture 可以使用 `auto_approve`。
+真实服务应根据包裹 TriggerFlow execution 的服务方法注册对应 handler，例如数据库 pending
+approval 记录、HTTP callback、webhook resume、SSE/WebSocket 等待，或 save 后返回
+interrupt id。需要 pending diagnostic 或 TriggerFlow `policy_approval` interrupt 时使用
+`fail_closed`。
+
+Skills Executor 不会把 `mcp`、`mcpServers`、`allow-scripts` 或
+Agently-specific `allowed-actions` 等 Skill frontmatter 当成能力授权。公开
+`compatibility` 和 `metadata` 可以作为发现 `capability_needs` 的证据，但加载仍由
+宿主 policy 控制。
+如果宿主希望在确定性读取 Skill 之外加入模型判断，可以开启
+`skills.capability_discovery.model_assisted=True`；模型推断出的 needs 仍然只是
+证据，必须经过同一套宿主 policy gate。
+
+公开 Agent Skills 规范里的 `allowed-tools` 是实验字段。Agently 如果支持它，也只能
+把它作为 already-mounted host tools 的限制或预批准提示；它不能挂载新 Actions、
+创建 MCP client、开启 shell/file access，或合成缺失 backend。
 
 ## 验收样例
 

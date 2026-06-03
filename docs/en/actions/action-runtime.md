@@ -129,7 +129,7 @@ Built-in capability packages live under `agently.builtins.actions`. For example:
 ```python
 from agently.builtins.actions import Browse, Search
 
-agent.use_actions(Search(timeout=15, backend="duckduckgo"))
+agent.use_actions(Search(timeout=15, backend="auto"))
 agent.use_actions(Browse())
 ```
 
@@ -190,6 +190,30 @@ extra.tool_logs  # equivalent to extra.action_logs at the old surface
 ```
 
 These remain valid public mounting surfaces. They map onto the new action runtime internally — they don't imply a `ToolManager` implementation. Migrate to the action surface when convenient; nothing breaks immediately.
+
+## Planning model key
+
+Action planning is a model-owned step. When an Agent uses `model_pool`, set
+`action.planning_model_key` to the business model key that should plan action
+rounds:
+
+```python
+agent.set_settings("model_pool", {"task-main": "deepseek-chat-prod"})
+agent.set_settings("model_profiles", {
+    "deepseek-chat-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_pool": "deepseek-prod",
+    }
+})
+agent.set_settings("action.planning_model_key", "task-main")
+```
+
+This applies to the default structured-plan and native tool-call planning
+paths. It is especially important when a higher-level runtime such as
+SkillsExecutor or AgentTaskLoop delegates a bounded action round to
+ActionRuntime.
 
 ## Handler interface
 

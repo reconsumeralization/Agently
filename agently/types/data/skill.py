@@ -87,12 +87,36 @@ class SkillPlanSelection(TypedDict, total=False):
     decision_card: SkillDecisionCard
     guidance: dict[str, Any]
     resource_index: dict[str, Any]
+    source: dict[str, Any]
+    metadata: dict[str, Any]
 
 
 class SkillPlanRejection(TypedDict, total=False):
     skill_id: str
     reason_code: str
     reason: str
+
+
+class SkillCapabilityNeed(TypedDict, total=False):
+    skill_id: str
+    need: Literal[
+        "web_search",
+        "web_browse",
+        "workspace_write",
+        "workspace_read",
+        "script_run",
+        "mcp",
+        "http_request",
+        "shell",
+        "python",
+        "unknown",
+    ]
+    source: Literal["body", "resource_index", "compatibility", "metadata", "model_inference"]
+    evidence: str
+    risk: Literal["read_only", "local_exec", "filesystem_write", "network", "external_side_effect"]
+    confidence: float
+    resource_path: str
+    capability_config: dict[str, Any]
 
 
 class SkillExecutionPlan(TypedDict, total=False):
@@ -107,6 +131,7 @@ class SkillExecutionPlan(TypedDict, total=False):
     decision_cards: list[SkillDecisionCard]
     prompt_bindings: list[dict[str, Any]]
     resource_bindings: list[dict[str, Any]]
+    capability_needs: list[SkillCapabilityNeed]
     expected_result_shape: dict[str, Any]
     expected_result_format: str
     capability_policy: dict[str, Any]

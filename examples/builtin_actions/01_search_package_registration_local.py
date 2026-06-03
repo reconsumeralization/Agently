@@ -5,7 +5,10 @@ from typing import Literal, cast
 from agently import Agently
 from agently.builtins.actions import Search
 
-SearchBackend = Literal["auto", "bing", "duckduckgo", "yahoo", "google", "mullvad_google", "yandex", "wikipedia"]
+SearchBackend = Literal[
+    "auto", "all", "bing", "brave", "duckduckgo", "google", "grokipedia", "mojeek", "startpage", "wikipedia",
+    "yahoo", "yandex",
+]
 SearchRegion = Literal[
     "xa-ar", "xa-en", "ar-es", "au-en", "at-de", "be-fr", "be-nl", "br-pt", "bg-bg", "ca-en", "ca-fr",
     "ct-ca", "cl-es", "cn-zh", "co-es", "hr-hr", "cz-cs", "dk-da", "ee-et", "fi-fi", "fr-fr", "de-de",
@@ -22,7 +25,7 @@ def build_agent():
     search = Search(
         proxy=os.getenv("SEARCH_PROXY") or None,
         timeout=10,
-        backend=cast(SearchBackend, os.getenv("SEARCH_BACKEND", "duckduckgo")),
+        backend=cast(SearchBackend, os.getenv("SEARCH_BACKEND", "auto")),
         region=cast(SearchRegion, os.getenv("SEARCH_REGION", "us-en")),
     )
     agent.use_actions(search)

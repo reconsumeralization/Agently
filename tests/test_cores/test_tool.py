@@ -84,8 +84,28 @@ def test_action_dispatcher_requires_approval():
     )
 
     result = action.execute_action(action_id, {})
-    assert result.get("status") == "approval_required"
+    assert result.get("status") == "blocked"
     legacy = action.call_tool(action_id, {})
+    assert legacy["status"] == "blocked"
+
+
+def test_action_dispatcher_fail_closed_handler_returns_approval_required():
+    action = Agently.action
+    action_id = f"approval_pending_action_{ uuid.uuid4().hex[:8] }"
+    action.register_action(
+        action_id=action_id,
+        desc="Approval gated action.",
+        kwargs={},
+        func=lambda: "ok",
+        approval_required=True,
+        expose_to_model=False,
+    )
+
+    Agently.configure_policy_approval(handler="fail_closed")
+    try:
+        legacy = action.call_tool(action_id, {})
+    finally:
+        Agently.configure_policy_approval(handler="input_timeout_fail")
     assert legacy["status"] == "approval_required"
 
 

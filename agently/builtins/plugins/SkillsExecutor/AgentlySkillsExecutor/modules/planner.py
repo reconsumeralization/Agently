@@ -19,6 +19,7 @@ from typing import Any, Literal, cast
 
 from agently.types.data import (
     ExecutionStrategy,
+    SkillCapabilityNeed,
     SkillContract,
     SkillExecutionPlan,
     SkillMode,
@@ -214,6 +215,13 @@ class SkillPlanner:
 
         execution_strategy = self._resolve_execution_strategy(selected)
         execution_stages = self._resolve_execution_stages(selected, execution_strategy)
+        capability_needs = self._discover_capability_needs(selections)
+        capability_needs = await self._discover_model_capability_needs(
+            context=context,
+            task_text=task_text,
+            selections=selections,
+            current_needs=capability_needs,
+        )
 
         return SkillExecutionPlan({
             "plan_id": uuid.uuid4().hex,
@@ -227,6 +235,7 @@ class SkillPlanner:
             "decision_cards": [_copy_public(selection.get("decision_card", {})) for selection in selections],
             "prompt_bindings": prompt_bindings,
             "resource_bindings": [_copy_public(selection.get("resource_index", {})) for selection in selections],
+            "capability_needs": capability_needs,
             "expected_result_shape": _ensure_dict(semantic_outputs),
             "expected_result_format": output_format,
             "capability_policy": {
@@ -373,27 +382,8 @@ class SkillPlanner:
         self,
         selected: list[SkillContract],
     ) -> ExecutionStrategy:
-        """Determine execution strategy from selected skill contracts.
-
-        Priority: react > staged > single_shot. Degrades to simpler when
-        affordances are missing.
-        """
-        has_tools = False
-        has_staged_hint = False
-
-        for contract in selected:
-            metadata = _ensure_dict(contract.get("metadata"))
-            fm = _ensure_dict(metadata.get("frontmatter"))
-            allowed_tools = fm.get("allowed-tools") or fm.get("allowed_tools") or []
-            if allowed_tools:
-                has_tools = True
-            if fm.get("execution") == "staged":
-                has_staged_hint = True
-
-        if has_tools:
-            return "react"
-        if has_staged_hint:
-            return "staged"
+        """Determine execution strategy without private Skill authoring fields."""
+        del selected
         return "single_shot"
 
     def _resolve_execution_stages(
@@ -401,21 +391,301 @@ class SkillPlanner:
         selected: list[SkillContract],
         execution_strategy: str,
     ) -> list[dict[str, Any]]:
-        """Extract declared stages from skill frontmatter when strategy is staged."""
-        if execution_strategy != "staged":
-            return []
-
-        for contract in selected:
-            metadata = _ensure_dict(contract.get("metadata"))
-            fm = _ensure_dict(metadata.get("frontmatter"))
-            stages = fm.get("stages")
-            if isinstance(stages, list) and stages:
-                return [
-                    {"description": str(s) if isinstance(s, str) else s}
-                    for s in stages
-                ]
-
+        """Standard Skills do not declare Agently execution stages."""
+        del selected, execution_strategy
         return []
+
+    def _discover_capability_needs(
+        self,
+        selections: list[SkillPlanSelection],
+    ) -> list[SkillCapabilityNeed]:
+        needs: list[SkillCapabilityNeed] = []
+        seen: set[tuple[str, str, str, str]] = set()
+
+        def add(
+            *,
+            skill_id: str,
+            need: str,
+            source: str,
+            evidence: str,
+            risk: str,
+            confidence: float,
+            resource_path: str = "",
+            capability_config: dict[str, Any] | None = None,
+        ) -> None:
+            if not skill_id or not need:
+                return
+            clipped = " ".join(str(evidence or "").split())[:240]
+            key = (skill_id, need, source, resource_path or clipped)
+            if key in seen:
+                return
+            seen.add(key)
+            needs.append(SkillCapabilityNeed({
+                "skill_id": skill_id,
+                "need": cast(Any, need),
+                "source": cast(Any, source),
+                "evidence": clipped,
+                "risk": cast(Any, risk),
+                "confidence": float(confidence),
+                "resource_path": resource_path,
+                "capability_config": _copy_public(capability_config or {}),
+            }))
+
+        for selection in selections:
+            skill_id = str(selection.get("skill_id") or "")
+            guidance = _ensure_dict(selection.get("guidance"))
+            body = str(guidance.get("content") or "")
+            resource_index = _ensure_dict(selection.get("resource_index"))
+            metadata = _ensure_dict(selection.get("metadata"))
+            frontmatter = _ensure_dict(metadata.get("frontmatter"))
+
+            self._scan_capability_text(
+                body,
+                add=lambda **kwargs: add(skill_id=skill_id, source="body", **kwargs),
+            )
+            compatibility = frontmatter.get("compatibility")
+            if compatibility:
+                self._scan_capability_text(
+                    compatibility,
+                    add=lambda **kwargs: add(skill_id=skill_id, source="compatibility", **kwargs),
+                    confidence=0.8,
+                )
+            public_metadata = frontmatter.get("metadata")
+            if public_metadata:
+                self._scan_capability_text(
+                    public_metadata,
+                    add=lambda **kwargs: add(skill_id=skill_id, source="metadata", **kwargs),
+                    confidence=0.65,
+                )
+            for resource in _ensure_list(resource_index.get("resources")):
+                if not isinstance(resource, dict):
+                    continue
+                resource_path = str(resource.get("path") or "")
+                kind = str(resource.get("kind") or "")
+                summary = str(resource.get("summary") or "")
+                if kind == "script":
+                    suffix = resource_path.rsplit(".", 1)[-1].lower() if "." in resource_path else ""
+                    script_need = "python" if suffix == "py" else "script_run"
+                    add(
+                        skill_id=skill_id,
+                        need=script_need,
+                        source="resource_index",
+                        evidence=f"Bundled script resource: { resource_path }",
+                        risk="local_exec",
+                        confidence=0.95,
+                        resource_path=resource_path,
+                    )
+                    add(
+                        skill_id=skill_id,
+                        need="script_run",
+                        source="resource_index",
+                        evidence=f"Bundled script resource: { resource_path }",
+                        risk="local_exec",
+                        confidence=0.9,
+                        resource_path=resource_path,
+                    )
+                elif kind in {"reference", "asset"} and summary:
+                    self._scan_capability_text(
+                        summary,
+                        add=lambda resource_path=resource_path, **kwargs: add(
+                            skill_id=skill_id,
+                            source="resource_index",
+                            resource_path=resource_path,
+                            **kwargs,
+                        ),
+                        confidence=0.6,
+                    )
+
+        return needs
+
+    async def _discover_model_capability_needs(
+        self,
+        *,
+        context: SkillsPlanningContext,
+        task_text: str,
+        selections: list[SkillPlanSelection],
+        current_needs: list[SkillCapabilityNeed],
+    ) -> list[SkillCapabilityNeed]:
+        enabled = bool(context.get_setting("skills.capability_discovery.model_assisted", False))
+        if not enabled or not selections:
+            return current_needs
+
+        try:
+            result = await context.async_request_model(
+                prompt={
+                    "task": task_text,
+                    "capability_need_discovery": {
+                        "purpose": "Infer host capabilities needed by selected standard Skills without granting permission.",
+                        "selected_skills": [
+                            {
+                                "skill_id": selection.get("skill_id"),
+                                "display_name": selection.get("display_name"),
+                                "guidance": _copy_public(selection.get("guidance", {})),
+                                "resource_index": _copy_public(selection.get("resource_index", {})),
+                                "public_metadata": _copy_public(selection.get("metadata", {})),
+                            }
+                            for selection in selections
+                        ],
+                        "already_detected": [_copy_public(item) for item in current_needs],
+                        "allowed_need_names": [
+                            "web_search",
+                            "web_browse",
+                            "workspace_write",
+                            "workspace_read",
+                            "script_run",
+                            "mcp",
+                            "http_request",
+                            "shell",
+                            "python",
+                            "unknown",
+                        ],
+                    },
+                    "policy": [
+                        "Return capability needs only; do not grant or authorize capabilities.",
+                        "Use source=model_inference for every returned item.",
+                        "Prefer unknown when the Skill implies an environment need that does not match a known need.",
+                    ],
+                },
+                model_key=self._stage_model_key(context, "planner"),
+                output_schema={
+                    "capability_needs": [
+                        (
+                            {
+                                "skill_id": (str, "Selected skill id.", True),
+                                "need": (str, "One allowed need name.", True),
+                                "evidence": (str, "Short evidence from the Skill or task.", True),
+                                "risk": (str, "read_only, local_exec, filesystem_write, network, or external_side_effect.", True),
+                                "confidence": (float, "Confidence from 0 to 1.", True),
+                                "resource_path": (str, "Related resource path when applicable.", False),
+                                "capability_config": (dict, "Public capability hints only, never authorization.", False),
+                            },
+                            "Model-inferred capability need.",
+                            True,
+                        )
+                    ],
+                },
+                output_format="json",
+                ensure_keys=["capability_needs"],
+                max_retries=2,
+            )
+        except Exception:
+            return current_needs
+
+        model_needs: list[SkillCapabilityNeed] = []
+        valid_needs = {
+            "web_search",
+            "web_browse",
+            "workspace_write",
+            "workspace_read",
+            "script_run",
+            "mcp",
+            "http_request",
+            "shell",
+            "python",
+            "unknown",
+        }
+        valid_risks = {
+            "read_only",
+            "local_exec",
+            "filesystem_write",
+            "network",
+            "external_side_effect",
+        }
+        selected_ids = {str(selection.get("skill_id") or "") for selection in selections}
+        for item in _ensure_list(_ensure_dict(result).get("capability_needs")):
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get("skill_id") or "")
+            need = str(item.get("need") or "")
+            if skill_id not in selected_ids or need not in valid_needs:
+                continue
+            risk = str(item.get("risk") or "")
+            if risk not in valid_risks:
+                risk = "external_side_effect" if need == "mcp" else "read_only"
+            confidence_raw = item.get("confidence", 0.5)
+            try:
+                confidence = max(0.0, min(float(confidence_raw), 1.0))
+            except Exception:
+                confidence = 0.5
+            model_needs.append(SkillCapabilityNeed({
+                "skill_id": skill_id,
+                "need": cast(Any, need),
+                "source": "model_inference",
+                "evidence": " ".join(str(item.get("evidence") or "").split())[:240],
+                "risk": cast(Any, risk),
+                "confidence": confidence,
+                "resource_path": str(item.get("resource_path") or ""),
+                "capability_config": _copy_public(_ensure_dict(item.get("capability_config"))),
+            }))
+
+        return self._merge_capability_needs([*current_needs, *model_needs])
+
+    def _merge_capability_needs(
+        self,
+        needs: list[SkillCapabilityNeed],
+    ) -> list[SkillCapabilityNeed]:
+        merged: list[SkillCapabilityNeed] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for item in needs:
+            key = (
+                str(item.get("skill_id") or ""),
+                str(item.get("need") or ""),
+                str(item.get("source") or ""),
+                str(item.get("resource_path") or item.get("evidence") or ""),
+            )
+            if not key[0] or not key[1] or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    def _scan_capability_text(
+        self,
+        value: Any,
+        *,
+        add: Any,
+        confidence: float = 0.75,
+    ) -> None:
+        if isinstance(value, dict):
+            text = " ".join(f"{ key } { val }" for key, val in value.items())
+        elif isinstance(value, (list, tuple, set)):
+            text = " ".join(str(item) for item in value)
+        else:
+            text = str(value or "")
+        normalized = text.lower()
+        if not normalized.strip():
+            return
+
+        def has_any(*terms: str) -> bool:
+            return any(term in normalized for term in terms)
+
+        if has_any("search", "web search", "public sources", "public context", "搜索", "公开资料", "公开信息"):
+            add(need="web_search", evidence=self._capability_excerpt(text, ["search", "public", "搜索", "公开"]), risk="network", confidence=confidence)
+        if has_any("browse", "open page", "web page", "relevant pages", "浏览", "网页"):
+            add(need="web_browse", evidence=self._capability_excerpt(text, ["browse", "page", "浏览", "网页"]), risk="network", confidence=confidence)
+        if has_any("http", "api request", "rest api", "fetch url", "network request"):
+            add(need="http_request", evidence=self._capability_excerpt(text, ["http", "api", "fetch", "request"]), risk="network", confidence=confidence)
+        if has_any("write file", "write the final", "save file", "markdown deliverable", "输出到文件", "写入文件", "保存文件"):
+            add(need="workspace_write", evidence=self._capability_excerpt(text, ["write", "save", "file", "写入", "保存"]), risk="filesystem_write", confidence=confidence)
+        if has_any("read file", "list files", "读取文件", "列出文件"):
+            add(need="workspace_read", evidence=self._capability_excerpt(text, ["read", "file", "workspace", "读取"]), risk="read_only", confidence=confidence)
+        if has_any("run script", "scripts/", "execute script", "运行脚本", "执行脚本"):
+            add(need="script_run", evidence=self._capability_excerpt(text, ["script", "scripts/", "脚本"]), risk="local_exec", confidence=confidence)
+        if has_any("mcp", "model context protocol"):
+            add(need="mcp", evidence=self._capability_excerpt(text, ["mcp", "model context protocol"]), risk="external_side_effect", confidence=confidence)
+        if has_any("bash", "shell", "command line", "cli command", "命令行", "终端命令"):
+            add(need="shell", evidence=self._capability_excerpt(text, ["bash", "shell", "command", "命令"]), risk="local_exec", confidence=confidence)
+        if has_any("python", ".py", "python script"):
+            add(need="python", evidence=self._capability_excerpt(text, ["python", ".py"]), risk="local_exec", confidence=confidence)
+
+    def _capability_excerpt(self, text: str, terms: list[str]) -> str:
+        collapsed = " ".join(str(text or "").split())
+        lowered = collapsed.lower()
+        positions = [lowered.find(term.lower()) for term in terms if lowered.find(term.lower()) >= 0]
+        if not positions:
+            return collapsed[:180]
+        start = max(min(positions) - 60, 0)
+        return collapsed[start:start + 180]
 
     def _records_for_scope(
         self,
@@ -594,6 +864,8 @@ class SkillPlanner:
             "decision_card": _copy_public(contract.get("decision_card", {})),
             "guidance": _copy_public(contract.get("guidance", {})),
             "resource_index": _copy_public(contract.get("resource_index", {})),
+            "source": _copy_public(contract.get("source", {})),
+            "metadata": _copy_public(contract.get("metadata", {})),
         })
 
     def _prompt_binding_for_selection(self, selection: SkillPlanSelection) -> dict[str, Any]:
