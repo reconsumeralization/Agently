@@ -169,6 +169,9 @@ Agently.set_settings("response.materialization_idle_timeout", 60.0)
 能够识别时带上 provider/model 字段。
 `response.materialization_idle_timeout` 限制最终 text、data、object 或 meta 从
 response parser materialize 出来的等待时间。`None` 表示无限制；`-1` 作为兼容写法可用。
+如果 provider 或最终响应构造在 materialization 完成前发出显式 stream error，
+`get_text()` / `get_data()` / `get_meta()` 会传播该原始错误，而不是继续等到
+materialization timeout。
 
 高频 RuntimeEvent 出口应该通过 Event Center 请求摘要投递，而不是让
 AgentExecution 在信号源降频：

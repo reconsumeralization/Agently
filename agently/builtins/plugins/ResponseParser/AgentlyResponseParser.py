@@ -303,6 +303,12 @@ class AgentlyResponseParser(ResponseParser):
             await consumer.close()
             raise
 
+    @staticmethod
+    def _normalize_error_event(data: Any) -> Exception:
+        if isinstance(data, Exception):
+            return data
+        return RuntimeError(str(data) if data is not None else "Model response stream emitted an error.")
+
     async def _extract(self):
         buffer = ""
         stream_chunk_index = 0
@@ -352,14 +358,15 @@ class AgentlyResponseParser(ResponseParser):
                                 payload={"meta": dict(data)},
                             )
                     case "error":
-                        if isinstance(data, Exception):
-                            self.full_result_data["errors"].append(data)
-                            self._record_runtime_observation(
-                                "failed",
-                                level="ERROR",
-                                message="Model response stream emitted an error.",
-                                error=data,
-                            )
+                        error = self._normalize_error_event(data)
+                        self.full_result_data["errors"].append(error)
+                        self._record_runtime_observation(
+                            "failed",
+                            level="ERROR",
+                            message="Model response stream emitted an error.",
+                            error=error,
+                        )
+                        raise error
         finally:
             if hasattr(self.response_generator, "aclose"):
                 with contextlib.suppress(RuntimeError):

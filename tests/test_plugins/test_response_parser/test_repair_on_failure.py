@@ -86,6 +86,48 @@ async def test_response_parser_repairs_structural_quotes_and_preserves_value_quo
 
 
 @pytest.mark.asyncio
+async def test_response_parser_error_event_fails_text_materialization(monkeypatch):
+    monkeypatch.setattr(agently.base, "async_emit_runtime", _noop_async_emit_runtime)
+
+    provider_error = ValueError("provider stream failed")
+    parser = create_response_parser(
+        [
+            ("delta", "partial text"),
+            ("error", provider_error),
+        ],
+        {"name": None},
+    )
+
+    with pytest.raises(ValueError, match="provider stream failed") as raised:
+        await asyncio.wait_for(parser.async_get_text(), timeout=1)
+
+    assert raised.value is provider_error
+    assert parser.full_result_data["errors"] == [provider_error]
+    observations = parser.drain_runtime_observations()
+    failed_observations = [item for item in observations if item["kind"] == "failed"]
+    assert failed_observations
+    assert failed_observations[0]["error"] is provider_error
+
+
+@pytest.mark.asyncio
+async def test_response_parser_string_error_event_fails_text_materialization(monkeypatch):
+    monkeypatch.setattr(agently.base, "async_emit_runtime", _noop_async_emit_runtime)
+
+    parser = create_response_parser(
+        [
+            ("delta", "partial text"),
+            ("error", "upstream action loop failed"),
+        ],
+        {"name": None},
+    )
+
+    with pytest.raises(RuntimeError, match="upstream action loop failed") as raised:
+        await asyncio.wait_for(parser.async_get_text(), timeout=1)
+
+    assert parser.full_result_data["errors"] == [raised.value]
+
+
+@pytest.mark.asyncio
 async def test_instant_async_generator_streams_valid_json_before_done(monkeypatch):
     monkeypatch.setattr(agently.base, "async_emit_runtime", _noop_async_emit_runtime)
 

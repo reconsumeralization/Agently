@@ -183,7 +183,10 @@ First-event timeout and stream-idle timeout both raise
 identify them.
 `response.materialization_idle_timeout` bounds the wait while final text, data,
 object, or meta is materialized from the response parser. `None` is unlimited;
-`-1` is accepted for compatibility.
+`-1` is accepted for compatibility. If the provider or response construction
+emits an explicit stream error before materialization completes,
+`get_text()` / `get_data()` / `get_meta()` propagates that original error
+instead of waiting for the materialization timeout.
 
 High-frequency RuntimeEvent outlets should request Event Center summary
 delivery instead of asking AgentExecution to throttle at the source:
