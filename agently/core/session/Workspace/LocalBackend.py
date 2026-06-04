@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -367,20 +368,20 @@ class LocalWorkspaceBackend:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as conn:
             if query:
-                sql = (
-                    "SELECT r.* FROM records r JOIN records_fts f ON r.id = f.record_id "
-                    f"{ where + ' AND' if where else 'WHERE' } records_fts MATCH ? "
-                    "ORDER BY bm25(records_fts)"
-                )
-                rows = conn.execute(sql, [*params, query]).fetchall()
+                fts_query = self._safe_fts_query(query)
+                rows = []
+                if fts_query:
+                    sql = (
+                        "SELECT r.* FROM records r JOIN records_fts f ON r.id = f.record_id "
+                        f"{ where + ' AND' if where else 'WHERE' } records_fts MATCH ? "
+                        "ORDER BY bm25(records_fts)"
+                    )
+                    try:
+                        rows = conn.execute(sql, [*params, fts_query]).fetchall()
+                    except sqlite3.OperationalError:
+                        rows = []
                 if not rows:
-                    like = f"%{ query }%"
-                    sql = f"SELECT r.* FROM records r { where }"
-                    rows = [
-                        row
-                        for row in conn.execute(sql, params).fetchall()
-                        if like.strip("%").lower() in str(row["summary"]).lower()
-                    ]
+                    rows = self._like_search_rows(conn, where=where, params=params, query=query)
             else:
                 rows = conn.execute(f"SELECT r.* FROM records r { where } ORDER BY created_at DESC", params).fetchall()
         refs = [self._row_to_ref(row) for row in rows]
@@ -394,6 +395,35 @@ class LocalWorkspaceBackend:
                 path = key.split(".", 1)[1]
                 refs = [ref for ref in refs if ref.get("meta", {}).get(path) == value]
         return refs
+
+    @staticmethod
+    def _safe_fts_query(query: str) -> str:
+        tokens = re.findall(r"[\w][\w.\-:/]*", str(query), flags=re.UNICODE)
+        phrases = []
+        for token in tokens[:16]:
+            normalized = token.strip().strip(".:-/")
+            if not normalized:
+                continue
+            escaped = normalized.replace('"', '""')
+            phrases.append(f'"{ escaped }"')
+        return " OR ".join(phrases)
+
+    @staticmethod
+    def _like_search_rows(
+        conn: sqlite3.Connection,
+        *,
+        where: str,
+        params: list[Any],
+        query: str,
+    ) -> list[sqlite3.Row]:
+        like = f"%{ query }%"
+        like_clauses = "(r.summary LIKE ? OR f.summary LIKE ? OR f.content LIKE ?)"
+        sql = (
+            "SELECT DISTINCT r.* FROM records r LEFT JOIN records_fts f ON r.id = f.record_id "
+            f"{ where + ' AND ' if where else 'WHERE ' }{ like_clauses } "
+            "ORDER BY r.created_at DESC"
+        )
+        return conn.execute(sql, [*params, like, like, like]).fetchall()
 
     @staticmethod
     def _record_id(value: WorkspaceRecordRef | str) -> str:

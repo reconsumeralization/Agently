@@ -231,7 +231,7 @@ def print_startup_summary(
 
 
 def print_result_summary(summary: dict[str, Any], file_text: str) -> None:
-    if summary.get("task_status") == "completed":
+    if summary.get("example_accepted"):
         print("\n[RESULT] Blog interview preparation accepted")
     elif summary.get("output_file_exists"):
         print("\n[RESULT] Blog interview preparation produced a partial artifact")
@@ -247,6 +247,7 @@ def print_result_summary(summary: dict[str, Any], file_text: str) -> None:
     print(f"[RESULT] Sources visible: {summary['has_sources']}")
     print(f"[RESULT] Interview angle visible: {summary['has_interview_angle']}")
     print(f"[RESULT] Targets mentioned: {summary['mentions_all_targets']}")
+    print(f"[RESULT] Semantic judge passed: {summary['semantic_judge_passed']}")
     print(f"[RESULT] Workspace checkpoints: {summary['workspace_checkpoint_count']}")
     print(f"[RESULT] Observed action history entries: {summary['action_log_count']}")
     print(f"[RESULT] Stream trace: {summary['stream_trace_file']}")
@@ -257,6 +258,110 @@ def print_result_summary(summary: dict[str, Any], file_text: str) -> None:
             print(f"[RESULT]   {line[:220]}")
     print("[RESULT] Run summary JSON:")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+async def judge_interview_semantics(
+    agent: Any,
+    *,
+    file_text: str,
+    interview_input: dict[str, Any],
+    success_criteria: list[str],
+    action_summary: dict[str, Any],
+) -> dict[str, Any]:
+    if not file_text.strip():
+        return {
+            "accepted": False,
+            "source_specificity_ok": False,
+            "target_coverage_ok": False,
+            "conflict_handling_ok": False,
+            "low_evidence_handling_ok": False,
+            "blog_interview_quality_ok": False,
+            "not_hiring_framed_ok": False,
+            "reason": "No final Markdown content was available for semantic judging.",
+            "rule_evidence": [],
+        }
+    try:
+        judged = await (
+            agent.create_request(model_key=TASK_MODEL_KEY)
+            .input(
+                {
+                    "candidate_markdown": file_text,
+                    "parsed_targets": interview_input["targets"],
+                    "interview_goal": interview_input["interview_goal"],
+                    "success_criteria": success_criteria,
+                    "action_summary": action_summary,
+                    "rules": [
+                        "Source notes must name concrete URLs, titles, or source labels and explain why each source matters.",
+                        "Every parsed target must receive target-specific questions, and multiple targets need comparative article questions.",
+                        "If the supplied organization/work affiliation is unsupported or contradicted by evidence, the brief must mark it as uncertain instead of treating it as fact.",
+                        "Low-public-evidence targets must be handled with confidence/unknowns and clarifying follow-up probes instead of invented facts.",
+                        "Questions must fit a blog/media interview, elicit original insight, and avoid generic product-promotion or hiring-screen framing.",
+                    ],
+                }
+            )
+            .instruct(
+                "Judge the candidate interview brief semantically. Use the rules exactly; do not rely on question count alone. "
+                "Return JSON only. If a rule is weak or unsupported, mark its boolean false and give concise evidence."
+            )
+            .output(
+                {
+                    "accepted": (bool, "True only when every semantic rule is satisfied.", True),
+                    "source_specificity_ok": (bool, "Source notes are concrete and relevant.", True),
+                    "target_coverage_ok": (bool, "Every target is covered with target-specific prompts.", True),
+                    "conflict_handling_ok": (bool, "Unsupported or contradictory affiliations are handled carefully.", True),
+                    "low_evidence_handling_ok": (bool, "Low-evidence targets are handled with confidence/unknowns and follow-up probes.", True),
+                    "blog_interview_quality_ok": (bool, "Questions fit a blog/media article and elicit original insight.", True),
+                    "not_hiring_framed_ok": (bool, "The brief is not framed as hiring, recruiting, or candidate evaluation.", True),
+                    "reason": (str, "Concise overall judgment.", True),
+                    "rule_evidence": [
+                        {
+                            "rule": (str, "Rule name.", True),
+                            "ok": (bool, "Whether this rule passed.", True),
+                            "evidence": (str, "Short evidence from the candidate brief.", True),
+                        }
+                    ],
+                },
+                format="json",
+            )
+            .async_start(max_retries=2, raise_ensure_failure=False)
+        )
+    except Exception as error:
+        return {
+            "accepted": False,
+            "source_specificity_ok": False,
+            "target_coverage_ok": False,
+            "conflict_handling_ok": False,
+            "low_evidence_handling_ok": False,
+            "blog_interview_quality_ok": False,
+            "not_hiring_framed_ok": False,
+            "reason": f"Semantic judge failed: {error.__class__.__name__}: {error}",
+            "rule_evidence": [],
+        }
+    if not isinstance(judged, dict):
+        return {
+            "accepted": False,
+            "source_specificity_ok": False,
+            "target_coverage_ok": False,
+            "conflict_handling_ok": False,
+            "low_evidence_handling_ok": False,
+            "blog_interview_quality_ok": False,
+            "not_hiring_framed_ok": False,
+            "reason": f"Semantic judge returned non-dict output: {judged!r}",
+            "rule_evidence": [],
+        }
+    bool_fields = [
+        "accepted",
+        "source_specificity_ok",
+        "target_coverage_ok",
+        "conflict_handling_ok",
+        "low_evidence_handling_ok",
+        "blog_interview_quality_ok",
+        "not_hiring_framed_ok",
+    ]
+    normalized: dict[str, Any] = {field: bool(judged.get(field)) for field in bool_fields}
+    normalized["reason"] = str(judged.get("reason") or "")
+    normalized["rule_evidence"] = judged.get("rule_evidence") if isinstance(judged.get("rule_evidence"), list) else []
+    return normalized
 
 
 def configure_agent_model_pool(agent: Any, *, temperature: float = 0.0) -> tuple[str, str, str]:
@@ -422,6 +527,19 @@ async def main(argv: list[str] | None = None):
         "stream_snapshots": True,
         "progress_model_key": progress_model_key,
     }
+    success_criteria = [
+        "The model used public search or browse evidence for the specified organization/work, original names, and aliases.",
+        "The task reflected on whether the information was sufficient before finalizing.",
+        f"The final Markdown file { output_file } exists in Workspace.",
+        f"The file includes concrete source notes with URLs, titles, or source labels inside the Markdown file itself, explains why each source matters, includes a blog/story interview angle, and has at least { min_questions } interview questions.",
+        "The file preserves each target's original name language and uses aliases as disambiguation/search context rather than silently renaming the target.",
+        "The file explicitly marks unsupported or contradictory organization/work affiliations as uncertain instead of repeating the user's wording as fact.",
+        "For targets with sparse public evidence, the file states confidence/unknowns and includes clarifying follow-up probes instead of invented biography.",
+        "Questions cover the target's organization/work context, public reputation, technical or creative choices, adoption/community/business context, article-worthy tension, and future direction where relevant.",
+        "Questions are written for a blog/media interview audience, not for hiring, recruiting, or candidate evaluation.",
+        "Questions include target-specific prompts for every supplied target, plus comparative article questions when multiple targets are supplied.",
+        "After writing the file, the execution evidence includes a file readback or validation checklist for the final Markdown content.",
+    ]
 
     task = agent.create_task(
         task_id=task_id,
@@ -434,17 +552,7 @@ async def main(argv: list[str] | None = None):
             "and explicit target-specific questions. Do not frame the output as a job interview, hiring evaluation, "
             "candidate screen, or recruiting guide."
         ),
-        success_criteria=[
-            "The model used public search or browse evidence for the specified organization/work, original names, and aliases.",
-            "The task reflected on whether the information was sufficient before finalizing.",
-            f"The final Markdown file { output_file } exists in Workspace.",
-            f"The file includes source notes or URLs, a blog/story interview angle, and at least { min_questions } interview questions.",
-            "The file preserves each target's original name language and uses aliases as disambiguation/search context rather than silently renaming the target.",
-            "Questions cover the target's organization/work context, public reputation, technical or creative choices, adoption/community/business context, article-worthy tension, and future direction where relevant.",
-            "Questions are written for a blog/media interview audience, not for hiring, recruiting, or candidate evaluation.",
-            "Questions include target-specific prompts for every supplied target, plus comparative article questions when multiple targets are supplied.",
-            "After writing the file, the execution evidence includes a file readback or validation checklist for the final Markdown content.",
-        ],
+        success_criteria=success_criteria,
         workspace=workspace_dir,
         max_iterations=4,
         limits={"max_model_requests": 18, "max_seconds": 280, "max_no_progress_seconds": 100},
@@ -540,6 +648,18 @@ async def main(argv: list[str] | None = None):
     action_registry = getattr(agent.action, "action_registry", None)
     if action_registry is not None and hasattr(action_registry, "has"):
         ddgs_refresh_action_present = ddgs_refresh_action_present or bool(action_registry.has("refresh_ddgs_dependency"))
+    semantic_judge = await judge_interview_semantics(
+        agent,
+        file_text=file_text,
+        interview_input=interview_input,
+        success_criteria=success_criteria,
+        action_summary={
+            "action_log_count": action_log_count,
+            "action_log_ids": sorted(action_id for action_id in action_log_ids if action_id),
+            "ddgs_refresh_action_present": ddgs_refresh_action_present,
+            "stream_trace_file": str(stream_trace_path),
+        },
+    )
 
     summary = {
         "provider": provider,
@@ -547,6 +667,7 @@ async def main(argv: list[str] | None = None):
         "task_model_key": task_model_key,
         "task_status": result["status"],
         "accepted": bool(result.get("accepted", result.get("status") == "completed")),
+        "example_accepted": bool(result.get("accepted", result.get("status") == "completed") and semantic_judge.get("accepted")),
         "artifact_status": str(result.get("artifact_status") or ("accepted" if result.get("status") == "completed" else "partial")),
         "terminal_reason": str(result.get("reason") or ""),
         "target_inputs": [target["raw_input"] for target in cast(list[dict[str, Any]], interview_input["targets"])],
@@ -558,6 +679,8 @@ async def main(argv: list[str] | None = None):
         "mentions_all_targets": mentions_all_targets,
         "has_alias_context": has_alias_context,
         "has_organization_or_work_context": has_organization_or_work_context,
+        "semantic_judge_passed": bool(semantic_judge.get("accepted")),
+        "semantic_judge": semantic_judge,
         "replan_count": replan_count,
         "progress_event_count": progress_count,
         "snapshot_event_count": snapshot_count,
@@ -576,26 +699,29 @@ async def main(argv: list[str] | None = None):
 if __name__ == "__main__":
     asyncio.run(main(sys.argv[1:]))
 
-# Expected key output from a real DeepSeek run on 2026-06-03:
+# Expected key output from a real DeepSeek run on 2026-06-04:
 # command:
-# AGENT_TASK_WORKSPACE=.agently/tasks/blog-interview-semantics-check \
+# AGENT_TASK_WORKSPACE=.agently/tasks/blog-interview-semantics-check-acceptance \
 #   python examples/agent_task/interview_question_preparation.py
 # task_status="completed"
 # accepted=True
+# example_accepted=True
 # artifact_status="accepted"
 # output_file_exists=True
-# question_count=20
+# question_count=25
 # has_sources=True
 # has_interview_angle=True
 # mentions_all_targets=True
 # has_alias_context=True for targets that include aliases
 # has_organization_or_work_context=True for targets that include organization/work
+# semantic_judge_passed=True
 # task_model_key="task-main"
 # progress_model="qwen2.5:7b"
-# action_log_count=14
+# action_log_count=8
 # progress_event_count=2
 # snapshot_event_count=4
 # stream_trace_file points to a JSONL stream trace under the Workspace
+# ddgs_refresh_action_present=True
 #
 # Skills contract note:
 # The selected Skill is a standard SKILL.md without Agently-specific
