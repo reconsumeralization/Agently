@@ -182,6 +182,50 @@ async def test_workspace_build_context_returns_refs_and_budget_diagnostics(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_path):
+    agent = Agently.create_agent("workspace-fts-safe-query").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    version_ref = await workspace.ingest(
+        content="Agently 4.1.3.4 task loop fix",
+        collection="observations",
+        kind="note",
+        summary="Agently 4.1.3.4 task loop fix",
+        scope={"task_id": "fts-safe"},
+    )
+    dotted_ref = await workspace.ingest(
+        content="foo.bar import failed during verification",
+        collection="observations",
+        kind="note",
+        summary="foo.bar import failed",
+        scope={"task_id": "fts-safe"},
+    )
+    question_ref = await workspace.ingest(
+        content="interview question preparation",
+        collection="observations",
+        kind="note",
+        summary="interview question preparation",
+        scope={"task_id": "fts-safe"},
+    )
+
+    version_results = await workspace.search("4.1.3.4", filters={"scope.task_id": "fts-safe"})
+    dotted_results = await workspace.search("foo.bar", filters={"scope.task_id": "fts-safe"})
+    question_results = await workspace.search("question", filters={"scope.task_id": "fts-safe"})
+    context_pack = await workspace.build_context(
+        goal="fix 4.1.3.4 foo.bar question",
+        scope={"task_id": "fts-safe"},
+        budget={"chars": 1000},
+        profile="software_dev",
+    )
+
+    assert version_ref["id"] in [item["id"] for item in version_results]
+    assert dotted_ref["id"] in [item["id"] for item in dotted_results]
+    assert question_ref["id"] in [item["id"] for item in question_results]
+    assert context_pack["items"]
+    assert "fallback_reason" not in context_pack["diagnostics"]
+
+
+@pytest.mark.asyncio
 async def test_workspace_backend_component_protocols_are_wired(tmp_path):
     agent = Agently.create_agent("workspace-components").use_workspace(tmp_path / "run")
     workspace = agent.workspace

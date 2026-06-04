@@ -24,6 +24,14 @@ agent = AgentFactory.create_agent()
 print({"api": "legacy", "status": "created"})
 """
 
+FORCED_GAP_LEGACY_SCRIPT = """\
+from agently import AgentFactory
+import json
+
+agent = AgentFactory.create_agent()
+print(json.dumps({"api": "legacy"}))
+"""
+
 CURRENT_API_GUIDANCE = """\
 Current 4.1.x migration guidance for this example:
 
@@ -43,6 +51,13 @@ Current 4.1.x migration guidance for this example:
 ProviderName = Literal["deepseek", "ollama"]
 
 
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Use AgentTaskLoop to repair a failing legacy Agently script and verify the fixed script."
@@ -57,6 +72,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=int(os.getenv("AGENT_TASK_MAX_ITERATIONS", "4")),
         help="Maximum AgentTaskLoop iterations.",
+    )
+    parser.add_argument(
+        "--forced-gap",
+        action="store_true",
+        default=_env_bool("AGENT_TASK_LEGACY_FORCED_GAP"),
+        help=(
+            "Use a two-gap legacy fixture intended to prove verification-failed -> replan -> pass. "
+            "This mode also limits each bounded step to one action so verification must drive the next iteration. "
+            "The example still reports the actual model behavior instead of forcing a failed first pass."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -183,7 +208,8 @@ async def main(argv: list[str] | None = None):
     task_files_dir = workspace_dir / "files"
     task_files_dir.mkdir(parents=True, exist_ok=True)
     script_path = task_files_dir / "legacy_script.py"
-    script_path.write_text(LEGACY_SCRIPT, encoding="utf-8")
+    legacy_script = FORCED_GAP_LEGACY_SCRIPT if args.forced_gap else LEGACY_SCRIPT
+    script_path.write_text(legacy_script, encoding="utf-8")
 
     run_env = _run_env()
     initial_run = _run_script(script_path, env=run_env)
@@ -211,8 +237,14 @@ async def main(argv: list[str] | None = None):
     await workspace.ingest(
         content={
             "path": "legacy_script.py",
-            "legacy_script_content": LEGACY_SCRIPT,
+            "legacy_script_content": legacy_script,
             "current_api_guidance": CURRENT_API_GUIDANCE,
+            "forced_gap": bool(args.forced_gap),
+            "forced_gap_note": (
+                "This fixture has two independent gaps: incompatible AgentFactory usage and an incomplete stdout JSON contract."
+                if args.forced_gap
+                else ""
+            ),
             "initial_returncode": initial_run.returncode,
             "initial_stdout": initial_run.stdout,
             "initial_stderr": initial_run.stderr,
@@ -228,6 +260,7 @@ async def main(argv: list[str] | None = None):
     print(f"[SETUP] Workspace: {workspace_dir}")
     print(f"[SETUP] Script: {script_path}")
     print(f"[SETUP] Provider: {provider}, model_key={TASK_MODEL_KEY}")
+    print(f"[SETUP] Forced gap mode: {bool(args.forced_gap)}")
     print(f"[SETUP] Initial returncode: {initial_run.returncode}")
     print(f"[SETUP] Initial stderr: {initial_run.stderr.strip()[:240]}")
 
@@ -239,7 +272,13 @@ async def main(argv: list[str] | None = None):
             "Workspace. Modify exactly the workspace-relative file path `legacy_script.py` through write_file. "
             "Verify by calling run_task_command with cmd='python legacy_script.py' and no workdir. The fixed "
             "script must use `from agently import Agently`, call `Agently.create_agent(...)`, avoid model "
-            "provider calls, and print strict JSON with api='4.1.x' and status='ok'."
+            "provider calls, and print strict JSON with api='4.1.x' and status='ok'. "
+            + (
+                "In forced-gap mode, do not treat import migration alone as success; the stdout JSON contract and command validation are separate required evidence. "
+                "Each bounded execution step is limited to one action, so use later iterations to close missing evidence."
+                if args.forced_gap
+                else ""
+            )
         ),
         success_criteria=[
             "The original failure from legacy_script.py is recorded and used.",
@@ -257,7 +296,7 @@ async def main(argv: list[str] | None = None):
                 "stream_progress": True,
                 "stream_snapshots": True,
             },
-            "routes": {"model_request": {"action_loop": {"max_rounds": 6}}},
+            "routes": {"model_request": {"action_loop": {"max_rounds": 1 if args.forced_gap else 6}}},
         },
     )
 
@@ -283,14 +322,24 @@ async def main(argv: list[str] | None = None):
         and validation["stdout_contract_ok"]
     )
     replan_count = sum(1 for item in stream_items if item.path.endswith(".replan"))
+    first_verification_failed = any(
+        item.path == "agent_task.iteration.1.verification"
+        and isinstance(item.value, dict)
+        and isinstance(item.value.get("verification"), dict)
+        and item.value["verification"].get("is_complete") is False
+        for item in stream_items
+    )
     workspace_checkpoint_count = len(await workspace.checkpoint_history("legacy_agently_script_upgrade"))
     summary = {
         "provider": provider,
+        "forced_gap": bool(args.forced_gap),
         "task_status": result["status"],
         "accepted": bool(result.get("accepted", result.get("status") == "completed")),
         "artifact_status": str(result.get("artifact_status") or ("accepted" if result.get("status") == "completed" else "partial")),
         "deterministic_validation_passed": deterministic_validation_passed,
         "initial_failure_recorded": initial_failure_recorded,
+        "first_verification_failed": first_verification_failed,
+        "forced_gap_replan_proof": bool(args.forced_gap and first_verification_failed and replan_count >= 1 and result["status"] == "completed"),
         "replan_count": replan_count,
         "final_script_runs": validation["returncode"] == 0,
         "verification_passed": result["status"] == "completed",
@@ -322,3 +371,14 @@ if __name__ == "__main__":
 # validation.stdout_json.api="4.1.x"
 # validation.stdout_json.status="ok"
 # stream_trace_file points to a JSONL stream trace under the Workspace
+#
+# Forced-gap validation command (requires a real DeepSeek or local Ollama run):
+#   AGENT_TASK_WORKSPACE=.agently/tasks/legacy-forced-gap \
+#   AGENT_TASK_LEGACY_FORCED_GAP=1 \
+#   python examples/agent_task/legacy_agently_script_upgrade.py
+# The forced-gap run reports forced_gap=True, first_verification_failed, and
+# forced_gap_replan_proof from the actual stream trace. Do not update expected
+# key output for this mode unless the command is re-run with a real model. This
+# mode limits each bounded step to one action so missing validation evidence
+# should be closed by the verifier-driven next iteration, not by hidden local
+# control flow.

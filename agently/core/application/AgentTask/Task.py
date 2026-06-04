@@ -476,6 +476,7 @@ class AgentTask:
                 "plan": plan,
                 "execution_result": DataFormatter.sanitize(execution_result),
                 "execution_meta": DataFormatter.sanitize(execution_meta),
+                "execution_evidence_summary": self._execution_log_summary(execution_meta),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "previous_iterations": self.iterations,
             }
@@ -515,7 +516,97 @@ class AgentTask:
                 "replan_instruction": "Run another bounded step with stronger evidence.",
                 "final_result": "",
             }
-        return verification
+        return self._normalize_verification(
+            verification,
+            execution_evidence_summary=self._execution_log_summary(execution_meta),
+        )
+
+    def _normalize_verification(
+        self,
+        verification: dict[str, Any],
+        *,
+        execution_evidence_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized: dict[str, Any] = {
+            "is_complete": self._normalize_bool(verification.get("is_complete"), default=False),
+            "requires_block": self._normalize_bool(verification.get("requires_block"), default=False),
+            "reason": str(verification.get("reason") or ""),
+            "missing_criteria": self._normalize_string_list(verification.get("missing_criteria")),
+            "replan_instruction": str(verification.get("replan_instruction") or ""),
+            "final_result": str(verification.get("final_result") or ""),
+        }
+        guard_reasons: list[str] = []
+        if normalized["requires_block"]:
+            normalized["is_complete"] = False
+            guard_reasons.append("requires_block_true")
+        if normalized["missing_criteria"]:
+            normalized["is_complete"] = False
+            guard_reasons.append("missing_criteria_present")
+        risky_actions = [
+            *self._normalize_string_list(execution_evidence_summary.get("failed_actions")),
+            *self._normalize_string_list(execution_evidence_summary.get("blocked_actions")),
+            *self._normalize_string_list(execution_evidence_summary.get("approval_required_actions")),
+        ]
+        if risky_actions:
+            normalized["is_complete"] = False
+            guard_reasons.append("execution_risk_actions_present")
+            normalized["missing_criteria"] = [
+                *normalized["missing_criteria"],
+                f"Unresolved execution risk actions: {', '.join(risky_actions)}",
+            ]
+        if normalized["is_complete"] and self._requires_final_result() and not normalized["final_result"].strip():
+            normalized["is_complete"] = False
+            guard_reasons.append("final_result_missing")
+            normalized["missing_criteria"] = [
+                *normalized["missing_criteria"],
+                "Final result is missing.",
+            ]
+        if guard_reasons:
+            normalized["guard_reasons"] = guard_reasons
+            if not normalized["replan_instruction"]:
+                normalized["replan_instruction"] = "Run another bounded step and produce explicit evidence for the guarded criteria."
+            self.diagnostics.setdefault("verification_guards", []).append(
+                {
+                    "task_id": self.id,
+                    "guard_reasons": guard_reasons,
+                    "missing_criteria": normalized["missing_criteria"],
+                }
+            )
+        for key, value in verification.items():
+            normalized.setdefault(key, DataFormatter.sanitize(value))
+        return normalized
+
+    @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item) for item in value if str(item).strip()]
+        if isinstance(value, tuple):
+            return [str(item) for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    def _requires_final_result(self) -> bool:
+        markers = (
+            "final",
+            "result",
+            "deliverable",
+            "artifact",
+            "file",
+            "markdown",
+            "report",
+            "brief",
+            "output",
+            "answer",
+            "最终",
+            "结果",
+            "交付",
+            "文件",
+            "产出",
+            "报告",
+        )
+        text = " ".join([self.goal, *self.success_criteria]).lower()
+        return any(marker in text for marker in markers)
 
     async def _await_task_request(self, awaitable, *, stage: str):
         timeout = self._task_request_timeout()
@@ -812,7 +903,7 @@ class AgentTask:
             self._emit_model_progress_from_snapshot(
                 iteration=iteration,
                 stage=stage,
-                snapshot=DataFormatter.sanitize(snapshot),
+                snapshot=self._operator_safe_progress_snapshot(stage, DataFormatter.sanitize(snapshot)),
                 model_key=model_key,
             )
         )
@@ -928,33 +1019,131 @@ class AgentTask:
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    @classmethod
+    def _operator_safe_progress_snapshot(cls, stage: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], cls._strip_developer_diagnostics({"stage": stage, **snapshot}))
+
+    @classmethod
+    def _strip_developer_diagnostics(cls, value: Any) -> Any:
+        sensitive_keys = {
+            "diagnostics",
+            "context_pack_diagnostics",
+            "fallback_reason",
+            "errors",
+            "progress_errors",
+            "stream_errors",
+        }
+        sensitive_markers = ("fts5", "sqlite", "fallback_reason", "no such column")
+        if isinstance(value, dict):
+            cleaned: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key)
+                if normalized_key in sensitive_keys or "diagnostic" in normalized_key:
+                    cleaned[normalized_key] = {"omitted": "developer_diagnostics"}
+                    continue
+                cleaned[normalized_key] = cls._strip_developer_diagnostics(item)
+            return cleaned
+        if isinstance(value, list):
+            return [cls._strip_developer_diagnostics(item) for item in value]
+        if isinstance(value, str) and any(marker in value.lower() for marker in sensitive_markers):
+            return "[developer diagnostic omitted]"
+        return value
+
     @staticmethod
     def _execution_log_summary(execution_meta: dict[str, Any]) -> dict[str, Any]:
         logs = execution_meta.get("logs", {})
         if not isinstance(logs, dict):
             return {}
-        action_logs = logs.get("action_logs", {})
-        action_ids: list[str] = []
-        action_statuses: dict[str, str] = {}
-        if isinstance(action_logs, dict):
-            for action_id, record in action_logs.items():
-                normalized_id = str(action_id)
-                action_ids.append(normalized_id)
-                if isinstance(record, dict):
-                    action_statuses[normalized_id] = str(record.get("status") or "")
-        elif isinstance(action_logs, list):
-            for item in action_logs:
-                if isinstance(item, dict):
-                    action_id = str(item.get("action_id") or item.get("name") or "")
-                    if action_id:
-                        action_ids.append(action_id)
-                        action_statuses[action_id] = str(item.get("status") or "")
+        action_records = AgentTask._collect_action_records(logs)
+        action_ids = [record["id"] for record in action_records if record.get("id")]
+        action_statuses = {
+            record["id"]: record.get("status", "")
+            for record in action_records
+            if record.get("id")
+        }
+        failed_actions = AgentTask._action_ids_by_status(action_records, {"failed", "failure", "error"})
+        blocked_actions = AgentTask._action_ids_by_status(action_records, {"blocked"})
+        approval_required_actions = AgentTask._action_ids_by_status(action_records, {"approval_required"})
+        validation_actions = [
+            record["id"]
+            for record in action_records
+            if record.get("id")
+            and any(
+                marker in " ".join(
+                    [
+                        record.get("id", ""),
+                        record.get("name", ""),
+                        record.get("action_type", ""),
+                        record.get("kind", ""),
+                    ]
+                ).lower()
+                for marker in ("shell", "command", "run", "test", "pytest", "read", "write_file", "validation")
+            )
+        ]
+        route = execution_meta.get("route", {})
+        artifact_refs = logs.get("artifact_refs", [])
+        workspace_refs = execution_meta.get("workspace_refs") or logs.get("workspace_refs", {})
         return {
             "model_response_count": len(logs.get("model_responses", [])) if isinstance(logs.get("model_responses", []), list) else 0,
             "action_log_count": len(action_ids),
             "action_ids": action_ids,
             "action_statuses": action_statuses,
+            "actions": action_records,
+            "failed_actions": failed_actions,
+            "blocked_actions": blocked_actions,
+            "approval_required_actions": approval_required_actions,
+            "validation_actions": validation_actions,
+            "artifact_refs": DataFormatter.sanitize(artifact_refs),
+            "workspace_refs": DataFormatter.sanitize(workspace_refs),
+            "route": DataFormatter.sanitize(route),
+            "status": str(execution_meta.get("status") or ""),
         }
+
+    @staticmethod
+    def _collect_action_records(logs: dict[str, Any]) -> list[dict[str, str]]:
+        records: list[dict[str, str]] = []
+
+        def add_entries(entries: Any) -> None:
+            if isinstance(entries, dict):
+                for action_id, record in entries.items():
+                    if isinstance(record, dict):
+                        records.append(AgentTask._compact_action_record(action_id, record))
+                    else:
+                        records.append({"id": str(action_id), "name": str(action_id), "status": str(record or "")})
+            elif isinstance(entries, list):
+                for item in entries:
+                    if isinstance(item, dict):
+                        action_id = item.get("action_id") or item.get("id") or item.get("name") or ""
+                        records.append(AgentTask._compact_action_record(action_id, item))
+
+        add_entries(logs.get("action_logs", {}))
+        route_logs = logs.get("route_logs", {})
+        if isinstance(route_logs, dict):
+            add_entries(route_logs.get("action_logs", {}))
+            route_output = route_logs.get("output", {})
+            if isinstance(route_output, dict):
+                add_entries(route_output.get("history", []))
+        return records
+
+    @staticmethod
+    def _compact_action_record(action_id: Any, record: dict[str, Any]) -> dict[str, str]:
+        normalized_id = str(action_id or record.get("action_id") or record.get("id") or record.get("name") or "")
+        return {
+            "id": normalized_id,
+            "name": str(record.get("name") or normalized_id),
+            "status": str(record.get("status") or ""),
+            "action_type": str(record.get("action_type") or record.get("type") or ""),
+            "kind": str(record.get("kind") or ""),
+        }
+
+    @staticmethod
+    def _action_ids_by_status(records: list[dict[str, str]], statuses: set[str]) -> list[str]:
+        result: list[str] = []
+        for record in records:
+            status = record.get("status", "").strip().lower()
+            if status in statuses and record.get("id"):
+                result.append(record["id"])
+        return result
 
     async def _emit(
         self,

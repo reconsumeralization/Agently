@@ -78,6 +78,13 @@ evidence, and checkpoints to Workspace. The next iteration receives a
 ContextPack from `workspace.build_context(...)`, so the loop can carry evidence
 forward without turning Workspace into an autonomous planner.
 
+AgentTask verification remains model-owned, but completion acceptance is
+conservative. The loop normalizes verifier output and will not accept a task as
+complete when missing criteria remain, required action evidence failed or was
+blocked, approval is still required, or a required final deliverable is absent.
+Those guard decisions are recorded in task diagnostics so the next iteration can
+replan from concrete evidence instead of accepting a weak completion claim.
+
 `task.stream()` emits structured result events and, by default, compact
 intermediate `snapshot` items. Natural-language `progress` items are opt-in with
 `options={"agent_task": {"stream_progress": True}}`; the built-in descriptions
@@ -88,6 +95,10 @@ emitted snapshot and task metadata. The main loop does not produce extra fields
 for progress narration and does not wait for progress narration to finish.
 Progress narrator failures are side-channel diagnostics and warning-level
 runtime events; they do not turn the main task into `model.request_failed`.
+Model progress narration receives an operator-safe snapshot; developer
+diagnostics such as low-level Workspace/SQLite fallback details remain in
+snapshots and `task.meta()["diagnostics"]`, but are omitted from the progress
+model input.
 
 Terminal task status and artifact acceptance are separate. `completed` means
 the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`).
@@ -100,6 +111,20 @@ roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps
 may use Actions, Skills, or Dynamic Task candidates that the host already
 enabled on the Agent. AgentTask does not provide multi-task coordination,
 background autonomy, distributed leases, or long-term memory management.
+
+For examples that validate model-owned semantic content, combine deterministic
+smoke checks with a second Agently model-judge request. Structural checks such
+as file existence, question count, and visible source labels are useful smoke
+gates, but semantic acceptance should come from a judge schema with per-rule
+evidence and boolean results.
+
+Business-system fixtures may be mocked in examples, but they should only return
+business facts, records, policies, or intentionally incomplete source data.
+They should not return pass/fail labels, hidden expected answers, or local
+quality verdicts. If the scenario needs to decide whether an artifact handled
+defective or conflicting data correctly, let AgentTask verification or a
+separate Agently model-judge request make that judgment from explicit rules and
+evidence.
 
 ## Execution Object
 

@@ -21,6 +21,8 @@ interview, recruiting screen, or candidate evaluation.
 4. Reflect on information sufficiency:
    - what is well-supported by public evidence;
    - what is weak, ambiguous, or missing;
+   - whether any supplied affiliation, organization, work, role, or alias is
+     contradicted or not supported by the sources;
    - whether another search or browse step is needed before finalizing.
 5. Draft grouped article interview questions that connect the person, project,
    product philosophy, technical tradeoffs, community adoption, business
@@ -48,6 +50,17 @@ The final Markdown file must include:
 
 - Do not invent biographical facts when public evidence is weak.
 - Mark weak assumptions explicitly.
+- Source notes must be specific: include a URL, title, or clear source label,
+  plus one sentence explaining why that source matters to the interview angle.
+- If the user's wording implies an affiliation or relationship that sources do
+  not support, mark it as uncertain or contradicted instead of repeating it as
+  fact.
+- When public evidence is sparse, state low confidence, list unknowns, and use
+  clarifying or exploratory questions rather than invented biography.
+- When names, aliases, or same-name people are ambiguous, preserve the user's
+  original wording and explain the disambiguation choice.
+- When multiple targets are supplied, include target-specific questions for
+  each target and comparative article questions that connect them.
 - Prefer questions that can elicit original insight from the interviewee, not
   generic product promotion.
 - Do not frame the deliverable as a job interview, hiring guide, candidate
