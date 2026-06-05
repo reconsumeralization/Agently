@@ -66,7 +66,7 @@ capabilities 的 bounded single-agent workflow。
 
 - Package version: `4.1.3.4`。
 - Release manifest: `compatibility/releases/4.1.3.4.json`。
-- Agently 推荐 `agently-devtools >=0.1.6,<0.2.0`。
+- Agently 推荐 `agently-devtools >=0.1.7,<0.2.0`。
 - Agently-Skills 使用 authoring protocol `agently-skills.authoring.v2` 和标准
   `SKILL.md` package。
 - 下一批 development-line manifest 是 `compatibility/in-development.json`，目标版本

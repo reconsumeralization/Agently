@@ -437,7 +437,7 @@ class AgentTask:
             {
                 "step_result": (str, "Concrete result of this bounded step", True),
                 "evidence": ([str], "Evidence produced by the step", True),
-                "remaining_work": ([str], "Known remaining work, empty when none", True),
+                "remaining_work": ([str], "Known remaining work, empty when none"),
             },
         )
         self.agent.request.prompt.set("output_format", "json")
@@ -500,9 +500,9 @@ class AgentTask:
                 "is_complete": (bool, "True only when all success criteria are satisfied", True),
                 "requires_block": (bool, "True only when the task cannot continue", True),
                 "reason": (str, "Concise verification reason", True),
-                "missing_criteria": ([str], "Unmet or weak criteria", True),
-                "replan_instruction": (str, "Instruction for the next planning round when incomplete", True),
-                "final_result": (str, "Final business result when complete", True),
+                "missing_criteria": ([str], "Unmet or weak criteria, empty when none"),
+                "replan_instruction": (str, "Instruction for the next planning round when incomplete"),
+                "final_result": (str, "Final business result when complete"),
             },
             format="json",
         )

@@ -92,7 +92,7 @@ def test_core_layout_keeps_only_classified_root_packages():
     root_files = sorted(path.name for path in core_root.iterdir() if path.is_file())
     root_dirs = sorted(path.name for path in core_root.iterdir() if path.is_dir() and path.name != "__pycache__")
 
-    assert root_files == ["Agent.py", "__init__.py"]
+    assert root_files == ["Agent.py", "AgentTurn.py", "__init__.py"]
     assert root_dirs == [
         "application",
         "execution",

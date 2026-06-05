@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from typing import Any
 
 
@@ -26,7 +27,7 @@ class BashSandboxActionExecutor:
         self,
         *,
         allowed_cmd_prefixes: list[str] | None = None,
-        allowed_workdir_roots: list[str] | None = None,
+        allowed_workdir_roots: list[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
     ):

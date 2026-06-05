@@ -80,7 +80,7 @@ capabilities.
 
 - Package version: `4.1.3.4`.
 - Release manifest: `compatibility/releases/4.1.3.4.json`.
-- Agently recommends `agently-devtools >=0.1.6,<0.2.0`.
+- Agently recommends `agently-devtools >=0.1.7,<0.2.0`.
 - Agently-Skills uses authoring protocol `agently-skills.authoring.v2` and
   standard `SKILL.md` packages.
 - The next development-line manifest is `compatibility/in-development.json`

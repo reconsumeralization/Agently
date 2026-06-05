@@ -169,8 +169,8 @@ async def test_request_validate_chain_and_runtime_handler_order():
 async def test_agent_validate_failure_retries_and_emits_runtime_events():
     MockValidateJSONRequester.reset([{"status": "draft"}, {"status": "ready"}])
     agent = _create_agent(MockValidateJSONRequester, "validate-agent")
-    agent.output({"status": (str,)}, format="json")
-    agent.validate(lambda result, context: result["status"] == "ready")
+    turn = agent.output({"status": (str,)}, format="json")
+    turn.validate(lambda result, context: result["status"] == "ready")
 
     captured = []
 
@@ -180,7 +180,7 @@ async def test_agent_validate_failure_retries_and_emits_runtime_events():
     hook_name = "test_model_request_validate.agent_retry"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     try:
-        data = await agent.async_start(max_retries=1)
+        data = await turn.async_start(max_retries=1)
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
