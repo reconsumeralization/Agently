@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.3.3"
-CURRENT_RELEASE_TRAIN = "2026-06-4.1.3.3"
+CURRENT_FRAMEWORK_VERSION = "4.1.3.4"
+CURRENT_RELEASE_TRAIN = "2026-06-4.1.3.4"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -18,7 +18,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
     "framework": "agently",
     "framework_version": CURRENT_FRAMEWORK_VERSION,
     "release_train": CURRENT_RELEASE_TRAIN,
-    "released_at": "2026-06-02",
+    "released_at": "2026-06-05",
     "notes": (
         "This manifest is the offline compatibility surface for the installed "
         "Agently package. Historical release manifests live in the source "
@@ -83,6 +83,61 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
             "repository": "Agently-Skills",
             "authoring_protocol": SKILLS_AUTHORING_PROTOCOL,
             "authoring_format": "standard SKILL.md only",
+            "runtime_capability_contract": {
+                "skill_capability_needs": (
+                    "SkillsExecutor records selected Skill capability needs in SkillExecutionPlan.capability_needs "
+                    "from SKILL.md guidance, resource indexes, public compatibility, public metadata, and optional "
+                    "model-assisted inference."
+                ),
+                "model_assisted_discovery_setting": "skills.capability_discovery.model_assisted",
+                "host_policy_surface": (
+                    "agent.configure_skill_capabilities(auto_load={...}, workspace_root=..., mcp_config=..., "
+                    "python=..., search=...) plus agent.configure_policy_approval(handler=...)"
+                ),
+                "search_provider": (
+                    "Framework Search uses the ddgs package by default, keeps backend configurable through host "
+                    "policy, supports host-approved ddgs refresh before search runs, treats no-result search as a "
+                    "successful empty result, and falls back through configured/default ddgs backends when a selected "
+                    "backend returns no usable parsed result."
+                ),
+                "workspace_file_action_owner": (
+                    "Workspace owns file action roots and path boundaries; SkillsExecutor prefers "
+                    "workspace.enable_file_actions(agent, ...) before falling back to "
+                    "agent.enable_workspace_file_actions(...)."
+                ),
+                "policy_approval_surface": (
+                    "Skills capability approval uses the framework-wide PolicyApproval handler surface: "
+                    "input_timeout_fail by default, fail_closed for pending diagnostics/TriggerFlow gates, "
+                    "auto_approve for tests, input, or registered service-specific handlers."
+                ),
+                "policy_modes": [
+                    "allow",
+                    "approval",
+                    "off",
+                ],
+                "auto_loadable_needs": [
+                    "web_search",
+                    "web_browse",
+                    "http_request",
+                    "workspace_read",
+                    "workspace_write",
+                    "python",
+                    "shell",
+                    "script_run",
+                    "mcp",
+                ],
+                "removed_private_skill_fields": [
+                    "allowed-actions",
+                    "allowed_actions",
+                    "allow-scripts",
+                    "allow_scripts",
+                    "mcp",
+                    "mcpServers",
+                    "mcp_servers",
+                    "execution",
+                    "stages",
+                ],
+            },
             "devtools_guidance_protocol": SKILLS_DEVTOOLS_GUIDANCE_PROTOCOL,
             "catalog_generation": "v2",
             "recommended_bundle": "app",
@@ -98,6 +153,25 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
         "docs": {
             "repository": "docs",
             "public_surface_protocol": DOCS_PUBLIC_SURFACE_PROTOCOL,
+        },
+        "action_runtime": {
+            "action_statuses": [
+                "success",
+                "partial_success",
+                "error",
+                "approval_required",
+                "blocked",
+                "skipped",
+            ],
+            "partial_success_contract": (
+                "Action results with status=partial_success keep success=True/ok=True and carry diagnostics for "
+                "degraded providers or fallback recovery. ActionFlow treats partial_success as continuable evidence, "
+                "not action.failed."
+            ),
+            "search_partial_success": (
+                "Built-in Search returns partial_success when earlier ddgs backends fail or return empty parsed "
+                "results but a later fallback backend returns usable results."
+            ),
         },
         "configuration": {
             "settings_contract": "dict-compatible typed helpers under agently.types.settings",

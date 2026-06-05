@@ -1,6 +1,6 @@
 <img width="640" alt="Agently" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4.1.3.2 - AI 应用运行时框架
+# Agently 4.1.3.4 - AI 应用运行时框架
 
 > 构建具备结构化输出、可观测 Actions、运行时 Skills、MCP 能力、过程流和可恢复工作流的 AI 服务后端。
 
@@ -32,11 +32,11 @@ Agently 面向的是正在从“模型偶尔能做对”走向“应用必须稳
 
 核心设计问题是：怎样保留模型能力，同时让应用代码拥有稳定契约、可观测执行和可重启的工作流边界？
 
-Agently 4.1.3.2 在 4.1.3 runtime line 之上补上 bounded AgentExecution
-task step、Workspace 驱动的多步任务上下文、runtime stall 控制，以及由
-EventCenter 统一管理的 RuntimeEvent 投递。应用代码可以运行带 lineage、limits、
-stream correlation 和 Workspace checkpoints 的 `mode="task_step"` execution，
-同时 DevTools 和 companion Skills 使用同一套 runtime event 语义。完整版本叙事见
+Agently 4.1.3.4 加固了长文本和强类型混排场景的结构化输出解析，增加
+OpenAICompatible 输出开始前的传输重试，传播明确的 stream materialization error，
+并发布 bounded single-Agent AgentTaskLoop 第一版公开 slice。完整版本叙事见
+[4.1.3.4 Release Notes](docs/cn/development/release-notes-4.1.3.4.md)、
+[4.1.3.3 Release Notes](docs/cn/development/release-notes-4.1.3.3.md)、
 [4.1.3.2 Release Notes](docs/cn/development/release-notes-4.1.3.2.md)、
 [4.1.3.1 Release Notes](docs/cn/development/release-notes-4.1.3.1.md)
 和 [4.1.3 Release Notes](docs/cn/development/release-notes-4.1.3.md)。
@@ -59,7 +59,7 @@ stream correlation 和 Workspace checkpoints 的 `mode="task_step"` execution，
 - **常见模型应用模式应该可组合** - router、To-Do/dependency execution、planning、reflection、evaluator/reviser 和多 Agent 协作，都可以由同一套 request/action/signal primitives 组合出来。阅读 [Playbooks](docs/cn/playbooks/overview.md)、[TriggerFlow 模型集成](docs/cn/triggerflow/model-integration.md) 和 [`examples/step_by_step/`](examples/step_by_step/)。
 - **服务应保持清晰项目边界** - async API、FastAPI helpers、settings 文件、prompt 文件、DevTools 观测和 companion coding-agent skills 适合非一次性项目。阅读 [项目结构](docs/cn/start/project-framework.md)、[FastAPI 服务封装](docs/cn/services/fastapi.md) 和 [观测概览](docs/cn/observability/overview.md)。
 
-当前框架版本：`4.1.3.2`。
+当前框架版本：`4.1.3.4`。
 
 Python：`>=3.10`。
 
