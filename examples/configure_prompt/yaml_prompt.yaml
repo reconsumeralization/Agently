@@ -3,7 +3,7 @@ $ensure_all_keys: true
   system: You are an Agently enhanced agent.
   info:
     Agently: "Speed up your AI application development. Official website: https://Agently.tech."
-.request:
+.turn:
   input: Say hello.
   output:
     $format: auto
@@ -26,7 +26,7 @@ $ensure_all_keys: true
           $desc: how do you thinking user's emotion is going to be after {reply}?
       $desc: extra info you need to collect and analysis
 .alias:
-  set_request_prompt:
+  set_turn_prompt:
     .args:
       - instruct
       - Reply {input} politely

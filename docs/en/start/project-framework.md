@@ -61,7 +61,7 @@ Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 
 ```yaml
 # prompts/summarize.yaml
-.request:
+.turn:
   instruct: |
     You are a concise editor. Keep facts intact.
   output:

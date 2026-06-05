@@ -84,6 +84,56 @@ def test_load_yaml_prompt_accepts_explicit_mappings_keyword():
     assert agent.request_prompt.get("input", inherit=False) == "Hello Alice"
 
 
+def test_agent_set_turn_prompt_matches_set_request_prompt():
+    agent = Agently.create_agent()
+
+    assert agent.set_turn_prompt("input", "from-turn") is agent
+    assert agent.request_prompt.get("input", inherit=False) == "from-turn"
+
+    assert agent.set_request_prompt("input", "from-request") is agent
+    assert agent.request_prompt.get("input", inherit=False) == "from-request"
+
+
+def test_agent_turn_set_turn_prompt_matches_set_request_prompt():
+    agent = Agently.create_agent()
+    turn = agent.create_turn()
+
+    assert turn.set_turn_prompt("input", "turn-local") is turn
+    assert turn.request_prompt.get("input", inherit=False) == "turn-local"
+    assert agent.request_prompt.get("input", inherit=False) is None
+
+    assert turn.set_request_prompt("input", "compat") is turn
+    assert turn.request_prompt.get("input", inherit=False) == "compat"
+
+
+def test_agent_set_turn_prompt_is_transferred_to_create_turn():
+    agent = Agently.create_agent()
+
+    agent.set_turn_prompt("input", "pending-turn")
+    turn = agent.create_turn()
+
+    assert turn.request_prompt.get("input", inherit=False) == "pending-turn"
+    assert agent.request_prompt.get("input", inherit=False) is None
+
+
+def test_load_yaml_prompt_accepts_turn_scope_and_set_turn_prompt_alias():
+    agent = Agently.create_agent()
+    yaml_prompt = """
+.turn:
+  input: "Hello ${name}"
+.alias:
+  set_turn_prompt:
+    .args:
+      - instruct
+      - Reply briefly.
+"""
+
+    agent.load_yaml_prompt(yaml_prompt, mappings={"name": "Alice"})
+
+    assert agent.request_prompt.get("input", inherit=False) == "Hello Alice"
+    assert agent.request_prompt.get("instruct", inherit=False) == "Reply briefly."
+
+
 def test_load_yaml_prompt_rejects_positional_mappings():
     agent = Agently.create_agent()
     yaml_prompt = 'input: "Hello ${name}"\n'

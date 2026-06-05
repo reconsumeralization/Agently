@@ -158,10 +158,12 @@
       "surface": [
         "AgentTurn",
         "Agent.create_turn",
-        "Agent quick prompt chain"
+        "Agent quick prompt chain",
+        "Agent.set_turn_prompt",
+        "AgentTurn.set_turn_prompt"
       ],
-      "contract": "Non-always Agent quick prompt calls create an isolated AgentTurn request draft; Agent-level persistent state remains on always=True/set_agent_prompt/stable setup APIs.",
-      "compatibility_policy": "Expression-local chaining is the recommended request-scoped shape. Multi-statement setup should capture turn = agent.create_turn() or use explicit low-level agent.create_request()/agent.request builders."
+      "contract": "Non-always Agent quick prompt calls create an isolated AgentTurn request draft; set_turn_prompt(...) names the one-turn prompt write surface; Agent-level persistent state remains on always=True/set_agent_prompt/stable setup APIs.",
+      "compatibility_policy": "Expression-local chaining is the recommended request-scoped shape. Multi-statement setup should capture turn = agent.create_turn() and mutate that turn. set_request_prompt(...) remains a compatibility alias for set_turn_prompt(...); explicit low-level agent.create_request()/agent.request builders remain available."
     },
     "image": {
       "status": "in-development",

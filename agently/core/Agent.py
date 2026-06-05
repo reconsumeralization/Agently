@@ -680,7 +680,7 @@ class BaseAgent:
         self.agent_prompt.set(key, value, mappings=mappings)
         return self
 
-    def set_request_prompt(
+    def set_turn_prompt(
         self,
         key: "PromptStandardSlot | str",
         value: Any,
@@ -689,6 +689,15 @@ class BaseAgent:
     ):
         self.request.prompt.set(key, value, mappings=mappings)
         return self
+
+    def set_request_prompt(
+        self,
+        key: "PromptStandardSlot | str",
+        value: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+    ):
+        return self.set_turn_prompt(key, value, mappings=mappings)
 
     def remove_agent_prompt(self, key: "PromptStandardSlot | str"):
         self.agent_prompt.set(key, None)

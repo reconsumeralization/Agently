@@ -148,6 +148,22 @@ class ConfigurePromptExtension(BaseAgent):
             return
         setter(prompt_key, prompt_value, mappings=mappings)
 
+    def _apply_turn_prompt_config(self, prompt_value: Any, variable_mappings: dict[str, Any] | None):
+        if isinstance(prompt_value, dict):
+            for request_prompt_key, request_prompt_value in prompt_value.items():
+                self._set_configured_prompt_value(
+                    self.set_turn_prompt,
+                    request_prompt_key,
+                    request_prompt_value,
+                    mappings=variable_mappings,
+                )
+        else:
+            self.set_turn_prompt(
+                "input",
+                prompt_value,
+                mappings=variable_mappings,
+            )
+
     def _execute_prompt_configure(self, prompt: dict[str, Any], variable_mappings: dict[str, Any] | None):
         for prompt_key, prompt_value in prompt.items():
             match prompt_key:
@@ -166,21 +182,8 @@ class ConfigurePromptExtension(BaseAgent):
                             prompt_value,
                             mappings=variable_mappings,
                         )
-                case ".request":
-                    if isinstance(prompt_value, dict):
-                        for request_prompt_key, request_prompt_value in prompt_value.items():
-                            self._set_configured_prompt_value(
-                                self.set_request_prompt,
-                                request_prompt_key,
-                                request_prompt_value,
-                                mappings=variable_mappings,
-                            )
-                    else:
-                        self.set_request_prompt(
-                            "input",
-                            prompt_value,
-                            mappings=variable_mappings,
-                        )
+                case ".request" | ".turn":
+                    self._apply_turn_prompt_config(prompt_value, variable_mappings)
                 case ".alias":
                     if isinstance(prompt_value, dict):
                         for alias_name, alias_parameters in prompt_value.items():
@@ -238,7 +241,7 @@ class ConfigurePromptExtension(BaseAgent):
                         )
                     else:
                         self._set_configured_prompt_value(
-                            self.set_request_prompt,
+                            self.set_turn_prompt,
                             prompt_key,
                             prompt_value,
                             mappings=variable_mappings,

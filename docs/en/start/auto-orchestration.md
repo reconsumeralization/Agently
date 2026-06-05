@@ -45,7 +45,7 @@ result = await turn.async_start()
 ```
 
 Do not rely on `agent.input(...); agent.output(...); await agent.async_start()`
-for request-scoped prompt accumulation. Use `always=True`,
+for turn-scoped prompt accumulation. Use `always=True`,
 `set_agent_prompt(...)`, or stable setup methods for Agent-lifetime state; use
 `agent.create_request(...)` / `agent.request` only when you intentionally want
 the lower-level request-builder surface.

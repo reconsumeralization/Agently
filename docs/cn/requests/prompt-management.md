@@ -51,9 +51,9 @@ result = (
 | 作用域 | API |
 |---|---|
 | Agent（每次请求都生效） | `.role(...)`、`.info(...)`、`.instruct(...)`、`.set_agent_prompt(key, value)` |
-| Request（仅一次） | `.input(...)`、`.output(...)`、`.set_request_prompt(key, value)` |
+| Turn（仅一次调用生效） | `.input(...)`、`.output(...)`、`.set_turn_prompt(key, value)` |
 
-同一作用域内最后一次设置覆盖前面，所以可以在单次请求里覆盖 agent 默认值，而不修改 agent。
+同一作用域内最后一次设置覆盖前面，所以可以在单个 turn 里覆盖 agent 默认值，而不修改 agent。`set_request_prompt(...)` 保持为 `set_turn_prompt(...)` 的兼容别名。
 
 ## YAML / JSON prompt 文件
 
@@ -66,7 +66,7 @@ $ensure_all_keys: true
   system: 你是一个工单分流助手。
   info:
     severities: ["P0", "P1", "P2", "P3"]
-.request:
+.turn:
   instruct: 对工单文本分类。
   output:
     $format: json
@@ -87,12 +87,14 @@ agent = Agently.create_agent().load_yaml_prompt("prompts/triage.yaml")
 
 result = (
     agent
-    .set_request_prompt("input", "EU 区域所有用户登录失败。")
+    .set_turn_prompt("input", "EU 区域所有用户登录失败。")
     .start()
 )
 ```
 
 `load_json_prompt(...)` 是 JSON 版本的同一 API。两者都接受路径或原始字符串。可以一份配置一个 prompt，也可以用 `prompt_key_path="demo.output_control"` 在多 prompt 文件里挑一个。
+
+Prompt 配置继续接受 `.request`，也可以用 `.turn` 作为 turn 级作用域别名。
 
 顶层 `$ensure_all_keys: true` 会强制所有叶子都必填，覆盖每叶子的 `$ensure`。整个 schema 必须完整返回时使用。
 

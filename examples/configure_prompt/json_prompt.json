@@ -6,7 +6,7 @@
             "Agently": "Speed up your AI application development. Official website: https://Agently.tech."
         }
     },
-    ".request": {
+    ".turn": {
         "input": "Say hello.",
         "output": {
             "$format": "auto",
@@ -38,7 +38,7 @@
         }
     },
     ".alias": {
-        "set_request_prompt": {
+        "set_turn_prompt": {
             ".args": ["instruct", "Reply {input} politely."]
         }
     },
