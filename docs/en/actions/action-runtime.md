@@ -110,7 +110,7 @@ print(calculate("3333+6666=?"))
 | `agent.enable_sqlite(...)` | mount a managed `query_sqlite` action |
 | `agent.enable_workspace_file_actions(...)` | expose the current Workspace file area as list/search/read/write actions |
 | `@agent.auto_func` | turn a Python function signature + docstring into a model-backed implementation that uses the agent's actions |
-| `agent.get_action_result()` | retrieve action call records after a request |
+| `agent.get_action_result(prompt=turn.prompt)` | retrieve action call records for a request-scoped turn |
 | `extra.action_logs` | structured logs produced during the action loop |
 
 `agent.action.get_action_info()` and `agent.action.get_tool_info()` return the
@@ -160,7 +160,8 @@ redacted artifact instead of being inserted into every prompt.
 When the model or application needs the omitted detail, read it explicitly:
 
 ```python
-records = agent.get_action_result()
+turn = agent.input("Use the action and summarize the result.")
+records = agent.get_action_result(prompt=turn.prompt)
 artifact_ref = records[0]["artifact_refs"][0]
 
 raw = agent.action.read_action_artifact(

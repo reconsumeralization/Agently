@@ -12,12 +12,12 @@ if __name__ == "__main__":
     server_script = Path(__file__).with_name("_calculator_mcp_server.py")
     agent.use_mcp(str(server_script))
 
-    agent.input(
+    turn = agent.input(
         "Use the MCP actions to compute (12.5 + 7.25) * 3, then answer with the exact result."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
-    response = agent.get_response()
+    response = turn.get_response()
     print_response(response)
 
 # Expected key output after configuring DeepSeek:

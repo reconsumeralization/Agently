@@ -125,8 +125,7 @@ async def main():
     print("Demo 2: backward compat (no model_key)")
     print("═" * 60)
 
-    agent.input("Reply with exactly 'OK' and nothing else.")
-    result = await agent.async_get_text()
+    result = await agent.input("Reply with exactly 'OK' and nothing else.").async_get_text()
     print(f"  Response (global model, no model_key): '{result.strip()}'")
     assert result.strip() == "OK", f"Expected 'OK', got '{result.strip()}'"
     print("  backward compat: OK")
@@ -140,8 +139,7 @@ async def main():
     print("═" * 60)
 
     agent.activate_model("deepseek-v4")
-    agent.input("Reply with exactly 'OK' and nothing else.")
-    result = await agent.async_get_text()
+    result = await agent.input("Reply with exactly 'OK' and nothing else.").async_get_text()
     print(f"  Response (active model='deepseek-v4'): '{result.strip()}'")
     assert result.strip() == "OK", f"Expected 'OK', got '{result.strip()}'"
     print("  activate_model: OK")
@@ -184,9 +182,12 @@ async def main():
     print("═" * 60)
 
     request = agent.create_temp_request(model_key="deepseek-v4")
-    request.input("Return a JSON object with a single key 'status' set to 'ok'.")
-    request.output({"status": (str, "ok or error", True)}, format="json")
-    response = request.get_response()
+    response = (
+        request
+        .input("Return a JSON object with a single key 'status' set to 'ok'.")
+        .output({"status": (str, "ok or error", True)}, format="json")
+        .get_response()
+    )
     result = await response.async_get_data()
     print(f"  Response: {result}")
     assert result.get("status") == "ok", f"Expected status 'ok', got {result}"

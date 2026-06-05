@@ -15,12 +15,12 @@ def add_invoice_amounts(first_amount: int, second_amount: int) -> int:
 
 if __name__ == "__main__":
     agent.use_actions(add_invoice_amounts)
-    agent.input(
+    turn = agent.input(
         "Use the action to calculate 17850 + 42675, then answer with the total and one short sentence."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
-    response = agent.get_response()
+    response = turn.get_response()
     print_response(response)
 
 # Expected key output after configuring DeepSeek:

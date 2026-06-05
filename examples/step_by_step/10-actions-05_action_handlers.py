@@ -96,11 +96,11 @@ async def auditing_planning_handler(context, request):
 def demo_augmented_planning():
     agent.register_action_planning_handler(auditing_planning_handler)
     agent.use_actions(["lookup_price", "apply_discount"])
-    agent.input(
+    turn = agent.input(
         "What is the price of a laptop after a 20% discount? Use the actions."
     )
-    records = agent.get_action_result()
-    response = agent.get_response()
+    records = agent.get_action_result(prompt=turn.prompt)
+    response = turn.get_response()
     print(response.result.get_text())
     agent.register_action_planning_handler(None)  # reset to default
 
@@ -147,12 +147,12 @@ def scripted_planning_handler(context, request):
 def demo_scripted_planning():
     agent.register_action_planning_handler(scripted_planning_handler)
     agent.use_actions(["lookup_price", "apply_discount"])
-    agent.input(
+    turn = agent.input(
         "What is the discounted price of a laptop? Use the scripted plan."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = agent.get_response()
+    response = turn.get_response()
     print(response.result.get_text())
     agent.register_action_planning_handler(None)
 
@@ -195,9 +195,9 @@ def demo_execution_handler():
     agent.register_action_planning_handler(scripted_planning_handler)
     agent.register_action_execution_handler(timed_execution_handler)
     agent.use_actions(["lookup_price", "apply_discount"])
-    agent.input("What is the 15% discounted price of a laptop? Use actions.")
-    records = agent.get_action_result()
-    response = agent.get_response()
+    turn = agent.input("What is the 15% discounted price of a laptop? Use actions.")
+    records = agent.get_action_result(prompt=turn.prompt)
+    response = turn.get_response()
     print(response.result.get_text())
     agent.register_action_planning_handler(None)
     agent.register_action_execution_handler(None)
@@ -235,7 +235,7 @@ def demo_execution_handler():
 #   returns list[ActionResult] — same format expected by get_response()
 #
 # Flow (demo_execution_handler with scripted planning):
-# agent.get_action_result()
+# agent.get_action_result(prompt=turn.prompt)
 #   Round 0: scripted_planning_handler -> lookup_price(laptop)
 #            timed_execution_handler  -> result: {price: 1299.99}
 #   Round 1: scripted_planning_handler -> apply_discount(1299.99, 15)

@@ -67,15 +67,15 @@ agent.action.register_action(
 def demo_register_action():
     # Activate by action ID string — useful when IDs are determined at runtime.
     agent.use_actions(["slugify", "count_words", "truncate"])
-    agent.input(
+    turn = agent.input(
         "Process this blog post title: 'Building Scalable AI Agents: A Practical Guide for 2025'. "
         "1) Generate a URL slug. "
         "2) Count the words in the original title. "
         "3) Truncate the title to 40 characters."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = agent.get_response()
+    response = turn.get_response()
     print(response.result.get_text())
 
 
@@ -103,8 +103,8 @@ def demo_register_action():
 #   | (registration, no model call yet)
 #   v
 # agent.use_actions(["slugify", "count_words", "truncate"])
-# agent.input("Process this title...")
-# agent.get_action_result()
+# turn = agent.input("Process this title...")
+# agent.get_action_result(prompt=turn.prompt)
 #   model plans: slugify("Building Scalable AI Agents: A Practical Guide for 2025")
 #                count_words("Building Scalable AI Agents: A Practical Guide for 2025")
 #                truncate("Building Scalable AI Agents: A Practical Guide for 2025", 40)

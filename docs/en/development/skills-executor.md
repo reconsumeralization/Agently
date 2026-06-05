@@ -171,8 +171,8 @@ execution = await agent.async_run_skills_task(
 ```
 
 Agent prompt methods are also supported for explicit Skills execution. The
-Skill run consumes the current prompt snapshot, uses rendered prompt text as the
-task, and maps the `output` / `output_format` slots to `output` /
+Skill run consumes the current turn prompt snapshot, uses rendered prompt text
+as the task, and maps the `output` / `output_format` slots to `output` /
 `output_format`:
 
 ```python

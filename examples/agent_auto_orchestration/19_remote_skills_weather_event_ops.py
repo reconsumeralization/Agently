@@ -162,7 +162,7 @@ def _compact_action_records(records: Sequence[Mapping[str, Any]]) -> list[dict[s
 
 
 async def _execute_model_owned_weather_actions(agent: Any, *, location: str, latitude: str, longitude: str, event_date: str) -> list[dict[str, Any]]:
-    agent.input(
+    turn = agent.input(
         (
             f"Use the registered weather MCP actions to collect current conditions and forecast "
             f"for an outdoor retail pop-up in {location} on {event_date}. "
@@ -171,7 +171,7 @@ async def _execute_model_owned_weather_actions(agent: Any, *, location: str, lat
             "Do not answer from memory."
         )
     )
-    action_calls = await agent.async_generate_action_call(max_rounds=1)
+    action_calls = await agent.async_generate_action_call(prompt=turn.prompt, max_rounds=1)
     if not action_calls:
         raise RuntimeError("The model did not generate weather MCP action calls.")
 

@@ -31,13 +31,13 @@ def demo_mcp_stdio():
     # stdio transport: Agently spawns the MCP server as a child process.
     # The subprocess is torn down automatically after the request completes.
     agent.use_mcp(str(mcp_server))
-    agent.input(
+    turn = agent.input(
         "A marathon is 42.195 km long, and the typical marathon runner weighs 70 kg. "
         "Use the MCP actions to convert both values to imperial units."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = agent.get_response()
+    response = turn.get_response()
     print(response.result.get_text())
 
 
@@ -55,7 +55,7 @@ def demo_mcp_stdio():
 # via stdin/stdout using the Model Context Protocol JSON-RPC format.
 # Agently discovers the server's tool list (km_to_miles, kg_to_lb) automatically
 # and exposes them to the model with the same interface as native @action_func tools.
-# get_action_result() drives the full MCP call cycle:
+# agent.get_action_result(prompt=turn.prompt) drives the full MCP call cycle:
 #   model plans calls -> Agently forwards them to the subprocess -> results returned.
 # The subprocess is killed after get_response() completes.
 #
@@ -65,7 +65,7 @@ def demo_mcp_stdio():
 #   MCP handshake -> tool list: [km_to_miles, kg_to_lb]
 #   |
 #   v
-# agent.get_action_result()
+# agent.get_action_result(prompt=turn.prompt)
 #   model plans: km_to_miles(km=42.195) -> 26.2188
 #                kg_to_lb(kg=70.0)      -> 154.3234
 #   |
