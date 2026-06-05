@@ -18,7 +18,7 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
@@ -785,7 +785,7 @@ class AgentTask:
             if queue in self._stream_queues:
                 self._stream_queues.remove(queue)
 
-    def _get_generator(self, *args: Any, **kwargs: Any):
+    def _get_generator(self, *args: Any, **kwargs: Any) -> Generator[AgentExecutionStreamData, None, None]:
         return FunctionShifter.syncify_async_generator(self.get_async_generator(*args, **kwargs))
 
     async def _emit_progress(

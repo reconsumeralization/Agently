@@ -60,6 +60,11 @@ meta = response.result.get_meta()        # 已缓存
 | `"original"` | 原始 provider 事件 | 调试 / passthrough |
 | `"all"` | 所有事件带类型标签 | 完整日志 |
 
+类型注解请从 `agently.types.data` 导入公开 stream item 类型：
+`StreamingData` 对应 `instant` / `streaming_parse`，
+`AgentlySpecificResponseMessage` 对应 `specific`，
+`AgentlyModelResponseMessage` 对应 `all`。
+
 ### Delta 例子
 
 ```python

@@ -32,6 +32,7 @@ Agently 在运行时层是 async-native。Sync 方法是通过 `FunctionShifter.
 `instant` 是字段级事件，不是原始 provider token。它可以在字段还在增长时通过
 `.delta` 提供部分字段文本，然后在 `.is_complete` 为 true 时发完成事件。把这些
 事件当作渐进式 UI 状态；最终可靠对象在结束后用 `async_get_data()` 读取。
+这类 stream handler 的入参类型用 `agently.types.data` 里的 `StreamingData` 标注。
 
 ## API 对照
 

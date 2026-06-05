@@ -17,7 +17,7 @@ import contextlib
 import re
 import warnings
 
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Generator, Literal, Mapping, cast
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Generator, Literal, Mapping, cast, overload
 from pydantic import BaseModel
 
 from agently.types.plugins import ResponseParser
@@ -56,7 +56,18 @@ from agently.builtins.plugins.ResponseParser.modules.yaml_literal import (
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.types.data import AgentlyModelResult, AgentlyResponseGenerator, RunContext, SerializableMapping, SpecificEvents
+    from agently.types.data import (
+        AgentlyModelResponseMessage,
+        AgentlyModelResult,
+        AgentlyOriginalResponsePayload,
+        AgentlyResponseGenerator,
+        AgentlySpecificResponseMessage,
+        InstantStreamingContentType,
+        ResponseContentType,
+        RunContext,
+        SerializableMapping,
+        SpecificEvents,
+    )
     from agently.utils import Settings
 
 DEFAULT_SPECIFIC_EVENTS = cast(
@@ -559,6 +570,60 @@ class AgentlyResponseParser(ResponseParser):
         await self._wait_for_consumer_result()
         return self.full_result_data["text_result"]
 
+    @overload
+    def get_async_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator[StreamingData, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["all"],
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["original"],
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "ResponseContentType | None" = "delta",
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator: ...
+
     async def get_async_generator(
         self,
         type: Literal['all', 'delta', 'specific', 'original', 'instant', 'streaming_parse'] | None = "delta",
@@ -672,6 +737,60 @@ class AgentlyResponseParser(ResponseParser):
         except asyncio.CancelledError:
             await consumer.close()
             raise
+
+    @overload
+    def get_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator[StreamingData, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["all"],
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["original"],
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: "ResponseContentType | None" = "delta",
+        content: "ResponseContentType | None" = "delta",
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator: ...
 
     def get_generator(
         self,

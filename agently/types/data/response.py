@@ -40,6 +40,8 @@ AgentlyModelResponseEvent = Literal[
 ]
 
 AgentlyModelResponseMessage: TypeAlias = tuple[AgentlyModelResponseEvent, Any]
+AgentlySpecificResponseMessage: TypeAlias = AgentlyModelResponseMessage
+AgentlyOriginalResponsePayload: TypeAlias = Any
 AgentlyResponseGenerator: TypeAlias = AsyncGenerator[AgentlyModelResponseMessage, None]
 
 NormalStreamingContentType: TypeAlias = Literal["delta", "original", "specific"]
@@ -216,3 +218,7 @@ class AgentExecutionStreamData(StreamingData):
     action_id: str | None = None
     graph_id: str | None = None
     meta: dict[str, Any] | None = None
+
+
+ModelStreamingHandler: TypeAlias = Callable[[StreamingData], Awaitable[None] | None]
+AgentExecutionStreamHandler: TypeAlias = Callable[[AgentExecutionStreamData], Awaitable[None] | None]

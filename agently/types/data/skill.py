@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from typing_extensions import TypedDict
 
@@ -21,6 +22,8 @@ from typing_extensions import TypedDict
 SkillMode = Literal["model_decision", "required"]
 SkillExecutionStatus = Literal["created", "running", "success", "no_match", "blocked", "error"]
 ExecutionStrategy = Literal["single_shot", "staged", "react"]
+SkillRuntimeStreamItem = dict[str, Any]
+SkillRuntimeStreamHandler = Callable[[SkillRuntimeStreamItem], Awaitable[None] | None]
 
 
 class SkillCard(TypedDict, total=False):

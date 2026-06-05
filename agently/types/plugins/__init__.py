@@ -25,7 +25,7 @@ from .ActionRuntime import (
 )
 from .EventHooker import EventHooker
 from .PromptGenerator import PromptGenerator
-from .ModelRequester import HandlerDrivenModelRequester, ModelRequestHandlers, ModelRequester
+from .ModelRequester import HandlerDrivenModelRequester, ModelProviderResponseGenerator, ModelRequestHandlers, ModelRequester
 from .TaskDAGPlanner import TaskDAGPlanner
 from .SkillsExecutor import (
     SkillsEffortStrategyHandler,

@@ -14,11 +14,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agently.core import BaseAgent
-from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode
+from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillRuntimeStreamHandler
 from agently.types.plugins import SkillsExecutor
 from agently.utils import DeprecationWarnings, FunctionShifter
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
@@ -201,7 +200,7 @@ class SkillsExtension(BaseAgent):
         output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
-        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        stream_handler: SkillRuntimeStreamHandler | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":
         task, output, output_format = self._skills_prompt_defaults(
@@ -239,7 +238,7 @@ class SkillsExtension(BaseAgent):
         output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
-        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        stream_handler: SkillRuntimeStreamHandler | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":
         return FunctionShifter.syncify(self.async_run_skills_task)(
@@ -260,7 +259,7 @@ class SkillsExtension(BaseAgent):
         *,
         plan: SkillExecutionPlan,
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
-        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        stream_handler: SkillRuntimeStreamHandler | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":
         context = create_agent_skills_runtime_context(
@@ -285,7 +284,7 @@ class SkillsExtension(BaseAgent):
         plans: list[SkillExecutionPlan],
         mode: Literal["concurrent", "sequential"] = "concurrent",
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
-        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        stream_handler: SkillRuntimeStreamHandler | None = None,
         effort: str | None = None,
     ) -> list[Any]:
         """Execute multiple skill plans concurrently or sequentially.

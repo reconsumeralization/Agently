@@ -178,6 +178,9 @@ meta = await execution.async_get_meta()
 
 The execution object follows the same consumption style as model responses:
 `get_data`, `get_text`, `get_meta`, `get_generator`, and async equivalents.
+Execution streams yield `AgentExecutionStreamData` from `agently.types.data`.
+This type keeps the familiar `path`, `value`, `delta`, and `is_complete` fields
+and adds route metadata for process-level events.
 
 `create_execution()` defaults to `mode="one_turn"`, which preserves the
 ordinary one-turn Agent behavior. When a developer-owned loop or future
