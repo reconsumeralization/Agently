@@ -67,6 +67,16 @@ class ModelResponseDataFlow:
                 merged.append(key)
         return merged
 
+    @staticmethod
+    def ensure_value_is_present(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return bool(value) and all(ModelResponseDataFlow.ensure_value_is_present(item) for item in value)
+        return True
+
     def is_strict_output_enabled(self) -> bool:
         try:
             prompt_object = self._result.prompt.to_prompt_object()
@@ -670,7 +680,13 @@ class ModelResponseDataFlow:
                         empty = object()
                         if not isinstance(constraint_data, (Mapping, Sequence)) or isinstance(constraint_data, str):
                             raise ValueError(f"Missing ensure key: { ensure_key }")
-                        if DataLocator.locate_path_in_dict(constraint_data, ensure_key, key_style, default=empty) is empty:
+                        located_value = DataLocator.locate_path_in_dict(
+                            constraint_data,
+                            ensure_key,
+                            key_style,
+                            default=empty,
+                        )
+                        if located_value is empty or not self.ensure_value_is_present(located_value):
                             raise ValueError(f"Missing ensure key: { ensure_key }")
             except Exception:
                 await self.emit_retrying_event(

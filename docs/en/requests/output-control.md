@@ -10,7 +10,7 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 The validation pipeline runs the first time a structured response result is consumed, then caches the outcome on that response result. It has a fixed order, and each step contributes to the same retry budget.
 
-For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leaves directly in `.output(...)` with the third-slot `ensure` flag, then let the runtime compile those flags into `ensure_keys`. Pass `ensure_keys=` manually only when the required path is runtime-dependent, conditional, or easier to express outside the static schema.
+For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leaves directly in `.output(...)` with the third-slot `ensure` flag, then let the runtime compile those flags into `ensure_keys`. Pass `ensure_keys=` manually only when the required path is runtime-dependent, conditional, or easier to express outside the static schema. Required string leaves must contain non-blank text; a missing key, `None`, blank string, empty wildcard result, or wildcard result containing a blank required value triggers the shared retry flow. `False` and `0` remain valid required values.
 
 ## Choosing An Output Format
 
@@ -89,6 +89,7 @@ for model-owned content.
 | `xml_field` | Uses one `<agently_output>` payload with `<field name="..." type="text|json">` blocks. The parser is XML-like and boundary-based, not strict XML. Explicit `format="xml_field"` or auto can select it for flat string-only dict schemas. |
 | `yaml_literal` | Uses a target YAML boundary and literal scalars for long text. It is explicit opt-in and remains outside auto by default. |
 | reasoning text | Provider-native reasoning and leading outer `<think>...</think>` content before the payload are normalized to reasoning events before parsing. Payload/code/text-internal `<think>` content is preserved. |
+| tuple `ensure` | Third-slot `True` compiles to `ensure_keys`. The path must resolve to a meaningful value: non-blank string for string leaves, non-empty values for wildcard matches, and ordinary typed values such as `False` or `0` remain valid. |
 
 Typical usage:
 
