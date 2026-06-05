@@ -16,10 +16,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 
 AttemptDecisionAction = Literal["retry", "raise", "yield_error", "stop"]
+AttemptStreamMessage: TypeAlias = tuple[str, Any]
+AttemptStreamGenerator: TypeAlias = AsyncGenerator[AttemptStreamMessage, None]
 
 
 @dataclass
@@ -93,10 +95,10 @@ class AttemptDecision:
         return cls("stop", reason=reason, observations=observations or [])
 
 
-AttemptExecuteHandler = Callable[[AttemptState], AsyncGenerator[tuple[str, Any], None]]
+AttemptExecuteHandler = Callable[[AttemptState], AttemptStreamGenerator]
 AttemptErrorHandler = Callable[[BaseException, AttemptState], AttemptDecision | Awaitable[AttemptDecision]]
 AttemptObservationHandler = Callable[[AttemptObservation, AttemptState], None | Awaitable[None]]
-AttemptOutputStartedHandler = Callable[[tuple[str, Any], AttemptState], bool]
+AttemptOutputStartedHandler = Callable[[AttemptStreamMessage, AttemptState], bool]
 
 
 @dataclass(frozen=True)

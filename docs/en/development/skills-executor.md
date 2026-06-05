@@ -250,6 +250,13 @@ Direct Skills execution streams runtime items through `stream_handler`:
 - `skills.staged.*`, `skills.react.*`, and `block.*` events when a multi-step
   strategy is selected
 
+Annotate direct Skills `stream_handler` callbacks with
+`SkillRuntimeStreamHandler` from `agently.types.data`. If you are writing a
+custom Skills effort strategy and call
+`context.async_request_model(..., stream_handler=...)`, that model-stream
+handler receives `StreamingData` and can be annotated with
+`ModelStreamingHandler`.
+
 `effort="fast"` uses the low-overhead single-shot path. `effort="normal"` runs
 the full preflight -> research -> plan -> execute -> verify -> reflect ->
 finalize chain. `effort="max"` uses the same chain with a larger retry budget

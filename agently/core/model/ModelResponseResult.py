@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from agently.utils import Settings
     from agently.types.data import (
         AgentlyModelResponseMessage,
+        AgentlyOriginalResponsePayload,
+        AgentlySpecificResponseMessage,
         InstantStreamingContentType,
         OutputValidateContext,
         OutputValidateHandler,
@@ -300,15 +302,31 @@ class ModelResponseResult:
         type: Literal["all"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator[tuple[str, Any], None, None]: ...
+    ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
 
     @overload
     def get_generator(
         self,
-        type: Literal["delta", "specific", "original"],
+        type: Literal["specific"],
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["original"],
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
 
     @overload
     def get_generator(
@@ -363,15 +381,31 @@ class ModelResponseResult:
         type: Literal["all"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator[tuple[str, Any], None]: ...
+    ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
 
     @overload
     def get_async_generator(
         self,
-        type: Literal["delta", "specific", "original"],
+        type: Literal["specific"],
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["delta"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["original"],
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
 
     @overload
     def get_async_generator(

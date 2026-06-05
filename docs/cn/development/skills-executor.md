@@ -225,6 +225,11 @@ judge。
 - 选中多步策略时，还会收到 `skills.staged.*`、`skills.react.*` 和 `block.*`
   事件
 
+直接 Skills `stream_handler` 回调可用 `agently.types.data` 里的
+`SkillRuntimeStreamHandler` 标注。如果你在自定义 Skills effort strategy 里调用
+`context.async_request_model(..., stream_handler=...)`，这个模型流回调收到的是
+`StreamingData`，可用 `ModelStreamingHandler` 标注。
+
 `effort="fast"` 使用低开销 single-shot 路径。`effort="normal"` 固定走完整
 preflight -> research -> plan -> execute -> verify -> reflect -> finalize
 链路。`effort="max"` 使用同一链路，但提高 retry 预算，并作为后续 Dynamic Task

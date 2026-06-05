@@ -15,24 +15,31 @@
 from __future__ import annotations
 
 import os
-
-from collections.abc import Awaitable, Callable
-from typing import Any, TYPE_CHECKING, Literal, cast
+from typing import Any, AsyncGenerator, Generator, TYPE_CHECKING, Literal, cast, overload
 
 from agently.core.model import _UNSET, _resolve_quick_prompt_input
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
+from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
 from agently.utils import FunctionShifter
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
-    from agently.core.model import ModelRequest
+    from agently.core.model import ModelRequest, ModelResponse, ModelResponseResult
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
         AgentExecutionMode,
+        AgentlyModelResponseMessage,
+        AgentlyOriginalResponsePayload,
+        AgentlySpecificResponseMessage,
+        InstantStreamingContentType,
         OutputValidateHandler,
         PromptStandardSlot,
+        ResponseContentType,
         RunContext,
+        SkillRuntimeStreamHandler,
+        SpecificEvents,
+        StreamingData,
         TaskDAG,
     )
     from agently.types.options import ExecutionOptions
@@ -354,7 +361,7 @@ class AgentTurn:
         output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
-        stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        stream_handler: "SkillRuntimeStreamHandler | None" = None,
         effort: str | None = None,
     ):
         task, output, output_format = self._skills_prompt_defaults(
@@ -446,12 +453,12 @@ class AgentTurn:
             raise_ensure_failure=raise_ensure_failure,
         )
 
-    def get_response(self, *, parent_run_context: "RunContext | None" = None):
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponse":
         turn_run_context = self._agent._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._agent._emit_agent_turn_started(turn_run_context)
         return self.request.get_response(parent_run_context=turn_run_context)
 
-    def get_result(self, *, parent_run_context: "RunContext | None" = None):
+    def get_result(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
         return self.get_response(parent_run_context=parent_run_context).result
 
     def get_meta(self, *, parent_run_context: "RunContext | None" = None):
@@ -466,11 +473,97 @@ class AgentTurn:
     async def async_get_text(self, *, parent_run_context: "RunContext | None" = None):
         return await self.get_response(parent_run_context=parent_run_context).async_get_text()
 
-    def get_data(self, *args: Any, parent_run_context: "RunContext | None" = None, **kwargs: Any):
-        return self.get_response(parent_run_context=parent_run_context).get_data(*args, **kwargs)
+    @overload
+    def get_data(
+        self,
+        *,
+        type: Literal['parsed'],
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> dict[str, Any]: ...
 
-    async def async_get_data(self, *args: Any, parent_run_context: "RunContext | None" = None, **kwargs: Any):
-        return await self.get_response(parent_run_context=parent_run_context).async_get_data(*args, **kwargs)
+    @overload
+    def get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Any: ...
+
+    def get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Any:
+        return self.get_response(parent_run_context=parent_run_context).get_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
+
+    @overload
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['parsed'],
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Any: ...
+
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Any:
+        return await self.get_response(parent_run_context=parent_run_context).async_get_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
 
     def get_data_object(self, *args: Any, parent_run_context: "RunContext | None" = None, **kwargs: Any):
         return self.get_response(parent_run_context=parent_run_context).get_data_object(*args, **kwargs)
@@ -478,11 +571,153 @@ class AgentTurn:
     async def async_get_data_object(self, *args: Any, parent_run_context: "RunContext | None" = None, **kwargs: Any):
         return await self.get_response(parent_run_context=parent_run_context).async_get_data_object(*args, **kwargs)
 
-    def get_generator(self, *args: Any, parent_run_context: "RunContext | None" = None, **kwargs: Any):
-        return self.get_response(parent_run_context=parent_run_context).get_generator(*args, **kwargs)
+    @overload
+    def get_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator["StreamingData", None, None]: ...
 
-    def get_async_generator(self, *args: Any, parent_run_context: "RunContext | None" = None, **kwargs: Any):
-        return self.get_response(parent_run_context=parent_run_context).get_async_generator(*args, **kwargs)
+    @overload
+    def get_generator(
+        self,
+        type: Literal["all"],
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["original"],
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: "ResponseContentType | None" = None,
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator: ...
+
+    def get_generator(
+        self,
+        type: "ResponseContentType | None" = None,
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator:
+        return self.get_response(parent_run_context=parent_run_context).get_generator(
+            type=type,
+            content=content,
+            specific=specific,
+        )
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator["StreamingData", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["all"],
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["original"],
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "ResponseContentType | None" = None,
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator: ...
+
+    def get_async_generator(
+        self,
+        type: "ResponseContentType | None" = None,
+        content: "ResponseContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator:
+        return self.get_response(parent_run_context=parent_run_context).get_async_generator(
+            type=type,
+            content=content,
+            specific=specific,
+        )
 
     def get_prompt_text(self):
         return self.request_prompt.to_text()[6:][:-11]

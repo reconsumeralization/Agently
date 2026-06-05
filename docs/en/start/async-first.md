@@ -31,6 +31,7 @@ The combination worth learning first:
 field text in `.delta` while the field is still growing, then emit a completion
 event when `.is_complete` becomes true. Treat these events as progressive UI
 state; read `async_get_data()` at the end for the durable parsed object.
+Annotate these stream handlers with `StreamingData` from `agently.types.data`.
 
 ## API surface map
 

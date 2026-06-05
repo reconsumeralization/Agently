@@ -85,12 +85,12 @@ class AgentExecution(Protocol):
         profile: str = "fast",
     ) -> AgentExecutionWorkspaceRecord: ...
 
-    async def get_async_generator(
+    def get_async_generator(
         self,
         type: Literal["instant", "streaming_parse", "all"] | str | None = "instant",
         content: Any = None,
         **kwargs: Any,
-    ) -> AsyncGenerator[AgentExecutionStreamData | tuple[str, AgentExecutionStreamData], None]: ...
+    ) -> AsyncGenerator[AgentExecutionStreamData, None]: ...
 
     def get_data(self, **kwargs: Any) -> Any: ...
 
@@ -100,7 +100,7 @@ class AgentExecution(Protocol):
 
     def record_workspace(self, **kwargs: Any) -> AgentExecutionWorkspaceRecord: ...
 
-    def get_generator(self, *args: Any, **kwargs: Any) -> Generator[Any, None, None]: ...
+    def get_generator(self, *args: Any, **kwargs: Any) -> Generator[AgentExecutionStreamData, None, None]: ...
 
 
 @runtime_checkable

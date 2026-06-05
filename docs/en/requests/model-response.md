@@ -60,6 +60,11 @@ This is also how `.validate(...)` runs only once per response — the cached res
 | `"original"` | raw provider events | debugging / passthrough |
 | `"all"` | every event with type tag | exhaustive logging |
 
+For type annotations, import the public stream item types from
+`agently.types.data`: `StreamingData` for `instant` / `streaming_parse`,
+`AgentlySpecificResponseMessage` for `specific`, and
+`AgentlyModelResponseMessage` for `all`.
+
 ### Delta example
 
 ```python

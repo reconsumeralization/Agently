@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Protocol, AsyncGenerator, TYPE_CHECKING
+from typing import Any, Protocol, AsyncGenerator, TYPE_CHECKING, TypeAlias
 from .base import AgentlyPlugin
 
 from agently.types.data import AttemptHandlers
 
 ModelRequestHandlers = AttemptHandlers
+ModelProviderResponseGenerator: TypeAlias = AsyncGenerator[Any, None]
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -85,7 +86,7 @@ class ModelRequester(AgentlyPlugin, Protocol):
         """
         ...
 
-    def request_model(self, request_data: "AgentlyRequestData") -> AsyncGenerator[tuple[str, Any], None]:
+    def request_model(self, request_data: "AgentlyRequestData") -> ModelProviderResponseGenerator:
         """
         Send the model request and return an async generator for streaming responses.
 
@@ -93,11 +94,11 @@ class ModelRequester(AgentlyPlugin, Protocol):
             request_data (SerializableData): The generated request data.
 
         Returns:
-            AsyncGenerator: The model response stream, format depends on implementation.
+            AsyncGenerator: Provider-native model response stream, format depends on implementation.
         """
         ...
 
-    def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResponseGenerator":
+    def broadcast_response(self, response_generator: ModelProviderResponseGenerator) -> "AgentlyResponseGenerator":
         """
         Process and broadcast the model response stream in a standardized format.
 

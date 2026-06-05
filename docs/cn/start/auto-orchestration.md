@@ -160,6 +160,9 @@ meta = await execution.async_get_meta()
 
 execution 对象沿用模型 response 的消费风格：`get_data`、`get_text`、
 `get_meta`、`get_generator` 以及对应 async 方法。
+execution stream 产出的是 `agently.types.data` 里的
+`AgentExecutionStreamData`。它保留熟悉的 `path`、`value`、`delta`、
+`is_complete` 字段，并增加过程级事件需要的 route metadata。
 
 `create_execution()` 默认使用 `mode="one_turn"`，保留普通单轮 Agent 调用
 语义。当开发者自己编写循环，或未来 AgentTaskLoop 需要一个有边界的单步执行时，

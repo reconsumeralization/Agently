@@ -230,6 +230,26 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
                 "builders remain available."
             ),
         },
+        "response_stream_type_surface": {
+            "status": "released",
+            "surface": [
+                "StreamingData",
+                "AgentlyModelResponseMessage",
+                "AgentlySpecificResponseMessage",
+                "ModelStreamingHandler",
+                "AttemptStreamMessage",
+                "AttemptStreamGenerator",
+                "AgentExecutionStreamData",
+                "SkillRuntimeStreamHandler",
+            ],
+            "contract": (
+                "Generator and handler type annotations are exposed through agently.types.data; delta yields str, "
+                "instant/streaming_parse yields StreamingData, specific/all yield event-tagged response messages, "
+                "AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive "
+                "SkillRuntimeStreamItem dictionaries."
+            ),
+            "compatibility_policy": "This clarifies public typing and does not change runtime stream payloads.",
+        },
         "image": {
             "status": "released",
             "surface": [

@@ -22,7 +22,10 @@ if TYPE_CHECKING:
     from agently.core import Prompt
     from agently.types.data import (
         AgentlyModelResult,
+        AgentlyModelResponseMessage,
+        AgentlyOriginalResponsePayload,
         AgentlyResponseGenerator,
+        AgentlySpecificResponseMessage,
         InstantStreamingContentType,
         ResponseContentType,
         RunContext,
@@ -99,15 +102,31 @@ class ResponseParser(AgentlyPlugin, Protocol):
         type: Literal["all"],
         *,
         specific: "SpecificEvents" = None,
-    ) -> AsyncGenerator[tuple[str, Any], None]: ...
+    ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
 
     @overload
     def get_async_generator(
         self,
-        type: Literal["delta", "specific", "original"],
+        type: Literal["specific"],
+        *,
+        specific: "SpecificEvents" = None,
+    ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["delta"],
         *,
         specific: "SpecificEvents" = None,
     ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["original"],
+        *,
+        specific: "SpecificEvents" = None,
+    ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
 
     @overload
     def get_async_generator(
@@ -142,15 +161,31 @@ class ResponseParser(AgentlyPlugin, Protocol):
         type: Literal["all"],
         *,
         specific: "SpecificEvents" = None,
-    ) -> Generator[tuple[str, Any], None, None]: ...
+    ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
 
     @overload
     def get_generator(
         self,
-        type: Literal["delta", "specific", "original"],
+        type: Literal["specific"],
+        *,
+        specific: "SpecificEvents" = None,
+    ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta"],
         *,
         specific: "SpecificEvents" = None,
     ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["original"],
+        *,
+        specific: "SpecificEvents" = None,
+    ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
 
     @overload
     def get_generator(
