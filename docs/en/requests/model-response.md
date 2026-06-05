@@ -1,14 +1,14 @@
 ---
 title: Model Response
-description: Reading text, structured data, metadata, and streaming events from one response.
-keywords: Agently, response, get_response, get_data, get_text, get_meta, generator, streaming
+description: Reading text, structured data, metadata, and streaming events from one result.
+keywords: Agently, result, get_result, get_data, get_text, get_meta, generator, streaming
 ---
 
-# Model Response
+# Model Result
 
 > Languages: **English** · [中文](../../cn/requests/model-response.md)
 
-`agent.input(...).start()` is a convenience that runs the request and returns the parsed dict. For everything more interesting — text, metadata, streaming, reuse — go through `get_response()`.
+`agent.input(...).start()` is a convenience that runs the request and returns the parsed dict. For everything more interesting — text, metadata, streaming, reuse — go through `get_result()`.
 
 ## Two consumption styles
 
@@ -16,40 +16,40 @@ keywords: Agently, response, get_response, get_data, get_text, get_meta, generat
 # Style A: one shot, return parsed data immediately
 result = agent.input("...").output({...}).start()
 
-# Style B: hold a reusable response
-response = agent.input("...").output({...}).get_response()
-text = response.result.get_text()
-data = response.result.get_data()
-meta = response.result.get_meta()
+# Style B: hold a reusable result facade
+result = agent.input("...").output({...}).get_result()
+text = result.get_text()
+data = result.get_data()
+meta = result.get_meta()
 ```
 
-Style B is the default for non-trivial code. The actual model call runs lazily when you first consume from `response.result`, then results are **cached** — multiple reads do not re-issue the request.
+Style B is the default for non-trivial code. The actual model call runs lazily when you first consume from `result`, then results are **cached** — multiple reads do not re-issue the request. `get_response()` remains a compatibility alias for older code and returns the same result facade.
 
 ## Reader methods
 
 | Method | Returns |
 |---|---|
-| `response.result.get_text()` | full plain text |
-| `response.result.get_data()` | parsed structured dict (when `output()` was used) |
-| `response.result.get_data_object()` | Pydantic instance (when `output()` was given a `BaseModel`) |
-| `response.result.get_meta()` | dict of usage / model info / timing |
+| `result.get_text()` | full plain text |
+| `result.get_data()` | parsed structured dict (when `output()` was used) |
+| `result.get_data_object()` | Pydantic instance (when `output()` was given a `BaseModel`) |
+| `result.get_meta()` | dict of usage / model info / timing |
 
 Each has an async sibling: `async_get_text()`, `async_get_data()`, `async_get_data_object()`, `async_get_meta()`.
 
 Mixing readers is fine — they all consume from the same cached result:
 
 ```python
-response = agent.input("...").output({...}).get_response()
-data = response.result.get_data()        # triggers the request
-text = response.result.get_text()        # already cached
-meta = response.result.get_meta()        # already cached
+result = agent.input("...").output({...}).get_result()
+data = result.get_data()        # triggers the request
+text = result.get_text()        # already cached
+meta = result.get_meta()        # already cached
 ```
 
-This is also how `.validate(...)` runs only once per response — the cached result is what gets validated.
+This is also how `.validate(...)` runs only once per result — the cached result is what gets validated.
 
 ## Streaming
 
-`response.result.get_generator(type=...)` (sync) and `get_async_generator(type=...)` (async) yield streaming events. The `type` parameter selects what you see:
+`result.get_generator(type=...)` (sync) and `get_async_generator(type=...)` (async) yield streaming events. The `type` parameter selects what you see:
 
 | `type` | What you get | Use it for |
 |---|---|---|
@@ -60,10 +60,11 @@ This is also how `.validate(...)` runs only once per response — the cached res
 | `"original"` | raw provider events | debugging / passthrough |
 | `"all"` | every event with type tag | exhaustive logging |
 
-For type annotations, import the public stream item types from
-`agently.types.data`: `StreamingData` for `instant` / `streaming_parse`,
+For common type annotations, import the public stream item types from
+`agently`: `StreamingData` for `instant` / `streaming_parse`,
 `AgentlySpecificResponseMessage` for `specific`, and
-`AgentlyModelResponseMessage` for `all`.
+`AgentlyModelResponseMessage` for `all`. The same types remain available from
+`agently.types.data` when you want the full typed data namespace.
 
 ### Delta example
 
@@ -111,7 +112,7 @@ agent = Agently.create_agent()
 
 
 async def stream_triage_card(ticket_text: str):
-    response = (
+    result = (
         agent
         .input(ticket_text)
         .output(
@@ -123,12 +124,12 @@ async def stream_triage_card(ticket_text: str):
             },
             format="json",
         )
-        .get_response()
+        .get_result()
     )
 
     ui_state: dict[str, str] = defaultdict(str)
 
-    async for item in response.get_async_generator(type="instant"):
+    async for item in result.get_async_generator(type="instant"):
         if item.delta:
             # Render a field-level patch to your UI / SSE / WebSocket channel.
             ui_state[item.path] += item.delta
@@ -136,8 +137,8 @@ async def stream_triage_card(ticket_text: str):
         if item.is_complete:
             print({"path": item.path, "status": "done", "value": item.value})
 
-    # No second request: this reads the cached final parse from the same response.
-    final_data = await response.async_get_data()
+    # No second request: this reads the cached final parse from the same result.
+    final_data = await result.async_get_data()
     return final_data
 
 
@@ -184,8 +185,8 @@ Same generators in async form:
 import asyncio
 
 async def main():
-    response = agent.input("...").output({...}).get_response()
-    async for item in response.get_async_generator(type="instant"):
+    result = agent.input("...").output({...}).get_result()
+    async for item in result.get_async_generator(type="instant"):
         if item.is_complete:
             print(item.path, item.value)
 
@@ -196,14 +197,14 @@ For services and TriggerFlow usage, async is the recommended path — see [Async
 
 ## Concurrency
 
-Because `get_response()` only kicks off the actual request when you consume it, you can build many responses up front and consume them in parallel:
+Because `get_result()` only kicks off the actual request when you consume it, you can build many results up front and consume them in parallel:
 
 ```python
 import asyncio
 
 async def ask(prompt):
-    r = agent.input(prompt).get_response()
-    return await r.result.async_get_text()
+    r = agent.input(prompt).get_result()
+    return await r.async_get_text()
 
 results = await asyncio.gather(
     ask("Summarize recursion."),
@@ -219,13 +220,13 @@ This is a standard async pattern; nothing in Agently is special about it.
 # bad — runs the request three times
 text = agent.input("...").start()
 data = agent.input("...").output({...}).start()
-meta = agent.input("...").output({...}).get_response().result.get_meta()
+meta = agent.input("...").output({...}).get_result().get_meta()
 
 # good — runs once, reads three views
-response = agent.input("...").output({...}).get_response()
-text = response.result.get_text()
-data = response.result.get_data()
-meta = response.result.get_meta()
+result = agent.input("...").output({...}).get_result()
+text = result.get_text()
+data = result.get_data()
+meta = result.get_meta()
 ```
 
 ## See also

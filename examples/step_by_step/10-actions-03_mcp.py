@@ -37,8 +37,8 @@ def demo_mcp_stdio():
     )
     records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
 
 
 # demo_mcp_stdio()
@@ -57,7 +57,7 @@ def demo_mcp_stdio():
 # and exposes them to the model with the same interface as native @action_func tools.
 # agent.get_action_result(prompt=turn.prompt) drives the full MCP call cycle:
 #   model plans calls -> Agently forwards them to the subprocess -> results returned.
-# The subprocess is killed after get_response() completes.
+# The subprocess is killed after get_result() is consumed.
 #
 # Flow:
 # agent.use_mcp("_10_mcp_server.py")
@@ -70,7 +70,7 @@ def demo_mcp_stdio():
 #                kg_to_lb(kg=70.0)      -> 154.3234
 #   |
 #   v
-# agent.get_response()
+# agent.get_result()
 #   model reply: "A marathon is 26.22 miles; the runner weighs 154.32 lb."
 # subprocess is killed
 #

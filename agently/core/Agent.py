@@ -50,7 +50,7 @@ if TYPE_CHECKING:
         StreamingData,
         TaskDAG,
     )
-    from agently.core.model import ModelResponse, ModelResponseResult
+    from agently.core.model import ModelResponseResult
     from agently.types.options import ExecutionOptions
 
 
@@ -446,7 +446,7 @@ class BaseAgent:
             }
         )
 
-    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponse":
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
         turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._emit_agent_turn_started(turn_run_context)
         return self.request.get_response(parent_run_context=turn_run_context)

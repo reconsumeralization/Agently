@@ -13,7 +13,7 @@ keywords: Agently, request, agent, response, output, validate, session
 1. **Prompt** — 你说给模型的内容。由分层槽位组成：`role` / `system`、`info`、`instruct`、`input`、`output` schema。详见 [Prompt 管理](prompt-management.md)。
 2. **Output schema** — 你想要的结构。由嵌套 dict + `(type, "desc", ensure)` 叶子构成。详见 [Schema as Prompt](schema-as-prompt.md)。
 3. **Validation 流水线** — `output()` 严格解析 → `ensure_keys` → `.validate(...)` 自定义校验 → 重试。详见 [输出控制](output-control.md)。
-4. **Response** — text、structured data、metadata、流式事件。可通过 `response.result` 复用。详见 [模型响应](model-response.md)。
+4. **Result** — text、structured data、metadata、流式事件。可通过 `get_result()` 复用。详见 [模型结果](model-response.md)。
 
 ## 最小写法
 
@@ -71,7 +71,7 @@ result = (
 
 ## Sync vs async
 
-上面的链以 `.start()` 结尾，是同步。服务和流式 UI 用 `.async_start()`，或者拿一个 `response = ....get_response()` 复用，再 `await response.result.async_get_data()`。详见 [Async First](../start/async-first.md)。
+上面的链以 `.start()` 结尾，是同步。服务和流式 UI 用 `.async_start()`，或者拿一个 `result = ....get_result()` 复用，再 `await result.async_get_data()`。详见 [Async First](../start/async-first.md)。
 
 ## 这一层在栈里的位置
 

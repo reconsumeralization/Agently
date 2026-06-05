@@ -30,7 +30,7 @@ agent.enable_python(desc="Use for exact calculations. Assign the final answer to
 
 turn = agent.input("Use Python to calculate the average of [15, 23, 42, 8, 12].")
 records = agent.get_action_result(prompt=turn.prompt)
-response = turn.get_response()
+result = turn.get_result()
 ```
 
 You normally do not need to call `Agently.execution_environment` directly. The

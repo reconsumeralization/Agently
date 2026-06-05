@@ -13,7 +13,7 @@ TASK_DURATIONS = {"t1": 0.8, "t2": 0.5, "t3": 0.7, "t4": 0.2, "t5": 0.2}
 def decompose_task(task: str) -> list[dict]:
     from agently import Agently
 
-    response = (
+    result = (
         Agently.create_agent()
         .input(task)
         .instruct([
@@ -32,9 +32,9 @@ def decompose_task(task: str) -> list[dict]:
             }],
             "summary": ("str", "decomposition summary"),
         })
-        .get_response()
+        .get_result()
     )
-    return response.get_data(ensure_keys=["tasks"])["tasks"]
+    return result.get_data(ensure_keys=["tasks"])["tasks"]
 
 
 def split_by_dependency(tasks: list[dict]) -> tuple[list[dict], list[dict]]:

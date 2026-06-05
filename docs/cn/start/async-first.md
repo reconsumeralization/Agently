@@ -25,24 +25,25 @@ Agently 在运行时层是 async-native。Sync 方法是通过 `FunctionShifter.
 
 最值得先掌握的组合：
 
-- `response.get_async_generator(type="instant")`——逐字段流出带 `path`、`delta`、`value`、`is_complete` 的结构化 `StreamingData` patch。
+- `result.get_async_generator(type="instant")`——逐字段流出带 `path`、`delta`、`value`、`is_complete` 的结构化 `StreamingData` patch。
 - `data.async_emit(...)`——把节点变成 TriggerFlow 信号。
 - `data.async_put_into_stream(...)`——把中间状态推给 UI / SSE / 日志。
 
 `instant` 是字段级事件，不是原始 provider token。它可以在字段还在增长时通过
 `.delta` 提供部分字段文本，然后在 `.is_complete` 为 true 时发完成事件。把这些
 事件当作渐进式 UI 状态；最终可靠对象在结束后用 `async_get_data()` 读取。
-这类 stream handler 的入参类型用 `agently.types.data` 里的 `StreamingData` 标注。
+这类 stream handler 的入参类型可直接用 `agently` 根入口的 `StreamingData`
+标注；需要完整 typed data 命名空间时也可以继续从 `agently.types.data` 导入。
 
 ## API 对照
 
 | Sync | Async 等价 |
 |---|---|
 | `agent.start()` / `request.start()` | `agent.async_start()` / `request.async_start()` |
-| `response.get_data()` | `response.async_get_data()` |
-| `response.get_text()` | `response.async_get_text()` |
-| `response.get_meta()` | `response.async_get_meta()` |
-| `response.get_generator(type=...)` | `response.get_async_generator(type=...)` |
+| `result.get_data()` | `result.async_get_data()` |
+| `result.get_text()` | `result.async_get_text()` |
+| `result.get_meta()` | `result.async_get_meta()` |
+| `result.get_generator(type=...)` | `result.get_async_generator(type=...)` |
 | `flow.start()` | `flow.async_start()` |
 | `execution.start()` / `execution.close()` | `execution.async_start()` / `execution.async_close()` |
 | `data.set_state(...)` / `data.emit(...)` | `data.async_set_state(...)` / `data.async_emit(...)` |
@@ -57,30 +58,30 @@ agent = Agently.create_agent()
 
 
 async def main():
-    response = (
+    result = (
         agent
         .input("给我一个标题和两条要点。")
         .output({
             "title": (str, "标题", True),
             "items": [(str, "要点", True)],
         })
-        .get_response()
+        .get_result()
     )
 
-    async for item in response.get_async_generator(type="instant"):
+    async for item in result.get_async_generator(type="instant"):
         if item.delta:
             print(item.path, "+", item.delta)
         if item.is_complete:
             print(item.path, "done")
 
-    final = await response.async_get_data()
+    final = await result.async_get_data()
     print(final)
 
 
 asyncio.run(main())
 ```
 
-`get_response()` 返回一个可复用的 `ModelResponse`。你可以从同一个 response 拿 text、结构化 data 和 metadata，不会重发请求——见 [模型响应](../requests/model-response.md)。
+`get_result()` 返回一个可复用的 `ModelResponseResult`。你可以从同一个 result 拿 text、结构化 data 和 metadata，不会重发请求——见 [模型结果](../requests/model-response.md)。
 
 ## Async + TriggerFlow
 

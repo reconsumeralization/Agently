@@ -75,11 +75,11 @@ def main():
     print("[ACTION_RECORDS]")
     pprint(records)
 
-    response = turn.get_response()
+    result = turn.get_result()
     print("[MODEL_REPLY]")
-    print(response.result.get_text())
+    print(result.get_text())
 
-    extra = response.result.full_result_data.get("extra") or {}
+    extra = result.full_result_data.get("extra") or {}
     print("[ACTION_LOGS]")
     pprint(extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else [])
 
@@ -96,5 +96,5 @@ if __name__ == "__main__":
 # Both SearchPack and BrowsePack are registered and the model decides which to call.
 # Typically the model calls search first to find relevant URLs, then calls browse on
 # the most relevant page to extract deeper content.  get_action_result() drives the
-# full multi-round action loop; get_response() asks the model to summarize with the
+# full multi-round action loop; get_result() asks the model to summarize with the
 # action results injected.  The model's "extra.action_logs" captures the full trace.

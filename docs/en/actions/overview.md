@@ -51,4 +51,4 @@ The public facade is [`agently/core/Action/`](../../../agently/core/Action/). Ag
 The `ToolManager` plugin type still exists for legacy use, but new examples use
 the Action Runtime path. The examples in `examples/action_runtime/` create a
 request-scoped `turn`, inspect `agent.get_action_result(prompt=turn.prompt)`,
-then call `turn.get_response()` and read `extra.action_logs`.
+then call `turn.get_result()` and read `extra.action_logs`.

@@ -69,20 +69,20 @@ result = (
 ```
 
 ### 结果消费
-- `response.get_text()`：原始输出
-- `response.get_data()`：结构化结果
-- `response.get_generator(type="instant")`：结构化流式输出
+- `result.get_text()`：原始输出
+- `result.get_data()`：结构化结果
+- `result.get_generator(type="instant")`：结构化流式输出
 
 Instant 事件包含：
 `path`, `wildcard_path`, `delta`, `value`, `is_complete`
 
 ```python
-response = (
+result = (
     agent.input("解释递归")
     .output({"answer": ("str", "最终回答")})
-    .get_response()
+    .get_result()
 )
-for msg in response.get_generator(type="instant"):
+for msg in result.get_generator(type="instant"):
     if msg.path == "answer" and msg.delta:
         print(msg.delta, end="", flush=True)
 print()

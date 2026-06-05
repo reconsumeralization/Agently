@@ -255,7 +255,8 @@ Annotate direct Skills `stream_handler` callbacks with
 custom Skills effort strategy and call
 `context.async_request_model(..., stream_handler=...)`, that model-stream
 handler receives `StreamingData` and can be annotated with
-`ModelStreamingHandler`.
+`ModelStreamingHandler`. Both types are available from the package root:
+`from agently import StreamingData, ModelStreamingHandler`.
 
 `effort="fast"` uses the low-overhead single-shot path. `effort="normal"` runs
 the full preflight -> research -> plan -> execute -> verify -> reflect ->

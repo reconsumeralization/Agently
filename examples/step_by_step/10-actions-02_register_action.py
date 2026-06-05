@@ -75,8 +75,8 @@ def demo_register_action():
     )
     records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
 
 
 # demo_register_action()
@@ -111,5 +111,5 @@ def demo_register_action():
 #   FunctionActionExecutor runs each -> slug, 9, truncated string
 #   |
 #   v
-# agent.get_response()
+# agent.get_result()
 #   model summarizes all three results in one reply

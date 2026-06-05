@@ -195,8 +195,8 @@ if __name__ == "__main__":
     )
     records = agent.get_action_result(prompt=turn.prompt, max_rounds=3)
     print_action_results(records)
-    response = turn.get_response()
-    print_response(response)
+    result = turn.get_result()
+    print_response(result)
 
 # Expected key output after configuring DeepSeek:
 # The custom ActionRuntime plans normalize_title first, then count_words.

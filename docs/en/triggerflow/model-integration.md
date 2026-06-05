@@ -45,22 +45,22 @@ The surrounding flow is async. Calling sync `start()` inside a chunk works but b
 ## Streaming structured fields into the runtime stream
 
 When the UI consuming the runtime stream benefits from incremental updates,
-bridge structured field patches from the model response into the TriggerFlow
+bridge structured field patches from the model result into the TriggerFlow
 runtime stream:
 
 ```python
 async def draft_with_streaming(data: TriggerFlowRuntimeData):
-    response = (
+    result = (
         agent
         .input(data.input)
         .output({
             "title": (str, "Title", True),
             "body": (str, "Body", True),
         })
-        .get_response()
+        .get_result()
     )
 
-    async for item in response.get_async_generator(type="instant"):
+    async for item in result.get_async_generator(type="instant"):
         if item.delta:
             await data.async_put_into_stream({
                 "path": item.path,
@@ -68,7 +68,7 @@ async def draft_with_streaming(data: TriggerFlowRuntimeData):
                 "done": item.is_complete,
             })
 
-    final = await response.async_get_data()
+    final = await result.async_get_data()
     await data.async_set_state("draft", final)
     return final
 ```
@@ -76,18 +76,18 @@ async def draft_with_streaming(data: TriggerFlowRuntimeData):
 `type="instant"` yields structured `StreamingData` patches, not raw provider
 tokens. Consumers can render `title` deltas while `body` is still generating.
 After the stream ends, `async_get_data()` returns the cached final parsed dict
-from the same response (no second request).
+from the same result (no second request).
 
-## Reusing one response across the chunk
+## Reusing one result across the chunk
 
-Call `get_response()` once, then read text + data + meta from `response.result` without re-issuing. See [Model Response](../requests/model-response.md):
+Call `get_result()` once, then read text + data + meta from `result` without re-issuing. See [Model Result](../requests/model-response.md):
 
 ```python
 async def step(data):
-    response = agent.input(data.input).output({...}).get_response()
-    text = await response.result.async_get_text()
-    obj = await response.result.async_get_data()
-    meta = await response.result.async_get_meta()
+    result = agent.input(data.input).output({...}).get_result()
+    text = await result.async_get_text()
+    obj = await result.async_get_data()
+    meta = await result.async_get_meta()
     await data.async_set_state("text", text)
     await data.async_set_state("obj", obj)
     await data.async_set_state("meta", meta)
@@ -151,6 +151,6 @@ This is how TriggerFlow plays the orchestration role: the flow keeps the wiring;
 ## See also
 
 - [Async First](../start/async-first.md) — why every chunk should use async APIs
-- [Model Response](../requests/model-response.md) — `get_response()` and the `result` cache
+- [Model Result](../requests/model-response.md) — `get_result()` and the result cache
 - [Output Control](../requests/output-control.md) — validate / retry behavior inside a chunk
 - [State and Resources](state-and-resources.md) — where the agent should live

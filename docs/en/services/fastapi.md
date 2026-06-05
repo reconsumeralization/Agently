@@ -102,13 +102,13 @@ Generator functions and async generators wrap into a `StreamingResponse`:
 
 ```python
 async def stream_answer(request_data):
-    response = (
+    result = (
         agent
         .input(request_data["data"])
         .output({"title": (str, "Title", True), "body": (str, "Body", True)})
-        .get_response()
+        .get_result()
     )
-    async for item in response.get_async_generator(type="instant"):
+    async for item in result.get_async_generator(type="instant"):
         if item.delta:
             yield {"path": item.path, "delta": item.delta, "done": item.is_complete}
 

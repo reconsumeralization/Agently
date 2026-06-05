@@ -313,7 +313,7 @@ class ModelRequest:
         return self
 
     # Response & Result
-    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponse:
+    def _create_model_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponse:
         if self._model_key:
             from agently.utils.ModelPool import resolve_model_pool_settings
             resolve_model_pool_settings(self._model_key, self.settings)
@@ -337,19 +337,22 @@ class ModelRequest:
         return response
 
     def get_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
-        return self.get_response(parent_run_context=parent_run_context).result
+        return self._create_model_response(parent_run_context=parent_run_context).result
+
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
+        return self.get_result(parent_run_context=parent_run_context)
 
     def get_meta(self, *, parent_run_context: "RunContext | None" = None):
-        return self.get_response(parent_run_context=parent_run_context).get_meta()
+        return self.get_result(parent_run_context=parent_run_context).get_meta()
 
     async def async_get_meta(self, *, parent_run_context: "RunContext | None" = None):
-        return await self.get_response(parent_run_context=parent_run_context).async_get_meta()
+        return await self.get_result(parent_run_context=parent_run_context).async_get_meta()
 
     def get_text(self, *, parent_run_context: "RunContext | None" = None) -> str:
-        return self.get_response(parent_run_context=parent_run_context).get_text()
+        return self.get_result(parent_run_context=parent_run_context).get_text()
 
     async def async_get_text(self, *, parent_run_context: "RunContext | None" = None):
-        return await self.get_response(parent_run_context=parent_run_context).async_get_text()
+        return await self.get_result(parent_run_context=parent_run_context).async_get_text()
 
     @overload
     def get_data(
@@ -416,8 +419,8 @@ class ModelRequest:
     ):
         if ensure_all_keys is not None:
             self.prompt.set("ensure_all_keys", ensure_all_keys)
-        response = self.get_response(parent_run_context=parent_run_context)
-        return await response.async_get_data(
+        result = self.get_result(parent_run_context=parent_run_context)
+        return await result.async_get_data(
             type=type,
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
@@ -491,8 +494,8 @@ class ModelRequest:
     ):
         if ensure_all_keys is not None:
             self.prompt.set("ensure_all_keys", ensure_all_keys)
-        response = self.get_response(parent_run_context=parent_run_context)
-        return await response.async_get_data_object(
+        result = self.get_result(parent_run_context=parent_run_context)
+        return await result.async_get_data_object(
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
             key_style=key_style,
@@ -602,7 +605,7 @@ class ModelRequest:
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
     ) -> Generator:
-        return self.get_response(parent_run_context=parent_run_context).get_generator(
+        return self.get_result(parent_run_context=parent_run_context).get_generator(
             type=type,
             content=content,
             specific=specific,
@@ -664,7 +667,7 @@ class ModelRequest:
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
     ) -> AsyncGenerator:
-        return self.get_response(parent_run_context=parent_run_context).get_async_generator(
+        return self.get_result(parent_run_context=parent_run_context).get_async_generator(
             type=type,
             content=content,
             specific=specific,

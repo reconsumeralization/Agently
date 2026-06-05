@@ -89,7 +89,7 @@ def react_loop(question: str, max_steps: int = 6) -> str:
 
     for step in range(max_steps):
         print(f"\n[Step {step + 1}]")
-        response = (
+        result = (
             Agently.create_agent()
             .input(question)
             .info({"available_tools": tools_desc, "completed_steps": completed})
@@ -106,9 +106,9 @@ def react_loop(question: str, max_steps: int = 6) -> str:
                 "tool_args": ("dict | null", "Tool arguments when type=='tool'"),
                 "answer": ("str | null", "Final answer when type=='final'"),
             })
-            .get_response()
+            .get_result()
         )
-        d = response.result.get_data()
+        d = result.get_data()
         if not d:
             break
 

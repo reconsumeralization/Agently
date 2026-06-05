@@ -16,7 +16,7 @@ llm = Agently.create_agent()
 
 
 async def main():
-    instant_mode_response = (
+    instant_mode_result = (
         llm.input("Give me 5 computer-related words and 3 color-related phrases and 1 random sentence.")
         .output(
             {
@@ -30,7 +30,7 @@ async def main():
         .get_async_generator(type="instant")
     )
 
-    async for event in instant_mode_response:
+    async for event in instant_mode_result:
         print(
             event.path,
             "[DONE]" if event.is_complete else "[>>>>]",

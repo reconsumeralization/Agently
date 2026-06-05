@@ -37,13 +37,13 @@ def build_flow() -> TriggerFlow:
             await data.async_set_state("response", {"input": user_input, "reply": empty_reply})
             return
 
-        response = agent.input(user_input).get_response()
+        result = agent.input(user_input).get_result()
 
-        async for delta in response.get_async_generator(type="delta"):
+        async for delta in result.get_async_generator(type="delta"):
             if delta:
                 await data.async_put_into_stream({"event": "delta", "content": delta})
 
-        final_reply = await response.async_get_text()
+        final_reply = await result.async_get_text()
         await data.async_put_into_stream({"event": "final", "content": final_reply})
         await data.async_set_state("response", {"input": user_input, "reply": final_reply})
 

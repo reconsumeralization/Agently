@@ -89,8 +89,8 @@ Prompt 配置文件现在推荐用 `.turn` 表示 turn-scoped section；`.reques
 - 目标回归测试覆盖 settings-owned 输出默认值、有意义必填值、AgentTurn request-scoped
   prompt draft 和 `set_turn_prompt(...)` 兼容行为。
 - 静态类型回归覆盖 AgentTurn 转发、ModelResponse stream facade、`specific`
-  事件元组、AgentExecution stream item，以及从 `agently.types.data` 暴露的
-  Skills stream handler 别名。
+  事件元组、AgentExecution stream item，以及从 `agently` 和
+  `agently.types.data` 暴露的 Skills stream handler 别名。
 - Agently-Skills 指引已更新，并通过 companion validation suite。
 
 ## 延期范围

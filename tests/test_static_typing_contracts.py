@@ -5,10 +5,26 @@ from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import assert_type
 
-from agently import Agent, Agently
-from agently.core import AgentTurn, BaseAgent, ModelResponse
+from agently import (
+    Agent,
+    AgentExecutionStreamData as RootAgentExecutionStreamData,
+    Agently,
+    AgentlyModelResponseEvent as RootAgentlyModelResponseEvent,
+    AgentlyModelResponseMessage as RootAgentlyModelResponseMessage,
+    AgentlyOriginalResponsePayload as RootAgentlyOriginalResponsePayload,
+    AgentlySpecificResponseMessage as RootAgentlySpecificResponseMessage,
+    EventHook as RootEventHook,
+    ModelStreamingHandler as RootModelStreamingHandler,
+    RuntimeEvent as RootRuntimeEvent,
+    RuntimeEventHook as RootRuntimeEventHook,
+    SkillRuntimeStreamHandler as RootSkillRuntimeStreamHandler,
+    SkillRuntimeStreamItem as RootSkillRuntimeStreamItem,
+    StreamingData as RootStreamingData,
+)
+from agently.core import AgentTurn, BaseAgent, ModelResponseResult
 from agently.types.data import (
     AgentExecutionStreamData,
+    AgentlyModelResponseEvent,
     AgentlyModelResponseMessage,
     AgentlyOriginalResponsePayload,
     AgentlySpecificResponseMessage,
@@ -39,9 +55,12 @@ def test_agent_turn_and_model_response_streaming_type_contracts():
         assert_type(turn.get_async_generator(type="all"), AsyncGenerator[AgentlyModelResponseMessage, None])
         assert_type(turn.get_async_generator(type="original"), AsyncGenerator[AgentlyOriginalResponsePayload, None])
 
-        response: ModelResponse = agent.create_request().input("hello").get_response()
-        assert_type(response.get_generator(type="instant"), Generator[StreamingData, None, None])
-        assert_type(response.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResponseMessage, None])
+        result: ModelResponseResult = agent.create_request().input("hello").get_result()
+        assert_type(result.get_generator(type="instant"), Generator[StreamingData, None, None])
+        assert_type(result.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResponseMessage, None])
+
+        compat_result: ModelResponseResult = agent.create_request().input("hello").get_response()
+        assert_type(compat_result.result.get_text(), str)
 
 
 def test_public_handler_type_aliases():
@@ -72,3 +91,19 @@ def test_skills_planning_context_model_stream_handler_contract():
             assert_type(item, StreamingData)
 
         _result = context.async_request_model(prompt="hello", stream_handler=handler)
+
+
+def test_common_types_are_available_from_package_root():
+    if TYPE_CHECKING:
+        assert_type(RootStreamingData(path="reply", value="ok"), StreamingData)
+        assert_type(cast(RootAgentExecutionStreamData, object()), AgentExecutionStreamData)
+        assert_type(cast(RootAgentlyModelResponseEvent, "delta"), AgentlyModelResponseEvent)
+        assert_type(cast(RootAgentlyModelResponseMessage, object()), AgentlyModelResponseMessage)
+        assert_type(cast(RootAgentlySpecificResponseMessage, object()), AgentlySpecificResponseMessage)
+        assert_type(cast(RootAgentlyOriginalResponsePayload, object()), AgentlyOriginalResponsePayload)
+        assert_type(cast(RootModelStreamingHandler, object()), ModelStreamingHandler)
+        assert_type(cast(RootSkillRuntimeStreamItem, object()), dict[str, Any])
+        assert_type(cast(RootSkillRuntimeStreamHandler, object()), SkillRuntimeStreamHandler)
+        assert_type(cast(RootRuntimeEvent, object()), RootRuntimeEvent)
+        assert_type(cast(RootEventHook, object()), RootEventHook)
+        assert_type(cast(RootRuntimeEventHook, object()), RootRuntimeEventHook)

@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 
-from typing import Any, AsyncGenerator, Awaitable, Literal, TYPE_CHECKING, cast, overload, Generator, Mapping
+from typing import Any, AsyncGenerator, Awaitable, Callable, Literal, TYPE_CHECKING, cast, overload, Generator, Mapping
 
 from agently.core.runtime import bind_runtime_context
 from agently.utils import DeprecationWarnings, FunctionShifter
@@ -85,6 +85,9 @@ class ModelResponseResult:
             ),
         )
         self._response_id = response_id
+        self.id: str = response_id
+        self.response_id: str = response_id
+        self.result: ModelResponseResult = self
         self._extension_handlers = extension_handlers
         self._response_parser = ResponseParser(
             agent_name,
@@ -107,8 +110,8 @@ class ModelResponseResult:
         self._validate_handler_signature: tuple[int, ...] | None = None
         self._data_flow = ModelResponseDataFlow(self)
         self.full_result_data = self._response_parser.full_result_data
-        self.get_meta = FunctionShifter.syncify(self.async_get_meta)
-        self.get_text = FunctionShifter.syncify(self.async_get_text)
+        self.get_meta = cast(Callable[[], dict[str, Any]], FunctionShifter.syncify(self.async_get_meta))
+        self.get_text = cast(Callable[[], str], FunctionShifter.syncify(self.async_get_text))
         self.get_data = FunctionShifter.syncify(self.async_get_data)
         self.get_data_object = FunctionShifter.syncify(self.async_get_data_object)
 
@@ -268,7 +271,7 @@ class ModelResponseResult:
             raise_ensure_failure=raise_ensure_failure,
         )
 
-    async def async_get_meta(self):
+    async def async_get_meta(self) -> dict[str, Any]:
         try:
             return await self._await_materialization(
                 self._response_parser.async_get_meta(),
@@ -278,7 +281,7 @@ class ModelResponseResult:
             await self._drain_response_parser_observations()
             await self._run_finally_handlers_once()
 
-    async def async_get_text(self):
+    async def async_get_text(self) -> str:
         try:
             return await self._await_materialization(
                 self._response_parser.async_get_text(),
@@ -292,6 +295,7 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: "InstantStreamingContentType",
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator["StreamingData", None, None]: ...
@@ -300,6 +304,7 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: Literal["all"],
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
@@ -308,6 +313,7 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: Literal["specific"],
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
@@ -316,6 +322,7 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: Literal["delta"],
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator[str, None, None]: ...
@@ -324,6 +331,7 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: Literal["original"],
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
@@ -332,6 +340,7 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: "ResponseContentType | None" = "delta",
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator: ...
@@ -371,6 +380,7 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: "InstantStreamingContentType",
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator["StreamingData", None]: ...
@@ -379,6 +389,7 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: Literal["all"],
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
@@ -387,6 +398,7 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: Literal["specific"],
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
@@ -395,6 +407,7 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: Literal["delta"],
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator[str, None]: ...
@@ -403,6 +416,7 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: Literal["original"],
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
@@ -411,6 +425,7 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: "ResponseContentType | None" = "delta",
+        content: "ResponseContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator: ...

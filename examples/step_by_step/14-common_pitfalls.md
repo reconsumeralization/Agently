@@ -14,7 +14,7 @@
 
 ## 1.2) Streaming inside async loop throws `asyncio.run` error
 - Symptom: `asyncio.run() cannot be called from a running event loop`.
-- Cause: using sync `get_response().get_generator(...)` inside an async handler.
+- Cause: using sync `get_result().get_generator(...)` inside an async handler.
 - Fix: use `request.get_async_generator(...)` with `async for`.
 
 ## 2) TriggerFlow result shape is unexpected

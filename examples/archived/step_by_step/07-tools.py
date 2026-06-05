@@ -51,18 +51,18 @@ def action_func_decorator():
 ## Advanced: Trace Action Calls from Result (extra)
 def action_call_trace():
     # Action calls happen inside the agent request, so the model can decide when to call actions.
-    # Action call records are stored in response.result.full_result_data["extra"]["action_logs"].
+    # Action call records are stored in result.full_result_data["extra"]["action_logs"].
     search = Search(
         proxy="http://127.0.0.1:55758",
         region="us-en",
         backend="google",
     )
     agent.use_actions([search.search, search.search_news])
-    response = agent.input("Search for Agently AI Framework and summarize key points.").get_response()
-    result = response.result.get_data()
-    extra = response.result.full_result_data.get("extra", {})
+    result = agent.input("Search for Agently AI Framework and summarize key points.").get_result()
+    data = result.get_data()
+    extra = result.full_result_data.get("extra", {})
     action_logs = extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else []
-    print(result)
+    print(data)
     print("[action_logs]", action_logs)
 
 
@@ -78,12 +78,12 @@ def multi_stage_search_browse_summarize():
         backend="google",
     )
     agent.use_actions([search.search, search.search_news])
-    response = (
+    result = (
         agent.input("Search for Agently AI Framework and list 3 best URLs to read (only URLs).")
         .output({"urls": [(str, "URL")]})
-        .get_response()
+        .get_result()
     )
-    stage1 = response.result.get_data()
+    stage1 = result.get_data()
     urls = stage1.get("urls", []) if isinstance(stage1, dict) else []
     urls = [u for u in urls if isinstance(u, str)]
     urls = urls[:3]
@@ -101,7 +101,7 @@ def multi_stage_search_browse_summarize():
 
     # Stage 3: summarize based on the browsed content with a clean agent that has no actions attached.
     summary_agent = Agently.create_agent()
-    response = (
+    result = (
         summary_agent.input({"task": "Summarize key points from the sources.", "sources": pages})
         .output(
             {
@@ -114,9 +114,9 @@ def multi_stage_search_browse_summarize():
                 ],
             }
         )
-        .get_response()
+        .get_result()
     )
-    stage3 = response.result.get_data()
+    stage3 = result.get_data()
     print("[stage3 summary]", stage3)
 
 

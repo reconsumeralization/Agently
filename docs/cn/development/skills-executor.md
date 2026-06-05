@@ -228,7 +228,8 @@ judge。
 直接 Skills `stream_handler` 回调可用 `agently.types.data` 里的
 `SkillRuntimeStreamHandler` 标注。如果你在自定义 Skills effort strategy 里调用
 `context.async_request_model(..., stream_handler=...)`，这个模型流回调收到的是
-`StreamingData`，可用 `ModelStreamingHandler` 标注。
+`StreamingData`，可用 `ModelStreamingHandler` 标注。两个类型都可以从根入口导入：
+`from agently import StreamingData, ModelStreamingHandler`。
 
 `effort="fast"` 使用低开销 single-shot 路径。`effort="normal"` 固定走完整
 preflight -> research -> plan -> execute -> verify -> reflect -> finalize

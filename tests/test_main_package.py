@@ -1057,11 +1057,11 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
             self.output_format = format
             return self
 
-        def get_response(self, **_kwargs):
+        def get_result(self, **_kwargs):
             return FakeModelResponse()
 
-        async def async_start(self, **_kwargs):  # pragma: no cover - get_response path owns streaming
-            raise AssertionError("streaming model tasks should use get_response()")
+        async def async_start(self, **_kwargs):  # pragma: no cover - get_result path owns streaming
+            raise AssertionError("streaming model tasks should use get_result()")
 
     request = FakeModelRequest()
     agent = Agently.create_agent("execution-model-field-stream-agent")

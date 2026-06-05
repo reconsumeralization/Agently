@@ -14,7 +14,7 @@ Agently has three protocol-level request plugins, plus per-provider configuratio
 Application code
       │
       ▼
-  ModelRequest  ──►  ModelResponse
+  ModelRequest  ──►  ModelResponseResult
       │
       ▼
 ModelRequester plugin (the "protocol layer")

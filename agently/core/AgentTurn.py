@@ -24,7 +24,7 @@ from agently.utils import FunctionShifter
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
-    from agently.core.model import ModelRequest, ModelResponse, ModelResponseResult
+    from agently.core.model import ModelRequest, ModelResponseResult
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
@@ -453,25 +453,25 @@ class AgentTurn:
             raise_ensure_failure=raise_ensure_failure,
         )
 
-    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponse":
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
         turn_run_context = self._agent._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._agent._emit_agent_turn_started(turn_run_context)
         return self.request.get_response(parent_run_context=turn_run_context)
 
     def get_result(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
-        return self.get_response(parent_run_context=parent_run_context).result
+        return self.get_response(parent_run_context=parent_run_context)
 
     def get_meta(self, *, parent_run_context: "RunContext | None" = None):
-        return self.get_response(parent_run_context=parent_run_context).get_meta()
+        return self.get_result(parent_run_context=parent_run_context).get_meta()
 
     async def async_get_meta(self, *, parent_run_context: "RunContext | None" = None):
-        return await self.get_response(parent_run_context=parent_run_context).async_get_meta()
+        return await self.get_result(parent_run_context=parent_run_context).async_get_meta()
 
     def get_text(self, *, parent_run_context: "RunContext | None" = None):
-        return self.get_response(parent_run_context=parent_run_context).get_text()
+        return self.get_result(parent_run_context=parent_run_context).get_text()
 
     async def async_get_text(self, *, parent_run_context: "RunContext | None" = None):
-        return await self.get_response(parent_run_context=parent_run_context).async_get_text()
+        return await self.get_result(parent_run_context=parent_run_context).async_get_text()
 
     @overload
     def get_data(
@@ -510,7 +510,7 @@ class AgentTurn:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ) -> Any:
-        return self.get_response(parent_run_context=parent_run_context).get_data(
+        return self.get_result(parent_run_context=parent_run_context).get_data(
             type=type,
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
@@ -556,7 +556,7 @@ class AgentTurn:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ) -> Any:
-        return await self.get_response(parent_run_context=parent_run_context).async_get_data(
+        return await self.get_result(parent_run_context=parent_run_context).async_get_data(
             type=type,
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
@@ -566,10 +566,10 @@ class AgentTurn:
         )
 
     def get_data_object(self, *args: Any, parent_run_context: "RunContext | None" = None, **kwargs: Any):
-        return self.get_response(parent_run_context=parent_run_context).get_data_object(*args, **kwargs)
+        return self.get_result(parent_run_context=parent_run_context).get_data_object(*args, **kwargs)
 
     async def async_get_data_object(self, *args: Any, parent_run_context: "RunContext | None" = None, **kwargs: Any):
-        return await self.get_response(parent_run_context=parent_run_context).async_get_data_object(*args, **kwargs)
+        return await self.get_result(parent_run_context=parent_run_context).async_get_data_object(*args, **kwargs)
 
     @overload
     def get_generator(
@@ -639,7 +639,7 @@ class AgentTurn:
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
     ) -> Generator:
-        return self.get_response(parent_run_context=parent_run_context).get_generator(
+        return self.get_result(parent_run_context=parent_run_context).get_generator(
             type=type,
             content=content,
             specific=specific,
@@ -713,7 +713,7 @@ class AgentTurn:
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
     ) -> AsyncGenerator:
-        return self.get_response(parent_run_context=parent_run_context).get_async_generator(
+        return self.get_result(parent_run_context=parent_run_context).get_async_generator(
             type=type,
             content=content,
             specific=specific,

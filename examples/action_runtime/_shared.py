@@ -47,11 +47,11 @@ def print_action_results(records):
     pprint(Action.to_action_results(records))
 
 
-def print_response(response):
+def print_response(result):
     print("[REPLY]")
-    print(response.result.get_text())
+    print(result.get_text())
 
-    extra = response.result.full_result_data.get("extra") or {}
+    extra = result.full_result_data.get("extra") or {}
     action_logs = extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else []
 
     print("[ACTION_LOGS_FROM_RESPONSE_RESULT]")
@@ -62,7 +62,7 @@ def print_response(response):
 #   create_deepseek_agent(system_prompt) — configures DeepSeek via env vars and returns an agent
 #   configure_deepseek(temperature=0.1) — configures DeepSeek settings globally
 #   print_action_results(records) — prints INTERMEDIATE_ACTION_RESULTS and INTERMEDIATE_ACTION_RESULTS_FOR_REPLY
-#   print_response(response) — prints REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
+#   print_response(result) — prints REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
 #
 # How it works:
 # configure_deepseek() reads DEEPSEEK_API_KEY and DEEPSEEK_BASE_URL from the environment
