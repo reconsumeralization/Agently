@@ -103,10 +103,12 @@ See [Model Response](../requests/model-response.md) for streaming options.
 
 ### Add a structured side-channel
 
-If your UI needs to know which action ran (to highlight a row, animate, etc.), read `agent.get_action_result()` after each turn:
+If your UI needs to know which action ran (to highlight a row, animate, etc.),
+hold the request-scoped turn and pass its prompt to the action loop:
 
 ```python
-records = agent.get_action_result()
+turn = agent.input(user_text)
+records = agent.get_action_result(prompt=turn.prompt)
 for r in records:
     notify_ui(action=r.name, args=r.input, result=r.output)
 ```

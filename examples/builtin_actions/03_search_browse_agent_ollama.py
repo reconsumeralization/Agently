@@ -67,15 +67,15 @@ def build_agent():
 
 def main():
     agent = build_agent()
-    agent.input(
+    turn = agent.input(
         "Find one recent source about agent action runtime design, browse the most relevant page if needed, "
         "then summarize the key point in two bullets."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print("[ACTION_RECORDS]")
     pprint(records)
 
-    response = agent.get_response()
+    response = turn.get_response()
     print("[MODEL_REPLY]")
     print(response.result.get_text())
 

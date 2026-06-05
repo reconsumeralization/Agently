@@ -28,9 +28,9 @@ For application developers, the shape is intentionally small:
 agent = Agently.create_agent()
 agent.enable_python(desc="Use for exact calculations. Assign the final answer to `result`.")
 
-agent.input("Use Python to calculate the average of [15, 23, 42, 8, 12].")
-records = agent.get_action_result()
-response = agent.get_response()
+turn = agent.input("Use Python to calculate the average of [15, 23, 42, 8, 12].")
+records = agent.get_action_result(prompt=turn.prompt)
+response = turn.get_response()
 ```
 
 You normally do not need to call `Agently.execution_environment` directly. The

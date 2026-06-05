@@ -32,14 +32,14 @@ agent.action.register_python_sandbox_action(
 
 def demo_python_sandbox():
     agent.use_actions("run_python")
-    agent.input(
+    turn = agent.input(
         "I have five product prices: 29.99, 14.50, 89.00, 5.25, 49.75. "
         "Use the Python sandbox to compute: the total, the average, and the price range "
         "(max minus min). Return all three values."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = agent.get_response()
+    response = turn.get_response()
     print(response.result.get_text())
 
 
@@ -48,14 +48,14 @@ def demo_python_sandbox():
 
 def demo_python_sandbox_sorting():
     agent.use_actions("run_python")
-    agent.input(
+    turn = agent.input(
         "Sort these words alphabetically and count unique first letters: "
         "['mango', 'apple', 'banana', 'avocado', 'blueberry', 'melon', 'cherry']. "
         "Use the Python sandbox."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = agent.get_response()
+    response = turn.get_response()
     print(response.result.get_text())
 
 
@@ -80,8 +80,8 @@ def demo_python_sandbox_sorting():
 #
 # Flow:
 # agent.use_actions("run_python")
-# agent.input("Compute total, average, range for [29.99, 14.50, ...]")
-# agent.get_action_result()
+# turn = agent.input("Compute total, average, range for [29.99, 14.50, ...]")
+# agent.get_action_result(prompt=turn.prompt)
 #   model plans: run_python(code="""
 #       prices = [29.99, 14.50, 89.00, 5.25, 49.75]
 #       result = {'total': sum(prices), 'average': sum(prices)/len(prices),

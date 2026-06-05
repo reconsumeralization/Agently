@@ -16,10 +16,11 @@ def basic_prompt_methods():
     # .set_agent_prompt() will cache prompt in agent instance and reuse prompt in every future request until it is changed or removed
     agent.set_agent_prompt("system", "You are a useful assistant.")
     # .set_turn_prompt() writes prompt for one turn only.
-    # Turn prompt will be erased when response instance of next request is created.
-    agent.set_turn_prompt("input", "Hello")
+    # Hold the turn if setup is split across statements.
+    turn = agent.create_turn()
+    turn.set_turn_prompt("input", "Hello")
 
-    print(agent.start())  # Have response
+    print(turn.start())  # Have response
     print(agent.start())  # Raise error because of missing core prompt
 
     # reset prompt
@@ -49,8 +50,8 @@ def what_happen_when_start():
     # In fact, .start() or .get_data() will create a response instance to storage a snapshot of all runtime information for this request first
     # If any response consume command is given to the response instance, the actual model request start and save all result to a result instance inside the response instance.
     # So the actual behaviors are like these:
-    agent.input("hi")
-    response = agent.get_response()
+    turn = agent.input("hi")
+    response = turn.get_response()
     result_data = response.result.get_data()
     # You can get different content from result and the request will not be restarted again
     # Different contents will be stored in result instance when the request is finished.
@@ -70,7 +71,8 @@ def what_happen_when_start():
 ## Chaining Methods Support
 def chaining_methods_support():
     result = (
-        agent.set_turn_prompt(
+        agent.create_turn()
+        .set_turn_prompt(
             "input",
             "hello",
         )
@@ -108,7 +110,8 @@ def any_data_as_prompt():
         ],  # Nested data supported
     }
     result = (
-        agent.set_turn_prompt(
+        agent.create_turn()
+        .set_turn_prompt(
             "input",
             question_list,
         )
@@ -142,9 +145,10 @@ def prompt_slots():
     # "output_format",
     # "options"
     # "chat_history", ! Notice: chat_history is a special prompt slot which allows message list only
-    agent.set_turn_prompt("input", "Is v3 or v4 is Agently's latest version?")
-    agent.set_turn_prompt("agently_latest_version", "4.0.6.11")
-    print(agent.start())
+    turn = agent.create_turn()
+    turn.set_turn_prompt("input", "Is v3 or v4 is Agently's latest version?")
+    turn.set_turn_prompt("agently_latest_version", "4.0.6.11")
+    print(turn.start())
 
 
 # prompt_slots()
@@ -155,7 +159,8 @@ def placeholder_mappings():
     # You can use ${<variable name>} in almost every position in prompt data as long as that position support string value.
     # Placeholder mappings should always be passed explicitly via mappings=...
     result = (
-        agent.set_turn_prompt(
+        agent.create_turn()
+        .set_turn_prompt(
             "input",
             "My question is ${question}",
             mappings={

@@ -12,8 +12,7 @@ agent = create_deepseek_agent(
 agent.action.register_bash_sandbox_action(
     action_id="repo_bash_inspector",
     desc=(
-        "Run a shell command inside a constrained sandbox. "
-        "Allowed commands are: pwd, ls, echo."
+        "Run a shell command inside a constrained sandbox."
     ),
     expose_to_model=True,
     allowed_cmd_prefixes=["pwd", "ls", "echo"],
@@ -28,14 +27,14 @@ agent.action.register_bash_sandbox_action(
 
 if __name__ == "__main__":
     agent.use_actions("repo_bash_inspector")
-    agent.input(
+    turn = agent.input(
         f"The repository root is `{repo_root}`. "
         "Use the bash sandbox action to run `pwd` in that directory, then list `examples/action_runtime`. "
         "Tell me the working directory and the example file names you found."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
-    response = agent.get_response()
+    response = turn.get_response()
     print_response(response)
 
 # Expected key output after configuring DeepSeek:

@@ -134,10 +134,10 @@ if __name__ == "__main__":
 
     agent.register_action_planning_handler(planning_handler)
     agent.use_actions("multiply")
-    agent.input("Use the multiply action once, then answer with the exact product.")
-    records = agent.get_action_result(max_rounds=1)
+    turn = agent.input("Use the multiply action once, then answer with the exact product.")
+    records = agent.get_action_result(prompt=turn.prompt, max_rounds=1)
     print_action_results(records)
-    response = agent.get_response()
+    response = turn.get_response()
     print_response(response)
 
 # Expected key output after configuring DeepSeek:

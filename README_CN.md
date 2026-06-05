@@ -295,7 +295,8 @@ MCP server 使用 `agent.use_mcp(...)`。构建带显式托管资源的自定义
 指令较重的 actions 会把后续模型上下文保持紧凑，只放 execution digest 和 artifact refs。应用如果需要完整代码、shell 输出、网页内容、SQL 行、截图或日志，可以显式读取 raw artifact：
 
 ```python
-records = agent.get_action_result()
+turn = agent.input("使用 shell action，并总结执行结果。")
+records = agent.get_action_result(prompt=turn.prompt)
 artifact_ref = records[0]["artifact_refs"][0]
 
 raw = agent.action.read_action_artifact(

@@ -103,10 +103,12 @@ for delta in gen:
 
 ### 加结构化旁路
 
-UI 需要知道哪个 action 跑了（高亮某行、动画等），每轮后读 `agent.get_action_result()`：
+UI 需要知道哪个 action 跑了（高亮某行、动画等）时，持有 request-scoped turn，
+并把它的 prompt 传给 action loop：
 
 ```python
-records = agent.get_action_result()
+turn = agent.input(user_text)
+records = agent.get_action_result(prompt=turn.prompt)
 for r in records:
     notify_ui(action=r.name, args=r.input, result=r.output)
 ```

@@ -36,7 +36,7 @@ agent.enable_python(
 
 
 if __name__ == "__main__":
-    agent.input(
+    turn = agent.input(
         {
             "task": (
                 "Process this GitHub issue. First call the Python action to compute: "
@@ -50,10 +50,10 @@ if __name__ == "__main__":
         }
     )
 
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
 
-    response = agent.get_response()
+    response = turn.get_response()
     print_response(response)
 
     print("[ACTION_CALL_HANDLES_AFTER_RELEASE]")

@@ -19,17 +19,17 @@ agent.enable_python(
 
 
 if __name__ == "__main__":
-    agent.input(
+    turn = agent.input(
         "Use Python for this list: [15, 23, 42, 8, 12]. "
         "Calculate average, count, and max-minus-min gap. "
         "The Python code must assign a dict to `result` with keys average, count, and max_minus_min_gap. "
         "Then reply with those values."
     )
 
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
 
-    response = agent.get_response()
+    response = turn.get_response()
     print_response(response)
 
     print("[ACTION_CALL_HANDLES_AFTER_RELEASE]")

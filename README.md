@@ -298,7 +298,8 @@ Use `agent.use_mcp(...)` for MCP servers. Use `agent.register_action(..., execut
 Instruction-heavy actions keep later model context compact with execution digests and artifact references. The application can read raw artifacts explicitly when it needs full code, shell output, page content, SQL rows, screenshots, or logs:
 
 ```python
-records = agent.get_action_result()
+turn = agent.input("Use the shell action and summarize the result.")
+records = agent.get_action_result(prompt=turn.prompt)
 artifact_ref = records[0]["artifact_refs"][0]
 
 raw = agent.action.read_action_artifact(

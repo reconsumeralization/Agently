@@ -31,13 +31,13 @@ def main():
     )
 
     print_model_provider(provider)
-    agent.input(
+    turn = agent.input(
         "Demonstrate shell policy: run pwd, then try ls. Explain whether each command was allowed or blocked."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
 
-    response = agent.get_response()
+    response = turn.get_response()
     print_model_reply(response)
 
     statuses = [record.get("status") for record in records]
