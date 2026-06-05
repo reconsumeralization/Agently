@@ -44,13 +44,13 @@ class TestOutputFormat:
         assert m.output_format == "flat_markdown"
         assert isinstance(m.output, dict)
 
-    def test_dict_output_defaults_to_auto_resolution(self):
-        """When output_format is None (default), dict output uses auto resolution."""
+    def test_dict_prompt_model_defaults_to_json_without_settings(self):
+        """PromptModel itself has no settings context, so None uses json."""
         from agently.types.data.prompt import PromptModel
 
         m = PromptModel(output=TEST_SCHEMA, output_format=None)
-        assert m.output_format == "xml_field"
-        assert m.output_format_resolved_from_auto is True
+        assert m.output_format == "json"
+        assert m.output_format_resolved_from_auto is False
 
     def test_non_dict_output_with_flat_markdown_warns_and_falls_back(self):
         from agently.types.data.prompt import PromptModel
@@ -241,14 +241,24 @@ class TestModelRequestOutputFormat:
         fmt = agent.request.prompt.get("output_format")
         assert fmt == "flat_markdown"
 
-    def test_default_format_is_auto(self):
+    def test_default_format_reads_settings_default_json(self):
         from agently import Agently
 
         agent = Agently.create_agent("test")
         agent.request.output(TEST_SCHEMA)
         fmt = agent.request.prompt.get("output_format")
-        assert fmt == "auto"
+        assert fmt is None
+        assert agent.request.prompt.to_prompt_object().output_format == "json"
+
+    def test_default_format_can_be_set_to_auto_per_agent(self):
+        from agently import Agently
+
+        agent = Agently.create_agent("test-auto-default")
+        agent.set_settings("prompt.default_output_format", "auto")
+        agent.request.output(TEST_SCHEMA)
+        assert agent.request.prompt.get("output_format") is None
         assert agent.request.prompt.to_prompt_object().output_format == "xml_field"
+        assert agent.request.prompt.to_prompt_object().output_format_resolved_from_auto is True
 
     def test_flat_markdown_prompt_keeps_header_line_plain(self):
         from agently import Agently

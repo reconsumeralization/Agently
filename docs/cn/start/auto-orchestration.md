@@ -19,6 +19,33 @@ result = (
 候选注入是边界。如果没有注册 Actions、Skills、Skills Packs 或 Dynamic Task
 候选，`agent.start()` 仍然是普通模型请求。
 
+quick prompt 链是 request-scoped。Agent 可以作为服务单例保存共享 settings、模型
+激活、Actions、Skills、Workspace 和 `always=True` prompt；同一条链里的
+`.input(...)`、`.system(...)`、`.output(...)`、附件和本轮 options 会写入隔离的
+`AgentTurn` draft：
+
+```python
+results = await asyncio.gather(
+    agent.input("Summarize request A").async_start(),
+    agent.input("Summarize request B").async_start(),
+    agent.input("Summarize request C").async_start(),
+)
+```
+
+多语句 setup 应显式拿住 turn draft：
+
+```python
+turn = agent.create_turn()
+turn.input("Review this renewal risk.")
+turn.output({"answer": (str, "final answer", True)})
+result = await turn.async_start()
+```
+
+不要再依赖 `agent.input(...); agent.output(...); await agent.async_start()`
+来累计本轮 turn prompt。Agent 生命周期状态使用 `always=True`、
+`set_agent_prompt(...)` 或稳定 setup 方法；只有明确需要低层 request-builder
+兼容面时才使用 `agent.create_request(...)` / `agent.request`。
+
 已验收开发线的路由是候选驱动、确定性优先：submitted Dynamic Task 候选优先，
 required Skills 候选进入 Skills route。当同时存在多个可选候选，例如 auto Dynamic
 Task、model-decision Skills 和普通 Actions 时，默认由模型选择 route；如果只有一个

@@ -169,8 +169,8 @@ execution = await (
 ```
 
 `set_agent_prompt(...)` 写入的长期 prompt 会被继承并保留给后续轮次；
-`set_request_prompt(...)` / quick prompt 写入的本轮 request prompt 会被冻结到这次
-Skill run，然后从 pending request 清理。显式传入的 `output=` 和
+`set_turn_prompt(...)`、兼容别名 `set_request_prompt(...)` 和 quick prompt 写入的
+本轮 turn prompt 会被冻结到这次 Skill run，然后从 pending request 清理。显式传入的 `output=` 和
 `output_format=` 参数优先于 prompt 推导值。
 
 `output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认

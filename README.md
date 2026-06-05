@@ -1,6 +1,6 @@
 <img width="640" alt="Agently" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4.1.3.4 - AI Application Runtime Framework
+# Agently 4.1.3.5 - AI Application Runtime Framework
 
 > Build AI service backends with structured outputs, observable Actions, runtime Skills, MCP capabilities, process streams, and recoverable workflows.
 
@@ -32,10 +32,11 @@ Agently is for teams moving from "the model can do it once" to "the application 
 
 The main design question is simple: how do you keep model behavior useful while still giving application code stable contracts, observable execution, and restart-safe workflow boundaries?
 
-Agently 4.1.3.4 hardens structured output parsing for mixed long-text and typed
-contracts, adds OpenAICompatible pre-output transport retry, propagates explicit
-stream materialization errors, and ships a bounded single-Agent AgentTaskLoop
-first public slice. Read the
+Agently 4.1.3.5 makes request and output control defaults safer: structured
+output defaults are settings-owned, required fields must resolve to meaningful
+values, Agent quick prompt chains isolate turn-local prompt drafts, and
+`set_turn_prompt(...)` names the one-turn prompt write surface. Read the
+[4.1.3.5 Release Notes](docs/en/development/release-notes-4.1.3.5.md),
 [4.1.3.4 Release Notes](docs/en/development/release-notes-4.1.3.4.md),
 [4.1.3.3 Release Notes](docs/en/development/release-notes-4.1.3.3.md),
 [4.1.3.2 Release Notes](docs/en/development/release-notes-4.1.3.2.md),
@@ -61,7 +62,7 @@ Agently is a good fit when you care about:
 - **Common model-app patterns should be composable** - router, To-Do/dependency execution, planning, reflection, evaluator/reviser, and multi-agent collaboration can be built from the same request/action/signal primitives. Read [Playbooks](docs/en/playbooks/overview.md), [TriggerFlow Model Integration](docs/en/triggerflow/model-integration.md), and [`examples/step_by_step/`](examples/step_by_step/).
 - **Services should keep clean project boundaries** - async APIs, FastAPI helpers, settings files, prompt files, DevTools observation, and companion coding-agent skills fit non-trivial projects. Read [Project Framework](docs/en/start/project-framework.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [Observability](docs/en/observability/overview.md).
 
-Current framework version: `4.1.3.4`.
+Current framework version: `4.1.3.5`.
 
 Python: `>=3.10`.
 
@@ -185,7 +186,7 @@ Prompts are composed from named slots. That keeps application intent, constraint
 response = (
     agent
     .role("You are a concise release-note writer.")
-    .info({"version": "4.1.3.2", "audience": "framework users"})
+    .info({"version": "4.1.3.5", "audience": "framework users"})
     .instruct("Return only facts grounded in the input.")
     .input("Summarize this release line for an engineering changelog.")
     .output({
@@ -459,7 +460,7 @@ pip install agently-devtools
 agently-devtools init my_project
 ```
 
-Agently 4.1.3.2 recommends `agently-devtools >=0.1.6,<0.2.0`.
+Agently 4.1.3.5 recommends `agently-devtools >=0.1.7,<0.2.0`.
 
 ## Architecture
 
@@ -691,8 +692,8 @@ Use the async request APIs directly or wrap agents, requests, generators, Trigge
 
 ## Compatibility Notes
 
-- The current package version is `4.1.3.2`.
-- The current release manifest is `compatibility/releases/4.1.3.2.json`.
+- The current package version is `4.1.3.5`.
+- The current release manifest is `compatibility/releases/4.1.3.5.json`.
 - Development-line planning belongs in `compatibility/in-development.json`; do not treat planned future versions as released.
 - README examples use the current Action and TriggerFlow close-snapshot paths.
 - Deprecated APIs emit warnings once per Python process unless `runtime.show_deprecation_warnings` is disabled.

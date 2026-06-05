@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.3.4"
-CURRENT_RELEASE_TRAIN = "2026-06-4.1.3.4"
+CURRENT_FRAMEWORK_VERSION = "4.1.3.5"
+CURRENT_RELEASE_TRAIN = "2026-06-4.1.3.5"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -77,7 +77,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
                     "summary_marker": "meta.coalesced",
                 },
             },
-            "recommended_version_specifier": ">=0.1.6,<0.2.0",
+            "recommended_version_specifier": ">=0.1.7,<0.2.0",
         },
         "skills": {
             "repository": "Agently-Skills",
@@ -172,9 +172,24 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
                 "Built-in Search returns partial_success when earlier ddgs backends fail or return empty parsed "
                 "results but a later fallback backend returns usable results."
             ),
+            "bash_sandbox_model_description": (
+                "Model-visible bash sandbox action descriptions include the allowed command prefixes, allowed "
+                "working-directory roots, and timeout when the action is registered or enabled through "
+                "agent.enable_shell(...)."
+            ),
         },
         "configuration": {
             "settings_contract": "dict-compatible typed helpers under agently.types.settings",
+            "default_output_format": (
+                "Omitted .output(..., format=...) reads prompt.default_output_format from the current settings "
+                "chain; the global default is json, while explicit format=\"auto\" and per-agent/request "
+                "prompt.default_output_format=\"auto\" remain available for schema-driven selection."
+            ),
+            "tuple_ensure_value_contract": (
+                "Tuple ensure flags and ensure_keys require paths to resolve to meaningful values: missing keys, "
+                "None, blank strings, empty wildcard matches, and wildcard matches containing blank required "
+                "values fail and share the normal retry budget; False and 0 remain valid typed values."
+            ),
             "options_contract": "dict-compatible typed helpers under agently.types.options",
             "plugin_schema_registration": [
                 "SETTINGS_SCHEMAS",
@@ -194,6 +209,27 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
         },
     },
     "request_input": {
+        "agent_turn_request_scope": {
+            "status": "released",
+            "surface": [
+                "AgentTurn",
+                "Agent.create_turn",
+                "Agent quick prompt chain",
+                "Agent.set_turn_prompt",
+                "AgentTurn.set_turn_prompt",
+            ],
+            "contract": (
+                "Non-always Agent quick prompt calls create an isolated AgentTurn request draft; "
+                "set_turn_prompt(...) names the one-turn prompt write surface; Agent-level persistent state remains "
+                "on always=True/set_agent_prompt/stable setup APIs."
+            ),
+            "compatibility_policy": (
+                "Expression-local chaining is the recommended request-scoped shape. Multi-statement setup should "
+                "capture turn = agent.create_turn() and mutate that turn. set_request_prompt(...) remains a "
+                "compatibility alias for set_turn_prompt(...); explicit low-level agent.create_request()/agent.request "
+                "builders remain available."
+            ),
+        },
         "image": {
             "status": "released",
             "surface": [

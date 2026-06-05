@@ -21,6 +21,35 @@ Candidate injection is the boundary. If no Actions, Skills, Skills Packs, or
 Dynamic Task candidates are registered, `agent.start()` remains an ordinary
 model request.
 
+Quick prompt chains are request-scoped. The Agent can be kept as a service
+singleton for shared settings, model activation, Actions, Skills, Workspace, and
+`always=True` prompt, while `.input(...)`, `.system(...)`, `.output(...)`,
+attachments, and per-turn options in one chain are written to an isolated
+`AgentTurn` draft:
+
+```python
+results = await asyncio.gather(
+    agent.input("Summarize request A").async_start(),
+    agent.input("Summarize request B").async_start(),
+    agent.input("Summarize request C").async_start(),
+)
+```
+
+For multi-statement setup, capture the turn draft explicitly:
+
+```python
+turn = agent.create_turn()
+turn.input("Review this renewal risk.")
+turn.output({"answer": (str, "final answer", True)})
+result = await turn.async_start()
+```
+
+Do not rely on `agent.input(...); agent.output(...); await agent.async_start()`
+for turn-scoped prompt accumulation. Use `always=True`,
+`set_agent_prompt(...)`, or stable setup methods for Agent-lifetime state; use
+`agent.create_request(...)` / `agent.request` only when you intentionally want
+the lower-level request-builder surface.
+
 Accepted development-line routing is candidate-driven and deterministic-first:
 submitted Dynamic Task candidates take precedence and required Skills
 candidates run through the Skills route. When several optional candidates are

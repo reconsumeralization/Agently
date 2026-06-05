@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Coroutine, Literal, ParamSpec, TypeVar, cast, get_args, get_origin, get_type_hints
 
 from agently.core.execution.Action import ActionDispatcher, ActionRegistry
@@ -456,6 +457,32 @@ class AgentlyToolManager(ToolManager):
         )
         return self
 
+    @staticmethod
+    def _format_bash_sandbox_desc(
+        desc: str,
+        *,
+        allowed_cmd_prefixes: list[str] | None,
+        allowed_workdir_roots: list[str | Path] | None,
+        timeout: int,
+    ) -> str:
+        command_text = (
+            ", ".join(str(prefix) for prefix in allowed_cmd_prefixes)
+            if allowed_cmd_prefixes
+            else "no command allowlist configured"
+        )
+        roots_text = (
+            ", ".join(str(Path(root)) for root in allowed_workdir_roots)
+            if allowed_workdir_roots
+            else "current working directory only"
+        )
+        policy_desc = (
+            f"Allowed command prefixes: {command_text}. "
+            f"Allowed working directory roots: {roots_text}. "
+            f"Timeout: {timeout} seconds."
+        )
+        base_desc = str(desc).strip()
+        return f"{base_desc}\n\n{policy_desc}" if base_desc else policy_desc
+
     def register_bash_sandbox_action(
         self,
         *,
@@ -465,13 +492,19 @@ class AgentlyToolManager(ToolManager):
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
         allowed_cmd_prefixes: list[str] | None = None,
-        allowed_workdir_roots: list[str] | None = None,
+        allowed_workdir_roots: list[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
     ):
+        model_desc = self._format_bash_sandbox_desc(
+            desc,
+            allowed_cmd_prefixes=allowed_cmd_prefixes,
+            allowed_workdir_roots=allowed_workdir_roots,
+            timeout=timeout,
+        )
         self.register_action(
             action_id=action_id,
-            desc=desc,
+            desc=model_desc,
             kwargs={
                 "cmd": ("str | list[str]", "Command to run inside the sandbox."),
                 "workdir": ("str | None", "Working directory inside allowed roots."),

@@ -130,7 +130,6 @@ async def run_staged_execution(
 
         reason = ReasonBlock(
             model_key=data.get_state("model_key", model_key),
-            output_format="auto",
             stream_bridge=True,
         )
 

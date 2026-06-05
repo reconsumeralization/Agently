@@ -21,6 +21,7 @@ from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
 
 from agently.core.extension import ExtensionHandlers
 from agently.core.application import AgentTask
+from agently.core.AgentTurn import AgentTurn
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
 from agently.core.orchestration import DynamicTask
@@ -150,6 +151,14 @@ class BaseAgent:
             model_key=model_key,
         )
 
+    def create_turn(self):
+        request = self.create_request()
+        prompt_snapshot = self._snapshot_request_prompt()
+        if prompt_snapshot:
+            request.prompt.update(prompt_snapshot)
+            self.request.prompt.clear()
+        return AgentTurn(self, request=request)
+
     _DYNAMIC_TASK_TARGET_EXCLUDED_PROMPT_KEYS = {
         "output",
         "output_format",
@@ -261,7 +270,8 @@ class BaseAgent:
         resolved_output_schema = output_schema if output_schema is not None else prompt_defaults["output_schema"]
         resolved_output_format = output_format if output_format is not None else prompt_defaults["output_format"]
         initial_graph_input = prompt_defaults["initial_graph_input"]
-        self.request.prompt.clear()
+        if _prompt_snapshot is None:
+            self.request.prompt.clear()
         return DynamicTask(
             self.plugin_manager,
             str(resolved_target),
@@ -670,7 +680,7 @@ class BaseAgent:
         self.agent_prompt.set(key, value, mappings=mappings)
         return self
 
-    def set_request_prompt(
+    def set_turn_prompt(
         self,
         key: "PromptStandardSlot | str",
         value: Any,
@@ -679,6 +689,15 @@ class BaseAgent:
     ):
         self.request.prompt.set(key, value, mappings=mappings)
         return self
+
+    def set_request_prompt(
+        self,
+        key: "PromptStandardSlot | str",
+        value: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+    ):
+        return self.set_turn_prompt(key, value, mappings=mappings)
 
     def remove_agent_prompt(self, key: "PromptStandardSlot | str"):
         self.agent_prompt.set(key, None)
@@ -732,9 +751,8 @@ class BaseAgent:
     ):
         if always:
             self.agent_prompt.set("system", prompt, mappings=mappings)
-        else:
-            self.request.prompt.set("system", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().system(prompt, mappings=mappings)
 
     def rule(
         self,
@@ -746,10 +764,8 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
             self.agent_prompt.set("system.rule", prompt, mappings=mappings)
-        else:
-            self.request.prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
-            self.request.prompt.set("system.rule", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().rule(prompt, mappings=mappings)
 
     def role(
         self,
@@ -764,10 +780,8 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
             self.agent_prompt.set("system.your_role", prompt, mappings=mappings)
-        else:
-            self.request.prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
-            self.request.prompt.set("system.your_role", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().role(prompt, mappings=mappings)
 
     def user_info(
         self,
@@ -782,10 +796,8 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
             self.agent_prompt.set("system.user_info", prompt, mappings=mappings)
-        else:
-            self.request.prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
-            self.request.prompt.set("system.user_info", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().user_info(prompt, mappings=mappings)
 
     def input(
         self,
@@ -799,9 +811,8 @@ class BaseAgent:
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("input", prompt, mappings=mappings)
-        else:
-            self.request.prompt.set("input", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().input(prompt, mappings=mappings)
 
     def info(
         self,
@@ -815,9 +826,8 @@ class BaseAgent:
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("info", prompt, mappings=mappings)
-        else:
-            self.request.prompt.set("info", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().info(prompt, mappings=mappings)
 
     def instruct(
         self,
@@ -831,9 +841,8 @@ class BaseAgent:
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", prompt, mappings=mappings)
-        else:
-            self.request.prompt.set("instruct", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().instruct(prompt, mappings=mappings)
 
     def examples(
         self,
@@ -847,9 +856,8 @@ class BaseAgent:
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("examples", prompt, mappings=mappings)
-        else:
-            self.request.prompt.set("examples", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().examples(prompt, mappings=mappings)
 
     def output(
         self,
@@ -862,15 +870,14 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
+        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     ):
         if always:
             self.agent_prompt.set("output", prompt, mappings=mappings)
-            self.agent_prompt.set("output_format", format)
-        else:
-            self.request.prompt.set("output", prompt, mappings=mappings)
-            self.request.prompt.set("output_format", format)
-        return self
+            if format is not None:
+                self.agent_prompt.set("output_format", format)
+            return self
+        return self.create_turn().output(prompt, mappings=mappings, format=format)
 
     def attachment(
         self,
@@ -881,9 +888,8 @@ class BaseAgent:
     ):
         if always:
             self.agent_prompt.set("attachment", prompt, mappings=mappings)
-        else:
-            self.request_prompt.set("attachment", prompt, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().attachment(prompt, mappings=mappings)
 
     def image(
         self,
@@ -907,9 +913,8 @@ class BaseAgent:
         )
         if always:
             self.agent_prompt.set("attachment", attachment, mappings=mappings)
-        else:
-            self.request_prompt.set("attachment", attachment, mappings=mappings)
-        return self
+            return self
+        return self.create_turn().attachment(attachment, mappings=mappings)
 
     def options(
         self,
@@ -919,9 +924,8 @@ class BaseAgent:
     ):
         if always:
             self.agent_prompt.set("options", options)
-        else:
-            self.request.prompt.set("options", options)
-        return self
+            return self
+        return self.create_turn().options(options)
 
     # Prompt
     def get_prompt_text(self):

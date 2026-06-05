@@ -220,6 +220,9 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     spec_desc = str(spec.get("desc", ""))
     assert "allowlisted shell command" in spec_desc
     assert "Only inspect the cwd." in spec_desc
+    assert "Allowed command prefixes: pwd." in spec_desc
+    assert f"Allowed working directory roots: {tmp_path}" in spec_desc
+    assert "Timeout: 20 seconds." in spec_desc
 
     result = agent.action.execute_action(
         "test_run_bash",

@@ -653,10 +653,10 @@ async def test_agent_turn_wraps_request_and_model_request_runs():
             meta={"flow_name": "agent-turn-flow"},
         )
         agent = _create_agent()
-        agent.input("Summarize the morning operations notes.")
-        agent.instruct("Focus on GPU cloud demand and operational risk.")
+        turn = agent.input("Summarize the morning operations notes.")
+        turn.instruct("Focus on GPU cloud demand and operational risk.")
 
-        text = await agent.async_get_text(parent_run_context=workflow_run)
+        text = await turn.async_get_text(parent_run_context=workflow_run)
 
         assert "Morning briefing prepared." in text
 
@@ -752,8 +752,8 @@ async def test_tool_runtime_uses_action_runs_under_request_scope():
         agent.register_tool_plan_analysis_handler(fake_plan_handler)
         agent.register_tool_execution_handler(fake_execution_handler)
         agent.tool.tag(["lookup_signal"], f"agent-{ agent.name }")
-        agent.input("Need a briefing with external signal.")
-        await agent.async_get_text()
+        turn = agent.input("Need a briefing with external signal.")
+        await turn.async_get_text()
 
         request_run = next(event.run for event in captured if event.event_type == "request.started")
         action_loop_start = next(event for event in captured if event.event_type == "action.loop_started")
@@ -867,10 +867,10 @@ async def test_trigger_flow_runtime_context_auto_inherits_parent_run_for_agent_a
 
         async def run_inside_flow(data: TriggerFlowRuntimeData):
             agent = _create_agent()
-            agent.input("Summarize the runtime context flow.")
+            turn = agent.input("Summarize the runtime context flow.")
             request = _create_request()
             request.input("Provide a direct request summary.")
-            agent_text = await agent.async_get_text()
+            agent_text = await turn.async_get_text()
             request_text = await request.async_get_text()
             return {
                 "agent_text": agent_text,
@@ -933,10 +933,10 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
         async def summarize_candidate(data: TriggerFlowRuntimeData):
             async def helper():
                 agent = _create_agent()
-                agent.input("Summarize candidate news.")
+                turn = agent.input("Summarize candidate news.")
                 request = _create_request()
                 request.input("Summarize direct request in subflow.")
-                agent_text = await agent.async_get_text()
+                agent_text = await turn.async_get_text()
                 request_text = await request.async_get_text()
                 return {
                     "agent_text": agent_text,
@@ -1026,8 +1026,8 @@ async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_fail
         async def slow_branch(data: TriggerFlowRuntimeData):
             del data
             agent = _create_slow_agent()
-            agent.input("Wait for sibling cancellation.")
-            return await agent.async_get_text()
+            turn = agent.input("Wait for sibling cancellation.")
+            return await turn.async_get_text()
 
         async def fail_branch(data: TriggerFlowRuntimeData):
             del data
@@ -1079,8 +1079,8 @@ async def test_trigger_flow_for_each_failure_waits_for_sibling_cleanup():
         async def analyze_item(data: TriggerFlowRuntimeData):
             if data.value == "slow":
                 agent = _create_slow_agent()
-                agent.input("Wait for for_each sibling cancellation.")
-                return await agent.async_get_text()
+                turn = agent.input("Wait for for_each sibling cancellation.")
+                return await turn.async_get_text()
             await asyncio.sleep(0.05)
             raise RuntimeError("for_each branch boom")
 

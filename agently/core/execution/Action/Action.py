@@ -34,6 +34,7 @@ import asyncio
 import inspect
 import json
 import uuid
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -782,7 +783,7 @@ class Action:
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
         allowed_cmd_prefixes: list[str] | None = None,
-        allowed_workdir_roots: list[str] | None = None,
+        allowed_workdir_roots: list[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
     ):

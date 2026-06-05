@@ -289,6 +289,12 @@ async def test_action_loop_uses_digest_and_exposes_recall_after_artifacts(tmp_pa
         allowed_workdir_roots=[str(tmp_path)],
         expose_to_model=True,
     )
+    spec = agent.action.action_registry.get_spec(action_id)
+    assert spec is not None
+    spec_desc = str(spec.get("desc", ""))
+    assert "Allowed command prefixes: pwd." in spec_desc
+    assert f"Allowed working directory roots: {tmp_path}" in spec_desc
+    assert "Timeout: 20 seconds." in spec_desc
     prompt = Agently.create_prompt()
     prompt.set("input", "inspect cwd")
     seen_rounds: list[dict[str, Any]] = []

@@ -168,7 +168,7 @@ class SkillPlanner:
         skills_packs: Any = None,
         mode: SkillMode = "model_decision",
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     ) -> SkillExecutionPlan:
         if mode not in {"model_decision", "required"}:
             raise ValueError("Skill mode must be one of: 'model_decision', 'required'.")
@@ -237,7 +237,7 @@ class SkillPlanner:
             "resource_bindings": [_copy_public(selection.get("resource_index", {})) for selection in selections],
             "capability_needs": capability_needs,
             "expected_result_shape": _ensure_dict(semantic_outputs),
-            "expected_result_format": output_format,
+            "expected_result_format": output_format or context.get_setting("prompt.default_output_format", "json"),
             "capability_policy": {
                 "auto_allow": any(bool(_ensure_dict(selector).get("auto_allow")) for selector in selectors if isinstance(selector, dict)),
             },

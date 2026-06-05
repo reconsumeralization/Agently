@@ -817,8 +817,13 @@ class SkillExecutor:
         self,
         plan: SkillExecutionPlan,
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None,
+        default_output_format: Any = "json",
     ) -> Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"]:
-        candidate = str(output_format or plan.get("expected_result_format") or "auto")
+        candidate = str(
+            output_format
+            or plan.get("expected_result_format")
+            or default_output_format
+        )
         if candidate not in {"json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"}:
             raise ValueError(
                 "Skill execution output_format must be one of: json, flat_markdown, hybrid, "

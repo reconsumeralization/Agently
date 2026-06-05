@@ -169,8 +169,8 @@ async def test_request_validate_chain_and_runtime_handler_order():
 async def test_agent_validate_failure_retries_and_emits_runtime_events():
     MockValidateJSONRequester.reset([{"status": "draft"}, {"status": "ready"}])
     agent = _create_agent(MockValidateJSONRequester, "validate-agent")
-    agent.output({"status": (str,)}, format="json")
-    agent.validate(lambda result, context: result["status"] == "ready")
+    turn = agent.output({"status": (str,)}, format="json")
+    turn.validate(lambda result, context: result["status"] == "ready")
 
     captured = []
 
@@ -180,7 +180,7 @@ async def test_agent_validate_failure_retries_and_emits_runtime_events():
     hook_name = "test_model_request_validate.agent_retry"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     try:
-        data = await agent.async_start(max_retries=1)
+        data = await turn.async_start(max_retries=1)
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
@@ -402,3 +402,65 @@ async def test_ensure_keys_runs_before_validate_handlers():
 
     assert data == {"summary": "ready", "reply": "done"}
     assert seen == [{"summary": "ready", "reply": "done"}]
+
+
+@pytest.mark.asyncio
+async def test_tuple_ensure_retries_blank_string_in_wildcard_path():
+    MockValidateJSONRequester.reset(
+        [
+            {
+                "environment_checklist": [
+                    {"item": "Python", "why": "Runtime check", "command": ""},
+                ],
+                "final_confirmation": "ready",
+            },
+            {
+                "environment_checklist": [
+                    {"item": "Python", "why": "Runtime check", "command": "python --version"},
+                ],
+                "final_confirmation": "ready",
+            },
+        ]
+    )
+    request = _create_request(MockValidateJSONRequester, "ensure-nonempty-command")
+    request.output(
+        {
+            "environment_checklist": [
+                {
+                    "item": (str, "check item", True),
+                    "why": (str, "check reason", True),
+                    "command": (str, "bash command", True),
+                }
+            ],
+            "final_confirmation": (str, "confirmation", True),
+        }
+    )
+
+    data = await request.async_start(max_retries=1)
+
+    assert MockValidateJSONRequester.attempts == 2
+    assert data["environment_checklist"][0]["command"] == "python --version"
+
+
+@pytest.mark.asyncio
+async def test_tuple_ensure_accepts_false_and_zero_values():
+    MockValidateJSONRequester.reset(
+        [
+            {
+                "ready": False,
+                "count": 0,
+            },
+        ]
+    )
+    request = _create_request(MockValidateJSONRequester, "ensure-false-zero")
+    request.output(
+        {
+            "ready": (bool, "whether ready", True),
+            "count": (int, "number of items", True),
+        }
+    )
+
+    data = await request.async_start(max_retries=0)
+
+    assert MockValidateJSONRequester.attempts == 1
+    assert data == {"ready": False, "count": 0}

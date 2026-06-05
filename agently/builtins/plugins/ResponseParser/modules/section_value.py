@@ -25,6 +25,10 @@ from .code_fence import strip_enclosing_code_fence
 
 
 _COMMENT_RE = re.compile(r"^\s*<!--(?P<body>.*?)-->\s*$", flags=re.DOTALL)
+_LEADING_SCAFFOLD_COMMENT_RE = re.compile(
+    r"^\s*<!--\s*\((?:text|json)\)(?:\s+.*?)?\s*-->\s*(?:\r?\n)?",
+    flags=re.IGNORECASE,
+)
 _ANGLE_PLACEHOLDER_RE = re.compile(
     r"^\s*\(?\s*(?:json|text)?\s*\)?\s*<[^>\n]{1,160}>\s*$",
     flags=re.IGNORECASE,
@@ -47,6 +51,8 @@ def normalize_scalar_section_value(
     represent a scalar field.
     """
     raw = _clean_section_text(content)
+    if not raw and content.strip():
+        return False, None
     if _looks_like_placeholder(raw):
         return False, None
 
@@ -65,6 +71,8 @@ def normalize_complex_section_value(
 ) -> tuple[bool, Any]:
     """Normalize a complex markdown section into a dict/list value."""
     raw = _clean_section_text(content)
+    if not raw and content.strip():
+        return False, None
     if _looks_like_placeholder(raw):
         return False, None
 
@@ -75,7 +83,12 @@ def normalize_complex_section_value(
 
 
 def _clean_section_text(content: str) -> str:
-    return strip_enclosing_code_fence(content).strip()
+    raw = strip_enclosing_code_fence(content).strip()
+    while True:
+        cleaned = _LEADING_SCAFFOLD_COMMENT_RE.sub("", raw, count=1).strip()
+        if cleaned == raw:
+            return raw
+        raw = cleaned
 
 
 def _try_parse_json(text: str) -> tuple[bool, Any]:
@@ -126,6 +139,8 @@ def normalize_json_section_value(
     that must stay strongly typed instead of being returned as prose.
     """
     raw = _clean_section_text(content)
+    if not raw and content.strip():
+        return False, None
     if _looks_like_placeholder(raw):
         return False, None
 
