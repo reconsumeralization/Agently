@@ -62,7 +62,7 @@ class AgentSkillsRuntimeContext:
         prompt: Any,
         model_key: str | None = None,
         output_schema: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         ensure_keys: list[str] | None = None,
         max_retries: int = 3,
         stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,

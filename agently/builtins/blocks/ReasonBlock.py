@@ -35,7 +35,7 @@ class ReasonBlock(FlowBlock):
         self,
         *,
         model_key: str = "reason",
-        output_format: str = "auto",
+        output_format: str | None = None,
         stream_bridge: bool = True,
         max_retries: int = 3,
     ):

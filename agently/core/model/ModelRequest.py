@@ -270,10 +270,11 @@ class ModelRequest:
         ),
         *,
         mappings: dict[str, Any] | None = None,
-        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
+        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     ):
         self.prompt.set("output", prompt, mappings=mappings)
-        self.prompt.set("output_format", format)
+        if format is not None:
+            self.prompt.set("output_format", format)
         return self
 
     def attachment(

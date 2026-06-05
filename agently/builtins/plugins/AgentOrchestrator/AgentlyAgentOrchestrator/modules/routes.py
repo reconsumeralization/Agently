@@ -97,7 +97,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     task = execution.task_target()
     agent = cast(Any, execution.agent)
     output = execution.prompt_snapshot.get("output")
-    output_format = execution.prompt_snapshot.get("output_format") or "auto"
+    output_format = execution.prompt_snapshot.get("output_format")
     route_options = execution.route_options("skills")
     effort = route_options.get("effort")
     if effort is not None:

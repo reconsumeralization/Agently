@@ -862,14 +862,16 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
+        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     ):
         if always:
             self.agent_prompt.set("output", prompt, mappings=mappings)
-            self.agent_prompt.set("output_format", format)
+            if format is not None:
+                self.agent_prompt.set("output_format", format)
         else:
             self.request.prompt.set("output", prompt, mappings=mappings)
-            self.request.prompt.set("output_format", format)
+            if format is not None:
+                self.request.prompt.set("output_format", format)
         return self
 
     def attachment(

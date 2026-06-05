@@ -19,7 +19,9 @@ def test_to_prompt_object():
     prompt["output"] = {"reply": (str, "your reply")}
     po3 = prompt.to_prompt_object().model_dump()
     assert po3["output"] == {"reply": (str, "your reply")}
-    assert po3.get("output_format") == "xml_field"  # Be automatically resolved by `output`
+    assert po3.get("output_format") == "json"  # Default comes from prompt settings.
+    prompt.settings.set("prompt.default_output_format", "auto")
+    assert prompt.to_prompt_object().output_format == "xml_field"
     prompt["output_format"] = "yaml"
     po4 = prompt.to_prompt_object().model_dump()
     assert po4["output"] == {"reply": (str, "your reply")}
@@ -406,10 +408,10 @@ def test_hybrid_prompt_marks_sanitized_scalar_fields_as_text():
 
     text = prompt.to_text()
 
-    assert "### analysis\n<!-- (text) One paragraph analysis. -->\n(your content here)" in text
+    assert "- analysis: text; One paragraph analysis." in text
+    assert "### analysis\n(your content here)" in text
     assert (
         "### items\n"
-        "<!-- (JSON) -->\n"
         "```json\n"
         "[\n"
         "  {\n"

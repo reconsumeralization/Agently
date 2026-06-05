@@ -86,7 +86,11 @@ async def run_runtime_chain_strategy(
             },
             model_key=model_key,
             output_schema=schema,
-            output_format=executor._resolve_output_format(plan, output_format),
+            output_format=executor._resolve_output_format(
+                plan,
+                output_format,
+                context.get_setting("prompt.default_output_format", "json"),
+            ),
             ensure_keys=ensure_keys,
             max_retries=3,
         )

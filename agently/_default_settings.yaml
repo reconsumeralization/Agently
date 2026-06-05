@@ -19,6 +19,7 @@ agently:
   api_key: null
 prompt:
   add_current_time: False
+  default_output_format: json
   role_mapping:
     system: system
     developer: developer

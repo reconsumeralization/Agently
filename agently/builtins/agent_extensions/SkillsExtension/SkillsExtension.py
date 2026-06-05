@@ -137,7 +137,7 @@ class SkillsExtension(BaseAgent):
             raise ValueError("Skills execution requires task=... or a configured agent.input(...).")
         explicit_output = output if output is not None else semantic_outputs
         resolved_outputs = explicit_output if explicit_output is not None else prompt_defaults["output_schema"]
-        resolved_format = output_format or cast(Any, prompt_defaults["output_format"]) or "auto"
+        resolved_format = output_format or cast(Any, prompt_defaults["output_format"])
         return str(resolved_task), resolved_outputs, cast(Any, resolved_format)
 
     async def async_resolve_skills_plan(

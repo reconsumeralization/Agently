@@ -52,7 +52,11 @@ async def run_single_shot_strategy(
         )
 
     try:
-        effective_output_format = executor._resolve_output_format(plan, output_format)
+        effective_output_format = executor._resolve_output_format(
+            plan,
+            output_format,
+            context.get_setting("prompt.default_output_format", "json"),
+        )
         result = await context.async_request_model(
             prompt=prompt,
             output_schema=executor._output_schema(plan),

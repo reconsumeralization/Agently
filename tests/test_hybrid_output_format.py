@@ -276,6 +276,32 @@ class TestParseHybridOutput:
         text = "### rule_results\n<!-- (JSON) <per-rule evidence list> -->"
         assert parse_hybrid_output(text, {"rule_results": [{"passed": (bool,)}]}) is None
 
+    def test_strips_leading_legacy_scaffold_comment_from_text_field(self):
+        text = (
+            "### environment_check\n"
+            "<!-- (text) 一句话说明如何判断环境通过 -->\n"
+            "Python imports and vector database initialization both pass.\n"
+        )
+        result = parse_hybrid_output(text, {"environment_check": (str,)})
+        assert result == {
+            "environment_check": "Python imports and vector database initialization both pass."
+        }
+
+    def test_hybrid_prompt_does_not_emit_html_comment_scaffold(self):
+        from agently import Agently
+
+        agent = Agently.create_agent("hybrid-prompt-no-comments")
+        agent.request.output(
+            {
+                "environment_check": (str, "一句话说明如何判断环境通过"),
+                "checks": [{"name": (str,), "passed": (bool,)}],
+            },
+            format="hybrid",
+        )
+        prompt_text = agent.request.prompt.to_text()
+        assert "<!--" not in prompt_text
+        assert "### environment_check" in prompt_text
+
 
 class TestHybridStreamingParser:
     async def _collect_events(self, parser, chunks):

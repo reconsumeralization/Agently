@@ -682,7 +682,7 @@ async def test_dynamic_task_model_output_schema_uses_agently_request_pipeline():
     snapshot = await task.async_run(timeout=1)
 
     assert request.output_schema == schema
-    assert request.output_format == "auto"
+    assert request.output_format is None
     assert request.start_kwargs == {"ensure_keys": ["brief", "next_update"]}
     assert snapshot["semantic_outputs"]["frontstage"]["result"]["brief"] == "Latency is resolved."
 
@@ -1103,7 +1103,7 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
         ("task_dag.tasks.draft.fields.reply", "We are", False),
         ("task_dag.tasks.draft.fields.reply", " investigating.", False),
     ]
-    assert request.output_format == "auto"
+    assert request.output_format is None
     assert data["semantic_outputs"]["final"]["result"]["reply"] == "We are investigating."
 
 

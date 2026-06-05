@@ -175,6 +175,16 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
         },
         "configuration": {
             "settings_contract": "dict-compatible typed helpers under agently.types.settings",
+            "default_output_format": (
+                "Omitted .output(..., format=...) reads prompt.default_output_format from the current settings "
+                "chain; the global default is json, while explicit format=\"auto\" and per-agent/request "
+                "prompt.default_output_format=\"auto\" remain available for schema-driven selection."
+            ),
+            "tuple_ensure_value_contract": (
+                "Tuple ensure flags and ensure_keys require paths to resolve to meaningful values: missing keys, "
+                "None, blank strings, empty wildcard matches, and wildcard matches containing blank required "
+                "values fail and share the normal retry budget; False and 0 remain valid typed values."
+            ),
             "options_contract": "dict-compatible typed helpers under agently.types.options",
             "plugin_schema_registration": [
                 "SETTINGS_SCHEMAS",
