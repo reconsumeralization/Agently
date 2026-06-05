@@ -64,7 +64,7 @@ async def draft_with_streaming(data: TriggerFlowRuntimeData):
             await data.async_put_into_stream({
                 "path": item.path,
                 "delta": item.delta,
-                "done": item.is_complete,
+                "done": item.is_completed,
             })
 
     final = await result.async_get_data()

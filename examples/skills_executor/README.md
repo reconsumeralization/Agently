@@ -61,7 +61,7 @@ write_file(result["summary"])             # persistence is host code
   the slug of the frontmatter `name` (e.g. `"Release Notes Generator"` →
   `"release-notes-generator"`).
 - To stream field-level progress, use `async_run_skills_task(..., stream_handler=...)`
-  and filter items where `type == "skills.model_stream"` and `is_complete`.
+  and filter items where `type == "skills.model_stream"` and `is_completed`.
 - To select quality/cost profiles, pass `effort="fast" | "normal" | "max"` to
   `async_run_skills_task(...)`. Advanced callers can override presets with
   `agent.set_settings("effort_presets", {...})`.

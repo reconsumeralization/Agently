@@ -32,12 +32,12 @@ if TYPE_CHECKING:
     from agently.core import PluginManager
     from agently.types.data import (
         InstantStreamingContentType,
-        AgentlyModelResponseMessage,
-        AgentlyOriginalResponsePayload,
-        AgentlySpecificResponseMessage,
+        AgentlyModelResultMessage,
+        AgentlyOriginalResultPayload,
+        AgentlySpecificResultMessage,
         OutputValidateHandler,
         PromptStandardSlot,
-        ResponseContentType,
+        ResultContentType,
         RunContext,
         SpecificEvents,
         StreamingData,
@@ -331,6 +331,7 @@ class ModelRequest:
             self.extension_handlers,
             run_context=self._create_request_run_context(parent_run_context=parent_run_context),
             agent_turn_run_context=agent_turn_run_context,
+            warn_deprecated=False,
         )
         response.run_context.response_id = response.id
         self.prompt.clear()
@@ -563,7 +564,7 @@ class ModelRequest:
         type: Literal["all"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
+    ) -> Generator["AgentlyModelResultMessage", None, None]: ...
 
     @overload
     def get_generator(
@@ -571,7 +572,7 @@ class ModelRequest:
         type: Literal["specific"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
+    ) -> Generator["AgentlySpecificResultMessage", None, None]: ...
 
     @overload
     def get_generator(
@@ -587,20 +588,20 @@ class ModelRequest:
         type: Literal["original"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
+    ) -> Generator["AgentlyOriginalResultPayload", None, None]: ...
 
     @overload
     def get_generator(
         self,
-        type: "ResponseContentType | None" = "delta",
+        type: "ResultContentType | None" = "delta",
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator: ...
 
     def get_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
@@ -625,7 +626,7 @@ class ModelRequest:
         type: Literal["all"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
+    ) -> AsyncGenerator["AgentlyModelResultMessage", None]: ...
 
     @overload
     def get_async_generator(
@@ -633,7 +634,7 @@ class ModelRequest:
         type: Literal["specific"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
+    ) -> AsyncGenerator["AgentlySpecificResultMessage", None]: ...
 
     @overload
     def get_async_generator(
@@ -649,20 +650,20 @@ class ModelRequest:
         type: Literal["original"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
+    ) -> AsyncGenerator["AgentlyOriginalResultPayload", None]: ...
 
     @overload
     def get_async_generator(
         self,
-        type: "ResponseContentType | None" = "delta",
+        type: "ResultContentType | None" = "delta",
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator: ...
 
     def get_async_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,

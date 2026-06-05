@@ -37,7 +37,7 @@ HTTP 调用模型端点
 自定义 requester handler 中，`build_request_handlers()` 返回
 `AttemptHandlers`；handler stream 可用 `agently.types.data` 里的
 `AttemptStreamMessage` / `AttemptStreamGenerator` 标注。`broadcast_response(...)`
-再把 attempt/provider stream 映射成公开的 `AgentlyResponseGenerator`。
+再把 attempt/provider stream 映射成公开的 `AgentlyResultGenerator`。
 
 如果你指向 `https://api.anthropic.com`（或某个走相同协议的 Claude 兼容代理），用 [AnthropicCompatible](anthropic-compatible.md)。其他情况（OpenAI、DeepSeek、Qwen、Ollama、Kimi、GLM、MiniMax、Doubao、SiliconFlow、Groq、ERNIE、走 OpenAI 兼容模式的 Gemini，以及任何说 OpenAI Chat Completions API 的私有网关），用 [OpenAICompatible](openai-compatible.md)。
 

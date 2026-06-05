@@ -9,9 +9,12 @@ from agently import (
     Agent,
     AgentExecutionStreamData as RootAgentExecutionStreamData,
     Agently,
-    AgentlyModelResponseEvent as RootAgentlyModelResponseEvent,
+    AgentlyModelResultEvent as RootAgentlyModelResultEvent,
+    AgentlyModelResultMessage as RootAgentlyModelResultMessage,
     AgentlyModelResponseMessage as RootAgentlyModelResponseMessage,
+    AgentlyOriginalResultPayload as RootAgentlyOriginalResultPayload,
     AgentlyOriginalResponsePayload as RootAgentlyOriginalResponsePayload,
+    AgentlySpecificResultMessage as RootAgentlySpecificResultMessage,
     AgentlySpecificResponseMessage as RootAgentlySpecificResponseMessage,
     EventHook as RootEventHook,
     ModelStreamingHandler as RootModelStreamingHandler,
@@ -24,9 +27,12 @@ from agently import (
 from agently.core import AgentTurn, BaseAgent, ModelResponseResult
 from agently.types.data import (
     AgentExecutionStreamData,
-    AgentlyModelResponseEvent,
+    AgentlyModelResultEvent,
+    AgentlyModelResultMessage,
     AgentlyModelResponseMessage,
+    AgentlyOriginalResultPayload,
     AgentlyOriginalResponsePayload,
+    AgentlySpecificResultMessage,
     AgentlySpecificResponseMessage,
     ModelStreamingHandler,
     SkillRuntimeStreamHandler,
@@ -45,19 +51,19 @@ def test_agent_turn_and_model_response_streaming_type_contracts():
         turn = agent.create_turn().input("hello").output({"reply": (str,)})
         assert_type(turn.get_generator(type="delta"), Generator[str, None, None])
         assert_type(turn.get_generator(type="instant"), Generator[StreamingData, None, None])
-        assert_type(turn.get_generator(type="specific"), Generator[AgentlySpecificResponseMessage, None, None])
-        assert_type(turn.get_generator(type="all"), Generator[AgentlyModelResponseMessage, None, None])
-        assert_type(turn.get_generator(type="original"), Generator[AgentlyOriginalResponsePayload, None, None])
+        assert_type(turn.get_generator(type="specific"), Generator[AgentlySpecificResultMessage, None, None])
+        assert_type(turn.get_generator(type="all"), Generator[AgentlyModelResultMessage, None, None])
+        assert_type(turn.get_generator(type="original"), Generator[AgentlyOriginalResultPayload, None, None])
 
         assert_type(turn.get_async_generator(type="delta"), AsyncGenerator[str, None])
         assert_type(turn.get_async_generator(type="instant"), AsyncGenerator[StreamingData, None])
-        assert_type(turn.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResponseMessage, None])
-        assert_type(turn.get_async_generator(type="all"), AsyncGenerator[AgentlyModelResponseMessage, None])
-        assert_type(turn.get_async_generator(type="original"), AsyncGenerator[AgentlyOriginalResponsePayload, None])
+        assert_type(turn.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResultMessage, None])
+        assert_type(turn.get_async_generator(type="all"), AsyncGenerator[AgentlyModelResultMessage, None])
+        assert_type(turn.get_async_generator(type="original"), AsyncGenerator[AgentlyOriginalResultPayload, None])
 
         result: ModelResponseResult = agent.create_request().input("hello").get_result()
         assert_type(result.get_generator(type="instant"), Generator[StreamingData, None, None])
-        assert_type(result.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResponseMessage, None])
+        assert_type(result.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResultMessage, None])
 
         compat_result: ModelResponseResult = agent.create_request().input("hello").get_response()
         assert_type(compat_result.result.get_text(), str)
@@ -97,7 +103,10 @@ def test_common_types_are_available_from_package_root():
     if TYPE_CHECKING:
         assert_type(RootStreamingData(path="reply", value="ok"), StreamingData)
         assert_type(cast(RootAgentExecutionStreamData, object()), AgentExecutionStreamData)
-        assert_type(cast(RootAgentlyModelResponseEvent, "delta"), AgentlyModelResponseEvent)
+        assert_type(cast(RootAgentlyModelResultEvent, "delta"), AgentlyModelResultEvent)
+        assert_type(cast(RootAgentlyModelResultMessage, object()), AgentlyModelResultMessage)
+        assert_type(cast(RootAgentlySpecificResultMessage, object()), AgentlySpecificResultMessage)
+        assert_type(cast(RootAgentlyOriginalResultPayload, object()), AgentlyOriginalResultPayload)
         assert_type(cast(RootAgentlyModelResponseMessage, object()), AgentlyModelResponseMessage)
         assert_type(cast(RootAgentlySpecificResponseMessage, object()), AgentlySpecificResponseMessage)
         assert_type(cast(RootAgentlyOriginalResponsePayload, object()), AgentlyOriginalResponsePayload)

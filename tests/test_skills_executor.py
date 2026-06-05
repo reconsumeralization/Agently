@@ -1615,7 +1615,7 @@ async def test_orchestrator_stream_bridge_maps_prompt_only_skill_model_fields():
     assert stream.items[0].route == "skills"
     assert stream.items[0].source == "model_request"
     assert stream.items[0].event_type == "delta"
-    assert stream.items[0].is_complete is False
+    assert stream.items[0].is_completed is False
 
 
 def test_no_matching_skill_returns_no_match(tmp_path):

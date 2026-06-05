@@ -126,7 +126,7 @@ async def cases_for_one(data):
                 "req_id": req["id"],
                 "path": item.path,
                 "delta": item.delta,
-                "done": item.is_complete,
+                "done": item.is_completed,
             })
     return await result.async_get_data()
 ```

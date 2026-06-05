@@ -25,12 +25,12 @@ Agently 在运行时层是 async-native。Sync 方法是通过 `FunctionShifter.
 
 最值得先掌握的组合：
 
-- `result.get_async_generator(type="instant")`——逐字段流出带 `path`、`delta`、`value`、`is_complete` 的结构化 `StreamingData` patch。
+- `result.get_async_generator(type="instant")`——逐字段流出带 `path`、`delta`、`value`、`is_completed` 的结构化 `StreamingData` patch。
 - `data.async_emit(...)`——把节点变成 TriggerFlow 信号。
 - `data.async_put_into_stream(...)`——把中间状态推给 UI / SSE / 日志。
 
 `instant` 是字段级事件，不是原始 provider token。它可以在字段还在增长时通过
-`.delta` 提供部分字段文本，然后在 `.is_complete` 为 true 时发完成事件。把这些
+`.delta` 提供部分字段文本，然后在 `.is_completed` 为 true 时发完成事件。把这些
 事件当作渐进式 UI 状态；最终可靠对象在结束后用 `async_get_data()` 读取。
 这类 stream handler 的入参类型可直接用 `agently` 根入口的 `StreamingData`
 标注；需要完整 typed data 命名空间时也可以继续从 `agently.types.data` 导入。
@@ -71,7 +71,7 @@ async def main():
     async for item in result.get_async_generator(type="instant"):
         if item.delta:
             print(item.path, "+", item.delta)
-        if item.is_complete:
+        if item.is_completed:
             print(item.path, "done")
 
     final = await result.async_get_data()

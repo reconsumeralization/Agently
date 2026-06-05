@@ -380,13 +380,13 @@ async def main() -> None:
 
     with Live(layout, refresh_per_second=15, screen=True, transient=False) as live:
         async for item in execution.get_async_generator(type="instant"):
-            if item.path == "route.selected" and item.is_complete:
+            if item.path == "route.selected" and item.is_completed:
                 route = (item.value or {}).get("selected_route", "")
                 continue
 
             # Track task completion
             for pd in _PANEL_DEFS.values():
-                if item.path in pd["complete_tasks"] and item.is_complete:
+                if item.path in pd["complete_tasks"] and item.is_completed:
                     completed_tasks.add(item.path)
                     break
 

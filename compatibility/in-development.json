@@ -170,10 +170,20 @@
       "status": "in-development",
       "surface": [
         "StreamingData",
+        "StreamingData.is_completed",
+        "StreamingData.is_complete",
+        "AgentlyModelResultEvent",
+        "AgentlyModelResultMessage",
+        "AgentlySpecificResultMessage",
+        "AgentlyOriginalResultPayload",
+        "AgentlyResultGenerator",
+        "ResultContentType",
         "AgentlyModelResponseEvent",
         "AgentlyModelResponseMessage",
         "AgentlySpecificResponseMessage",
         "AgentlyOriginalResponsePayload",
+        "AgentlyResponseGenerator",
+        "ResponseContentType",
         "ModelStreamingHandler",
         "AgentExecutionStreamHandler",
         "AttemptStreamMessage",
@@ -182,8 +192,8 @@
         "SkillRuntimeStreamItem",
         "SkillRuntimeStreamHandler"
       ],
-      "contract": "Common generator and handler type annotations are exposed through agently and agently.types.data; delta yields str, instant/streaming_parse yields StreamingData, specific/all yield event-tagged response messages, AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive SkillRuntimeStreamItem dictionaries.",
-      "compatibility_policy": "This clarifies public typing and does not change runtime stream payloads."
+      "contract": "Common generator and handler type annotations are exposed through agently and agently.types.data. Result-named aliases are the recommended public names: delta yields str, instant/streaming_parse yields StreamingData with is_completed, specific/all yield event-tagged result messages, AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive SkillRuntimeStreamItem dictionaries.",
+      "compatibility_policy": "Response-named type aliases and StreamingData.is_complete remain compatibility aliases. is_complete is deprecated in favor of is_completed and will be removed in Agently 4.2; Response-named aliases are deprecated in favor of Result-named aliases and will be removed in Agently 4.2."
     },
     "model_response_result_facade": {
       "status": "in-development",
@@ -194,10 +204,11 @@
         "ModelRequest.get_response",
         "Agent.get_response",
         "AgentTurn.get_response",
+        "ModelResponse",
         "ModelResponseResult"
       ],
       "contract": "get_result() is the recommended reusable model-call facade for text, data, metadata, and streaming readers. get_response() remains a compatibility alias and returns the same ModelResponseResult facade. ModelResponseResult.result points to itself so older response.result reader chains continue to work.",
-      "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); text = result.get_text(). Code that already calls get_response() and then reader methods or response.result reader chains remains supported."
+      "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); text = result.get_text(). Code that already calls get_response() and then reader methods or response.result reader chains remains supported. Direct ModelResponse construction is deprecated and will be removed in Agently 4.2."
     },
     "image": {
       "status": "in-development",

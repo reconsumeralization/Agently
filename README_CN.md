@@ -239,7 +239,7 @@ result = (
 for event in result.get_generator(type="instant"):
     if event.path == "definition" and event.delta:
         print(event.delta, end="", flush=True)
-    if event.wildcard_path == "examples[*]" and event.is_complete:
+    if event.wildcard_path == "examples[*]" and event.is_completed:
         print("\nEXAMPLE:", event.value)
 ```
 
@@ -468,7 +468,7 @@ graph TB
     Prompt["Prompt 槽位与输出 schema"]
     Agent["Agent 请求层"]
     Model["Model requester plugins"]
-    Response["ModelResponseResult: text, data, meta, stream"]
+    Result["ModelResponseResult: text, data, meta, stream"]
     Action["Action Runtime: planning, dispatch, logs"]
     Env["Execution Environment: MCP, Python, Bash, Node, Browser, SQLite"]
     Flow["TriggerFlow: branch, fan-out, stream, pause/resume, persist"]
@@ -479,7 +479,7 @@ graph TB
     Settings --> Agent
     Prompt --> Agent
     Agent --> Model
-    Model --> Response
+    Model --> Result
     Agent --> Action
     Action --> Env
     App --> Flow

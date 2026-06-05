@@ -52,7 +52,7 @@ def instant_structured_streaming():
         if data.delta:
             field_buffers[data.path] = field_buffers.get(data.path, "") + data.delta
             print(f"[patch] {data.path}: +{data.delta!r}")
-        if data.is_complete:
+        if data.is_completed:
             print(f"[done]  {data.path}: {data.value!r}")
     print()
 
@@ -108,7 +108,7 @@ async def async_streaming():
 #      .wildcard_path : path with array indices replaced by * ("tips[*]")
 #      .delta         : the latest token fragment at this path
 #      .value         : parser's current value at this path
-#      .is_complete   : True when this field/path is closed
+#      .is_completed   : True when this field/path is closed
 #    Use wildcard_path to dispatch rendering per field type without hard-coding
 #    indices. Treat instant events as provisional UI state; read get_data() /
 #    async_get_data() at the end for durable business state.

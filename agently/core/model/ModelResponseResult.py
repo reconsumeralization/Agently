@@ -30,15 +30,15 @@ if TYPE_CHECKING:
     from agently.core.extension.PluginManager import PluginManager
     from agently.utils import Settings
     from agently.types.data import (
-        AgentlyModelResponseMessage,
-        AgentlyOriginalResponsePayload,
-        AgentlySpecificResponseMessage,
+        AgentlyModelResultMessage,
+        AgentlyOriginalResultPayload,
+        AgentlySpecificResultMessage,
         InstantStreamingContentType,
         OutputValidateContext,
         OutputValidateHandler,
         OutputValidateResult,
         OutputValidateResultDict,
-        ResponseContentType,
+        ResultContentType,
         RunContext,
         SpecificEvents,
         StreamingData,
@@ -61,7 +61,7 @@ class ModelResponseResult:
         agent_name: str,
         response_id: str,
         prompt: "Prompt",
-        response_generator: AsyncGenerator["AgentlyModelResponseMessage", None],
+        response_generator: AsyncGenerator["AgentlyModelResultMessage", None],
         plugin_manager: "PluginManager",
         settings: "Settings",
         extension_handlers: "ExtensionHandlers",
@@ -295,7 +295,7 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: "InstantStreamingContentType",
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator["StreamingData", None, None]: ...
@@ -304,25 +304,25 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: Literal["all"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
+    ) -> Generator["AgentlyModelResultMessage", None, None]: ...
 
     @overload
     def get_generator(
         self,
         type: Literal["specific"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
+    ) -> Generator["AgentlySpecificResultMessage", None, None]: ...
 
     @overload
     def get_generator(
         self,
         type: Literal["delta"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator[str, None, None]: ...
@@ -331,24 +331,24 @@ class ModelResponseResult:
     def get_generator(
         self,
         type: Literal["original"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
+    ) -> Generator["AgentlyOriginalResultPayload", None, None]: ...
 
     @overload
     def get_generator(
         self,
-        type: "ResponseContentType | None" = "delta",
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = "delta",
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator: ...
 
     def get_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator:
@@ -380,7 +380,7 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: "InstantStreamingContentType",
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator["StreamingData", None]: ...
@@ -389,25 +389,25 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: Literal["all"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
+    ) -> AsyncGenerator["AgentlyModelResultMessage", None]: ...
 
     @overload
     def get_async_generator(
         self,
         type: Literal["specific"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
+    ) -> AsyncGenerator["AgentlySpecificResultMessage", None]: ...
 
     @overload
     def get_async_generator(
         self,
         type: Literal["delta"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator[str, None]: ...
@@ -416,24 +416,24 @@ class ModelResponseResult:
     def get_async_generator(
         self,
         type: Literal["original"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
+    ) -> AsyncGenerator["AgentlyOriginalResultPayload", None]: ...
 
     @overload
     def get_async_generator(
         self,
-        type: "ResponseContentType | None" = "delta",
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = "delta",
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator: ...
 
     async def get_async_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator:

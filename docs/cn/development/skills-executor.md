@@ -218,7 +218,7 @@ judge。
 直接执行 Skills 时，`stream_handler` 会收到 runtime items：
 
 - `skills.prompt_only.start`
-- `skills.model_stream`，包含 `path`、`value`、`delta`、`is_complete`
+- `skills.model_stream`，包含 `path`、`value`、`delta`、`is_completed`
 - `skills.prompt_only.done`
 - `effort="normal"` 或 `effort="max"` 选中内置 planner chain 时，会收到
   `skills.runtime_chain.*`

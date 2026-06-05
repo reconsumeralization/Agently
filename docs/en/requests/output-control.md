@@ -54,7 +54,7 @@ field paths for instant events.
 - `wildcard_path` normalizes indexes, such as `risk_flags[*]`;
 - `delta` is the new fragment for progressive rendering;
 - `value` is the parser's current value for that path;
-- `is_complete` / `event_type == "done"` marks a field as closed.
+- `is_completed` / `event_type == "done"` marks a field as closed.
 
 Use the stream for provisional UI/progress. Use `get_data()` /
 `async_get_data()` after the stream for durable business state; it reads the
@@ -156,7 +156,7 @@ async for item in result.get_async_generator(type="instant"):
         await websocket.send_json({
             "path": item.path,
             "delta": item.delta,
-            "done": item.is_complete,
+            "done": item.is_completed,
         })
 
 final = await result.async_get_data()

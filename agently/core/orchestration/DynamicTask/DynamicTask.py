@@ -302,7 +302,8 @@ class DynamicTask:
                 "field_path": field_path,
                 "value": getattr(item, "value", None),
                 "delta": getattr(item, "delta", None),
-                "is_complete": bool(getattr(item, "is_complete", event_type == "done")),
+                "is_completed": bool(getattr(item, "is_completed", getattr(item, "is_complete", event_type == "done"))),
+                "is_complete": bool(getattr(item, "is_completed", getattr(item, "is_complete", event_type == "done"))),
                 "payload": {
                     "field_path": field_path,
                     "wildcard_path": getattr(item, "wildcard_path", None),

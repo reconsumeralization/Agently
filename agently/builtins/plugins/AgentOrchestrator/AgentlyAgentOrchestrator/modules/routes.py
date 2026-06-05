@@ -60,7 +60,7 @@ async def run_model_request_route(
                     source="model_request",
                     delta=str(data),
                     event_type="delta",
-                    is_complete=False,
+                    is_completed=False,
                 )
             elif event == "done":
                 await execution.emit_stream(
