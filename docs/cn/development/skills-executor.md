@@ -141,7 +141,7 @@ print(execution.skill_logs)
 
 `output=` 使用和 `.output(...)` 相同的 schema grammar；它就是本次
 Skill run 的结构化输出契约，描述 Skill 执行要交付的业务结果形状。
-`output_format=` 才控制承载格式，例如 JSON、flat Markdown、hybrid 或自动选择。
+`output_format=` 才控制承载格式，例如 JSON、flat Markdown、hybrid、XML-like field envelope、YAML literal 或自动选择。
 旧的 `semantic_outputs=` 参数仅作为 Skills 执行的兼容别名保留，并会触发
 deprecation warning。
 
@@ -175,9 +175,12 @@ Skill run，然后从 pending request 清理。显式传入的 `output=` 和
 
 `output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认
 `"auto"`。Auto 是结构规则：扁平且全是字符串字段时选择
-`"flat_markdown"`；顶层 dict 同时包含字符串字段和复杂 list/object 字段时选择
-`"hybrid"`；布尔/数字控制字段、全复杂结构和非 dict 输出选择 `"json"`。紧凑机器
-可读结果、judge、布尔、数字或下游 JSON-only 契约应显式用 `"json"`。
+`"xml_field"`；顶层 dict 同时包含字符串字段和任意非字符串 typed 字段时选择
+`"hybrid"`；全控制字段、全复杂结构和非 dict 输出选择 `"json"`。紧凑全 typed
+机器可读结果或下游 JSON-only 契约应显式用 `"json"`。扁平纯字符串字段
+适合 XML-like field boundary 时可显式用 `"xml_field"`；长文本混合 typed
+字段时可显式用 `"hybrid"`；只有明确需要 YAML target document 时才显式用
+`"yaml_literal"`。
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -185,7 +188,7 @@ execution = await agent.async_run_skills_task(
     skills=["release-review"],
     mode="required",
     output={"html": (str, "render-ready HTML", True)},
-    output_format="flat_markdown",
+    output_format="xml_field",
 )
 ```
 

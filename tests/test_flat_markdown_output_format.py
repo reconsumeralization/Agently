@@ -49,7 +49,7 @@ class TestOutputFormat:
         from agently.types.data.prompt import PromptModel
 
         m = PromptModel(output=TEST_SCHEMA, output_format=None)
-        assert m.output_format == "flat_markdown"
+        assert m.output_format == "xml_field"
         assert m.output_format_resolved_from_auto is True
 
     def test_non_dict_output_with_flat_markdown_warns_and_falls_back(self):
@@ -248,7 +248,7 @@ class TestModelRequestOutputFormat:
         agent.request.output(TEST_SCHEMA)
         fmt = agent.request.prompt.get("output_format")
         assert fmt == "auto"
-        assert agent.request.prompt.to_prompt_object().output_format == "flat_markdown"
+        assert agent.request.prompt.to_prompt_object().output_format == "xml_field"
 
     def test_flat_markdown_prompt_keeps_header_line_plain(self):
         from agently import Agently

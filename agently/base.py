@@ -330,7 +330,7 @@ class AgentlyMain(Generic[A]):
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     ) -> DynamicTask:
         return DynamicTask(
             self.plugin_manager,

@@ -97,7 +97,7 @@ result = (
 顶层 `$ensure_all_keys: true` 会强制所有叶子都必填，覆盖每叶子的 `$ensure`。整个 schema 必须完整返回时使用。
 
 `output` 块里的 `$format` 会映射到 `.output(..., format=...)` 同一个输出格式设置。
-支持 `auto`、`json`、`flat_markdown`、`hybrid`。如果配置文件需要更明确的 key，
+支持 `auto`、`json`、`flat_markdown`、`hybrid`、`xml_field`、`yaml_literal`。如果配置文件需要更明确的 key，
 也可以写 `.format`、`$output_format` 或 `.output_format`。
 
 ## 往返转换

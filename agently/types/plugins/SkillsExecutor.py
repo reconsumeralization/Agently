@@ -51,7 +51,7 @@ class SkillsPlanningContext(Protocol):
         prompt: Any,
         model_key: str | None = None,
         output_schema: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
         ensure_keys: list[str] | None = None,
         max_retries: int = 3,
         stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
@@ -112,7 +112,7 @@ class SkillsEffortStrategyHandler(Protocol):
         context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         effort: str | None = None,
         effort_config: dict[str, Any] | None = None,
     ) -> Awaitable[Any] | Any: ...
@@ -206,7 +206,7 @@ class SkillsExecutor(Protocol):
         mode: SkillMode = "model_decision",
         output: Any = None,
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
     ) -> SkillExecutionPlan: ...
 
     async def async_execute_plan(
@@ -215,6 +215,6 @@ class SkillsExecutor(Protocol):
         context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         effort: str | None = None,
     ) -> Any: ...

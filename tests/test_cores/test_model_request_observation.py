@@ -154,6 +154,53 @@ class MockThinkStructuredRequester:
         yield "meta", {"provider": "mock-observation", "model": "mock-think"}
 
 
+class MockCompleteJsonRequester:
+    name = "MockCompleteJsonRequester"
+    DEFAULT_SETTINGS: dict[str, Any] = {}
+    attempts = 0
+
+    def __init__(self, prompt, settings):
+        self.prompt = prompt
+        self.settings = settings
+
+    @classmethod
+    def reset(cls):
+        cls.attempts = 0
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    def generate_request_data(self):
+        type(self).attempts += 1
+        return AgentlyRequestData(
+            client_options={},
+            headers={},
+            data={"messages": self.prompt.to_messages()},
+            request_options={"stream": True},
+            request_url="mock://complete-json-requester",
+        )
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        del request_data
+        yield "message", json.dumps({"summary": "ready", "reply": "done"}, ensure_ascii=False)
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, Any], None],
+    ):
+        response_text = ""
+        async for event, data in response_generator:
+            if event == "message":
+                response_text += str(data)
+        yield "delta", response_text
+        yield "done", response_text
+
+
 class MockSlowCancelableRequester:
     name = "MockSlowCancelableRequester"
     DEFAULT_SETTINGS: dict[str, Any] = {}
@@ -306,6 +353,18 @@ def _create_think_structured_request():
         plugin_manager,
         agent_name="think-structured-agent",
         agent_id="agent-think-structured",
+        parent_settings=settings,
+    )
+
+
+def _create_complete_json_request():
+    settings = Settings(name="CompleteJsonTestSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="CompleteJsonPluginManager")
+    plugin_manager.register("ModelRequester", MockCompleteJsonRequester, activate=True)
+    return ModelRequest(
+        plugin_manager,
+        agent_name="complete-json-agent",
+        agent_id="agent-complete-json",
         parent_settings=settings,
     )
 
@@ -478,6 +537,72 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
         }
         assert final_completed_event.payload["raw_text"] == '{"summary": "all good", "reply": "done"}'
         assert final_completed_event.payload["cleaned_text"] == '{"summary": "all good", "reply": "done"}'
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_auto_format_parse_failure_degrades_to_json_and_preserves_all_shape():
+    MockObservationRequester.reset()
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.auto_degradation_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        request = _create_request()
+        request.input("Return a structured operations update.")
+        request.output(
+            {
+                "summary": (str,),
+                "reply": (str,),
+            },
+            format="auto",
+        )
+
+        response = request.get_response()
+        all_data = await response.async_get_data(type="all", max_retries=1)
+
+        assert all_data["parsed_result"] == {"summary": "all good", "reply": "done"}
+        assert all_data["extra"]["output_format"] == "json"
+        assert MockObservationRequester.attempts == 2
+
+        retry_event = next(event for event in captured if event.event_type == "model.retrying")
+        assert retry_event.payload["retry_reason"] == "format_degradation"
+        assert retry_event.payload["from_output_format"] == "xml_field"
+        assert retry_event.payload["to_output_format"] == "json"
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_get_data_all_checks_ensure_keys_against_parsed_result():
+    MockCompleteJsonRequester.reset()
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.all_ensure_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        request = _create_complete_json_request()
+        request.input("Return a complete update.")
+        request.output(
+            {
+                "summary": (str,),
+                "reply": (str,),
+            },
+            format="json",
+        )
+
+        all_data = await request.get_response().async_get_data(type="all", max_retries=1)
+
+        assert all_data["parsed_result"] == {"summary": "ready", "reply": "done"}
+        assert MockCompleteJsonRequester.attempts == 1
+        assert [event for event in captured if event.event_type == "model.retrying"] == []
     finally:
         Agently.event_center.unregister_hook(hook_name)
 

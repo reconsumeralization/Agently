@@ -94,7 +94,7 @@ class DynamicTask:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         initial_graph_input: Any = None,
     ):
         if not target:
@@ -275,14 +275,15 @@ class DynamicTask:
         value: Any,
         *,
         task_id: str,
-    ) -> Literal["json", "flat_markdown", "hybrid", "auto"]:
+    ) -> Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"]:
         output_format = str(value or "auto").strip()
-        if output_format not in {"json", "flat_markdown", "hybrid", "auto"}:
+        if output_format not in {"json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"}:
             raise ValueError(
                 f"Dynamic Task model task '{ task_id }' received invalid output_format "
-                f"'{ output_format }'. Expected one of: json, flat_markdown, hybrid, auto."
+                f"'{ output_format }'. Expected one of: json, flat_markdown, hybrid, "
+                "xml_field, yaml_literal, auto."
             )
-        return cast(Literal["json", "flat_markdown", "hybrid", "auto"], output_format)
+        return cast(Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"], output_format)
 
     async def _put_model_stream_item(self, context: DynamicTaskContext, item: Any) -> None:
         event_type = str(getattr(item, "event_type", "done"))

@@ -157,6 +157,20 @@ for event, data in gen:
         print("[tool call]", data)
 ```
 
+### Reasoning events
+
+Some providers expose reasoning in native response fields. Some local or
+OpenAI-compatible reasoning models may instead place a leading outer
+`<think>...</think>` block in ordinary content. Agently normalizes both cases
+before structured parsing:
+
+- `reasoning_delta` / `reasoning_done` carry reasoning text.
+- `delta` / `done` carry only the answer payload that parsers should consume.
+- `original_delta` / `original_done` keep the provider's raw content unchanged.
+- Only a complete leading outer `<think>...</think>` before the answer payload is
+  normalized. `<think>` inside a field, code block, or long text payload remains
+  ordinary answer content.
+
 ## Async streaming
 
 Same generators in async form:

@@ -129,6 +129,18 @@ class OpenAICompatibleResponseAdapterMixin:
                         done_mapping,
                         style=content_mapping_style,
                     )
+                if done_content is None and self.model_type in ("chat", "completions"):
+                    done_content = DataLocator.locate_path_in_dict(
+                        message_record,
+                        "choices[0].message.content",
+                        style="dot",
+                    )
+                if done_content is None and self.model_type == "completions":
+                    done_content = DataLocator.locate_path_in_dict(
+                        message_record,
+                        "choices[0].text",
+                        style="dot",
+                    )
                 if done_content:
                     yield "done", done_content
                 else:
@@ -147,7 +159,7 @@ class OpenAICompatibleResponseAdapterMixin:
                 match self.model_type:
                     case "embeddings":
                         yield "original_done", message_record
-                    case "_":
+                    case _:
                         done_message = message_record
                         if "message" not in done_message["choices"][0]:
                             done_message["choices"][0].update({"message": {}})

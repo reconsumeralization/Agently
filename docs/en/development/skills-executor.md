@@ -156,9 +156,10 @@ print(execution.skill_logs)
 `output=` uses the same schema grammar as `.output(...)`; it is the
 structured-output contract for the Skill run. It describes the business result
 shape the Skill execution must produce, while `output_format=` controls whether
-that result is carried as JSON, flat Markdown, hybrid output, or automatic
-format selection. The older `semantic_outputs=` argument is kept only as a
-deprecated compatibility alias for Skills execution.
+that result is carried as JSON, flat Markdown, hybrid output, XML-like field
+envelopes, YAML literal documents, or automatic format selection. The older
+`semantic_outputs=` argument is kept only as a deprecated compatibility alias
+for Skills execution.
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -191,11 +192,15 @@ and then cleared from the pending request. Explicit `output=` and
 
 `output_format=` selects how that model response is controlled. Leave it as
 `"auto"` for ordinary Skill answers. Auto is structural: it chooses
-`"flat_markdown"` for flat string-only schemas, `"hybrid"` for top-level dicts
-that combine string fields with complex list/object fields, and `"json"` for
-boolean/numeric control fields, all-complex schemas, and non-dict outputs. Use
-explicit `"json"` for compact machine-readable results, judges, booleans,
-numbers, or downstream JSON-only contracts.
+`"xml_field"` for flat string-only dict schemas, `"hybrid"` for top-level
+dicts that combine string fields with typed non-string fields, and `"json"` for
+all-control schemas, all-complex schemas, and non-dict outputs. Use
+explicit `"json"` for compact all-typed machine-readable results or downstream
+JSON-only contracts. Use explicit `"xml_field"` when
+flat string-only fields benefit from XML-like field boundaries, and explicit
+`"hybrid"` for mixed long text plus typed fields. Use explicit `"yaml_literal"`
+only when the task intentionally wants a YAML target
+document.
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -203,7 +208,7 @@ execution = await agent.async_run_skills_task(
     skills=["release-review"],
     mode="required",
     output={"html": (str, "render-ready HTML", True)},
-    output_format="flat_markdown",
+    output_format="xml_field",
 )
 ```
 

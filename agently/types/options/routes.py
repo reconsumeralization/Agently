@@ -23,5 +23,5 @@ class SkillsRouteOptions(AgentlyConfigModel):
     __options_namespace__ = "routes.skills"
 
     effort: str | Literal["fast", "normal", "max"] | None = None
-    output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None
+    output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None
     meta: dict[str, Any] | None = None

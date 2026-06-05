@@ -270,7 +270,7 @@ class ModelRequest:
         ),
         *,
         mappings: dict[str, Any] | None = None,
-        format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
     ):
         self.prompt.set("output", prompt, mappings=mappings)
         self.prompt.set("output_format", format)

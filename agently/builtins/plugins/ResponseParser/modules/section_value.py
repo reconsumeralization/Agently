@@ -114,6 +114,31 @@ def _normalize_json_value(
     return False, None
 
 
+def normalize_json_section_value(
+    content: str,
+    *,
+    field_name: str,
+) -> tuple[bool, Any]:
+    """Normalize a section that is required to contain JSON.
+
+    Unlike :func:`normalize_complex_section_value`, scalar JSON values are
+    allowed. This is used by hybrid/xml_field sections for bool/number fields
+    that must stay strongly typed instead of being returned as prose.
+    """
+    raw = _clean_section_text(content)
+    if _looks_like_placeholder(raw):
+        return False, None
+
+    parsed_ok, parsed = _try_parse_json(raw)
+    if not parsed_ok:
+        return False, None
+    if isinstance(parsed, dict) and set(parsed.keys()) == {field_name}:
+        parsed = parsed[field_name]
+    if isinstance(parsed, str) and _looks_like_placeholder(parsed):
+        return False, None
+    return True, parsed
+
+
 def _looks_like_placeholder(value: str) -> bool:
     stripped = value.strip()
     if not stripped:

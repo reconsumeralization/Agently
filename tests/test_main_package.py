@@ -738,6 +738,58 @@ async def test_dynamic_task_model_task_can_select_output_format():
     assert snapshot["semantic_outputs"]["fragment"]["result"]["html"] == "<section>OK</section>"
 
 
+@pytest.mark.parametrize("output_format", ["xml_field", "yaml_literal"])
+@pytest.mark.asyncio
+async def test_dynamic_task_model_task_accepts_new_structured_output_formats(output_format):
+    schema = {"html": (str, "render-ready HTML", True)}
+
+    class FakeModelRequest:
+        def __init__(self):
+            self.output_schema = None
+            self.output_format = None
+
+        def input(self, _value):
+            return self
+
+        def instruct(self, _value):
+            return self
+
+        def output(self, value, *, format="auto"):
+            self.output_schema = value
+            self.output_format = format
+            return self
+
+        async def async_start(self, **_kwargs):
+            return {"html": "<section>OK</section>"}
+
+    request = FakeModelRequest()
+    task = Agently.create_dynamic_task(
+        "render a fragment",
+        plan={
+            "graph_id": f"model-output-format-{output_format}",
+            "task_schema_version": "task_dag/v1",
+            "tasks": [
+                {
+                    "id": "render_html",
+                    "kind": "model",
+                    "inputs": {
+                        "output_schema": schema,
+                        "output_format": output_format,
+                    },
+                }
+            ],
+            "semantic_outputs": {"fragment": "render_html"},
+        },
+        model=request,
+    )
+
+    snapshot = await task.async_run(timeout=1)
+
+    assert request.output_schema == schema
+    assert request.output_format == output_format
+    assert snapshot["semantic_outputs"]["fragment"]["result"]["html"] == "<section>OK</section>"
+
+
 def test_dynamic_task_can_be_created_without_explicit_model_source():
     task = Agently.create_dynamic_task("needs planning")
 

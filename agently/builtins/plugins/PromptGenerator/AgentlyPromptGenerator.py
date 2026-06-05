@@ -291,6 +291,111 @@ class AgentlyPromptGenerator(PromptGenerator):
             lines.append("")
         return lines
 
+    @staticmethod
+    def _is_string_output_field(field_spec: Any) -> bool:
+        if isinstance(field_spec, tuple) and field_spec:
+            return field_spec[0] in (str, "str")
+        return field_spec in (str, "str")
+
+    def _generate_yaml_literal_field_lines(self, field_name: str, field_spec: Any, indent: int = 0) -> list[str]:
+        if isinstance(field_spec, tuple) and field_spec:
+            return self._generate_yaml_literal_field_lines(field_name, field_spec[0], indent)
+
+        pad = " " * indent
+        if field_spec in (str, "str"):
+            return [f"{pad}{field_name}: |", f"{pad}  write text here"]
+        if field_spec in (bool, "bool", "boolean"):
+            return [f"{pad}{field_name}: true"]
+        if field_spec in (int, "int"):
+            return [f"{pad}{field_name}: 3"]
+        if field_spec in (float, "float", "number"):
+            return [f"{pad}{field_name}: 3.14"]
+        if isinstance(field_spec, dict):
+            lines = [f"{pad}{field_name}:"]
+            for child_name, child_spec in field_spec.items():
+                lines.extend(self._generate_yaml_literal_field_lines(str(child_name), child_spec, indent + 2))
+            return lines
+        if isinstance(field_spec, list):
+            item_spec = field_spec[0] if field_spec else (str,)
+            lines = [f"{pad}{field_name}:"]
+            if isinstance(item_spec, dict):
+                first = True
+                for child_name, child_spec in item_spec.items():
+                    rendered = self._generate_yaml_literal_field_lines(str(child_name), child_spec, indent + 4)
+                    if first:
+                        lines.append(" " * (indent + 2) + "- " + rendered[0].strip())
+                        lines.extend(rendered[1:])
+                        first = False
+                    else:
+                        lines.extend(rendered)
+            else:
+                sample = "write text here" if item_spec in (str, "str", (str,), ("str",)) else "3"
+                lines.append(" " * (indent + 2) + f"- {sample}")
+            return lines
+        return [f"{pad}{field_name}: \"...\""]
+
+    def _generate_xml_field_output_prompt(
+        self,
+        output: dict[str, Any],
+        *,
+        ensure_all_keys: bool = False,
+        title_mapping: dict[str, str] | None = None,
+    ) -> list[str]:
+        lines: list[str] = [
+            f"[{ (title_mapping or {}).get('output_requirement', 'OUTPUT REQUIREMENT') }]:",
+            "Data Format: XML-like field envelope",
+            "",
+            "Return exactly one <agently_output> payload. Each required field MUST be wrapped",
+            "in <field name=\"field_name\" type=\"text|json\">...</field>.",
+            "Use type=\"text\" only for string prose/code fields. Use type=\"json\" for",
+            "lists, objects, booleans, numbers, and other strongly typed values.",
+            "Text field content is raw text; it does not need XML entity escaping.",
+        ]
+        if ensure_all_keys:
+            lines.extend([
+                "",
+                "All defined fields are required. Every field block listed below MUST appear.",
+            ])
+        lines.extend(["", "<agently_output>"])
+        for field_name, field_spec in output.items():
+            if self._is_string_output_field(field_spec):
+                lines.extend([f'<field name="{field_name}" type="text">', "write text here", "</field>"])
+            else:
+                lines.extend([
+                    f'<field name="{field_name}" type="json">',
+                    self._generate_json_value_example(field_spec),
+                    "</field>",
+                ])
+        lines.extend(["</agently_output>", ""])
+        return lines
+
+    def _generate_yaml_literal_output_prompt(
+        self,
+        output: dict[str, Any],
+        *,
+        ensure_all_keys: bool = False,
+        title_mapping: dict[str, str] | None = None,
+    ) -> list[str]:
+        lines: list[str] = [
+            f"[{ (title_mapping or {}).get('output_requirement', 'OUTPUT REQUIREMENT') }]:",
+            "Data Format: YAML literal document",
+            "",
+            "Return exactly one YAML document between these boundary lines:",
+            "<<<BEGIN AGENTLY_YAML>>>",
+            "<<<END AGENTLY_YAML>>>",
+            "Use YAML literal block scalars (|) for long text/code fields.",
+        ]
+        if ensure_all_keys:
+            lines.extend([
+                "",
+                "All defined fields are required. Every top-level key listed below MUST appear.",
+            ])
+        lines.extend(["", "<<<BEGIN AGENTLY_YAML>>>"])
+        for field_name, field_spec in output.items():
+            lines.extend(self._generate_yaml_literal_field_lines(str(field_name), field_spec))
+        lines.extend(["<<<END AGENTLY_YAML>>>", ""])
+        return lines
+
     def _generate_hybrid_output_prompt(
         self,
         output: dict[str, Any],
@@ -305,10 +410,9 @@ class AgentlyPromptGenerator(PromptGenerator):
             "Respond in clearly separated sections. Each section MUST start with the exact",
             "markdown header shown below (### field_name).",
             "",
-            "Sections marked [text] expect plain text content. Write your content directly",
-            "after the header.",
+            "String text fields expect plain text content directly after the header.",
             "",
-            "Sections marked [JSON] expect valid JSON inside a ```json code block.",
+            "List, object, boolean, and number fields expect valid JSON inside a ```json code block.",
             "Write the opening ```json on its own line, then your JSON content, then",
             "the closing ``` on its own line.",
             "",
@@ -324,7 +428,7 @@ class AgentlyPromptGenerator(PromptGenerator):
         lines.append("Required sections:")
         lines.append("")
         for field_name, field_spec in output.items():
-            kind = self._classify_hybrid_field_spec(field_spec)
+            kind = "scalar" if self._is_string_output_field(field_spec) else "json"
             kind_note = "(text)" if kind == "scalar" else "(JSON)"
             desc = ""
             if isinstance(field_spec, tuple) and len(field_spec) >= 2 and field_spec[1]:
@@ -338,10 +442,33 @@ class AgentlyPromptGenerator(PromptGenerator):
                 lines.append("(your content here)")
             else:
                 lines.append("```json")
-                lines.append(self._generate_json_output_prompt(field_spec, title_mapping=title_mapping))
+                lines.append(self._generate_json_value_example(field_spec))
                 lines.append("```")
             lines.append("")
         return lines
+
+    def _generate_json_value_example(self, value: Any) -> str:
+        if isinstance(value, tuple) and value:
+            return self._generate_json_value_example(value[0])
+        if value in (str, "str"):
+            return '"..."'
+        if value in (int, "int"):
+            return "3"
+        if value in (float, "float", "number"):
+            return "3.14"
+        if value in (bool, "bool", "boolean"):
+            return "true"
+        if isinstance(value, dict):
+            items = [f'"{key}": {self._generate_json_value_example(child)}' for key, child in value.items()]
+            return "{\n  " + ",\n  ".join(items) + "\n}" if items else "{}"
+        if isinstance(value, list):
+            item = value[0] if value else (str,)
+            rendered = self._generate_json_value_example(item)
+            if "\n" in rendered:
+                rendered = "\n  ".join(rendered.splitlines())
+                return "[\n  " + rendered + "\n]"
+            return f"[{rendered}]"
+        return '"..."'
 
     @classmethod
     def _classify_hybrid_field_spec(cls, field_spec: Any):
@@ -509,6 +636,22 @@ class AgentlyPromptGenerator(PromptGenerator):
                 case "hybrid":
                     prompt_text_list.extend(
                         self._generate_hybrid_output_prompt(
+                            DataFormatter.sanitize(prompt_object.output),
+                            ensure_all_keys=getattr(prompt_object, "ensure_all_keys", False),
+                            title_mapping=prompt_title_mapping,
+                        )
+                    )
+                case "xml_field":
+                    prompt_text_list.extend(
+                        self._generate_xml_field_output_prompt(
+                            DataFormatter.sanitize(prompt_object.output),
+                            ensure_all_keys=getattr(prompt_object, "ensure_all_keys", False),
+                            title_mapping=prompt_title_mapping,
+                        )
+                    )
+                case "yaml_literal":
+                    prompt_text_list.extend(
+                        self._generate_yaml_literal_output_prompt(
                             DataFormatter.sanitize(prompt_object.output),
                             ensure_all_keys=getattr(prompt_object, "ensure_all_keys", False),
                             title_mapping=prompt_title_mapping,

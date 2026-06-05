@@ -146,10 +146,14 @@ task. Each model task may also set `inputs.output_format`:
 - `json`: compact machine-control outputs, action arguments, routing flags,
   numeric or boolean facts, model judges, dense nested arrays/objects, and
   strict extraction.
-- `flat_markdown`: flat string fields with long HTML, Markdown, code, SVG,
-  SQL, templates, or report sections.
-- `hybrid`: explicit opt-in for long prose with structured lists, tables,
-  citations, metadata, or nested evidence when retry latency is acceptable.
+- `flat_markdown`: explicit compatibility mode for legacy section-header
+  prompts.
+- `hybrid`: default auto target, or explicit mode, for long prose/code fields
+  mixed with typed list/object/boolean/number fields.
+- `xml_field`: default auto target, or explicit mode, for flat string-only
+  dict schemas. It uses Agently's custom boundary parser, not strict XML.
+- `yaml_literal`: explicit YAML target document for teams that prefer YAML and
+  can tolerate indentation sensitivity.
 - `auto`: structural schema-driven selection when retry latency is acceptable.
 
 ```python
