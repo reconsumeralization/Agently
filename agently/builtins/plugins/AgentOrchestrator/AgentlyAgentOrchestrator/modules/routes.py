@@ -34,8 +34,8 @@ async def run_model_request_route(
     raise_ensure_failure: bool,
 ) -> Any:
     agent = execution.agent
-    turn_run_context = execution.agent_turn_run_context
-    execution._agent_turn_completion_owned_by_response = True
+    turn_run_context = agent._create_agent_turn_run_context(parent_run_context=execution.parent_run_context)
+    await agent._async_emit_agent_turn_started(turn_run_context)
     if ensure_all_keys is not None:
         agent.request.prompt.set("ensure_all_keys", ensure_all_keys)
     response = agent.request.get_response(parent_run_context=turn_run_context)
@@ -207,10 +207,7 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
     await execution.emit_stream("route.dynamic_task.graph", graph_dict, route="dynamic_task", source="dynamic_task")
 
     compiled = task.compile(graph)
-    dag_execution = compiled.create_execution(
-        auto_close=False,
-        parent_run_context=execution.agent_turn_run_context,
-    )
+    dag_execution = compiled.create_execution(auto_close=False)
     graph_input, graph_input_source = _resolve_dynamic_task_graph_input(execution, candidate, target)
 
     async def runner():

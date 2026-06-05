@@ -22,10 +22,6 @@ Event Center 是 Agently 的框架级运行时事件通道。它承载 **Runtime
 run 与 retry 命名：
 
 - `agent_turn` 是一次 Agent 面向用户/调用方回合的 run lineage 类型。
-- `agent.create_execution()` / `agent.start()` 会为一次 execution 创建一个
-  `agent_turn` run，并把选中的 route 工作绑定到它下面。`model_request`
-  route 仍由 `ModelResponse` 发出 turn completion / failure，保持旧的请求观测语义；
-  `skills` 和 `dynamic_task` route 则由 AgentExecution 发出 turn completion / failure。
 - `attempt_index` 描述一次请求内部的模型重试 attempt；它不是 Agent turn 计数。
 - DevTools 应保持两者语义分离：从 `run.run_kind` 渲染 `agent_turn`，从 `model_request` run 的 `payload.attempt_index` 或 `run.meta.attempt_index` 读取模型重试 attempt。
 

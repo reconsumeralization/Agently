@@ -378,55 +378,6 @@ class BaseAgent:
             }
         )
 
-    async def _async_emit_agent_turn_completed(
-        self,
-        turn_run_context: "RunContext",
-        *,
-        payload: dict[str, Any] | None = None,
-        source: str = "BaseAgent",
-    ):
-        from agently.base import async_emit_runtime
-
-        await async_emit_runtime(
-            {
-                "event_type": "agent_turn.completed",
-                "source": source,
-                "message": f"Agent turn completed for '{ self.name }'.",
-                "payload": {
-                    "agent_id": self.id,
-                    "agent_name": self.name,
-                    **(payload or {}),
-                },
-                "run": turn_run_context,
-            }
-        )
-
-    async def _async_emit_agent_turn_failed(
-        self,
-        turn_run_context: "RunContext",
-        *,
-        error: BaseException,
-        payload: dict[str, Any] | None = None,
-        source: str = "BaseAgent",
-    ):
-        from agently.base import async_emit_runtime
-
-        await async_emit_runtime(
-            {
-                "event_type": "agent_turn.failed",
-                "source": source,
-                "level": "ERROR",
-                "message": f"Agent turn failed for '{ self.name }'.",
-                "payload": {
-                    "agent_id": self.id,
-                    "agent_name": self.name,
-                    **(payload or {}),
-                },
-                "error": error,
-                "run": turn_run_context,
-            }
-        )
-
     def _emit_session_runtime_observation(
         self,
         kind: str,

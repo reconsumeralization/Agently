@@ -79,7 +79,6 @@ class AgentExecution:
             limits=self.limits,
         )
         self.parent_run_context = parent_run_context
-        self.agent_turn_run_context = agent._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self.route_info: dict[str, Any] = {}
         self.route_plan: dict[str, Any] = {}
         self.close_snapshot: dict[str, Any] = {}
@@ -108,7 +107,6 @@ class AgentExecution:
         self._error: BaseException | None = None
         self._selected_route: tuple[str, dict[str, Any]] | None = None
         self._seen_action_log_keys: set[str] = set()
-        self._agent_turn_completion_owned_by_response = False
 
         self.start = FunctionShifter.syncify(self.async_start)
         self.get_data = FunctionShifter.syncify(self.async_get_data)
@@ -227,11 +225,7 @@ class AgentExecution:
         max_retries: int,
         raise_ensure_failure: bool,
     ) -> tuple[str, Any]:
-        with bind_runtime_context(
-            parent_run_context=self.agent_turn_run_context,
-            agent_turn_run_context=self.agent_turn_run_context,
-            agent_execution_context=self.execution_context,
-        ):
+        with bind_runtime_context(agent_execution_context=self.execution_context):
             self.execution_context.record_progress(stage="route_selection", status="started")
             route, route_meta = await self.select_route()
             self.execution_context.record_progress(stage="route_selection", status="completed")
@@ -379,7 +373,6 @@ class AgentExecution:
             self._started = True
             self.status = "running"
             try:
-                await self.agent._async_emit_agent_turn_started(self.agent_turn_run_context)
                 self.execution_context.record_progress(
                     stage="agent_execution",
                     status="started",
@@ -399,17 +392,6 @@ class AgentExecution:
                 if self.status == "running":
                     self.status = "success"
                 await self.emit_stream("result", self.result, route=route, source="agent_execution")
-                if not self._agent_turn_completion_owned_by_response:
-                    await self.agent._async_emit_agent_turn_completed(
-                        self.agent_turn_run_context,
-                        payload={
-                            "execution_id": self.id,
-                            "execution_mode": self.mode,
-                            "route": route,
-                            "status": self.status,
-                        },
-                        source="AgentExecution",
-                    )
                 return self.result
             except RuntimeStageStallError as error:
                 self.status = "timed_out" if error.status == "timed_out" else "stalled"
@@ -420,17 +402,6 @@ class AgentExecution:
                     error.to_diagnostic(),
                     source="agent_execution",
                 )
-                if not self._agent_turn_completion_owned_by_response:
-                    await self.agent._async_emit_agent_turn_failed(
-                        self.agent_turn_run_context,
-                        error=error,
-                        payload={
-                            "execution_id": self.id,
-                            "execution_mode": self.mode,
-                            "status": self.status,
-                        },
-                        source="AgentExecution",
-                    )
                 raise
             except asyncio.TimeoutError as error:
                 self.status = "timed_out"
@@ -452,17 +423,6 @@ class AgentExecution:
                     timeout_error.to_diagnostic(),
                     source="agent_execution",
                 )
-                if not self._agent_turn_completion_owned_by_response:
-                    await self.agent._async_emit_agent_turn_failed(
-                        self.agent_turn_run_context,
-                        error=timeout_error,
-                        payload={
-                            "execution_id": self.id,
-                            "execution_mode": self.mode,
-                            "status": self.status,
-                        },
-                        source="AgentExecution",
-                    )
                 raise timeout_error from error
             except AgentExecutionLimitExceeded as error:
                 self.status = "blocked"
@@ -473,17 +433,6 @@ class AgentExecution:
                     {"type": error.__class__.__name__, "message": str(error), "limit_name": error.limit_name},
                     source="agent_execution",
                 )
-                if not self._agent_turn_completion_owned_by_response:
-                    await self.agent._async_emit_agent_turn_failed(
-                        self.agent_turn_run_context,
-                        error=error,
-                        payload={
-                            "execution_id": self.id,
-                            "execution_mode": self.mode,
-                            "status": self.status,
-                        },
-                        source="AgentExecution",
-                    )
                 raise
             except BaseException as error:
                 self.status = "error"
@@ -494,17 +443,6 @@ class AgentExecution:
                     {"type": error.__class__.__name__, "message": str(error)},
                     source="agent_execution",
                 )
-                if not self._agent_turn_completion_owned_by_response:
-                    await self.agent._async_emit_agent_turn_failed(
-                        self.agent_turn_run_context,
-                        error=error,
-                        payload={
-                            "execution_id": self.id,
-                            "execution_mode": self.mode,
-                            "status": self.status,
-                        },
-                        source="AgentExecution",
-                    )
                 raise
             finally:
                 self._refresh_diagnostics()
