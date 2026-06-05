@@ -132,9 +132,10 @@ task = (
 The prompt snapshot is rendered through the normal Prompt generator to become
 the Dynamic Task target. The `output` slot becomes the facade-level
 `output_schema`, and `output_format` becomes the default model-task format.
-`set_agent_prompt(...)` / `always=True` values are inherited; request prompt
-values from `set_request_prompt(...)` / quick prompt calls are frozen into the
-new task and then cleared from the pending request. Explicit
+`set_agent_prompt(...)` / `always=True` values are inherited. In a quick prompt
+chain, request prompt values are held on the AgentTurn draft and frozen into the
+new task; direct `set_request_prompt(...)` / `agent.request` values remain the
+lower-level request-builder compatibility path. Explicit
 `create_dynamic_task(target=..., output_schema=..., output_format=...)`
 arguments override prompt-derived defaults.
 
