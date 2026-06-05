@@ -1,6 +1,6 @@
 <img width="640" alt="Agently" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4.1.3.2 - AI Application Runtime Framework
+# Agently 4.1.3.4 - AI Application Runtime Framework
 
 > Build AI service backends with structured outputs, observable Actions, runtime Skills, MCP capabilities, process streams, and recoverable workflows.
 
@@ -32,12 +32,11 @@ Agently is for teams moving from "the model can do it once" to "the application 
 
 The main design question is simple: how do you keep model behavior useful while still giving application code stable contracts, observable execution, and restart-safe workflow boundaries?
 
-Agently 4.1.3.2 adds bounded AgentExecution task steps, Workspace-backed
-multi-step task context, runtime stall controls, and EventCenter-managed
-RuntimeEvent delivery on top of the 4.1.3 runtime line. Application code can
-run explicit `mode="task_step"` executions with lineage, limits, stream
-correlation, and Workspace checkpoints while DevTools and companion Skills stay
-aligned with the same runtime event vocabulary. Read the
+Agently 4.1.3.4 hardens structured output parsing for mixed long-text and typed
+contracts, adds OpenAICompatible pre-output transport retry, propagates explicit
+stream materialization errors, and ships a bounded single-Agent AgentTaskLoop
+first public slice. Read the
+[4.1.3.4 Release Notes](docs/en/development/release-notes-4.1.3.4.md),
 [4.1.3.3 Release Notes](docs/en/development/release-notes-4.1.3.3.md),
 [4.1.3.2 Release Notes](docs/en/development/release-notes-4.1.3.2.md),
 [4.1.3.1 Release Notes](docs/en/development/release-notes-4.1.3.1.md), and
@@ -62,7 +61,7 @@ Agently is a good fit when you care about:
 - **Common model-app patterns should be composable** - router, To-Do/dependency execution, planning, reflection, evaluator/reviser, and multi-agent collaboration can be built from the same request/action/signal primitives. Read [Playbooks](docs/en/playbooks/overview.md), [TriggerFlow Model Integration](docs/en/triggerflow/model-integration.md), and [`examples/step_by_step/`](examples/step_by_step/).
 - **Services should keep clean project boundaries** - async APIs, FastAPI helpers, settings files, prompt files, DevTools observation, and companion coding-agent skills fit non-trivial projects. Read [Project Framework](docs/en/start/project-framework.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [Observability](docs/en/observability/overview.md).
 
-Current framework version: `4.1.3.2`.
+Current framework version: `4.1.3.4`.
 
 Python: `>=3.10`.
 
