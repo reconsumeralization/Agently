@@ -14,6 +14,7 @@
 
 import asyncio
 import contextlib
+import re
 import warnings
 
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Generator, Literal, Mapping, cast
@@ -42,6 +43,16 @@ from agently.builtins.plugins.ResponseParser.modules.hybrid import (
     HybridStreamingParser,
     parse_hybrid_output,
 )
+from agently.builtins.plugins.ResponseParser.modules.xml_field import (
+    XmlFieldStreamingParser,
+    extract_xml_field_target,
+    parse_xml_field_output,
+)
+from agently.builtins.plugins.ResponseParser.modules.yaml_literal import (
+    YamlLiteralStreamingParser,
+    extract_yaml_literal_target,
+    parse_yaml_literal_output,
+)
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -52,6 +63,92 @@ DEFAULT_SPECIFIC_EVENTS = cast(
     "SpecificEvents",
     ["reasoning_delta", "delta", "reasoning_done", "done", "tool_calls"],
 )
+
+STRUCTURED_OUTPUT_FORMATS = {"json", "flat_markdown", "hybrid", "xml_field", "yaml_literal"}
+
+
+class LeadingThinkEventNormalizer:
+    """Normalize leading ``<think>...</think>`` content into reasoning events."""
+
+    _OPEN = "<think>"
+    _CLOSE_RE = re.compile(r"</think>", flags=re.IGNORECASE)
+
+    def __init__(self):
+        self._mode: Literal["unknown", "reasoning", "answer"] = "unknown"
+        self._pending = ""
+        self._reasoning_buffer = ""
+        self._reasoning_done_emitted = False
+
+    def feed_delta(self, chunk: str) -> list[tuple[str, str]]:
+        if self._mode == "answer":
+            return [("delta", chunk)] if chunk else []
+
+        self._pending += chunk
+        if self._mode == "unknown":
+            leading = self._pending.lstrip()
+            if not leading:
+                return []
+            lowered = leading.lower()
+            if self._OPEN.startswith(lowered) and len(lowered) < len(self._OPEN):
+                return []
+            if lowered.startswith(self._OPEN):
+                self._mode = "reasoning"
+                self._pending = leading[len(self._OPEN):]
+                return self._drain_reasoning_pending()
+            self._mode = "answer"
+            answer = self._pending
+            self._pending = ""
+            return [("delta", answer)] if answer else []
+
+        return self._drain_reasoning_pending()
+
+    def feed_done(self, content: str) -> list[tuple[str, str]]:
+        events: list[tuple[str, str]] = []
+        answer = self._strip_leading_think(content)
+        if self._reasoning_buffer and not self._reasoning_done_emitted:
+            events.append(("reasoning_done", self._reasoning_buffer))
+            self._reasoning_done_emitted = True
+        events.append(("done", answer))
+        return events
+
+    def _drain_reasoning_pending(self) -> list[tuple[str, str]]:
+        events: list[tuple[str, str]] = []
+        close = self._CLOSE_RE.search(self._pending)
+        if close is None:
+            if self._pending:
+                self._reasoning_buffer += self._pending
+                events.append(("reasoning_delta", self._pending))
+                self._pending = ""
+            return events
+
+        reasoning = self._pending[:close.start()]
+        if reasoning:
+            self._reasoning_buffer += reasoning
+            events.append(("reasoning_delta", reasoning))
+        if not self._reasoning_done_emitted:
+            events.append(("reasoning_done", self._reasoning_buffer))
+            self._reasoning_done_emitted = True
+        rest = self._pending[close.end():].lstrip()
+        self._pending = ""
+        self._mode = "answer"
+        if rest:
+            events.append(("delta", rest))
+        return events
+
+    def _strip_leading_think(self, content: str) -> str:
+        leading = content.lstrip()
+        if not leading.lower().startswith(self._OPEN):
+            return content
+        close = self._CLOSE_RE.search(leading)
+        if close is None:
+            return content
+        reasoning = leading[len(self._OPEN):close.start()]
+        if reasoning and not self._reasoning_buffer:
+            self._reasoning_buffer = reasoning
+        answer = leading[close.end():].lstrip()
+        if not answer:
+            return content
+        return answer
 
 
 class AgentlyResponseParser(ResponseParser):
@@ -93,7 +190,7 @@ class AgentlyResponseParser(ResponseParser):
             "extra": {},
         }
         self._prompt_object = prompt.to_prompt_object()
-        self._OutputModel = prompt.to_output_model() if self._prompt_object.output_format in ("json", "flat_markdown", "hybrid") else None
+        self._OutputModel = prompt.to_output_model() if self._prompt_object.output_format in STRUCTURED_OUTPUT_FORMATS else None
         self._response_consumer: GeneratorConsumer | None = None
         self._consumer_lock = asyncio.Lock()
         self._final_json_parse_result: tuple[str | None, Any, BaseModel | None, bool] | None = None
@@ -129,6 +226,42 @@ class AgentlyResponseParser(ResponseParser):
             self._build_result_object,
         )
 
+    def _known_field_section_seen(self, text: str) -> bool:
+        output_schema = self._prompt_object.output
+        if not isinstance(output_schema, Mapping) or not output_schema:
+            return False
+        escaped_names = "|".join(re.escape(str(name)) for name in output_schema.keys())
+        if not escaped_names:
+            return False
+        pattern = rf"^###\s+({escaped_names})\s*(?:\[(?:text|JSON)\])?\s*$"
+        return re.search(pattern, text, flags=re.MULTILINE) is not None
+
+    def _parse_structured_text_output(self, text: str) -> tuple[Any | None, str | None, bool]:
+        payload_extracted = False
+        try:
+            match self._prompt_object.output_format:
+                case "flat_markdown":
+                    payload_extracted = self._known_field_section_seen(text)
+                    parsed = parse_flat_markdown_output(text, self._prompt_object.output or {})
+                case "hybrid":
+                    payload_extracted = self._known_field_section_seen(text)
+                    parsed = parse_hybrid_output(text, self._prompt_object.output or {})
+                case "xml_field":
+                    payload_extracted = extract_xml_field_target(text) is not None
+                    parsed = parse_xml_field_output(text, self._prompt_object.output or {})
+                case "yaml_literal":
+                    payload_extracted = extract_yaml_literal_target(text) is not None
+                    parsed = parse_yaml_literal_output(text, self._prompt_object.output or {})
+                case _:
+                    return None, f"Unsupported structured output format: {self._prompt_object.output_format}", False
+        except Exception as exc:
+            return None, f"{exc.__class__.__name__}: {exc}", payload_extracted
+        if parsed is None:
+            if payload_extracted:
+                return None, "Structured payload was found, but parser could not materialize it.", True
+            return None, "Parser returned no structured payload.", False
+        return parsed, None, payload_extracted
+
     def _record_runtime_observation(
         self,
         kind: str,
@@ -162,6 +295,10 @@ class AgentlyResponseParser(ResponseParser):
                 self.full_result_data["cleaned_result"] = completed
                 self.full_result_data["parsed_result"] = parsed
                 self.full_result_data["result_object"] = result_object
+                self.full_result_data["extra"]["output_format"] = "json"
+                self.full_result_data["extra"]["parse_error"] = None
+                self.full_result_data["extra"]["payload_extracted"] = completed is not None
+                self.full_result_data["extra"]["parse_success"] = True
                 self._record_runtime_observation(
                     "completed",
                     message="Model response parsed as JSON output.",
@@ -172,12 +309,25 @@ class AgentlyResponseParser(ResponseParser):
                         "repaired": repaired,
                         "streamed_text": buffer,
                         "format": "json",
+                        "resolved_format": "json",
+                        "payload_extracted": completed is not None,
+                        "parse_success": True,
+                        "parse_error": None,
                     },
                 )
             else:
+                parse_error = (
+                    "No JSON payload could be located."
+                    if completed is None
+                    else "Located JSON payload could not be parsed."
+                )
                 self.full_result_data["cleaned_result"] = completed
                 self.full_result_data["parsed_result"] = None
                 self.full_result_data["result_object"] = None
+                self.full_result_data["extra"]["output_format"] = "json"
+                self.full_result_data["extra"]["parse_error"] = parse_error
+                self.full_result_data["extra"]["payload_extracted"] = completed is not None
+                self.full_result_data["extra"]["parse_success"] = False
                 self._record_runtime_observation(
                     "parse_failed",
                     level="WARNING",
@@ -187,72 +337,56 @@ class AgentlyResponseParser(ResponseParser):
                         "cleaned_text": completed,
                         "streamed_text": buffer,
                         "format": "json",
+                        "resolved_format": "json",
+                        "payload_extracted": completed is not None,
+                        "parse_success": False,
+                        "parse_error": parse_error,
                     },
                 )
             return
 
-        if self._prompt_object.output_format == "flat_markdown":
-            parsed = parse_flat_markdown_output(str(data), self._prompt_object.output or {})
+        if self._prompt_object.output_format in ("flat_markdown", "hybrid", "xml_field", "yaml_literal"):
+            parsed, parse_error, payload_extracted = self._parse_structured_text_output(str(data))
+            self.full_result_data["extra"]["parse_error"] = parse_error
+            self.full_result_data["extra"]["output_format"] = self._prompt_object.output_format
+            self.full_result_data["extra"]["payload_extracted"] = payload_extracted
             if parsed is not None:
                 result_object = self._build_result_object(parsed)
                 self.full_result_data["parsed_result"] = parsed
                 self.full_result_data["result_object"] = result_object
                 self.full_result_data["text_result"] = str(data)
+                self.full_result_data["extra"]["parse_success"] = True
                 self._record_runtime_observation(
                     "completed",
-                    message="Model response parsed as flat_markdown output.",
+                    message=f"Model response parsed as {self._prompt_object.output_format} output.",
                     payload={
                         "result": DataFormatter.sanitize(parsed),
                         "raw_text": str(data),
                         "streamed_text": buffer,
-                        "format": "flat_markdown",
+                        "format": self._prompt_object.output_format,
+                        "resolved_format": self._prompt_object.output_format,
+                        "payload_extracted": payload_extracted,
+                        "parse_success": True,
+                        "parse_error": None,
                     },
                 )
             else:
                 self.full_result_data["parsed_result"] = None
                 self.full_result_data["result_object"] = None
                 self.full_result_data["text_result"] = str(data)
+                self.full_result_data["extra"]["parse_success"] = False
                 self._record_runtime_observation(
                     "parse_failed",
                     level="WARNING",
-                    message="Can not parse flat_markdown output from model response.",
+                    message=f"Can not parse {self._prompt_object.output_format} output from model response.",
                     payload={
                         "result": str(data),
                         "streamed_text": buffer,
-                        "format": "flat_markdown",
-                    },
-                )
-            return
-
-        if self._prompt_object.output_format == "hybrid":
-            parsed = parse_hybrid_output(str(data), self._prompt_object.output or {})
-            if parsed is not None:
-                result_object = self._build_result_object(parsed)
-                self.full_result_data["parsed_result"] = parsed
-                self.full_result_data["result_object"] = result_object
-                self.full_result_data["text_result"] = str(data)
-                self._record_runtime_observation(
-                    "completed",
-                    message="Model response parsed as hybrid output.",
-                    payload={
-                        "result": DataFormatter.sanitize(parsed),
-                        "raw_text": str(data),
-                        "streamed_text": buffer,
-                        "format": "hybrid",
-                    },
-                )
-            else:
-                self.full_result_data["parsed_result"] = None
-                self.full_result_data["result_object"] = None
-                self.full_result_data["text_result"] = str(data)
-                self._record_runtime_observation(
-                    "parse_failed",
-                    level="WARNING",
-                    message="Can not parse hybrid output from model response.",
-                    payload={
-                        "result": str(data),
-                        "streamed_text": buffer,
-                        "format": "hybrid",
+                        "format": self._prompt_object.output_format,
+                        "resolved_format": self._prompt_object.output_format,
+                        "payload_extracted": payload_extracted,
+                        "parse_success": False,
+                        "parse_error": parse_error,
                     },
                 )
             return
@@ -274,6 +408,7 @@ class AgentlyResponseParser(ResponseParser):
                     "raw_text": str(data),
                     "streamed_text": buffer,
                     "format": self._prompt_object.output_format,
+                    "resolved_format": self._prompt_object.output_format,
                 },
             )
 
@@ -312,6 +447,7 @@ class AgentlyResponseParser(ResponseParser):
     async def _extract(self):
         buffer = ""
         stream_chunk_index = 0
+        think_normalizer = LeadingThinkEventNormalizer()
         try:
             async for item in self.response_generator:
                 try:
@@ -319,34 +455,44 @@ class AgentlyResponseParser(ResponseParser):
                 except:
                     warnings.warn(f"\n⚠️ Incorrect response data from Agently Response Generator: { item }")
                     continue
+                if event == "delta":
+                    for normalized_event, normalized_data in think_normalizer.feed_delta(str(data)):
+                        yield normalized_event, normalized_data
+                        if normalized_event == "delta":
+                            buffer += str(normalized_data)
+                            stream_chunk_index += 1
+                            if self.settings.get("$log.cancel_logs") is not True:
+                                self._record_runtime_observation(
+                                    "streaming",
+                                    level="DEBUG",
+                                    message=str(normalized_data),
+                                    payload={
+                                        "delta": str(normalized_data),
+                                        "chunk_index": stream_chunk_index,
+                                    },
+                                )
+                            elif self._streaming_canceled is False:
+                                self._record_runtime_observation(
+                                    "streaming_canceled",
+                                    level="INFO",
+                                    message=f"Streaming logs canceled for response '{ self.response_id }'.",
+                                )
+                                self._streaming_canceled = True
+                    continue
                 if event == "done":
-                    await self._handle_done_event(data, buffer)
-                    yield event, data
+                    if isinstance(data, str):
+                        normalized_done_events = think_normalizer.feed_done(data)
+                    else:
+                        normalized_done_events = [("done", data)]
+                    for normalized_event, normalized_data in normalized_done_events:
+                        if normalized_event == "done":
+                            await self._handle_done_event(normalized_data, buffer)
+                        yield normalized_event, normalized_data
                     continue
                 yield event, data
                 match event:
                     case "original_delta":
                         self.full_result_data["original_delta"].append(data)
-                    case "delta":
-                        buffer += str(data)
-                        stream_chunk_index += 1
-                        if self.settings.get("$log.cancel_logs") is not True:
-                            self._record_runtime_observation(
-                                "streaming",
-                                level="DEBUG",
-                                message=str(data),
-                                payload={
-                                    "delta": str(data),
-                                    "chunk_index": stream_chunk_index,
-                                },
-                            )
-                        elif self._streaming_canceled is False:
-                            self._record_runtime_observation(
-                                "streaming_canceled",
-                                level="INFO",
-                                message=f"Streaming logs canceled for response '{ self.response_id }'.",
-                            )
-                            self._streaming_canceled = True
                     case "original_done":
                         self.full_result_data["original_done"] = data
                     case "meta":
@@ -400,7 +546,7 @@ class AgentlyResponseParser(ResponseParser):
                 return self.full_result_data.copy()
 
     async def async_get_data_object(self) -> BaseModel | None:
-        if self._prompt_object.output_format not in ("json", "flat_markdown", "hybrid"):
+        if self._prompt_object.output_format not in STRUCTURED_OUTPUT_FORMATS:
             raise TypeError(
                 "Error: Cannot build an output model for a non-structure output.\n"
                 f"Output Format: { self._prompt_object.output_format }\n"
@@ -427,6 +573,8 @@ class AgentlyResponseParser(ResponseParser):
         streaming_json_parser = None
         streaming_flat_markdown_parser = None
         streaming_hybrid_parser = None
+        streaming_xml_field_parser = None
+        streaming_yaml_literal_parser = None
         if type in ("instant", "streaming_parse"):
             if self._prompt_object.output_format == "json":
                 streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
@@ -434,6 +582,10 @@ class AgentlyResponseParser(ResponseParser):
                 streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
             elif self._prompt_object.output_format == "hybrid":
                 streaming_hybrid_parser = HybridStreamingParser(self._prompt_object.output or {})
+            elif self._prompt_object.output_format == "xml_field":
+                streaming_xml_field_parser = XmlFieldStreamingParser(self._prompt_object.output or {})
+            elif self._prompt_object.output_format == "yaml_literal":
+                streaming_yaml_literal_parser = YamlLiteralStreamingParser(self._prompt_object.output or {})
         if type is None and content is not None:
             DeprecationWarnings.warn_deprecated_once(
                 "AgentlyResponseParser.get_async_generator.content",
@@ -492,6 +644,28 @@ class AgentlyResponseParser(ResponseParser):
                                     if _streaming_parse_path_style == "slash":
                                         streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
                                     yield streaming_data
+                        if streaming_xml_field_parser is not None:
+                            if event == "delta":
+                                async for streaming_data in streaming_xml_field_parser.parse_chunk(str(data)):
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
+                            elif event == "done":
+                                async for streaming_data in streaming_xml_field_parser.flush():
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
+                        if streaming_yaml_literal_parser is not None:
+                            if event == "delta":
+                                async for streaming_data in streaming_yaml_literal_parser.parse_chunk(str(data)):
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
+                            elif event == "done":
+                                async for streaming_data in streaming_yaml_literal_parser.flush():
+                                    if _streaming_parse_path_style == "slash":
+                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                    yield streaming_data
                     case "original":
                         if event.startswith("original"):
                             yield data
@@ -512,6 +686,8 @@ class AgentlyResponseParser(ResponseParser):
         streaming_json_parser = None
         streaming_flat_markdown_parser = None
         streaming_hybrid_parser = None
+        streaming_xml_field_parser = None
+        streaming_yaml_literal_parser = None
         if type in ("instant", "streaming_parse"):
             if self._prompt_object.output_format == "json":
                 streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
@@ -519,6 +695,10 @@ class AgentlyResponseParser(ResponseParser):
                 streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
             elif self._prompt_object.output_format == "hybrid":
                 streaming_hybrid_parser = HybridStreamingParser(self._prompt_object.output or {})
+            elif self._prompt_object.output_format == "xml_field":
+                streaming_xml_field_parser = XmlFieldStreamingParser(self._prompt_object.output or {})
+            elif self._prompt_object.output_format == "yaml_literal":
+                streaming_yaml_literal_parser = YamlLiteralStreamingParser(self._prompt_object.output or {})
         if type is None and content is not None:
             DeprecationWarnings.warn_deprecated_once(
                 "AgentlyResponseParser.get_generator.content",
@@ -569,6 +749,51 @@ class AgentlyResponseParser(ResponseParser):
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_flat_markdown_parser.flush()
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                    if streaming_hybrid_parser is not None:
+                        if event == "delta":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_hybrid_parser.parse_chunk(str(data))
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                        elif event == "done":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_hybrid_parser.flush()
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                    if streaming_xml_field_parser is not None:
+                        if event == "delta":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_xml_field_parser.parse_chunk(str(data))
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                        elif event == "done":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_xml_field_parser.flush()
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                    if streaming_yaml_literal_parser is not None:
+                        if event == "delta":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_yaml_literal_parser.parse_chunk(str(data))
+                            ):
+                                if _streaming_parse_path_style == "slash":
+                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+                                yield streaming_data
+                        elif event == "done":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_yaml_literal_parser.flush()
                             ):
                                 if _streaming_parse_path_style == "slash":
                                     streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)

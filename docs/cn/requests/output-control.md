@@ -14,17 +14,19 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 ## 选择输出格式
 
-`.output(...)` 默认是 `format="auto"`。Auto 会根据 schema 形态选择最简单的
-结构化格式：扁平纯字符串 dict 走 `flat_markdown`；字符串字段与复杂
-list/object 字段混合的 dict 走 `hybrid`；布尔/数字控制字段、全复杂结构或非
-dict 输出仍走 `json`。Auto 不检查字段名或描述里的业务含义。如果下游代码依赖
+`.output(...)` 默认是 `format="auto"`。Auto 会根据 schema 形态选择结构化格式：
+扁平纯字符串 dict 走 `xml_field`；字符串字段与 typed 非字符串字段混合的 dict
+走 `hybrid`；全复杂、全控制字段或非 dict 输出仍走 `json`。Auto 不检查字段名或描述里的业务含义。如果下游代码依赖
 固定的原始输出形态，应显式指定格式。
+`yaml_literal` 是显式 opt-in 格式，不进入 auto；`flat_markdown` 仅作为显式兼容模式保留。
 
 | 模式 | 适用场景 | 不适合 |
 |---|---|---|
 | `auto` | 希望使用框架默认策略，并让 schema 自己决定最适合模型生成的结构化格式。适合应用代码通过 Agently 消费解析后的数据，而不是依赖模型原始文本。 | 旧消费者、测试 fixture、外部 API 或保存的 prompt 期待原始 JSON 文本。此时显式用 `format="json"`。 |
-| `flat_markdown` | 输出是扁平 dict，字段都是标量，尤其某些字段可能包含大量代码、HTML、SVG、Markdown、SQL、模板或多段 prose。用章节标题隔离字段，可以减少 JSON 转义问题，也让大文本块更易读。 | 需要嵌套 list/object、记录数组，或只需要一个非结构化文档。 |
-| `hybrid` | 输出同时有 prose/code 字段和结构化 list/object，例如 `summary` + `citations`、`analysis` + `components`、`notes` + `next_steps`。标量字段保持文本章节，复杂字段放 JSON code block。 | 所有字段都是标量，或所有字段都是紧凑的深层结构且 JSON 更直接。 |
+| `flat_markdown` | 兼容旧 section-header prompt 的显式模式。 | auto 选择、嵌套 list/object、记录数组，或需要高可靠解析。 |
+| `hybrid` | 字符串 prose/code 字段与 typed 字段混合时的 auto 默认目标。字符串字段保持 Markdown 章节，list/object/boolean/number 字段放 fenced JSON block。 | 没有字符串 prose/code 字段、所有字段都是紧凑机器数据且 JSON 更直接，或下游不能接受 Markdown-section raw output。 |
+| `xml_field` | 扁平纯字符串 dict 的 auto 默认目标。Agently 用自定义 XML-like parser 解析，不是严格 XML parser；text 字段可包含 Markdown、代码、`&` 或类似 XML 的片段。 | 下游消费者期待真实 XML 语义、namespace、entity escaping 或 XML schema validation。 |
+| `yaml_literal` | 团队明确偏好 YAML document，且可接受 YAML 缩进敏感性时显式使用。长文本/代码字段用 YAML literal scalar（`|`），整体包在 `<<<BEGIN AGENTLY_YAML>>>` / `<<<END AGENTLY_YAML>>>` boundary 中。 | 通用 auto、低遵循模型，或 JSON 更简单稳定的 dense machine contract。 |
 | `json` | 需要最稳定的机器契约、嵌套数据、数组、外部系统互通、兼容旧 prompt/测试，或下游明确依赖原始 JSON 行为。 | 大段嵌入文档或代码会让转义变脆弱，也更难让模型稳定生成。 |
 | 纯文本 | 请求只要一个自由文本成品：文章、邮件、解释、报告、Markdown 页面、HTML 页面，或其他单一多段落文档。不要调用 `output()`；直接用 `start()` / `async_start()`，或读取 `response.result.get_text()`。 | 需要可单独寻址的字段、路径校验、`ensure_keys`、typed object 或下游分支。 |
 
@@ -49,28 +51,28 @@ dict 输出仍走 `json`。Auto 不检查字段名或描述里的业务含义。
 
 | 输出模式 | Instant 支持 | 使用建议 |
 |---|---|---|
-| `auto` | 支持，auto 先解析为 `json`、`flat_markdown` 或 `hybrid` 后使用对应流式解析器。 | 适合 UI streaming，前提是调用方消费 Agently 的 `StreamingData`，而不是依赖模型原始文本。如果 auto 最终降级到 JSON 重试，用最终解析结果覆盖或丢弃临时 UI 状态。 |
-| `flat_markdown` | 支持，按 `### field` 章节输出字段级 text delta。 | 适合代码、HTML、Markdown、报告章节等长标量字段。字段的首个更新会在模型输出该字段 header 后出现；纯数字标量 schema 的 header 遵循风险更高。 |
-| `hybrid` | 支持，按章节输出字段级 text delta。JSON block 内容先按文本流出，最终再解析成 list/object。 | 适合 prose + 结构化 records 的混合输出。instant 用于 UI/进度，最终 typed 结构用 `get_data()` / `async_get_data()`。 |
+| `auto` | 支持，auto 先解析为 `json`、`hybrid` 或 `xml_field` 后使用对应流式解析器。 | 适合 UI streaming，前提是调用方消费 Agently 的 `StreamingData`，而不是依赖模型原始文本。如果 auto 最终降级到 JSON 重试，用最终解析结果覆盖或丢弃临时 UI 状态。 |
+| `flat_markdown` | 支持，按 `### field` 章节输出字段级 text delta。 | 显式兼容模式。auto/default 解析决策优先使用 `xml_field` 或 `hybrid`。 |
+| `hybrid` | 支持，按章节输出字段级 text delta。JSON block 内容先按文本流出，最终再解析成 typed 值。 | prose/code + 结构化 records/control fields 的 auto 默认路径。instant 用于 UI/进度，最终 typed 结构用 `get_data()` / `async_get_data()`。 |
+| `xml_field` | 支持，在 `<field name="..." type="...">` block 内输出字段级 text delta。 | 当显式 boundary 比 Markdown header 更容易被目标模型遵循时使用。最终解析消费归一化后的 answer payload，不消费 provider reasoning。 |
+| `yaml_literal` | 支持，在目标 YAML boundary 内输出顶层字段 delta。 | 作为临时 UI 状态使用。最终 YAML parsing 对缩进敏感，应以 `get_data()` 结果为准。 |
 | `json` | 支持，走增量 JSON parser。 | 适合数组或嵌套对象的路径级更新。流式阶段更依赖模型及时输出合法 JSON 片段；完成后仍会做最终 repair/parse。 |
 | 纯文本 / `text` | 不提供结构化 instant path。 | 用 `type="delta"` 做原始 token 流式，或完成后 `get_text()`。 |
 
-### 可靠性记录
+### 当前格式契约
 
-2026-05-23 的 cross-model 验收覆盖了 6 个 provider、12 个场景（共 72 个
-检查），包括 DeepSeek、Qwen、Qianfan ERNIE、MiniMax、GLM 和本地 Qwen2.5。
-2026-05-24 追加的结构化输出稳定性 smoke run 覆盖了 DeepSeek V4 Flash、
-Qwen3.6-35B-A3B、GLM-4.5-Air，场景包括扁平字符串、标量控制字段、嵌套
-EDA netlist、hybrid EDA netlist 和 model-judge 数组。这些是已观察到的兼容性
-数据，不是数学保证：
+当前指导基于已经实现的 parser / prompt 契约。大规模生产推荐前，应使用代表性目标模型
+重新验证。格式推荐实验必须保存原始输出，只校验解析、必填字段存在和结构类型；不得用
+分词、关键词或子串匹配作为模型生成内容正确性的判断信号。
 
-| 模式 / 场景集合 | 观察结果 | 选择含义 |
-|---|---|---|
-| `auto` overall | 2026-05-23 旧的 broader auto 矩阵 72/72 通过。当前 auto 是结构规则：扁平纯字符串 dict 可走 `flat_markdown`；字符串字段 + 复杂字段的 dict 可走 `hybrid`；布尔/数字控制字段、全复杂结构和非 dict 输出走 `json`。 | 应用消费最终解析数据、且可接受重试延迟时，适合作为默认；需要兼容固定线协议时显式指定格式。 |
-| `flat_markdown` native parsing | 早期 flat_markdown 场景暴露过 header 遵循风险，尤其纯数字字段以及部分 ERNIE/GLM 运行。当前 auto 不再把数字/布尔字段放进 flat_markdown。 | 适合大段文本/代码字段；不适合全数字标量 schema 或已知不稳定遵循章节标题的模型。 |
-| `json` 嵌套结构 | 2026-05-24 smoke run 中，嵌套 EDA netlist 和嵌套 model-judge 数组在 DeepSeek V4 Flash、Qwen3.6-35B-A3B、GLM-4.5-Air 上未观察到 JSON 输出失败。 | 不要一刀切禁用复杂嵌套结构。dense nested records、judge、布尔、数字和机器契约优先用 JSON。 |
-| `hybrid` 嵌套结构 | 实验中发现并修复了一个 prompt contract 缺口：复杂 hybrid section 现在会包含自己的 JSON 子结构。修复后 EDA hybrid 在 DeepSeek V4 Flash 和 Qwen3.6-35B-A3B 上首轮通过；GLM-4.5-Air 在该 hybrid 场景 360s 无 progress request failure。 | Auto 可为字符串字段 + records 选择 hybrid；如果业务更希望 dense nested machine contract，显式指定 `json`。reasoning 或大型 MoE 档位建议 360s+ timeout，并监听 streaming/meta 事件后再判断失败。 |
-| `instant` sampled scenarios | Instant 覆盖了 flat scalar 输出（S8）和 hybrid 混合输出（S11），并在 provider 集合中验收。 | 支持 UI/进度展示，但业务决策与持久化应消费完成后的最终解析结果；streaming event 是临时状态。 |
+| 关注点 | 契约 |
+|---|---|
+| `auto` 选择 | 只看 schema 结构。不看字段名、描述、模型输出或业务语义。 |
+| `flat_markdown` | 仅保留为显式兼容模式，不再由 auto 选择。 |
+| `hybrid` | 字符串字段是 Markdown section。非字符串字段是 fenced JSON block，并且必须解析成 JSON value，包括 boolean 和 number。auto 会将字符串 + typed 混合 schema 解析到该格式。 |
+| `xml_field` | 使用一个 `<agently_output>` payload 和 `<field name="..." type="text|json">` block。parser 是 XML-like boundary parser，不是严格 XML。auto 会将扁平纯字符串 dict 解析到该格式。 |
+| `yaml_literal` | 使用目标 YAML boundary；长文本字段使用 literal scalar。显式 opt-in，默认不进入 auto。 |
+| reasoning 文本 | provider-native reasoning 和目标 payload 前面的完整外层 `<think>...</think>` 会在解析前归一为 reasoning event。payload/code/text 内部的 `<think>` 会保留。 |
 
 典型用法：
 
@@ -87,12 +89,19 @@ agent.input("Extract invoice fields.").output({
     "line_items": [{"sku": (str,), "amount": (float,)}],
 }, format="json").start()
 
-# prose 加结构化 records 都有价值时，显式使用 hybrid。
+# prose/code 字段混合 records 时，auto 使用 hybrid。
 agent.input("Create an EDA netlist with design notes.").output({
     "analysis": (str, "one paragraph design rationale", True),
     "components": [{"refdes": (str, "reference designator", True), "value": (str, "part value", True)}],
     "nets": [{"name": (str, "net name", True), "connections": [{"refdes": (str, "refdes", True), "pin": (str, "pin", True)}]}],
 }, format="hybrid").start()
+
+# 长文本混合 typed records 时，使用 XML-like field envelope。
+agent.input("Create lesson material.").output({
+    "lesson_script": (str, "long lesson script", True),
+    "environment_checklist": [{"item": (str,), "why": (str,), "command": (str,)}],
+    "final_confirmation": (str, "one sentence", True),
+}, format="xml_field").start()
 
 # 纯文本：一个成品文档，不走结构化 parser。
 html = agent.input("Write a complete landing page as HTML.").start()

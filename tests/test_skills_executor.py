@@ -1418,6 +1418,21 @@ def test_model_decision_orders_multiple_candidates_with_model(tmp_path):
     assert "candidate_skill_cards" in MockSkillsRequester.requests[-1]
 
 
+@pytest.mark.parametrize("output_format", ["xml_field", "yaml_literal"])
+def test_resolve_skills_plan_accepts_new_structured_output_formats(tmp_path, output_format):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    plan = _create_agent().resolve_skills_plan(
+        "handle release",
+        skills=["alpha-skill"],
+        mode="required",
+        output_format=output_format,
+    )
+
+    assert plan.get("expected_result_format") == output_format
+
+
 def test_run_skills_task_uses_full_skill_guidance_not_only_decision_card(tmp_path):
     _skill(tmp_path / "alpha", name="Alpha Skill", body="Alpha guidance full sentence with detailed operating procedure.")
     Agently.skills_executor.install_skills(tmp_path / "alpha")

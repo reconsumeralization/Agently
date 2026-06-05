@@ -16,8 +16,8 @@
 
 Used by AgentlyResponseParser when ``output_format == "hybrid"``.
 
-Hybrid format combines flat_markdown-style section headers for scalar
-fields with JSON code blocks for complex fields (lists, nested dicts).
+Hybrid format combines flat_markdown-style section headers for string text
+fields with JSON code blocks for lists, objects, booleans, and numbers.
 """
 
 from __future__ import annotations
@@ -25,12 +25,11 @@ from __future__ import annotations
 import re
 from typing import Any, AsyncGenerator, Mapping
 
-from agently.types.data.prompt import _classify_field_spec
 from agently.types.data.response import StreamingData
 from agently.utils import DataLocator
 
 from .section_value import (
-    normalize_complex_section_value,
+    normalize_json_section_value,
     normalize_scalar_section_value,
 )
 
@@ -41,11 +40,16 @@ def _extract_json_block(content: str) -> str | None:
     Looks for ```` ```json ... ``` ```` first, then falls back to
     :func:`DataLocator.locate_output_json`.
     """
-    # Try markdown code block first
-    m = re.search(r"```(?:json)?[ \t]*\n(.*?)\n?```", content, flags=re.DOTALL)
+    m = re.match(r"\s*```(?:json)?[ \t]*\n(.*?)\n?```\s*", content, flags=re.DOTALL)
     if m:
         return m.group(1).strip()
     return None
+
+
+def _is_hybrid_text_field(field_spec: Any) -> bool:
+    if isinstance(field_spec, tuple) and field_spec:
+        return field_spec[0] in (str, "str")
+    return field_spec in (str, "str")
 
 
 def parse_hybrid_output(text: str, output_schema: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -53,11 +57,9 @@ def parse_hybrid_output(text: str, output_schema: Mapping[str, Any]) -> dict[str
 
     Splits by ``### field_name`` headers, then:
 
-    - **Scalar fields**: content is trimmed and stored as-is (pydantic
-      type coercion handles the rest).
-    - **Complex fields**: content is searched for a JSON code block;
-      on success the JSON is parsed with ``json5``. If no JSON block is
-      found the raw content is stored as a string.
+    - **String fields**: content is trimmed and stored as-is.
+    - **Non-string fields**: content must provide valid JSON so bools,
+      numbers, lists, and objects remain strongly typed.
 
     Args:
         text: The raw model response text.
@@ -84,18 +86,17 @@ def parse_hybrid_output(text: str, output_schema: Mapping[str, Any]) -> dict[str
         content = sections[i + 1].strip() if i + 1 < len(sections) else ""
         field_spec = output_schema.get(field_name)
 
-        if _classify_field_spec(field_spec) == "complex":
+        if not _is_hybrid_text_field(field_spec):
             json_text = _extract_json_block(content)
             if json_text is None:
                 json_text = DataLocator.locate_output_json(content, {field_name: field_spec})
-            ok, value = normalize_complex_section_value(
+            ok, value = normalize_json_section_value(
                 json_text if json_text is not None else content,
                 field_name=field_name,
             )
         else:
-            json_text = _extract_json_block(content)
             ok, value = normalize_scalar_section_value(
-                json_text if json_text is not None else content,
+                content,
                 field_name=field_name,
             )
         if not ok:

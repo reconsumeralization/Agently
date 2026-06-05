@@ -64,6 +64,9 @@ class OpenAICompatible(
         },
         "timeout_mode": "first_token",
         "stream_idle_timeout": None,
+        "request_retry": {
+            "max_attempts": 2,
+        },
         "client_options": {},
         "headers": {},
         "proxy": None,

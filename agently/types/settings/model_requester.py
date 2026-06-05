@@ -28,6 +28,10 @@ class _HTTPTimeoutSettings(AgentlyConfigModel):
     pool: float | None = None
 
 
+class _RequestRetrySettings(AgentlyConfigModel):
+    max_attempts: int | None = None
+
+
 class _OpenAIContentMapping(AgentlyConfigModel):
     id: str | None = None
     role: str | None = None
@@ -55,6 +59,7 @@ class OpenAICompatibleSettings(AgentlyConfigModel):
     model_type: Literal["chat", "completions", "embeddings"] | None = None
     timeout_mode: Literal["http", "first_token"] | None = None
     stream_idle_timeout: float | None = None
+    request_retry: _RequestRetrySettings | dict[str, int | None] | bool | None = None
     client_options: dict[str, Any] | None = None
     headers: dict[str, Any] | None = None
     proxy: str | None = None

@@ -191,7 +191,7 @@ class AgentlySkillsExecutor(SkillsExecutor):
         mode: SkillMode = "model_decision",
         output: Any = None,
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
     ) -> SkillExecutionPlan:
         if output is not None and semantic_outputs is not None:
             raise ValueError("Use either output= or semantic_outputs= for Skills planning, not both.")
@@ -217,7 +217,7 @@ class AgentlySkillsExecutor(SkillsExecutor):
         context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         effort: str | None = None,
     ):
         return await SkillExecutor(

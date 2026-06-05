@@ -251,7 +251,7 @@ class BaseAgent:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         _prompt_snapshot: Mapping[str, Any] | None = None,
     ) -> DynamicTask:
         prompt_defaults = self._dynamic_task_prompt_defaults(target, prompt_snapshot=_prompt_snapshot)
@@ -294,7 +294,7 @@ class BaseAgent:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         graph_input: Any = _UNSET,
         timeout: float | None = None,
         max_retries: int = 3,
@@ -862,7 +862,7 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-        format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
     ):
         if always:
             self.agent_prompt.set("output", prompt, mappings=mappings)

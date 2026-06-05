@@ -103,7 +103,7 @@ class SkillExecutor:
         context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         effort: str | None = None,
     ) -> SkillExecution:
         execution_id = uuid.uuid4().hex
@@ -251,7 +251,7 @@ class SkillExecutor:
             execution_id: str,
             runtime_stream: list[dict[str, Any]],
             skill_logs: list[dict[str, Any]],
-            output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+            output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
             effort_config: dict[str, Any] | None = None,
             effort: str | None = None,
             strategy_name: str = strategy_name,
@@ -281,7 +281,7 @@ class SkillExecutor:
         execution_id: str,
         runtime_stream: list[dict[str, Any]],
         skill_logs: list[dict[str, Any]],
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         effort_config: dict[str, Any] | None = None,
         effort: str | None = None,
         strategy_name: str,
@@ -816,14 +816,15 @@ class SkillExecutor:
     def _resolve_output_format(
         self,
         plan: SkillExecutionPlan,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None,
-    ) -> Literal["json", "flat_markdown", "hybrid", "auto"]:
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None,
+    ) -> Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"]:
         candidate = str(output_format or plan.get("expected_result_format") or "auto")
-        if candidate not in {"json", "flat_markdown", "hybrid", "auto"}:
+        if candidate not in {"json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"}:
             raise ValueError(
-                "Skill execution output_format must be one of: json, flat_markdown, hybrid, auto."
+                "Skill execution output_format must be one of: json, flat_markdown, hybrid, "
+                "xml_field, yaml_literal, auto."
             )
-        return cast(Literal["json", "flat_markdown", "hybrid", "auto"], candidate)
+        return cast(Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"], candidate)
 
     async def _emit_runtime_item(
         self,

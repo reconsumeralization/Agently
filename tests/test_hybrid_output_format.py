@@ -52,12 +52,12 @@ class TestClassifyFieldSpec:
 
 
 class TestResolveAutoFormat:
-    def test_all_str_flat_markdown(self):
-        assert _resolve_auto_format({"html": (str, "HTML"), "notes": (str, "Notes")}) == "flat_markdown"
+    def test_all_str_xml_field(self):
+        assert _resolve_auto_format({"html": (str, "HTML"), "notes": (str, "Notes")}) == "xml_field"
 
-    def test_mixed_scalar_types_json(self):
-        """Non-string scalar control fields stay on JSON in auto mode."""
-        assert _resolve_auto_format({"name": (str,), "age": (int,), "active": (bool,)}) == "json"
+    def test_mixed_scalar_types_hybrid(self):
+        """String fields mixed with typed controls use hybrid in auto mode."""
+        assert _resolve_auto_format({"name": (str,), "age": (int,), "active": (bool,)}) == "hybrid"
 
     def test_string_scalar_plus_complex_hybrid(self):
         assert _resolve_auto_format({"summary": (str,), "items": [(str,)]}) == "hybrid"
@@ -83,7 +83,7 @@ class TestResolveAutoFormat:
         }
         assert _resolve_auto_format(schema) == "hybrid"
 
-    def test_judge_schema_json_even_with_reason_fields(self):
+    def test_judge_schema_hybrid_without_field_name_semantics(self):
         schema = {
             "rule_results": [{
                 "rule_id": (str, "Stable rule id", True),
@@ -93,11 +93,11 @@ class TestResolveAutoFormat:
             "overall_reason": (str, "Concise summary", True),
             "passes": (bool, "Final pass/fail", True),
         }
-        assert _resolve_auto_format(schema) == "json"
+        assert _resolve_auto_format(schema) == "hybrid"
 
-    def test_auto_hybrid_requires_text_hint_and_complex_field(self):
+    def test_auto_hybrid_requires_string_field_and_typed_field(self):
         assert _should_auto_use_hybrid({"label": (str,), "items": [(str,)]}) is True
-        assert _should_auto_use_hybrid({"summary": (str,), "items": [(str,)], "count": (int,)}) is False
+        assert _should_auto_use_hybrid({"summary": (str,), "items": [(str,)], "count": (int,)}) is True
         assert _should_auto_use_hybrid({"items": [(str,)]}) is False
 
     def test_all_complex_json(self):
@@ -126,14 +126,14 @@ class TestPromptModelAuto:
         assert m.output_format == "hybrid"
         assert m.output_format_resolved_from_auto is True
 
-    def test_auto_with_string_fields_sets_flat_markdown_and_flag(self):
+    def test_auto_with_string_fields_sets_xml_field_and_flag(self):
         m = PromptModel(output={"name": (str,), "notes": (str,)}, output_format="auto")
-        assert m.output_format == "flat_markdown"
+        assert m.output_format == "xml_field"
         assert m.output_format_resolved_from_auto is True
 
-    def test_auto_with_nonstr_scalar_sets_json_and_flag(self):
+    def test_auto_with_string_and_typed_scalar_sets_hybrid_and_flag(self):
         m = PromptModel(output={"name": (str,), "age": (int,)}, output_format="auto")
-        assert m.output_format == "json"
+        assert m.output_format == "hybrid"
         assert m.output_format_resolved_from_auto is True
 
     def test_auto_with_all_complex_sets_json_and_flag(self):
@@ -161,6 +161,18 @@ class TestExtractJsonBlock:
 
     def test_plain_code_block(self):
         assert _extract_json_block('```\n{"a":1}\n```') == '{"a":1}'
+
+    def test_ignores_non_json_code_block_before_text(self):
+        content = (
+            "Intro\n"
+            "```bash\n"
+            "python --version\n"
+            "```\n"
+            "```json\n"
+            "{\"a\": 1}\n"
+            "```\n"
+        )
+        assert _extract_json_block(content) is None
 
     def test_no_block_returns_none(self):
         assert _extract_json_block("no json here") is None
@@ -194,12 +206,12 @@ class TestParseHybridOutput:
         assert result["items"][0] == {"id": 1, "name": "item1"}
 
     def test_scalar_only(self):
-        """Degenerate hybrid: all scalar fields still works."""
+        """Degenerate hybrid keeps string fields as text and parses typed scalars as JSON."""
         text = "### name\nAlice\n\n### age\n30\n"
         result = parse_hybrid_output(text, {"name": (str,), "age": (int,)})
         assert result is not None
         assert result["name"] == "Alice"
-        assert result["age"] == "30"
+        assert result["age"] == 30
 
     def test_missing_json_block_fails_parse(self):
         text = "### items\nsome raw content without json\n"
@@ -226,6 +238,34 @@ class TestParseHybridOutput:
         )
         result = parse_hybrid_output(text, {"summary": (str,), "items": [(str,)]})
         assert result == {"summary": "A summary paragraph.", "items": ["one", "two"]}
+
+    def test_text_field_preserves_inner_code_fences_and_markdown_headings(self):
+        text = (
+            "### lesson_script\n"
+            "# Lesson\n\n"
+            "### 1. Runtime Check\n"
+            "Run this command:\n"
+            "```bash\n"
+            "python --version\n"
+            "```\n"
+            "Then continue after the code block.\n\n"
+            "### items\n"
+            "```json\n"
+            "[{\"name\": \"Python\", \"passed\": true}]\n"
+            "```\n"
+        )
+        result = parse_hybrid_output(
+            text,
+            {
+                "lesson_script": (str,),
+                "items": [{"name": (str,), "passed": (bool,)}],
+            },
+        )
+        assert result is not None
+        assert "### 1. Runtime Check" in result["lesson_script"]
+        assert "```bash\npython --version\n```" in result["lesson_script"]
+        assert "Then continue after the code block." in result["lesson_script"]
+        assert result["items"] == [{"name": "Python", "passed": True}]
 
     def test_unwraps_scalar_same_field_json_wrapper(self):
         text = '### passes\n```json\n{"passes": false}\n```'

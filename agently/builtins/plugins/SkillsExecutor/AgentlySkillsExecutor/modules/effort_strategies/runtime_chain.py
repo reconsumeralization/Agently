@@ -22,7 +22,7 @@ async def run_runtime_chain_strategy(
     execution_id: str,
     runtime_stream: list[dict[str, Any]],
     skill_logs: list[dict[str, Any]],
-    output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+    output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     effort_config: dict[str, Any] | None = None,
     effort: str | None = None,
     strategy_name: str = "runtime_chain",

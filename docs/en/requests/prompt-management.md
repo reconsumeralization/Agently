@@ -98,8 +98,9 @@ result = (
 
 `$format` on the `output` block maps to the same output format setting as
 `.output(..., format=...)`. Supported values are `auto`, `json`,
-`flat_markdown`, and `hybrid`. You can also use `.format`, `$output_format`, or
-`.output_format` when a config file needs a more explicit key.
+`flat_markdown`, `hybrid`, `xml_field`, and `yaml_literal`. You can also use
+`.format`, `$output_format`, or `.output_format` when a config file needs a more
+explicit key.
 
 ## Round-tripping
 
