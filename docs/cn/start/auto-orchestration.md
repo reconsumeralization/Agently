@@ -29,6 +29,87 @@ Task、model-decision Skills 和普通 Actions 时，默认由模型选择 route
 Skills、Dynamic Task 和后续 route 实现都可以替换，而不需要 core 知道内置
 plugin 的内部实现。
 
+## AgentTask Loop
+
+当业务目标需要一个有边界的多轮闭环，而不是一次 Agent turn 时，使用
+`agent.create_task(...)`。AgentTask V1 运行一个由单个 Agent 持有的任务：计划、
+执行一个 bounded step、写入 Workspace 证据、验证、必要时 replan，最后以 complete
+或 blocked 结束。
+
+```python
+task = agent.create_task(
+    goal="将旧版 Agently 脚本迁移到当前 4.1.x API，并确保它可以运行。",
+    success_criteria=[
+        "原始失败已被记录。",
+        "脚本不再使用不兼容的旧 API。",
+        "修复后的脚本可以运行，并产出预期结构化结果。",
+    ],
+    workspace="./.agently/tasks/legacy-script-upgrade",
+    max_iterations=4,
+    verify="before_done",
+    options={
+        "agent_task": {
+            "stream_progress": True,
+            "stream_progress_background": True,
+            "stream_snapshots": True,
+            # 可选：用单独 model key 基于 snapshot 生成自然语言进展。
+            # 不设置时使用模板 progress，不增加模型请求。
+            # "progress_model_key": "cheap-progress-model",
+        },
+    },
+)
+
+async for item in task.stream():
+    if (item.meta or {}).get("stream_kind") == "progress":
+        print("[PROGRESS]", item.value["message"])
+    elif (item.meta or {}).get("stream_kind") == "snapshot":
+        print("[SNAPSHOT]", item.path, item.value["snapshot"])
+
+result = await task.run()
+meta = await task.meta()
+```
+
+每轮会把 planning decision、execution observation、verification evidence 和
+checkpoint 写入 Workspace。下一轮通过 `workspace.build_context(...)` 取得
+ContextPack，因此 loop 可以把证据带入下一轮，但 Workspace 不会变成自主规划器。
+
+AgentTask 的验证仍由模型判断拥有，但最终验收采用保守 guard。loop 会规范化
+verifier 输出；当仍有 missing criteria、必需 action evidence 失败或被 blocked、
+仍需 approval，或必需 final deliverable 缺失时，不会把任务标记为 complete。
+这些 guard 决策会记录在 task diagnostics 中，让下一轮基于具体证据 replan，而不是
+接受一个证据不足的完成声明。
+
+`task.stream()` 会发出结构化结果事件，并默认发出紧凑中间状态 `snapshot` item。
+自然语言 `progress` item 需要通过
+`options={"agent_task": {"stream_progress": True}}` 显式打开；内置描述是模板文本，
+未配置 `progress_model_key` 时不会增加模型请求或 token 消耗。设置
+`progress_model_key` 后，AgentTask 会用这个单独 model key 在后台基于已产生的
+snapshot 和任务元数据总结进展；主循环不会为了 progress 多产出字段，也不会等待
+progress 总结完成。progress narrator 失败属于 side-channel diagnostics 和
+warning 级 runtime event，不会把主任务标记成 `model.request_failed`。
+progress model 只接收 operator-safe snapshot；底层 Workspace/SQLite fallback
+等 developer diagnostics 仍保留在 snapshot 和 `task.meta()["diagnostics"]`，
+但不会进入 progress model 输入。
+
+任务终态和 artifact 验收是两件事。`completed` 表示 verifier 已验收结果
+（`accepted=True`、`artifact_status="accepted"`）。`max_iterations` 仍可能留下
+有用的 Workspace 文件或 checkpoint，但它只是 partial artifact
+（`accepted=False`、`artifact_status="partial"`），不是已完成的业务结果。
+
+第一版公开 slice 有明确边界：单任务、单 Agent owner、约 2-5 次迭代，并通过
+`AgentExecution` 执行 bounded step。这些 step 可以使用调用方已经在 Agent 上启用的
+Actions、Skills 或 Dynamic Task 候选。AgentTask 不提供多任务协同、后台自治、分布式
+租约或长期记忆管理。
+
+当示例需要验证模型生成内容的语义质量时，应组合 deterministic smoke check 和第二个
+Agently model-judge request。文件存在、问题数量、source label 可见等结构检查只能作为
+smoke gate；语义验收应使用带每条规则 evidence 和 boolean 结果的 judge schema。
+
+示例里的业务系统 fixture 可以 mock，但只能返回业务事实、记录、政策或有缺陷/不完整的
+source data。不要让 mock 返回 pass/fail、隐藏标准答案或本地质量 verdict。若场景需要判断
+artifact 是否正确处理了缺陷数据或冲突事实，应由 AgentTask verifier 或独立 Agently
+model-judge request 基于明确规则和证据做判断。
+
 ## Execution 对象
 
 当调用方需要路线诊断、多种结果视图或过程流式输出时，使用
@@ -106,6 +187,9 @@ Agently.set_settings("response.materialization_idle_timeout", 60.0)
 能够识别时带上 provider/model 字段。
 `response.materialization_idle_timeout` 限制最终 text、data、object 或 meta 从
 response parser materialize 出来的等待时间。`None` 表示无限制；`-1` 作为兼容写法可用。
+如果 provider 或最终响应构造在 materialization 完成前发出显式 stream error，
+`get_text()` / `get_data()` / `get_meta()` 会传播该原始错误，而不是继续等到
+materialization timeout。
 
 高频 RuntimeEvent 出口应该通过 Event Center 请求摘要投递，而不是让
 AgentExecution 在信号源降频：

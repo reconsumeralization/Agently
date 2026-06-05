@@ -40,7 +40,7 @@ from .ActionRegistry import ActionRegistry
 
 
 class ActionDispatcher:
-    VALID_STATUSES = {"success", "error", "approval_required", "blocked", "skipped"}
+    VALID_STATUSES = {"success", "partial_success", "error", "approval_required", "blocked", "skipped"}
 
     def __init__(self, registry: ActionRegistry, settings: Settings):
         self.registry = registry
@@ -109,6 +109,64 @@ class ActionDispatcher:
         }
         return cast(ActionResult, result)
 
+    async def _resolve_action_approval(
+        self,
+        *,
+        spec: ActionSpec,
+        action_call: ActionCall,
+        policy: ActionPolicy,
+    ) -> tuple[bool, ActionPolicy | None, ActionResult | None]:
+        if policy.get("policy_approval_granted") is True:
+            return True, policy, None
+
+        from agently.base import policy_approval
+
+        action_id = str(spec.get("action_id", ""))
+        decision = await policy_approval.async_resolve(
+            {
+                "source": "action",
+                "capability": action_id,
+                "subject": str(spec.get("name") or action_id),
+                "risk": str(spec.get("side_effect_level", "")),
+                "payload": {
+                    "action_call": dict(action_call),
+                    "action_spec": {
+                        "action_id": action_id,
+                        "name": str(spec.get("name", action_id)),
+                        "side_effect_level": str(spec.get("side_effect_level", "")),
+                        "executor_type": str(spec.get("executor_type", "")),
+                    },
+                },
+                "policy": dict(policy),
+            },
+            handler=str(policy.get("policy_approval_handler") or "") or None,
+        )
+        status = str(decision.get("status", "pending"))
+        if status == "approved":
+            merged_policy = cast(ActionPolicy, dict(policy))
+            override = decision.get("policy_override", {})
+            if isinstance(override, dict):
+                cast(dict[str, Any], merged_policy).update(override)
+            merged_policy["policy_approval_granted"] = True
+            merged_policy["policy_approval_decision"] = dict(decision)
+            return True, merged_policy, None
+        message = str(decision.get("reason") or f"Action '{ action_id }' requires approval before execution.")
+        result = self._approval_result(
+            spec=spec,
+            action_call=action_call,
+            policy=policy,
+            reason=status,
+            message=message,
+        )
+        approval = result.get("approval", {})
+        if isinstance(approval, dict):
+            approval["decision"] = dict(decision)
+            result["approval"] = cast(ActionApproval, approval)
+        if status == "denied":
+            result["status"] = "blocked"
+            result["error"] = message
+        return False, None, result
+
     def _normalize_executor_output(
         self,
         *,
@@ -157,7 +215,7 @@ class ActionDispatcher:
         action_input = action_call.get("action_input", {})
         if not isinstance(action_input, dict):
             action_input = {}
-        result.setdefault("ok", result.get("status") == "success")
+        result.setdefault("ok", result.get("status") in {"success", "partial_success"})
         result.setdefault("status", "success" if result.get("ok") else "error")
         result.setdefault("purpose", purpose)
         result.setdefault("action_id", action_id)
@@ -167,7 +225,7 @@ class ActionDispatcher:
         result.setdefault("next", str(action_call.get("next", action_call.get("todo_suggestion", ""))))
         result.setdefault("result", result.get("data"))
         result.setdefault("data", result.get("result"))
-        result.setdefault("success", result.get("status") == "success")
+        result.setdefault("success", result.get("status") in {"success", "partial_success"})
         result.setdefault("artifacts", [])
         result.setdefault("diagnostics", [])
         result.setdefault("meta", {})
@@ -182,6 +240,7 @@ class ActionDispatcher:
     def _to_execution_environment_policy(policy: ActionPolicy) -> ExecutionEnvironmentPolicy:
         keys = {
             "approval_mode",
+            "policy_approval_handler",
             "workspace_roots",
             "path_allowlist",
             "path_denylist",
@@ -334,16 +393,20 @@ class ActionDispatcher:
             "tool_kwargs": dict(action_input),
         }
         policy = self._merge_policy(execution_settings, spec, policy_override)
+        policy_approval_handler = execution_settings.get("policy_approval.handler", None)
+        if policy_approval_handler is not None and not policy.get("policy_approval_handler"):
+            policy["policy_approval_handler"] = str(policy_approval_handler)
 
         if spec.get("approval_required") is True or policy.get("approval_mode") == "always":
-            message = f"Action '{ action_id }' requires approval before execution."
-            return self._approval_result(
+            approved, approved_policy, approval_result = await self._resolve_action_approval(
                 spec=spec,
                 action_call=action_call,
                 policy=policy,
-                reason="approval_required",
-                message=message,
             )
+            if not approved:
+                return cast(ActionResult, approval_result)
+            if approved_policy is not None:
+                policy = approved_policy
         if spec.get("sandbox_required") is True and not getattr(executor, "sandboxed", False):
             return {
                 "ok": False,

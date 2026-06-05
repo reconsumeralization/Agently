@@ -24,7 +24,7 @@ async def run_react_strategy(
     execution_id: str,
     runtime_stream: list[dict[str, Any]],
     skill_logs: list[dict[str, Any]],
-    output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+    output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     effort_config: dict[str, Any] | None = None,
     effort: str | None = None,
     strategy_name: str = "react",
@@ -36,8 +36,6 @@ async def run_react_strategy(
     artifact_inline_limit = to_int(ec.get("artifact_inline_limit") or executor.registry.settings.get("skills.artifact_inline_limit", 65536), 65536)
     capture_context = RuntimeStreamCaptureContext(context, runtime_stream)
 
-    allowed_tools, allowed_actions, allow_scripts = executor._extract_react_affordances(plan)
-
     try:
         result = await run_react_execution(
             task=task,
@@ -46,9 +44,9 @@ async def run_react_strategy(
             settings=executor.registry.settings,
             step_budget=step_budget,
             model_key=model_key,
-            allowed_tools=allowed_tools,
-            allowed_actions=allowed_actions,
-            allow_scripts=allow_scripts,
+            allowed_tools=[],
+            allowed_actions=[],
+            allow_scripts=False,
             artifact_inline_limit=artifact_inline_limit,
         )
     except Exception as error:

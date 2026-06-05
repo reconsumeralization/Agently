@@ -28,6 +28,7 @@ Agently.set_settings("OpenAICompatible", {
 | `api_key` | bearer token; omit for local servers that don't require auth |
 | `model` | provider-specific model name |
 | `model_type` | `"chat"` (default) or `"completion"` for legacy completion endpoints |
+| `request_retry` | transient transport retry policy; defaults to `{"max_attempts": 2}` and only retries before output starts |
 | `request_options` | extra dict forwarded to the underlying HTTP client (timeouts, headers) |
 
 The full set lives in the [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/) package. The public plugin class is exported from `plugin.py`, while request building, credentials, transport, handler binding, and response mapping live under its private `modules/` package.
@@ -86,6 +87,14 @@ You can also set request-level overrides via the request chain — see [Settings
 `OpenAICompatible` handles both streaming responses (used by `get_generator(...)` / `get_async_generator(...)`) and tool calling (used by the action runtime). You don't need to enable these per-provider — they're on as the protocol allows.
 
 If a particular provider doesn't fully implement OpenAI semantics for one of these (e.g., a quirky streaming format), the underlying plugin tries to be tolerant; report concrete cases via issues.
+
+For transient transport failures such as a connection reset or provider-side
+disconnect before any output is emitted, `OpenAICompatible` retries the same
+request once by default. This does not change the selected model, prompt, or
+structured output format. Set `"request_retry": {"max_attempts": 1}` or
+`"request_retry": False` to disable that replay. Once output has started,
+Agently does not replay the stream automatically, because doing so could
+duplicate partial content.
 
 ## See also
 

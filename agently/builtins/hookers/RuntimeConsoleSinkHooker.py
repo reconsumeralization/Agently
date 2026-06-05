@@ -55,6 +55,8 @@ _SIMPLE_EVENT_TYPES = {
             "action.loop_failed",
             "action.started",
             "action.completed",
+            "action.approval_required",
+            "action.blocked",
             "action.failed",
             "tool.loop_started",
             "tool.loop_completed",
@@ -379,6 +381,8 @@ def _resolve_action_stage(event: "ObservationEvent") -> str:
         "action.plan_ready": "Plan Ready",
         "action.started": "Started",
         "action.completed": "Completed",
+        "action.approval_required": "Approval Required",
+        "action.blocked": "Blocked",
         "action.failed": "Failed",
     }
     if event.event_type in stage_mapping:

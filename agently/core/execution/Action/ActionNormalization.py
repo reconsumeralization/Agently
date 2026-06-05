@@ -278,7 +278,7 @@ def normalize_execution_record(
 
         success = record.get("success")
         if not isinstance(success, bool):
-            success = status == "success" and not is_execution_error_result(result)
+            success = status in {"success", "partial_success"} and not is_execution_error_result(result)
 
         if not success and error == "":
             error = str(result) if result is not None else "Action execution failed."

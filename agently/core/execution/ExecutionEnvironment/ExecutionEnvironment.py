@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import uuid
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
+import json
+from typing import TYPE_CHECKING, Any, cast
 
 from agently.types.data import (
-    ExecutionEnvironmentDecision,
     ExecutionEnvironmentHandle,
     ExecutionEnvironmentPolicy,
     ExecutionEnvironmentRequirement,
@@ -31,12 +30,6 @@ if TYPE_CHECKING:
     from agently.core.extension.PluginManager import PluginManager
     from agently.types.plugins import ExecutionEnvironmentProvider
     from agently.utils import Settings
-
-
-ExecutionEnvironmentDecisionHandler = Callable[
-    [ExecutionEnvironmentRequirement, ExecutionEnvironmentPolicy],
-    bool | ExecutionEnvironmentDecision | Awaitable[bool | ExecutionEnvironmentDecision],
-]
 
 
 class ExecutionEnvironmentError(RuntimeError):
@@ -92,7 +85,6 @@ class ExecutionEnvironmentManager:
         self._handles: dict[str, ExecutionEnvironmentHandle] = {}
         self._handles_by_reuse_key: dict[str, str] = {}
         self._providers: dict[str, "ExecutionEnvironmentProvider"] = {}
-        self._decision_handler: ExecutionEnvironmentDecisionHandler | None = None
 
         self.ensure = FunctionShifter.syncify(self.async_ensure)
         self.release = FunctionShifter.syncify(self.async_release)
@@ -216,10 +208,6 @@ class ExecutionEnvironmentManager:
         )
         return normalized
 
-    def set_decision_handler(self, handler: ExecutionEnvironmentDecisionHandler | None):
-        self._decision_handler = handler
-        return self
-
     async def _resolve_approval(
         self,
         requirement: ExecutionEnvironmentRequirement,
@@ -237,18 +225,35 @@ class ExecutionEnvironmentManager:
         )
         if approval_mode == "never":
             raise ExecutionEnvironmentApprovalDenied(requirement, "Execution environment approval is disabled by policy.")
-        if self._decision_handler is None:
+        from agently.base import policy_approval
+
+        decision = await policy_approval.async_resolve(
+            {
+                "source": "execution_environment",
+                "capability": str(requirement.get("kind", "")),
+                "subject": str(requirement.get("resource_key") or requirement.get("kind") or ""),
+                "risk": "resource",
+                "payload": {
+                    "requirement": dict(requirement),
+                },
+                "policy": dict(policy),
+                "lineage": {
+                    "owner_id": str(requirement.get("owner_id", "")),
+                    "scope": str(requirement.get("scope", "")),
+                },
+                "meta": {
+                    "requirement_id": str(requirement.get("requirement_id", "")),
+                },
+            },
+            handler=str(policy.get("policy_approval_handler", "") or "") or None,
+        )
+        status = str(decision.get("status", "pending"))
+        if status == "pending":
             raise ExecutionEnvironmentApprovalRequired(requirement, policy)
-        decision = await FunctionShifter.asyncify(self._decision_handler)(requirement, policy)
-        if isinstance(decision, bool):
-            if decision:
-                return policy
-            raise ExecutionEnvironmentApprovalDenied(requirement, "Execution environment approval was denied.")
-        decision_dict = decision if isinstance(decision, dict) else {}
-        if decision_dict.get("approved") is not True:
-            raise ExecutionEnvironmentApprovalDenied(requirement, str(decision_dict.get("reason", "")))
+        if status != "approved":
+            raise ExecutionEnvironmentApprovalDenied(requirement, str(decision.get("reason", "")))
         merged_policy = dict(policy)
-        override = decision_dict.get("policy_override", {})
+        override = decision.get("policy_override", {})
         if isinstance(override, dict):
             merged_policy.update(override)
         return cast(ExecutionEnvironmentPolicy, merged_policy)

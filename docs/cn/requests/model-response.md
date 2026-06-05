@@ -156,6 +156,18 @@ for event, data in gen:
         print("[tool call]", data)
 ```
 
+### Reasoning 事件
+
+有些 provider 会用原生 response 字段提供 reasoning。有些本地或 OpenAI-compatible
+reasoning 模型可能把开头的外层 `<think>...</think>` 放进普通 content。Agently
+会在结构化解析前统一归一：
+
+- `reasoning_delta` / `reasoning_done` 承载 reasoning 文本。
+- `delta` / `done` 只承载 parser 应消费的 answer payload。
+- `original_delta` / `original_done` 保留 provider 原始内容，不做改写。
+- 只归一位于 answer payload 之前的完整外层 `<think>...</think>`。字段、代码块或
+  长文本 payload 内部的 `<think>` 会作为普通 answer 内容保留。
+
 ## Async 流式
 
 同样的 generator 改 async：

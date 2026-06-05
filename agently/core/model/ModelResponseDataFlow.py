@@ -70,7 +70,13 @@ class ModelResponseDataFlow:
     def is_strict_output_enabled(self) -> bool:
         try:
             prompt_object = self._result.prompt.to_prompt_object()
-            return bool(getattr(prompt_object, "ensure_all_keys", False)) and prompt_object.output_format == "json"
+            return bool(getattr(prompt_object, "ensure_all_keys", False)) and prompt_object.output_format in {
+                "json",
+                "flat_markdown",
+                "hybrid",
+                "xml_field",
+                "yaml_literal",
+            }
         except Exception:
             return False
 
@@ -406,6 +412,7 @@ class ModelResponseDataFlow:
         validation_outcome: dict[str, Any] | None = None,
         retry_reason: str = "output_constraints",
         message: str | None = None,
+        extra_payload: dict[str, Any] | None = None,
     ):
         from agently.base import async_emit_runtime
 
@@ -433,6 +440,8 @@ class ModelResponseDataFlow:
                     "validation_payload": DataFormatter.sanitize(validation_outcome.get("payload")),
                 }
             )
+        if extra_payload:
+            payload.update(DataFormatter.sanitize(extra_payload))
         with bind_runtime_context(
             parent_run_context=result.request_run_context,
             request_run_context=result.request_run_context,
@@ -461,6 +470,7 @@ class ModelResponseDataFlow:
     async def try_auto_degradation(
         self,
         *,
+        type: Literal["original", "parsed", "all"],
         data: Any,
         active_ensure_keys: list[str],
         validate_handler: Any,
@@ -478,13 +488,15 @@ class ModelResponseDataFlow:
             prompt_object = result.prompt.to_prompt_object()
             if not (
                 getattr(prompt_object, "output_format_resolved_from_auto", False)
-                and prompt_object.output_format in ("flat_markdown", "hybrid")
+                and prompt_object.output_format in ("flat_markdown", "hybrid", "xml_field", "yaml_literal")
             ):
                 return None
             parsed_result = result._response_parser.full_result_data.get("parsed_result")
             if parsed_result is not None:
                 return None
 
+            original_format = prompt_object.output_format
+            parse_error = result._response_parser.full_result_data.get("extra", {}).get("parse_error")
             result.prompt.set("output_format", "json")
             await self.emit_retrying_event(
                 retry_count=retry_count,
@@ -494,12 +506,18 @@ class ModelResponseDataFlow:
                 key_style=key_style,
                 retry_reason="format_degradation",
                 message=(
-                    f"Auto-format '{prompt_object.output_format}' parse failed. "
+                    f"Auto-format '{original_format}' parse failed. "
                     f"Degrading to json."
                 ),
+                extra_payload={
+                    "auto_degradation_reason": "auto_resolved_format_parse_failed",
+                    "from_output_format": original_format,
+                    "to_output_format": "json",
+                    "parse_error": parse_error,
+                },
             )
             return await self.retry_get_data(
-                type="parsed",
+                type=type,
                 ensure_keys=active_ensure_keys,
                 validate_handler=validate_handler,
                 key_style=key_style,
@@ -599,6 +617,7 @@ class ModelResponseDataFlow:
                 await result._drain_response_parser_observations()
                 if type in ("parsed", "all") and retry_count < max_retries:
                     degraded_data = await self.try_auto_degradation(
+                        type=type,
                         data=data,
                         active_ensure_keys=active_ensure_keys,
                         validate_handler=validate_handler,
@@ -623,6 +642,7 @@ class ModelResponseDataFlow:
 
             if type in ("parsed", "all") and retry_count < max_retries:
                 degraded_data = await self.try_auto_degradation(
+                    type=type,
                     data=data,
                     active_ensure_keys=active_ensure_keys,
                     validate_handler=validate_handler,
@@ -635,6 +655,9 @@ class ModelResponseDataFlow:
                     return degraded_data
 
             try:
+                constraint_data = data
+                if type == "all" and isinstance(data, Mapping):
+                    constraint_data = data.get("parsed_result")
                 if strict_output:
                     parsed_result = result._response_parser.full_result_data.get("parsed_result")
                     result_object = result._response_parser.full_result_data.get("result_object")
@@ -645,7 +668,9 @@ class ModelResponseDataFlow:
                 if active_ensure_keys:
                     for ensure_key in active_ensure_keys:
                         empty = object()
-                        if DataLocator.locate_path_in_dict(data, ensure_key, key_style, default=empty) is empty:
+                        if not isinstance(constraint_data, (Mapping, Sequence)) or isinstance(constraint_data, str):
+                            raise ValueError(f"Missing ensure key: { ensure_key }")
+                        if DataLocator.locate_path_in_dict(constraint_data, ensure_key, key_style, default=empty) is empty:
                             raise ValueError(f"Missing ensure key: { ensure_key }")
             except Exception:
                 await self.emit_retrying_event(

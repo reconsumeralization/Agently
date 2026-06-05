@@ -17,9 +17,11 @@ from __future__ import annotations
 import uuid
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Callable, Literal, cast
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
-from agently.types.data import SkillContract, SkillExecutionDict, SkillExecutionPlan, SkillExecutionStatus
+from agently.types.data import SkillExecutionDict, SkillExecutionPlan, SkillExecutionStatus
 from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
 
@@ -101,7 +103,7 @@ class SkillExecutor:
         context: SkillsExecutionContext,
         task: str,
         plan: SkillExecutionPlan,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         effort: str | None = None,
     ) -> SkillExecution:
         execution_id = uuid.uuid4().hex
@@ -133,7 +135,7 @@ class SkillExecutor:
                 effort=effort,
             )
 
-        capability_result = await self._mount_declared_capabilities(context=context, plan=plan)
+        capability_result = await self._prepare_capabilities(context=context, plan=plan)
         runtime_stream.extend(capability_result["runtime_stream"])
         if capability_result["status"] in {"blocked", "approval_required"}:
             return self._build_execution(
@@ -143,7 +145,7 @@ class SkillExecutor:
                 runtime_stream=runtime_stream,
                 skill_logs=skill_logs,
                 output={
-                    "error": "Skill capability mounting is blocked.",
+                    "error": "Skill capability preparation is blocked.",
                     "diagnostics": capability_result["diagnostics"],
                 },
                 effort=effort,
@@ -236,7 +238,7 @@ class SkillExecutor:
         configured = str(effort_config.get("strategy") or "").strip()
         if configured:
             return configured
-        if effort_name and effort_name in self.effort_strategy_handlers:
+        if effort_name and effort_name in self._strategy_handlers():
             return effort_name
         return str(plan.get("execution_strategy") or "single_shot")
 
@@ -249,7 +251,7 @@ class SkillExecutor:
             execution_id: str,
             runtime_stream: list[dict[str, Any]],
             skill_logs: list[dict[str, Any]],
-            output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+            output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
             effort_config: dict[str, Any] | None = None,
             effort: str | None = None,
             strategy_name: str = strategy_name,
@@ -279,7 +281,7 @@ class SkillExecutor:
         execution_id: str,
         runtime_stream: list[dict[str, Any]],
         skill_logs: list[dict[str, Any]],
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         effort_config: dict[str, Any] | None = None,
         effort: str | None = None,
         strategy_name: str,
@@ -393,7 +395,7 @@ class SkillExecutor:
             "truncated": total > len(resources),
         }
 
-    async def _mount_declared_capabilities(
+    async def _prepare_capabilities(
         self,
         *,
         context: SkillsExecutionContext,
@@ -401,441 +403,381 @@ class SkillExecutor:
     ) -> dict[str, Any]:
         diagnostics: list[dict[str, Any]] = []
         runtime_stream: list[dict[str, Any]] = []
-        policy = _ensure_dict(plan.get("capability_policy"))
-        auto_allow = bool(policy.get("auto_allow"))
         agent = getattr(context, "agent", None)
         if agent is None:
             return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
+        needs = [
+            _ensure_dict(item)
+            for item in _ensure_list(plan.get("capability_needs"))
+            if isinstance(item, dict)
+        ]
+        if not needs:
+            return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
 
-        for selection in _ensure_list(plan.get("selected_skills")):
-            skill_id = str(_ensure_dict(selection).get("skill_id") or "")
-            if not skill_id:
+        selected_by_id = {
+            str(_ensure_dict(item).get("skill_id") or ""): _ensure_dict(item)
+            for item in _ensure_list(plan.get("selected_skills"))
+            if isinstance(item, dict)
+        }
+        policy = self._capability_policy(context=context, plan=plan)
+        approval_required = False
+        blocked = False
+        mounted_keys: set[tuple[str, str]] = set()
+
+        for need in needs:
+            need_name = str(need.get("need") or "")
+            skill_id = str(need.get("skill_id") or "")
+            mode = self._policy_mode(policy, need_name)
+            event_policy_mode = mode
+            if mode == "off":
+                diagnostics.append(self._capability_diagnostic("capability_disabled", need, mode=mode))
+                runtime_stream.append(self._capability_event("skills.capability.disabled", need, mode=mode))
+                blocked = True
                 continue
+            if mode == "approval":
+                decision = await self._resolve_capability_approval(
+                    context=context,
+                    need=need,
+                    policy=policy,
+                )
+                if decision.get("approved") is not True:
+                    diagnostics.append({
+                        **self._capability_diagnostic("approval_required", need, mode=mode),
+                        "approval": _copy_public(decision),
+                    })
+                    runtime_stream.append({
+                        **self._capability_event("skills.capability.approval_required", need, mode=mode),
+                        "approval": _copy_public(decision),
+                    })
+                    approval_required = True
+                    continue
+                runtime_stream.append({
+                    **self._capability_event("skills.capability.approved", need, mode=mode),
+                    "approval": _copy_public(decision),
+                })
+                mode = "allow"
+            if mode != "allow":
+                diagnostics.append(self._capability_diagnostic("capability_policy_missing", need, mode=mode))
+                runtime_stream.append(self._capability_event("skills.capability.policy_missing", need, mode=mode))
+                blocked = True
+                continue
+
+            mount_key = (need_name, str(need.get("resource_path") or ""))
+            if mount_key in mounted_keys:
+                continue
+            mounted_keys.add(mount_key)
             try:
-                contract = self.registry.inspect_skills(skill_id)
+                action_ids = await self._mount_capability(
+                    agent=agent,
+                    need=need,
+                    policy=policy,
+                    selection=selected_by_id.get(skill_id, {}),
+                )
             except Exception as error:
                 diagnostics.append({
-                    "level": "warning",
-                    "code": "capability_contract_unreadable",
-                    "skill_id": skill_id,
+                    **self._capability_diagnostic("capability_mount_failed", need, mode=event_policy_mode),
                     "message": str(error),
                 })
+                runtime_stream.append({
+                    **self._capability_event("skills.capability.mount_failed", need, mode=event_policy_mode),
+                    "message": str(error),
+                })
+                blocked = True
                 continue
-            fm = _ensure_dict(_ensure_dict(contract.get("metadata")).get("frontmatter"))
-            mcp_config = self._mcp_config_from_frontmatter(fm)
-            if mcp_config:
-                if self._mcp_requires_approval(mcp_config) and not auto_allow:
-                    diagnostics.append({
-                        "level": "error",
-                        "code": "approval_required",
-                        "skill_id": skill_id,
-                        "capability": "mcp",
-                        "message": "Skill-declared stdio/local command MCP requires auto_allow=True or an approval handler.",
-                    })
-                    return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
-                try:
-                    await agent.async_use_mcp(mcp_config)
-                    item = {
-                        "type": "skills.capability.mounted",
-                        "action": "mounted",
-                        "skill_id": skill_id,
-                        "capability": "mcp",
-                    }
-                    runtime_stream.append(item)
-                    diagnostics.append({
-                        "level": "info",
-                        "code": "capability_mounted",
-                        "skill_id": skill_id,
-                        "capability": "mcp",
-                    })
-                except Exception as error:
-                    diagnostics.append({
-                        "level": "error",
-                        "code": "capability_mount_failed",
-                        "skill_id": skill_id,
-                        "capability": "mcp",
-                        "message": str(error),
-                    })
-                    return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
+            diagnostics.append({
+                **self._capability_diagnostic("capability_mounted", need, mode=event_policy_mode),
+                "action_ids": action_ids,
+            })
+            runtime_stream.append({
+                **self._capability_event("skills.capability.mounted", need, mode=event_policy_mode),
+                "action_ids": action_ids,
+            })
 
-            bash_actions = self._bash_action_ids_from_contract(contract)
-            if bash_actions:
-                if not auto_allow:
-                    diagnostics.append({
-                        "level": "error",
-                        "code": "approval_required",
-                        "skill_id": skill_id,
-                        "capability": "bash_action",
-                        "message": "Skill-declared Bash/scripts require auto_allow=True or an approval handler before runtime actions are mounted.",
-                    })
-                    return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
-                mounted = self._mount_bash_actions_for_skill(agent=agent, contract=contract, action_ids=bash_actions)
-                for action_id in mounted:
-                    item = {
-                        "type": "skills.capability.mounted",
-                        "action": "mounted",
-                        "skill_id": skill_id,
-                        "capability": "bash_action",
-                        "action_id": action_id,
-                    }
-                    runtime_stream.append(item)
-                    diagnostics.append({
-                        "level": "info",
-                        "code": "capability_mounted",
-                        "skill_id": skill_id,
-                        "capability": "bash_action",
-                        "action_id": action_id,
-                    })
-
-            missing_result = self._resolve_missing_declared_actions(
-                agent=agent,
-                contract=contract,
-            )
-            runtime_stream.extend(missing_result["runtime_stream"])
-            diagnostics.extend(missing_result["diagnostics"])
-            if missing_result["status"] != "success":
-                return {
-                    "status": missing_result["status"],
-                    "diagnostics": diagnostics,
-                    "runtime_stream": runtime_stream,
-                }
+        if blocked:
+            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
+        if approval_required:
+            return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
         return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
 
-    def _mcp_config_from_frontmatter(self, frontmatter: dict[str, Any]) -> Any:
-        if isinstance(frontmatter.get("mcpServers"), dict):
-            return {"mcpServers": frontmatter["mcpServers"]}
-        if isinstance(frontmatter.get("mcp_servers"), dict):
-            return {"mcpServers": frontmatter["mcp_servers"]}
-        mcp = frontmatter.get("mcp")
-        if isinstance(mcp, str) and mcp.strip():
-            return mcp.strip()
-        if isinstance(mcp, dict):
-            if isinstance(mcp.get("mcpServers"), dict):
-                return mcp
-            if mcp.get("url") or mcp.get("command"):
-                return {"mcpServers": {"default": mcp}}
-        return None
+    def _capability_policy(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        plan: SkillExecutionPlan,
+    ) -> dict[str, Any]:
+        configured = context.get_setting("skills.capability_policy", None)
+        if configured is None:
+            configured = self.registry.settings.get("skills.capability_policy") or {}
+        policy = _ensure_dict(configured)
+        plan_policy = _ensure_dict(plan.get("capability_policy"))
+        if plan_policy:
+            merged = dict(policy)
+            for key, value in plan_policy.items():
+                if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key] = {**_ensure_dict(merged.get(key)), **value}
+                else:
+                    merged[key] = value
+            policy = merged
+        return policy
 
-    def _mcp_requires_approval(self, mcp_config: Any) -> bool:
-        if isinstance(mcp_config, str):
-            return not (mcp_config.startswith("http://") or mcp_config.startswith("https://"))
-        if not isinstance(mcp_config, dict):
-            return True
-        servers = _ensure_dict(mcp_config.get("mcpServers"))
-        for config in servers.values():
-            if not isinstance(config, dict):
-                continue
-            if config.get("command") or config.get("args"):
-                return True
-        return False
+    def _policy_mode(self, policy: dict[str, Any], need_name: str) -> str:
+        auto_load = _ensure_dict(policy.get("auto_load"))
+        raw = auto_load.get(need_name, policy.get(need_name, "off"))
+        if isinstance(raw, dict):
+            raw = raw.get("mode", raw.get("policy", "off"))
+        mode = str(raw or "off").strip().lower()
+        if mode in {"allow", "allowed", "true", "yes", "auto"}:
+            return "allow"
+        if mode in {"approval", "approve", "ask"}:
+            return "approval"
+        return "off"
 
-    def _bash_action_ids_from_contract(self, contract: SkillContract) -> list[str]:
-        metadata = _ensure_dict(contract.get("metadata"))
-        fm = _ensure_dict(metadata.get("frontmatter"))
-        action_ids: list[str] = []
-        for tool_name in self._declared_tool_names(fm.get("allowed-tools") or fm.get("allowed_tools")):
-            base = tool_name.lower()
-            if base in {"bash", "shell", "run_bash"} and tool_name not in action_ids:
-                action_ids.append(tool_name)
-        has_scripts = self._contract_has_scripts(contract)
-        if has_scripts and (fm.get("allow-scripts") or fm.get("allow_scripts")) and "run_bash" not in action_ids:
-            action_ids.append("run_bash")
-        return action_ids
+    async def _resolve_capability_approval(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        need: dict[str, Any],
+        policy: dict[str, Any],
+    ) -> dict[str, Any]:
+        from agently.base import policy_approval
 
-    def _contract_has_scripts(self, contract: SkillContract) -> bool:
-        return any(
-            str(item.get("kind")) == "script"
-            for item in _ensure_list(_ensure_dict(contract.get("resource_index")).get("resources"))
-            if isinstance(item, dict)
+        decision = await policy_approval.async_resolve(
+            {
+                "source": "skills_capability",
+                "capability": str(need.get("need") or ""),
+                "subject": str(need.get("skill_id") or need.get("need") or ""),
+                "risk": "capability_mount",
+                "payload": {
+                    "need": _copy_public(need),
+                    "task": getattr(context, "task", None),
+                },
+                "policy": _copy_public(policy),
+                "lineage": {
+                    "skill_id": str(need.get("skill_id") or ""),
+                    "source": str(need.get("source") or ""),
+                },
+            },
+            handler=str(context.get_setting("policy_approval.handler", "") or "") or None,
         )
+        return _copy_public(decision)
 
-    def _declared_tool_names(self, value: Any) -> list[str]:
-        values = value if isinstance(value, list) else [value]
-        names: list[str] = []
-        for item in values:
-            if not isinstance(item, str):
-                continue
-            raw = item.strip()
-            if not raw:
-                continue
-            name = raw.split("(", 1)[0].strip()
-            if name and name not in names:
-                names.append(name)
-        return names
+    def _capability_diagnostic(self, code: str, need: dict[str, Any], *, mode: str) -> dict[str, Any]:
+        return {
+            "level": "info" if code == "capability_mounted" else "error",
+            "code": code,
+            "skill_id": str(need.get("skill_id") or ""),
+            "need": str(need.get("need") or ""),
+            "source": str(need.get("source") or ""),
+            "risk": str(need.get("risk") or ""),
+            "policy": mode,
+            "evidence": str(need.get("evidence") or ""),
+            "resource_path": str(need.get("resource_path") or ""),
+        }
 
-    def _mount_bash_actions_for_skill(
+    def _capability_event(self, event_type: str, need: dict[str, Any], *, mode: str) -> dict[str, Any]:
+        return {
+            "type": event_type,
+            "action": event_type.rsplit(".", 1)[-1],
+            "skill_id": str(need.get("skill_id") or ""),
+            "need": str(need.get("need") or ""),
+            "source": str(need.get("source") or ""),
+            "risk": str(need.get("risk") or ""),
+            "policy": mode,
+            "resource_path": str(need.get("resource_path") or ""),
+        }
+
+    async def _mount_capability(
         self,
         *,
         agent: Any,
-        contract: SkillContract,
-        action_ids: list[str],
+        need: dict[str, Any],
+        policy: dict[str, Any],
+        selection: dict[str, Any],
     ) -> list[str]:
-        skill_id = str(contract.get("skill_id") or "skill")
-        skill_root = Path(str(_ensure_dict(contract.get("source")).get("installed_path") or "")).expanduser().resolve()
-        commands = self._skill_script_command_prefixes(contract)
-        mounted: list[str] = []
-        for action_id in action_ids:
-            if not isinstance(action_id, str) or not action_id.strip():
-                continue
-            resolved_id = action_id.strip()
-            desc = (
-                f"Runtime shell capability mounted for Skill '{ skill_id }'. "
-                f"Commands are restricted to the installed Skill directory: { skill_root }."
-            )
-            if hasattr(agent, "enable_shell"):
-                agent.enable_shell(
-                    root=skill_root,
-                    commands=commands,
-                    action_id=resolved_id,
-                    desc=desc,
-                    expose_to_model=True,
-                )
-                mounted.append(resolved_id)
-        return mounted
+        need_name = str(need.get("need") or "")
+        if need_name == "web_search":
+            from agently.builtins.actions import Search
+            before = self._agent_action_ids(agent)
+            options = self._web_search_options(policy)
+            refresh_actions = self._refresh_ddgs_if_allowed(agent, options)
+            before = self._agent_action_ids(agent)
+            agent.use_actions(Search(
+                backend=cast(Any, options.get("backend", "auto")),
+                search_backend=cast(Any, options.get("search_backend", None)),
+                news_backend=cast(Any, options.get("news_backend", None)),
+                timeout=cast(Any, options.get("timeout", None)),
+                proxy=cast(Any, options.get("proxy", None)),
+                region=cast(Any, options.get("region", "us-en")),
+                options=cast(Any, options.get("options", None)),
+            ))
+            action_ids = self._new_action_ids(agent, before)
+            return [*refresh_actions, *action_ids]
+            return self._new_action_ids(agent, before)
+        if need_name == "web_browse":
+            from agently.builtins.actions import Browse
+            before = self._agent_action_ids(agent)
+            agent.use_actions(Browse())
+            return self._new_action_ids(agent, before)
+        if need_name == "workspace_write":
+            before = self._agent_action_ids(agent)
+            options = _ensure_dict(policy.get("workspace"))
+            root = options.get("root", policy.get("workspace_root", None))
+            if root is None:
+                workspace = getattr(agent, "workspace", None)
+                enable_file_actions = getattr(workspace, "enable_file_actions", None)
+                if callable(enable_file_actions):
+                    enable_file_actions(agent, write=True)
+                else:
+                    agent.enable_workspace_file_actions(write=True)
+            else:
+                agent.enable_workspace_file_actions(root=root, write=True)
+            return self._new_action_ids(agent, before)
+        if need_name == "workspace_read":
+            before = self._agent_action_ids(agent)
+            options = _ensure_dict(policy.get("workspace"))
+            root = options.get("root", policy.get("workspace_root", None))
+            if root is None:
+                workspace = getattr(agent, "workspace", None)
+                enable_file_actions = getattr(workspace, "enable_file_actions", None)
+                if callable(enable_file_actions):
+                    enable_file_actions(agent, write=False)
+                else:
+                    agent.enable_workspace_file_actions(write=False)
+            else:
+                agent.enable_workspace_file_actions(root=root, write=False)
+            return self._new_action_ids(agent, before)
+        if need_name == "python":
+            before = self._agent_action_ids(agent)
+            action_id = str(_ensure_dict(policy.get("python")).get("action_id") or "run_python")
+            agent.enable_python(action_id=action_id)
+            return self._new_action_ids(agent, before) or [action_id]
+        if need_name in {"shell", "script_run"}:
+            before = self._agent_action_ids(agent)
+            root = self._skill_root_for_selection(selection)
+            commands = self._script_commands(selection, need)
+            action_id = self._script_action_id(need, selection)
+            agent.enable_shell(root=root, commands=commands or None, action_id=action_id)
+            return self._new_action_ids(agent, before) or [action_id]
+        if need_name == "http_request":
+            return self._mount_http_request(agent)
+        if need_name == "mcp":
+            mcp_config = _ensure_dict(policy.get("mcp")).get("config")
+            if not mcp_config:
+                raise RuntimeError("MCP capability requires skills.capability_policy.mcp.config.")
+            await agent.async_use_mcp(mcp_config)
+            return ["mcp"]
+        raise RuntimeError(f"No built-in capability loader for need '{ need_name }'.")
 
-    def _skill_script_command_prefixes(self, contract: SkillContract) -> list[str]:
+    def _web_search_options(self, policy: dict[str, Any]) -> dict[str, Any]:
+        options = _ensure_dict(policy.get("web_search"))
+        search_options = _ensure_dict(policy.get("search"))
+        merged = {**search_options, **options}
+        merged.setdefault("backend", "auto")
+        return merged
+
+    def _refresh_ddgs_if_allowed(self, agent: Any, options: dict[str, Any]) -> list[str]:
+        refresh_mode = str(
+            options.get("refresh_ddgs")
+            or options.get("ensure_latest_ddgs")
+            or "off"
+        ).strip().lower()
+        if refresh_mode not in {"allow", "allowed", "true", "yes", "auto"}:
+            return []
+        action_id = str(options.get("refresh_action_id") or "refresh_ddgs_dependency")
+        command = ["python", "-m", "pip", "install", "--upgrade", "ddgs"]
+        agent.enable_shell(
+            commands=["python -m pip install --upgrade ddgs"],
+            action_id=action_id,
+            expose_to_model=False,
+            timeout=int(options.get("refresh_timeout", 60)),
+        )
+        result = agent.action.execute_action(action_id, {"cmd": command})
+        if result.get("status") != "success":
+            raise RuntimeError(f"ddgs dependency refresh failed: { result.get('error') or result.get('data') }")
+        return [action_id]
+
+    def _agent_action_ids(self, agent: Any) -> set[str]:
+        action = getattr(agent, "action", None)
+        get_action_list = getattr(action, "get_action_list", None)
+        if not callable(get_action_list):
+            return set()
+        agent_name = str(getattr(agent, "name", "agent"))
+        action_items = cast(list[dict[str, Any]], get_action_list(tags=[f"agent-{ agent_name }"]))
+        return {
+            str(item.get("action_id") or item.get("name") or "")
+            for item in action_items
+            if str(item.get("action_id") or item.get("name") or "")
+        }
+
+    def _new_action_ids(self, agent: Any, before: set[str]) -> list[str]:
+        return sorted(self._agent_action_ids(agent) - before)
+
+    def _skill_root_for_selection(self, selection: dict[str, Any]) -> Path:
+        raw = _ensure_dict(selection.get("source")).get("installed_path")
+        if raw:
+            return Path(str(raw)).expanduser().resolve()
+        return Path(".").resolve()
+
+    def _script_commands(self, selection: dict[str, Any], need: dict[str, Any]) -> list[str]:
         commands = ["bash", "sh", "python", "python3", "node", "npx", "npm"]
-        for item in _ensure_list(_ensure_dict(contract.get("resource_index")).get("resources")):
+        resource_path = str(need.get("resource_path") or "")
+        if resource_path:
+            name = Path(resource_path).name
+            if name:
+                commands.append(name)
+                commands.append(resource_path)
+        for item in _ensure_list(_ensure_dict(selection.get("resource_index")).get("resources")):
             if not isinstance(item, dict) or str(item.get("kind")) != "script":
                 continue
-            path = Path(str(item.get("path") or ""))
-            if path.name and path.name not in commands:
-                commands.append(path.name)
-        return commands
+            path = str(item.get("path") or "")
+            if path:
+                commands.append(path)
+                commands.append(Path(path).name)
+        deduped: list[str] = []
+        for command in commands:
+            if command and command not in deduped:
+                deduped.append(command)
+        return deduped
 
-    def _resolve_missing_declared_actions(
-        self,
-        *,
-        agent: Any,
-        contract: SkillContract,
-    ) -> dict[str, Any]:
-        skill_id = str(contract.get("skill_id") or "")
-        diagnostics: list[dict[str, Any]] = []
-        runtime_stream: list[dict[str, Any]] = []
-        missing: list[str] = []
-        unsafe_missing: list[str] = []
-        synthesized: list[str] = []
+    def _script_action_id(self, need: dict[str, Any], selection: dict[str, Any]) -> str:
+        skill_id = str(selection.get("skill_id") or need.get("skill_id") or "skill")
+        base = skill_id.replace(".", "_").replace("-", "_")
+        return f"run_{ base }_script"
 
-        for action_id in self._declared_action_names(contract):
-            if self._agent_has_action(agent, action_id):
-                continue
-            if self._can_synthesize_python_action(action_id):
-                if self._mount_python_sandbox_action(agent=agent, contract=contract, action_id=action_id):
-                    synthesized.append(action_id)
-                    runtime_stream.append({
-                        "type": "skills.capability.mounted",
-                        "action": "mounted",
-                        "skill_id": skill_id,
-                        "capability": "python_sandbox_action",
-                        "action_id": action_id,
-                    })
-                    diagnostics.append({
-                        "level": "info",
-                        "code": "capability_synthesized",
-                        "skill_id": skill_id,
-                        "capability": "python_sandbox_action",
-                        "action_id": action_id,
-                    })
-                    continue
-            if self._is_business_or_external_capability(action_id):
-                unsafe_missing.append(action_id)
-            else:
-                missing.append(action_id)
+    def _mount_http_request(self, agent: Any) -> list[str]:
+        before = self._agent_action_ids(agent)
 
-        if unsafe_missing:
-            diagnostics.append({
-                "level": "error",
-                "code": "capability_missing",
-                "skill_id": skill_id,
-                "capability": "business_action",
-                "required": unsafe_missing,
-                "message": (
-                    "Skill declares business/external capabilities but no Action, MCP tool, "
-                    "or connector is mounted. Provide a real backend; Python sandbox synthesis is not allowed."
-                ),
-            })
-            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
-        if missing:
-            diagnostics.append({
-                "level": "error",
-                "code": "capability_missing",
-                "skill_id": skill_id,
-                "capability": "action",
-                "required": missing,
-                "message": "Skill declares capabilities that are not mounted and cannot be safely synthesized.",
-            })
-            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
-        return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "synthesized": synthesized}
+        def http_request(url: str, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None, timeout: int = 20):
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"}:
+                raise ValueError("Only http/https URLs are allowed.")
+            resolved_method = method.upper()
+            if resolved_method not in {"GET", "HEAD"}:
+                raise ValueError("The built-in Skills HTTP capability is read-only and supports GET/HEAD only.")
+            data = body.encode("utf-8") if body and resolved_method != "GET" else None
+            request = Request(url, data=data, headers=headers or {}, method=resolved_method)
+            with urlopen(request, timeout=timeout) as response:
+                content = response.read(200000)
+                return {
+                    "url": url,
+                    "status": response.status,
+                    "headers": dict(response.headers.items()),
+                    "content": content.decode("utf-8", errors="replace"),
+                    "truncated": len(content) >= 200000,
+                }
 
-    def _declared_action_names(self, contract: SkillContract) -> list[str]:
-        metadata = _ensure_dict(contract.get("metadata"))
-        fm = _ensure_dict(metadata.get("frontmatter"))
-        names: list[str] = []
-        bash_actions = set(self._bash_action_ids_from_contract(contract))
-        if not self._mcp_config_from_frontmatter(fm):
-            for name in self._declared_tool_names(fm.get("allowed-tools") or fm.get("allowed_tools") or []):
-                if name in bash_actions:
-                    continue
-                if name and name not in names:
-                    names.append(name)
-        actions = fm.get("allowed-actions") or fm.get("allowed_actions") or []
-        if isinstance(actions, list):
-            for action in actions:
-                if isinstance(action, str):
-                    name = self._declared_tool_names(action)
-                    if name and name[0] not in names:
-                        names.append(name[0])
-        return names
-
-    def _agent_has_action(self, agent: Any, action_id: str) -> bool:
-        registry = getattr(getattr(agent, "action", None), "action_registry", None)
-        has_action = getattr(registry, "has", None)
-        return bool(callable(has_action) and has_action(action_id))
-
-    def _mount_python_sandbox_action(
-        self,
-        *,
-        agent: Any,
-        contract: SkillContract,
-        action_id: str,
-    ) -> bool:
-        action = getattr(agent, "action", None)
-        register = getattr(action, "register_python_sandbox_action", None)
-        if not callable(register):
-            return False
-        skill_id = str(contract.get("skill_id") or "skill")
-        agent_name = str(getattr(agent, "name", "agent"))
-        register(
-            action_id=action_id,
-            desc=(
-                f"Ephemeral pure-Python sandbox action synthesized for Skill '{ skill_id }'. "
-                "Use only for deterministic in-memory calculation, parsing, validation, "
-                "format conversion, or data shaping. Do not access network, secrets, files, "
-                "subprocesses, business systems, or external services. Assign final output to `result`."
-            ),
-            tags=[f"agent-{ agent_name }", f"skill-{ skill_id }", "skills-synthesized"],
-            expose_to_model=True,
+        agent.register_action(
+            name="http_request",
+            desc="Perform a read-only HTTP GET/HEAD request for Skills-guided research or API inspection.",
+            kwargs={
+                "url": (str, "HTTP or HTTPS URL."),
+                "method": (str, "GET or HEAD. Default: GET."),
+                "headers": (dict, "Optional request headers."),
+                "timeout": (int, "Timeout seconds. Default: 20."),
+            },
+            func=http_request,
         )
-        return True
-
-    def _can_synthesize_python_action(self, action_id: str) -> bool:
-        lowered = action_id.lower().replace("-", "_")
-        if self._is_business_or_external_capability(lowered):
-            return False
-        safe_terms = {
-            "calculate",
-            "compute",
-            "validate",
-            "check",
-            "parse",
-            "format",
-            "transform",
-            "convert",
-            "normalize",
-            "extract",
-            "score",
-            "rank",
-            "compare",
-            "merge",
-            "split",
-            "dedupe",
-            "filter",
-            "aggregate",
-            "summarize",
-            "render",
-        }
-        return any(term in lowered for term in safe_terms)
-
-    def _is_business_or_external_capability(self, action_id: str) -> bool:
-        lowered = action_id.lower().replace("-", "_")
-        risky_terms = {
-            "api",
-            "http",
-            "url",
-            "fetch",
-            "search",
-            "browse",
-            "web",
-            "download",
-            "upload",
-            "file",
-            "read",
-            "write",
-            "save",
-            "delete",
-            "remove",
-            "create",
-            "update",
-            "patch",
-            "post",
-            "put",
-            "send",
-            "email",
-            "notify",
-            "slack",
-            "sms",
-            "crm",
-            "salesforce",
-            "hubspot",
-            "database",
-            "db",
-            "sql",
-            "query",
-            "payment",
-            "charge",
-            "refund",
-            "invoice",
-            "order",
-            "booking",
-            "calendar",
-            "github",
-            "jira",
-            "notion",
-            "sheet",
-            "docx",
-            "pdf",
-            "pptx",
-            "mcp",
-            "bash",
-            "shell",
-            "python",
-            "node",
-        }
-        return any(term in lowered for term in risky_terms)
-
-    def _extract_react_affordances(
-        self,
-        plan: SkillExecutionPlan,
-    ) -> tuple[list[str], list[str], bool]:
-        """Extract allowed_tools, allowed_actions, and allow_scripts from selected skill contracts."""
-        allowed_tools: list[str] = []
-        allowed_actions: list[str] = []
-        allow_scripts = False
-
-        for selection in _ensure_list(plan.get("selected_skills")):
-            skill_id = str(_ensure_dict(selection).get("skill_id", ""))
-            if not skill_id:
-                continue
-            try:
-                contract = self.registry.inspect_skills(skill_id)
-            except Exception:
-                continue
-            metadata = _ensure_dict(contract.get("metadata"))
-            fm = _ensure_dict(metadata.get("frontmatter"))
-            for t in self._declared_tool_names(fm.get("allowed-tools") or fm.get("allowed_tools") or []):
-                if t not in allowed_tools:
-                    allowed_tools.append(t)
-            actions = fm.get("allowed-actions") or fm.get("allowed_actions") or []
-            if isinstance(actions, list):
-                for a in actions:
-                    if isinstance(a, str) and a not in allowed_actions:
-                        allowed_actions.append(a)
-            if fm.get("allow-scripts") or fm.get("allow_scripts"):
-                allow_scripts = True
-                if self._contract_has_scripts(contract) and "run_bash" not in allowed_tools:
-                    allowed_tools.append("run_bash")
-
-        return allowed_tools, allowed_actions, allow_scripts
+        return self._new_action_ids(agent, before) or ["http_request"]
 
     def _build_prompt(self, *, task: str, plan: SkillExecutionPlan) -> dict[str, Any]:
         selected = [_ensure_dict(item) for item in _ensure_list(plan.get("selected_skills"))]
@@ -874,14 +816,15 @@ class SkillExecutor:
     def _resolve_output_format(
         self,
         plan: SkillExecutionPlan,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None,
-    ) -> Literal["json", "flat_markdown", "hybrid", "auto"]:
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None,
+    ) -> Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"]:
         candidate = str(output_format or plan.get("expected_result_format") or "auto")
-        if candidate not in {"json", "flat_markdown", "hybrid", "auto"}:
+        if candidate not in {"json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"}:
             raise ValueError(
-                "Skill execution output_format must be one of: json, flat_markdown, hybrid, auto."
+                "Skill execution output_format must be one of: json, flat_markdown, hybrid, "
+                "xml_field, yaml_literal, auto."
             )
-        return cast(Literal["json", "flat_markdown", "hybrid", "auto"], candidate)
+        return cast(Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"], candidate)
 
     async def _emit_runtime_item(
         self,

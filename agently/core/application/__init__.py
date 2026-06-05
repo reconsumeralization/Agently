@@ -18,12 +18,14 @@ from .AgentExecution import (
     AgentExecutionStream,
     RuntimeStageStallError,
 )
+from .AgentTask import AgentTask
 from .SkillsExecutor import SkillsExecutor
 
 __all__ = [
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
     "AgentExecutionStream",
+    "AgentTask",
     "RuntimeStageStallError",
     "SkillsExecutor",
 ]

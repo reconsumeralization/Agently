@@ -85,6 +85,37 @@ class Workspace:
     def capabilities(self) -> WorkspaceBackendCapabilities:
         return self.backend.capabilities()
 
+    def enable_file_actions(
+        self,
+        agent: Any,
+        *,
+        write: bool = False,
+        read: bool = True,
+        search: bool = True,
+        list_files: bool = True,
+        action_prefix: str = "",
+        expose_to_model: bool = True,
+        **kwargs: Any,
+    ):
+        """Expose this Workspace's file area through an Agent's Action surface.
+
+        Workspace owns the file root and path boundary; ActionRuntime only makes
+        the scoped operations callable by the model.
+        """
+        enable = getattr(agent, "enable_workspace_file_actions", None)
+        if not callable(enable):
+            raise TypeError("Workspace file actions require an Agent with enable_workspace_file_actions(...).")
+        return enable(
+            root=self.files_root,
+            read=read,
+            write=write,
+            search=search,
+            list_files=list_files,
+            action_prefix=action_prefix,
+            expose_to_model=expose_to_model,
+            **kwargs,
+        )
+
     async def ingest(
         self,
         *,

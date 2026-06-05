@@ -127,7 +127,7 @@ agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 ```python
 from agently.builtins.actions import Browse, Search
 
-agent.use_actions(Search(timeout=15, backend="duckduckgo"))
+agent.use_actions(Search(timeout=15, backend="auto"))
 agent.use_actions(Browse())
 ```
 
@@ -181,6 +181,29 @@ extra.tool_logs  # 旧入口的 extra.action_logs
 ```
 
 它们仍是有效的公开挂载入口。内部映射到新 action runtime —— 不意味着 `ToolManager` 实现。方便时迁到 action 入口；什么都不会立刻坏。
+
+## 规划模型 key
+
+Action planning 是模型拥有的步骤。如果 Agent 使用 `model_pool`，应把
+`action.planning_model_key` 设置为负责规划 action round 的业务模型 key：
+
+```python
+agent.set_settings("model_pool", {"task-main": "deepseek-chat-prod"})
+agent.set_settings("model_profiles", {
+    "deepseek-chat-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_pool": "deepseek-prod",
+    }
+})
+agent.set_settings("action.planning_model_key", "task-main")
+```
+
+这个配置同时作用于默认 structured-plan 和 native tool-call planning
+路径。当 SkillsExecutor 或 AgentTaskLoop 把一个 bounded action round
+委托给 ActionRuntime 时尤其重要，否则 action planning 可能没有显式使用
+预期的 `model_pool` 业务 key。
 
 ## handler 接口
 

@@ -20,12 +20,15 @@ from typing_extensions import TypedDict
 from .tool import KwargsType, ReturnType
 from .execution_environment import ExecutionEnvironmentRequirement
 
-ActionStatus = Literal["success", "error", "approval_required", "blocked", "skipped"]
+ActionStatus = Literal["success", "partial_success", "error", "approval_required", "blocked", "skipped"]
 ActionSideEffectLevel = Literal["read", "write", "exec"]
 
 
 class ActionPolicy(TypedDict, total=False):
     approval_mode: Literal["auto", "always", "never"]
+    policy_approval_granted: bool
+    policy_approval_handler: str
+    policy_approval_decision: dict[str, Any]
     workspace_roots: list[str]
     path_allowlist: list[str]
     path_denylist: list[str]
@@ -46,6 +49,7 @@ class ActionApproval(TypedDict, total=False):
     missing_permissions: list[str]
     suggested_policy: ActionPolicy
     message: str
+    decision: dict[str, Any]
 
 
 class ActionArtifact(TypedDict, total=False):

@@ -15,7 +15,6 @@
 from .ExecutionEnvironment import (
     ExecutionEnvironmentApprovalDenied,
     ExecutionEnvironmentApprovalRequired,
-    ExecutionEnvironmentDecisionHandler,
     ExecutionEnvironmentError,
     ExecutionEnvironmentManager,
 )
@@ -23,7 +22,6 @@ from .ExecutionEnvironment import (
 __all__ = [
     "ExecutionEnvironmentApprovalDenied",
     "ExecutionEnvironmentApprovalRequired",
-    "ExecutionEnvironmentDecisionHandler",
     "ExecutionEnvironmentError",
     "ExecutionEnvironmentManager",
 ]

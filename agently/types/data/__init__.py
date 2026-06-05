@@ -131,8 +131,17 @@ from .execution_environment import (
     ExecutionEnvironmentStatus,
 )
 
+from .policy_approval import (
+    PolicyApprovalDecision,
+    PolicyApprovalHandler,
+    PolicyApprovalRequest,
+    PolicyApprovalSource,
+    PolicyApprovalStatus,
+)
+
 from .skill import (
     ExecutionStrategy,
+    SkillCapabilityNeed,
     SkillCard,
     SkillContract,
     SkillDecisionCard,

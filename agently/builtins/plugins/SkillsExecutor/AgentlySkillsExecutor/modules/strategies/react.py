@@ -386,7 +386,15 @@ def _can_delegate_action_round(
 ) -> bool:
     if not callable(getattr(context, "async_execute_action_round", None)):
         return False
-    return bool(allowed_tools or allowed_actions)
+    if allowed_tools or allowed_actions:
+        return True
+    agent = getattr(context, "agent", None)
+    action = getattr(agent, "action", None)
+    get_action_list = getattr(action, "get_action_list", None)
+    if not callable(get_action_list):
+        return False
+    agent_name = str(getattr(agent, "name", "agent"))
+    return bool(get_action_list(tags=[f"agent-{ agent_name }"]))
 
 
 def _build_action_runtime_prompt(

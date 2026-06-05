@@ -132,6 +132,7 @@ class Action:
         self.action_settings.setdefault("loop.concurrency", None)
         self.action_settings.setdefault("loop.timeout", None)
         self.action_settings.setdefault("protocol", "structured_plan")
+        self.action_settings.setdefault("planning_model_key", None)
         self.action_settings.setdefault("policy.global", {})
         self.action_settings.setdefault("policy.agent", {})
 
@@ -657,7 +658,7 @@ class Action:
         status = str(result.get("status", "success"))
         data = result.get("data", result.get("result"))
         error = str(result.get("error", ""))
-        if status == "success":
+        if status in {"success", "partial_success"}:
             return data
         if isinstance(data, dict) and "error" in data:
             return data

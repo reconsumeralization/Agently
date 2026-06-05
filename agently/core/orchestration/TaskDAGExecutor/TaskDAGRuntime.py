@@ -236,13 +236,34 @@ def _make_task_runner(
         try:
             if _approval_required(resolved_task) and not data.is_resume:
                 await _put_task_event(data, graph, resolved_task, "approval_required", input=task_input)
-                return await data.async_pause_for(
-                    type=_approval_type(resolved_task),
-                    payload=_approval_payload(resolved_task, task_input),
+                from agently.base import policy_approval
+                from agently.core.orchestration.TriggerFlow.Control import TriggerFlowPauseSignal
+
+                gate_result = await policy_approval.async_gate(
+                    data,
+                    {
+                        "source": "task_dag",
+                        "capability": _approval_type(resolved_task),
+                        "subject": resolved_task.title or resolved_task.id,
+                        "risk": "task_dag_approval",
+                        "payload": _approval_payload(resolved_task, task_input),
+                        "policy": dict(graph.policies),
+                        "lineage": {
+                            "graph_id": graph.graph_id,
+                            "task_id": resolved_task.id,
+                        },
+                        "execution_id": str(getattr(data.execution, "id", "")),
+                    },
                     interrupt_id=f"task:{ graph.graph_id }:{ resolved_task.id }",
                     resume_to="self",
                 )
+                if isinstance(gate_result, TriggerFlowPauseSignal):
+                    return gate_result
+                if gate_result.get("status") != "approved":
+                    raise RuntimeError(str(gate_result.get("reason", "Task DAG approval was denied.")))
             output = data.resume.value if _is_approval_task(resolved_task) and data.is_resume else None
+            if _is_approval_task(resolved_task) and output is None:
+                output = {"status": "approved", "approved": True, "reason": "Task DAG approval passed."}
             if not _is_approval_task(resolved_task):
                 context = DynamicTaskContext(
                     graph=graph,

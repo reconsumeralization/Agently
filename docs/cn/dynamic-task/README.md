@@ -134,8 +134,10 @@ prompt 推导值。
 `inputs.output_format`：
 
 - `json`：紧凑的机器控制输出、Action 参数、路由标记、数字/布尔事实、model judge、密集嵌套数组/对象、严格抽取。
-- `flat_markdown`：扁平字符串字段，且包含较长 HTML、Markdown、代码、SVG、SQL、模板或报告章节。
-- `hybrid`：显式 opt-in，用于长文本同时需要结构化 list、table、citation、metadata 或嵌套 evidence，且可接受重试耗时。
+- `flat_markdown`：legacy section-header prompt 的显式兼容模式。
+- `hybrid`：长 prose/code 字段混合 typed list/object/boolean/number 字段时的 auto 默认目标，也可显式指定。
+- `xml_field`：扁平纯字符串 dict schema 的 auto 默认目标，也可显式指定。它使用 Agently 自定义 boundary parser，不是严格 XML。
+- `yaml_literal`：显式 YAML target document，用于偏好 YAML 且能接受缩进敏感性的场景。
 - `auto`：接受结构化 schema 自动选择输出格式，并且可以接受重试延迟。
 
 ```python

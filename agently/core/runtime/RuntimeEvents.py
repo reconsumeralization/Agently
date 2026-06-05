@@ -127,6 +127,8 @@ async def async_emit_action_flow_observation(observation: dict[str, Any]) -> Non
         "loop_completed": "action.loop_completed",
         "action_started": "action.started",
         "action_completed": "action.completed",
+        "action_approval_required": "action.approval_required",
+        "action_blocked": "action.blocked",
         "action_failed": "action.failed",
     }
     event_type = event_types.get(kind)

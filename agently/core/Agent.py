@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
 
 from agently.core.extension import ExtensionHandlers
+from agently.core.application import AgentTask
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
 from agently.core.orchestration import DynamicTask
@@ -88,6 +89,11 @@ class BaseAgent:
 
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
+
+    def configure_policy_approval(self, *, handler: str | None = None):
+        if handler is not None:
+            self.settings.set("policy_approval.handler", str(handler))
+        return self
 
     def activate_model(self, model_key: str | None = None):
         """Set the default model key for subsequent Agent-owned requests.
@@ -245,7 +251,7 @@ class BaseAgent:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         _prompt_snapshot: Mapping[str, Any] | None = None,
     ) -> DynamicTask:
         prompt_defaults = self._dynamic_task_prompt_defaults(target, prompt_snapshot=_prompt_snapshot)
@@ -288,7 +294,7 @@ class BaseAgent:
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         graph_input: Any = _UNSET,
         timeout: float | None = None,
         max_retries: int = 3,
@@ -621,6 +627,34 @@ class BaseAgent:
             parent_run_context=parent_run_context,
         )
 
+    def create_task(
+        self,
+        *,
+        goal: str,
+        success_criteria: list[str],
+        workspace: str | os.PathLike[str] | None = None,
+        max_iterations: int = 3,
+        verify: Literal["before_done"] = "before_done",
+        recall_profile: str = "software_dev",
+        context_budget: dict[str, Any] | None = None,
+        limits: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        task_id: str | None = None,
+    ):
+        return AgentTask(
+            self,
+            goal=goal,
+            success_criteria=success_criteria,
+            workspace=workspace,
+            max_iterations=max_iterations,
+            verify=verify,
+            recall_profile=recall_profile,
+            context_budget=context_budget,
+            limits=limits,
+            options=options,
+            task_id=task_id,
+        )
+
     def validate(self, handler: "OutputValidateHandler"):
         self.extension_handlers.append("validate_handlers", handler)
         return self
@@ -828,7 +862,7 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-        format: Literal["json", "flat_markdown", "hybrid", "auto"] = "auto",
+        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] = "auto",
     ):
         if always:
             self.agent_prompt.set("output", prompt, mappings=mappings)

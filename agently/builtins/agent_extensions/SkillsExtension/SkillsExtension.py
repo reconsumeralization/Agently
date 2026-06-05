@@ -89,13 +89,40 @@ class SkillsExtension(BaseAgent):
             self.__session_skills_pack_selectors.append({"selector": _copy_public(item), "mode": mode})
         return self
 
+    def configure_skill_capabilities(
+        self,
+        *,
+        auto_load: dict[str, str] | None = None,
+        workspace_root: str | None = None,
+        mcp_config: Any = None,
+        python: dict[str, Any] | None = None,
+        search: dict[str, Any] | None = None,
+    ):
+        policy = _ensure_dict(self.settings.get("skills.capability_policy", {}))
+        if auto_load is not None:
+            policy["auto_load"] = dict(auto_load)
+        if workspace_root is not None:
+            workspace = _ensure_dict(policy.get("workspace"))
+            workspace["root"] = workspace_root
+            policy["workspace"] = workspace
+        if mcp_config is not None:
+            mcp = _ensure_dict(policy.get("mcp"))
+            mcp["config"] = _copy_public(mcp_config)
+            policy["mcp"] = mcp
+        if python is not None:
+            policy["python"] = dict(python)
+        if search is not None:
+            policy["web_search"] = dict(search)
+        self.settings.set("skills.capability_policy", policy)
+        return self
+
     def _skills_prompt_defaults(
         self,
         task: str | None,
         output: Any = None,
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
-    ) -> tuple[str, Any, Literal["json", "flat_markdown", "hybrid", "auto"]]:
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
+    ) -> tuple[str, Any, Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"]]:
         if output is not None and semantic_outputs is not None:
             raise ValueError("Use either output= or semantic_outputs= for Skills execution, not both.")
         if semantic_outputs is not None:
@@ -122,7 +149,7 @@ class SkillsExtension(BaseAgent):
         mode: SkillMode = "model_decision",
         output: Any = None,
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     ) -> SkillExecutionPlan:
         task, output, output_format = self._skills_prompt_defaults(
             task,
@@ -152,7 +179,7 @@ class SkillsExtension(BaseAgent):
         mode: SkillMode = "model_decision",
         output: Any = None,
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     ) -> SkillExecutionPlan:
         return FunctionShifter.syncify(self.async_resolve_skills_plan)(
             task,
@@ -173,7 +200,7 @@ class SkillsExtension(BaseAgent):
         mode: SkillMode = "model_decision",
         output: Any = None,
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":
@@ -211,7 +238,7 @@ class SkillsExtension(BaseAgent):
         mode: SkillMode = "model_decision",
         output: Any = None,
         semantic_outputs: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":
@@ -232,7 +259,7 @@ class SkillsExtension(BaseAgent):
         task: str,
         *,
         plan: SkillExecutionPlan,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         effort: str | None = None,
     ) -> "SkillExecution":
@@ -257,7 +284,7 @@ class SkillsExtension(BaseAgent):
         *,
         plans: list[SkillExecutionPlan],
         mode: Literal["concurrent", "sequential"] = "concurrent",
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         effort: str | None = None,
     ) -> list[Any]:

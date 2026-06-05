@@ -141,11 +141,17 @@ Agently.execution_environment.release(handle_or_id)
 Agently.execution_environment.release_scope("session", owner_id)
 Agently.execution_environment.inspect(id)
 Agently.execution_environment.list(scope="execution")
-Agently.execution_environment.set_decision_handler(handler)
+Agently.policy_approval.register_handler("my_handler", handler)
+Agently.configure_policy_approval(handler="my_handler")
 ```
 
 Declaration is lazy. It validates and records a requirement but does not start
 anything. `ensure(...)` starts or reuses a handle subject to policy and approval.
+Approval is resolved through the framework-wide `Agently.policy_approval`
+handler. The default `input_timeout_fail` handler prompts only in an interactive
+CLI and denies after timeout or immediately in non-interactive services. Service
+wrappers around TriggerFlow executions should register their own handler, for
+example one that stores a pending approval and resumes with `continue_with(...)`.
 Before reusing a ready handle, the manager calls
 `provider.async_health_check(handle)`. Healthy handles are reused with
 `ref_count + 1`; unhealthy handles emit `execution_environment.unhealthy`, are

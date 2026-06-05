@@ -192,11 +192,13 @@ agent.activate_model("reasoning")
 `selection` 控制一次新的独立请求开始前如何选 key，支持 `fixed`、`random`、
 `round_robin`、`least_used`；旧的顶层 `strategy` / `mode` 仍作为 selection 快捷写法。
 
-`failover` 控制 provider 请求失败后怎么处理。如果没有声明 `failover`，Agently 保持旧行为：
-直接暴露 provider 错误，不自动尝试另一个 credential。内置 `try_next` 只会对配置的 HTTP
-状态码尝试下一个 key。默认建议使用 `401`、`403`、`429` 这类鉴权或额度相关状态码。`405`
-和 `422` 很多时候代表 endpoint、method、payload 或模型能力不匹配，只有当你的 provider
-明确用它们表达 key 或 quota 失败时才加入。
+`failover` 控制 provider 请求遇到 credential 或 provider-side 错误后怎么处理。如果没有
+声明 `failover`，Agently 不会自动尝试另一个 credential。`OpenAICompatible` 仍然有一个
+窄范围传输重放：尚未开始输出时发生的临时断连，会按 `OpenAICompatible.request_retry`
+（默认 `{"max_attempts": 2}`）用同一个模型、prompt 和输出格式重试。内置 `try_next` 只会对
+配置的 HTTP 状态码尝试下一个 key。默认建议使用 `401`、`403`、`429` 这类鉴权或额度相关
+状态码。`405` 和 `422` 很多时候代表 endpoint、method、payload 或模型能力不匹配，只有当
+你的 provider 明确用它们表达 key 或 quota 失败时才加入。
 
 两层策略都可以直接使用 Python handler：
 

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from .base import print_, async_print, AgentlyMain, Agent
-from .core import TriggerFlow, TriggerFlowBlueprint
+from .core import AgentTask, TriggerFlow, TriggerFlowBlueprint
 from .types.trigger_flow import (
     TriggerFlowContractSpec,
     TriggerFlowEventData,
@@ -29,6 +29,7 @@ Agently = AgentlyMain()
 __all__ = [
     "Agently",
     "Agent",
+    "AgentTask",
     "TriggerFlow",
     "TriggerFlowContractSpec",
     "TriggerFlowRuntimeData",

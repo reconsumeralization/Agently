@@ -2,6 +2,7 @@ import pytest
 import asyncio
 
 import os
+from httpx import RemoteProtocolError
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
@@ -127,6 +128,91 @@ async def test_non_stream_request_retries_next_api_key_on_failover(monkeypatch):
 
     assert [headers.get("Authorization") for headers in calls] == ["Bearer key-a", "Bearer key-b"]
     assert events == [("message", '{"choices":[{"delta":{"content":"ok"}}]}'), ("message", "[DONE]")]
+
+
+@pytest.mark.asyncio
+async def test_request_model_retries_transient_provider_error_before_output_started(monkeypatch):
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "request_retry": {"max_attempts": 2},
+        },
+        {"input": "hello"},
+    )
+    calls = 0
+
+    async def fake_legacy(_request_data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield "error", RemoteProtocolError("server disconnected")
+            return
+        yield "message", '{"choices":[{"delta":{"content":"ok"}}]}'
+        yield "message", "[DONE]"
+
+    monkeypatch.setattr(plugin, "_request_model_legacy", fake_legacy)
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert calls == 2
+    assert events == [("message", '{"choices":[{"delta":{"content":"ok"}}]}'), ("message", "[DONE]")]
+
+
+@pytest.mark.asyncio
+async def test_request_model_does_not_retry_transient_provider_error_after_output_started(monkeypatch):
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "request_retry": {"max_attempts": 2},
+        },
+        {"input": "hello"},
+    )
+    calls = 0
+
+    async def fake_legacy(_request_data):
+        nonlocal calls
+        calls += 1
+        yield "message", '{"choices":[{"delta":{"content":"partial"}}]}'
+        yield "error", RemoteProtocolError("server disconnected")
+
+    monkeypatch.setattr(plugin, "_request_model_legacy", fake_legacy)
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert calls == 1
+    assert events[0] == ("message", '{"choices":[{"delta":{"content":"partial"}}]}')
+    assert events[1][0] == "error"
+    assert isinstance(events[1][1], RemoteProtocolError)
+
+
+@pytest.mark.asyncio
+async def test_broadcast_response_maps_non_stream_chat_message_content():
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": False,
+        },
+        {"input": "hello"},
+    )
+
+    async def response_generator():
+        yield "message", '{"choices":[{"message":{"role":"assistant","content":"done text"},"finish_reason":"stop"}]}'
+        yield "message", "[DONE]"
+
+    events = []
+    async for event, payload in plugin.broadcast_response(response_generator()):
+        events.append((event, payload))
+
+    assert ("done", "done text") in events
+    original_done = next(payload for event, payload in events if event == "original_done")
+    assert original_done["choices"][0]["message"]["content"] == "done text"
 
 
 @pytest.mark.asyncio

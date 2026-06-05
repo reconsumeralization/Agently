@@ -86,7 +86,7 @@ print(calculate("3333+6666=?"))
 ```python
 from agently.builtins.actions import Browse, Search
 
-agent.use_actions(Search(timeout=15, backend="duckduckgo"))
+agent.use_actions(Search(timeout=15, backend="auto"))
 agent.use_actions(Browse())
 ```
 
@@ -96,6 +96,18 @@ agent.use_actions(Browse())
 `tool_info_list` 元数据，但不应该拥有内置能力实现。`agent.use_tools(...)`、
 `agent.tool_func` 和 `Agently.tool` 也仍是受支持的兼容入口。新的内置能力不要再以
 `tool_info_list` / `BuiltInTool` 作为 authoring API。
+
+Search 由 `ddgs` package 支撑。默认保留 `backend="auto"`，也可以传入具体 ddgs
+backend，例如 `yahoo`、`brave`、`duckduckgo`、`google`、`startpage`、
+`mojeek`、`wikipedia` 或 `yandex`。某个 backend 返回 HTTP 200 不代表已经解析到
+可用搜索结果；当 backend 没有可用结果时，Search 会继续尝试配置或默认的 ddgs
+fallback backends。真实无结果会以成功 action result 返回 `[]`，不会让 action loop
+因为“没有结果”而失败。
+
+如果前面的 backend 失败，但后续 fallback backend 返回了可用结果，Action result
+会使用 `status="partial_success"`，同时保持 `success=True` 并携带 backend
+diagnostics。这表示“有可用证据但存在外部搜索源降级”，不应被 ActionFlow 当作
+`action.failed` 终止条件。
 
 shell 能力优先使用 `agent.enable_shell(...)`，它挂载托管 `run_bash` action。
 `Cmd` 仍作为低层兼容 package 与 Bash 执行实现 helper 保留。

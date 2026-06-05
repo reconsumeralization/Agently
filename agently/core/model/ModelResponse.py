@@ -389,17 +389,33 @@ class ModelResponse:
             except BaseException as error:
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise
+                is_side_channel = bool(
+                    self.settings.get("runtime.side_channel", False)
+                    or self.settings.get("model_request.side_channel", False)
+                )
+                failure_level = "WARNING" if is_side_channel else "ERROR"
+                model_failure_event = (
+                    "model.side_channel_request_failed" if is_side_channel else "model.request_failed"
+                )
+                request_failure_event = (
+                    "request.side_channel_failed" if is_side_channel else "request.failed"
+                )
                 await async_emit_runtime(
                     {
-                        "event_type": "model.request_failed",
+                        "event_type": model_failure_event,
                         "source": "ModelResponse",
-                        "level": "ERROR",
-                        "message": f"Model request failed for agent '{ self.agent_name }'.",
+                        "level": failure_level,
+                        "message": (
+                            f"Side-channel model request failed for agent '{ self.agent_name }'."
+                            if is_side_channel
+                            else f"Model request failed for agent '{ self.agent_name }'."
+                        ),
                         "payload": {
                             "agent_name": self.agent_name,
                             "response_id": self.id,
                             "attempt_index": self.attempt_index,
                             "request_run_id": self.request_run_context.run_id,
+                            "side_channel": is_side_channel,
                         },
                         "error": error,
                         "run": self.model_run_context,
@@ -407,14 +423,19 @@ class ModelResponse:
                 )
                 await async_emit_runtime(
                     {
-                        "event_type": "request.failed",
+                        "event_type": request_failure_event,
                         "source": "ModelResponse",
-                        "level": "ERROR",
-                        "message": f"Request failed for agent '{ self.agent_name }'.",
+                        "level": failure_level,
+                        "message": (
+                            f"Side-channel request failed for agent '{ self.agent_name }'."
+                            if is_side_channel
+                            else f"Request failed for agent '{ self.agent_name }'."
+                        ),
                         "payload": {
                             "agent_name": self.agent_name,
                             "response_id": self.id,
                             "attempt_index": self.attempt_index,
+                            "side_channel": is_side_channel,
                         },
                         "error": error,
                         "run": self.request_run_context,

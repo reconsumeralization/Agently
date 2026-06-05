@@ -133,11 +133,16 @@ Agently.execution_environment.release(handle_or_id)
 Agently.execution_environment.release_scope("session", owner_id)
 Agently.execution_environment.inspect(id)
 Agently.execution_environment.list(scope="execution")
-Agently.execution_environment.set_decision_handler(handler)
+Agently.policy_approval.register_handler("my_handler", handler)
+Agently.configure_policy_approval(handler="my_handler")
 ```
 
 声明是 lazy 的：只校验和记录 requirement，不启动任何东西。`ensure(...)` 会在 policy
-与 approval 允许的情况下启动或复用 handle。复用 ready handle 前，manager 会调用
+与 approval 允许的情况下启动或复用 handle。approval 由框架全局
+`Agently.policy_approval` handler 决定。默认 `input_timeout_fail` 只会在交互式 CLI
+中提示输入，并在超时后失败；非交互服务环境会立即失败。包裹 TriggerFlow execution
+的服务应注册自己的 handler，例如写入 pending approval 后用 `continue_with(...)` 恢复。
+复用 ready handle 前，manager 会调用
 `provider.async_health_check(handle)`。健康则 `ref_count + 1` 后复用；不健康则发出
 `execution_environment.unhealthy`，释放旧 handle，再 ensure 一个新 handle。V2 不加入后台
 health scheduler、lease TTL 或自动 reconnect loop。

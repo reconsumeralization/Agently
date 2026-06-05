@@ -22,6 +22,7 @@ from agently.core import (
     Action,
     DynamicTask,
     ExecutionEnvironmentManager,
+    PolicyApprovalManager,
     PluginManager,
     EventCenter,
     Tool,
@@ -70,6 +71,10 @@ action = Action(plugin_manager, settings)
 tool = action
 execution_environment = ExecutionEnvironmentManager(
     plugin_manager=plugin_manager,
+    settings=settings,
+    event_center=event_center,
+)
+policy_approval = PolicyApprovalManager(
     settings=settings,
     event_center=event_center,
 )
@@ -220,6 +225,7 @@ class AgentlyMain(Generic[A]):
         self.action = action
         self.tool = tool
         self.execution_environment = execution_environment
+        self.policy_approval = policy_approval
         self.action_registry = action_registry
         self.action_dispatcher = action_dispatcher
         self.action_runtime = action_runtime
@@ -291,6 +297,11 @@ class AgentlyMain(Generic[A]):
         self.logger.setLevel(log_level)
         return self
 
+    def configure_policy_approval(self, *, handler: str | None = None):
+        if handler is not None:
+            self.policy_approval.set_default_handler(handler)
+        return self
+
     def create_prompt(self, name: str = "agently_prompt") -> Prompt:
         return Prompt(
             self.plugin_manager,
@@ -319,7 +330,7 @@ class AgentlyMain(Generic[A]):
         max_tasks: int | None = None,
         output_schema: Any = None,
         ensure_keys: Any = None,
-        output_format: Literal["json", "flat_markdown", "hybrid", "auto"] | None = None,
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
     ) -> DynamicTask:
         return DynamicTask(
             self.plugin_manager,
