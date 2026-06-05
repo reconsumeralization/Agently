@@ -14,21 +14,26 @@ For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leave
 
 ## Choosing An Output Format
 
-`.output(...)` defaults to `format="auto"`. Auto chooses the structured format
-from the schema shape: flat string-only dicts use `xml_field`; dicts that mix
-string fields with typed non-string fields use `hybrid`; all-complex,
-all-control, and non-dict schemas stay `json`.
-Auto does not inspect business meaning in field names or descriptions. If
-downstream code relies on a specific wire shape, set the format explicitly.
-`yaml_literal` is explicit opt-in and is not selected by auto. `flat_markdown`
-remains explicit-only for compatibility.
+`.output(...)` reads its omitted format default from
+`prompt.default_output_format`, whose global default is `json`. Agent-level and
+request-level settings can override that default independently. Set
+`prompt.default_output_format="auto"` only when a target model has passed
+representative structured-output stability checks.
+
+Explicit `format="auto"` chooses the structured format from the schema shape:
+flat string-only dicts use `xml_field`; dicts that mix string fields with typed
+non-string fields use `hybrid`; all-complex, all-control, and non-dict schemas
+stay `json`. Auto does not inspect business meaning in field names or
+descriptions. If downstream code relies on a specific wire shape, set the format
+explicitly. `yaml_literal` is explicit opt-in and is not selected by auto.
+`flat_markdown` remains explicit-only for compatibility.
 
 | Mode | Use When | Avoid When |
 |---|---|---|
-| `auto` | You want the framework default and the schema itself should choose the most model-friendly structured format. Good for application code that consumes parsed data through Agently rather than the raw model text. | A legacy consumer, test fixture, external API, or saved prompt expects raw JSON text. Use `format="json"` there. |
+| `auto` | You explicitly accept schema-driven format selection and retry latency for a model that has passed stability checks. Good for application code that consumes parsed data through Agently rather than raw model text. | You need the conservative framework default, a legacy consumer, test fixture, external API, or saved prompt expects raw JSON text. Use `format="json"` or leave the default at `json`. |
 | `flat_markdown` | Explicit compatibility mode for legacy section-header prompts. | Auto selection, nested lists/objects, arrays of records, or high-reliability parsing. |
-| `hybrid` | Default auto target when string prose/code fields are mixed with typed fields. String fields stay as Markdown sections; list/object/boolean/number fields use fenced JSON blocks. | There are no string prose/code fields, every field is compact machine data where JSON is simpler, or a downstream consumer cannot tolerate Markdown-section raw output. |
-| `xml_field` | Default auto target for flat string-only dict schemas. Agently parses this with a custom XML-like parser, not strict XML. | A downstream consumer expects real XML semantics, namespaces, entity escaping, or schema validation. |
+| `hybrid` | Explicit format, or auto target, when string prose/code fields are mixed with typed fields. String fields stay as Markdown sections; list/object/boolean/number fields use fenced JSON blocks. | There are no string prose/code fields, every field is compact machine data where JSON is simpler, the target model echoes section scaffolding, or a downstream consumer cannot tolerate Markdown-section raw output. |
+| `xml_field` | Explicit format, or auto target, for flat string-only dict schemas. Agently parses this with a custom XML-like parser, not strict XML. | A downstream consumer expects real XML semantics, namespaces, entity escaping, or schema validation. |
 | `yaml_literal` | Explicit opt-in for teams that prefer YAML documents and can tolerate YAML indentation sensitivity. Long text/code fields use YAML literal scalars (`|`) inside `<<<BEGIN AGENTLY_YAML>>>` / `<<<END AGENTLY_YAML>>>` boundaries. | General auto mode, low-adherence models, or dense machine contracts where JSON is simpler and less indentation-sensitive. |
 | `json` | You need the strictest machine contract, nested data, arrays, interop with external systems, compatibility with old prompts/tests, or exact raw JSON behavior. | Large embedded documents or code blocks make escaping fragile or hard for the model to read. |
 | Plain text | The request asks for one freeform artifact: an article, email, explanation, report, Markdown page, HTML page, or other single multi-paragraph document. Do not call `output()`; use `start()` / `async_start()` directly or read `response.result.get_text()`. | You need separately addressable fields, path validation, `ensure_keys`, typed objects, or downstream branching. |
@@ -58,9 +63,9 @@ request.
 
 | Output Mode | Instant Support | Practical Guidance |
 |---|---|---|
-| `auto` | Yes, after auto resolves to `json`, `hybrid`, or `xml_field`. | Good for UI streaming when callers consume Agently `StreamingData` rather than raw model text. If auto later degrades to JSON during final parsing, discard or overwrite provisional UI state with the final parsed result. |
-| `flat_markdown` | Yes, field-level text deltas by `### field` sections. | Explicit compatibility mode. Prefer `xml_field` or `hybrid` for auto/default parsing decisions. |
-| `hybrid` | Yes, field-level text deltas by section. JSON block contents stream as text and are parsed into typed values at finalization. | Default auto path for prose/code plus structured records or control fields. Use instant for UI/progress, then use `get_data()` / `async_get_data()` for the finalized typed structure. |
+| `auto` | Yes, after auto resolves to `json`, `hybrid`, or `xml_field`. | Use only when explicit schema-driven selection is acceptable. If auto later degrades to JSON during final parsing, discard or overwrite provisional UI state with the final parsed result. |
+| `flat_markdown` | Yes, field-level text deltas by `### field` sections. | Explicit compatibility mode. Prefer `json` for omitted-format defaults, and use explicit `xml_field` or `hybrid` only when their boundaries fit the target model. |
+| `hybrid` | Yes, field-level text deltas by section. JSON block contents stream as text and are parsed into typed values at finalization. | Explicit path for prose/code plus structured records or control fields. Use instant for UI/progress, then use `get_data()` / `async_get_data()` for the finalized typed structure. |
 | `xml_field` | Yes, field-level text deltas inside `<field name="..." type="...">` blocks. | Useful when explicit boundaries are easier for the target model than Markdown section headers. Final parsing consumes the normalized answer payload, not provider reasoning. |
 | `yaml_literal` | Yes, top-level field deltas inside the target YAML boundary. | Treat as provisional UI state. Final YAML parsing is indentation-sensitive and should be checked through `get_data()`. |
 | `json` | Yes, via incremental JSON parsing. | Best when arrays or nested objects need path-level updates. More sensitive to malformed or delayed JSON syntax while streaming; final repair still happens at completion. |
@@ -79,15 +84,23 @@ for model-owned content.
 |---|---|
 | `auto` selection | Uses schema structure only. It does not inspect field names, descriptions, model output, or business meaning. |
 | `flat_markdown` | Explicit compatibility mode only; it is no longer selected by auto. |
-| `hybrid` | String fields are Markdown sections. Non-string fields are fenced JSON blocks and must parse as JSON values, including booleans and numbers. Auto selects it for mixed string + typed schemas. |
-| `xml_field` | Uses one `<agently_output>` payload with `<field name="..." type="text|json">` blocks. The parser is XML-like and boundary-based, not strict XML. Auto selects it for flat string-only dict schemas. |
+| default selection | Omitted `.output(..., format=...)` reads `prompt.default_output_format`; the global default is `json`. |
+| `hybrid` | String fields are Markdown sections. Non-string fields are fenced JSON blocks and must parse as JSON values, including booleans and numbers. Explicit `format="hybrid"` or auto can select it for mixed string + typed schemas. Current qwen2.5:7b stability checks found scaffold/header omissions and copied scaffold comments, so keep it explicit unless the target model has passed representative tests. |
+| `xml_field` | Uses one `<agently_output>` payload with `<field name="..." type="text|json">` blocks. The parser is XML-like and boundary-based, not strict XML. Explicit `format="xml_field"` or auto can select it for flat string-only dict schemas. |
 | `yaml_literal` | Uses a target YAML boundary and literal scalars for long text. It is explicit opt-in and remains outside auto by default. |
 | reasoning text | Provider-native reasoning and leading outer `<think>...</think>` content before the payload are normalized to reasoning events before parsing. Payload/code/text-internal `<think>` content is preserved. |
 
 Typical usage:
 
 ```python
-# Default: auto, chosen from schema shape.
+# Default: json, read from prompt.default_output_format.
+agent.input("Create a self-contained page.").output({
+    "html": (str, "complete HTML document"),
+    "notes": (str, "short implementation notes"),
+}).start()
+
+# Per-agent opt-in: omitted .output(..., format=...) now uses auto.
+agent.set_settings("prompt.default_output_format", "auto")
 agent.input("Create a self-contained page.").output({
     "html": (str, "complete HTML document"),
     "notes": (str, "short implementation notes"),
@@ -99,7 +112,7 @@ agent.input("Extract invoice fields.").output({
     "line_items": [{"sku": (str,), "amount": (float,)}],
 }, format="json").start()
 
-# Auto uses hybrid when prose/code fields are mixed with records.
+# Explicit hybrid when prose/code fields are mixed with records.
 agent.input("Create an EDA netlist with design notes.").output({
     "analysis": (str, "one paragraph design rationale", True),
     "components": [{"refdes": (str, "reference designator", True), "value": (str, "part value", True)}],

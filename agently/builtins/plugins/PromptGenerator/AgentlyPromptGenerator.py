@@ -429,15 +429,19 @@ class AgentlyPromptGenerator(PromptGenerator):
         lines.append("")
         for field_name, field_spec in output.items():
             kind = "scalar" if self._is_string_output_field(field_spec) else "json"
-            kind_note = "(text)" if kind == "scalar" else "(JSON)"
             desc = ""
             if isinstance(field_spec, tuple) and len(field_spec) >= 2 and field_spec[1]:
                 desc = f"{self._replace_slot_references(field_spec[1], title_mapping)}"
-            lines.append(f"### {field_name}")
             if desc:
-                lines.append(f"<!-- {kind_note} {desc} -->")
+                lines.append(f"- {field_name}: {'text' if kind == 'scalar' else 'json'}; {desc}")
             else:
-                lines.append(f"<!-- {kind_note} -->")
+                lines.append(f"- {field_name}: {'text' if kind == 'scalar' else 'json'}")
+        lines.append("")
+        lines.append("Response skeleton:")
+        lines.append("")
+        for field_name, field_spec in output.items():
+            kind = "scalar" if self._is_string_output_field(field_spec) else "json"
+            lines.append(f"### {field_name}")
             if kind == "scalar":
                 lines.append("(your content here)")
             else:
@@ -696,7 +700,10 @@ class AgentlyPromptGenerator(PromptGenerator):
         }
 
     def to_prompt_object(self) -> PromptModel:
-        prompt_object = PromptModel(**self.prompt)
+        prompt_data = dict(self.prompt)
+        if "output" in prompt_data and "output_format" not in prompt_data:
+            prompt_data["output_format"] = self.settings.get("prompt.default_output_format", "json")
+        prompt_object = PromptModel(**prompt_data)
         return prompt_object
 
     def to_text(

@@ -229,8 +229,7 @@ class PromptModel(BaseModel):
     def set_output_format(self) -> "PromptModel":
         if self.output_format is None:
             if isinstance(self.output, Mapping):
-                self.output_format_resolved_from_auto = True
-                self.output_format = _resolve_auto_format(self.output)
+                self.output_format = "json"
             elif not isinstance(self.output, str) and isinstance(self.output, Sequence):
                 self.output_format = "json"
             elif isinstance(self.output, type):

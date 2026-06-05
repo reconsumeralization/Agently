@@ -213,10 +213,11 @@ class DynamicTask:
         output_schema = task_options.get("output_schema", task_options.get("output"))
         if output_schema is None and should_apply_default_contract:
             output_schema = self.output_schema
-        default_output_format = self.output_format if self.output_format is not None else "auto"
-        output_format = self._normalize_model_output_format(
-            task_options.get("output_format", default_output_format),
-            task_id=context.task.id,
+        task_output_format = task_options.get("output_format", self.output_format)
+        output_format = (
+            self._normalize_model_output_format(task_output_format, task_id=context.task.id)
+            if task_output_format is not None
+            else None
         )
         ensure_keys = task_options.get("ensure_keys")
         if ensure_keys is None and should_apply_default_contract:

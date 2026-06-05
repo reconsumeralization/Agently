@@ -175,6 +175,11 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
         },
         "configuration": {
             "settings_contract": "dict-compatible typed helpers under agently.types.settings",
+            "default_output_format": (
+                "Omitted .output(..., format=...) reads prompt.default_output_format from the current settings "
+                "chain; the global default is json, while explicit format=\"auto\" and per-agent/request "
+                "prompt.default_output_format=\"auto\" remain available for schema-driven selection."
+            ),
             "options_contract": "dict-compatible typed helpers under agently.types.options",
             "plugin_schema_registration": [
                 "SETTINGS_SCHEMAS",
