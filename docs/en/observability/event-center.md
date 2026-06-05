@@ -22,6 +22,11 @@ Naming compatibility:
 Run and retry naming:
 
 - `agent_turn` is a run lineage kind for one Agent-facing turn.
+- `agent.create_execution()` / `agent.start()` create one `agent_turn` run for
+  the execution and bind selected route work under it. For `model_request`
+  routes, `ModelResponse` still emits the turn completion or failure so legacy
+  request observation stays stable; for `skills` and `dynamic_task` routes,
+  AgentExecution emits turn completion or failure itself.
 - `attempt_index` describes a retryable model-request attempt inside a request; it is not an Agent turn counter.
 - DevTools should preserve both fields as separate semantics: render `agent_turn` from `run.run_kind`, and read model retry attempts from `payload.attempt_index` or `run.meta.attempt_index` on `model_request` runs.
 

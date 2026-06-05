@@ -75,6 +75,10 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
             "plugin_contract": "plugins return observations/errors/decisions; core maps them to official RuntimeEvent records",
             "builtin_direct_emitters_for_official_events": False,
             "agent_execution_stream_owner": "agently.core.application.AgentExecution.AgentExecutionStream",
+            "agent_turn_lineage_owner": (
+                "AgentExecution creates one agent_turn run per execution and binds route work under it; "
+                "ModelResponse still owns model_request route turn completion."
+            ),
         },
         "runtime_naming": {
             "agent_turn": "run_kind for one Agent-facing turn",
