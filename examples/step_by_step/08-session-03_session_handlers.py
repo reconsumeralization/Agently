@@ -115,7 +115,7 @@ def demo_ai_summarization():
         #   • does NOT record into any session
         #   • is safe to call from inside an async resize handler
         memo_request = agent.create_temp_request()
-        (
+        new_memo = await (
             memo_request
             .input({
                 "dropped_messages": [{"role": m.role, "content": m.content} for m in to_drop],
@@ -131,8 +131,8 @@ def demo_ai_summarization():
                     "...": "...",
                 }
             })
+            .async_start(ensure_keys=["key_points"])
         )
-        new_memo = await memo_request.async_start(ensure_keys=["key_points"])
         print(f"  [Resize] Summary memo: {new_memo.get('key_points', {})}")
 
         return None, kept, new_memo.get("key_points", {})

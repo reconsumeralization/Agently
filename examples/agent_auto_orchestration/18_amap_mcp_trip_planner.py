@@ -97,7 +97,7 @@ def _summarize_observations(history: list[dict[str, Any]]) -> str:
 
 
 async def _execute_model_owned_amap_actions(agent: Any, *, city: str) -> list[dict[str, Any]]:
-    agent.input(
+    turn = agent.input(
         (
             f"Use the registered AMap MCP actions to collect one-day trip facts for {city}. "
             "Generate action calls only for maps_weather and maps_text_search. "
@@ -105,7 +105,7 @@ async def _execute_model_owned_amap_actions(agent: Any, *, city: str) -> list[di
             "Do not answer from memory."
         )
     )
-    action_calls = await agent.async_generate_action_call(max_rounds=1)
+    action_calls = await agent.async_generate_action_call(prompt=turn.prompt, max_rounds=1)
     if not action_calls:
         raise RuntimeError("The model did not generate AMap MCP action calls.")
 

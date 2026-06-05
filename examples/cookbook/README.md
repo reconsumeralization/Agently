@@ -48,7 +48,8 @@ export OLLAMA_DEFAULT_MODEL=qwen2.5:7b
 ## Notes
 
 - Action loop: if the default model-driven loop is enough, use
-  `agent.use_actions(...)`, `agent.input(...)`, and `agent.get_action_result()`.
+  `agent.use_actions(...)`, `turn = agent.input(...)`, and
+  `agent.get_action_result(prompt=turn.prompt)`.
   Use a custom TriggerFlow loop only when you need explicit stage visibility,
   runtime streams, approvals, or custom stop conditions.
 - Shell policy: keep policy in Action/Execution Environment configuration. Do

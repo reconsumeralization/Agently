@@ -44,12 +44,12 @@ if __name__ == "__main__":
         wait_for_port("127.0.0.1", port)
         agent.use_mcp(f"http://127.0.0.1:{port}/mcp")
 
-        agent.input(
+        turn = agent.input(
             "Use the MCP actions to compute (100.25 + 55.5) * 1.08 and return the exact result."
         )
-        records = agent.get_action_result()
+        records = agent.get_action_result(prompt=turn.prompt)
         print_action_results(records)
-        response = agent.get_response()
+        response = turn.get_response()
         print_response(response)
     finally:
         with suppress(Exception):

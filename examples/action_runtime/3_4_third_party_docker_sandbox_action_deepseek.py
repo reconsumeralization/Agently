@@ -253,13 +253,13 @@ if __name__ == "__main__":
         )
 
         agent.use_actions("docker_sandbox_exec")
-        agent.input(
+        turn = agent.input(
             "Use the Docker sandbox action to run `printf 'hello from docker sandbox\\n'` exactly once, "
             "then tell me exactly what the container printed."
         )
-        records = agent.get_action_result()
+        records = agent.get_action_result(prompt=turn.prompt)
         print_action_results(records)
-        response = agent.get_response()
+        response = turn.get_response()
         print_response(response)
 
 # Expected key output after configuring DeepSeek with Docker running:

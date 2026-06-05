@@ -32,13 +32,13 @@ agent.action.register_action(
 
 if __name__ == "__main__":
     agent.use_actions(["normalize_title", "count_words"])
-    agent.input(
+    turn = agent.input(
         "Use the available actions on this title: `  Action   Runtime   Plugin   Refactor  `. "
         "Return the normalized title and the exact word count."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
-    response = agent.get_response()
+    response = turn.get_response()
     print_response(response)
 
 # Expected key output after configuring DeepSeek:

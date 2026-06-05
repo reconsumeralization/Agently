@@ -216,8 +216,9 @@ def session_custom_handlers_with_memo_in_real_request():
         _ = session_settings
         kept = list(context_window[-4:])
         memo_request = agent.create_temp_request()
-        (
-            memo_request.input({"messages": context_window[:-4], "history_memo": memo})
+        new_memo = await (
+            memo_request
+            .input({"messages": context_window[:-4], "history_memo": memo})
             .instruct("Recreate key points memo dict of {input.messages} and {input.history_memo}")
             .output(
                 {
@@ -227,8 +228,8 @@ def session_custom_handlers_with_memo_in_real_request():
                     }
                 }
             )
+            .async_start(ensure_keys=["key_points"])
         )
-        new_memo = await memo_request.async_start(ensure_keys=["key_points"])
         return None, kept, new_memo["key_points"]
 
     session.register_analysis_handler(analysis_handler)

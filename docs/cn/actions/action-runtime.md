@@ -110,7 +110,7 @@ print(calculate("3333+6666=?"))
 | `agent.enable_sqlite(...)` | 挂载托管 `query_sqlite` action |
 | `agent.enable_workspace_file_actions(...)` | 把当前 Workspace 文件作业区暴露成列表、搜索、读取、写入 actions |
 | `@agent.auto_func` | 把 Python 函数签名 + docstring 变成模型驱动的实现，使用 agent 的 action |
-| `agent.get_action_result()` | 请求后取 action 调用记录 |
+| `agent.get_action_result(prompt=turn.prompt)` | 取 request-scoped turn 的 action 调用记录 |
 | `extra.action_logs` | action loop 期间产生的结构化日志 |
 
 `agent.action.get_action_info()` 和 `agent.action.get_tool_info()` 默认返回该
@@ -152,7 +152,8 @@ browser/page/session，可以启用 Browser Execution Environment。
 如果模型或应用需要回溯细节，可以显式读取：
 
 ```python
-records = agent.get_action_result()
+turn = agent.input("使用 action，并总结执行结果。")
+records = agent.get_action_result(prompt=turn.prompt)
 artifact_ref = records[0]["artifact_refs"][0]
 
 raw = agent.action.read_action_artifact(

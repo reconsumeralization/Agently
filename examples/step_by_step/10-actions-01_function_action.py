@@ -35,14 +35,14 @@ def fahrenheit_to_celsius(fahrenheit: float) -> float:
 def demo_single_action():
     # Activate one action. The model must call it to produce the exact answer.
     agent.use_actions(celsius_to_fahrenheit)
-    agent.input("Normal body temperature is 37°C. What is that in Fahrenheit? Use the action.")
+    turn = agent.input("Normal body temperature is 37°C. What is that in Fahrenheit? Use the action.")
 
     # Phase 1: model plans the call, Agently executes it, records are returned
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
 
     # Phase 2: model writes the final reply using the action result
-    response = agent.get_response()
+    response = turn.get_response()
     print(response.result.get_text())
 
 
@@ -52,13 +52,13 @@ def demo_single_action():
 def demo_two_actions():
     # With two actions available, the model selects the right direction automatically.
     agent.use_actions([celsius_to_fahrenheit, fahrenheit_to_celsius])
-    agent.input(
+    turn = agent.input(
         "The oven is set to 375°F and the room is 22°C. "
         "Convert each temperature to the other scale using the available actions."
     )
-    records = agent.get_action_result()
+    records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = agent.get_response()
+    response = turn.get_response()
     print(response.result.get_text())
 
 
@@ -74,18 +74,18 @@ def demo_two_actions():
 # @agent.action_func decorates a Python function and registers it with an auto-derived
 # action_id (the function name) and schema from type annotations + docstring.
 # agent.use_actions() activates the listed actions for the upcoming request.
-# agent.get_action_result() asks the model to plan which actions to call, runs them
-# through FunctionActionExecutor, and returns a list of ActionResult records.
-# agent.get_response() feeds those records back so the model can cite exact values.
+# agent.get_action_result(prompt=turn.prompt) asks the model to plan which actions
+# to call, runs them through FunctionActionExecutor, and returns ActionResult records.
+# turn.get_response() feeds those records back so the model can cite exact values.
 #
 # Flow:
 # agent.use_actions([celsius_to_fahrenheit, fahrenheit_to_celsius])
 #   |
 #   v
-# agent.input("The oven is 375°F and the room is 22°C...")
+# turn = agent.input("The oven is 375°F and the room is 22°C...")
 #   |
 #   v
-# agent.get_action_result()
+# agent.get_action_result(prompt=turn.prompt)
 #   model plans: fahrenheit_to_celsius(fahrenheit=375.0) -> 190.56
 #                celsius_to_fahrenheit(celsius=22.0)      -> 71.6
 #   FunctionActionExecutor runs both calls

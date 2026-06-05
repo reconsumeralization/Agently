@@ -17,9 +17,8 @@ Agently.set_settings(
 #   3. If 'tool': execute it, append the result to history, repeat from step 1.
 #   4. If 'final': return the answer.
 #
-# Unlike agent.get_action_result() (which delegates planning to Agently internals),
-# this loop makes each reasoning step explicit and observable — useful when you
-# want to inspect or control the plan-act-observe cycle directly.
+# Unlike agent.get_action_result(prompt=turn.prompt), which delegates planning to
+# Agently internals, this loop makes each reasoning step explicit and observable.
 
 # --- Mock data (no external API required) ---
 
@@ -174,7 +173,8 @@ if __name__ == "__main__":
 # and appends the result to completed_steps so the next step can build on it.
 # The loop is capped at max_steps to prevent runaway execution.
 # This explicit loop lets you inspect every reasoning step; the built-in
-# agent.get_action_result() provides a more concise API when observability is not needed.
+# agent.get_action_result(prompt=turn.prompt) provides a more concise API when
+# observability is not needed.
 #
 # Flow:
 # question + [] -> model plans get_product("laptop")

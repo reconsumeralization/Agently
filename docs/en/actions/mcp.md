@@ -100,10 +100,12 @@ There's no precedence between MCP-provided tools and locally-defined actions. Th
 
 ## Inspecting what was called
 
-After a request, see what tools the model actually invoked:
+For a request-scoped turn, pass the turn prompt into the action loop to inspect
+what tools the model actually invoked:
 
 ```python
-records = agent.get_action_result()
+turn = agent.input("Use the MCP server to answer this question.")
+records = agent.get_action_result(prompt=turn.prompt)
 for r in records:
     print(r)
 ```
