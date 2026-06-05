@@ -1,6 +1,6 @@
 prompt_1:
-  .request:
+  .turn:
     instruct: Say "Mew" to everything
 prompt_2:
-  .request:
+  .turn:
     instruct: Response as a stereotype AI

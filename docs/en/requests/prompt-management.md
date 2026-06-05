@@ -51,9 +51,9 @@ result = (
 | Scope | API |
 |---|---|
 | Agent (persists for every future request) | `.role(...)`, `.info(...)`, `.instruct(...)`, `.set_agent_prompt(key, value)` |
-| Request (one call only) | `.input(...)`, `.output(...)`, `.set_request_prompt(key, value)` |
+| Turn (one call only) | `.input(...)`, `.output(...)`, `.set_turn_prompt(key, value)` |
 
-The slot you set last wins for that scope, so you can override agent defaults in one request without mutating the agent.
+The slot you set last wins for that scope, so you can override agent defaults in one turn without mutating the agent. `set_request_prompt(...)` remains a compatibility alias for `set_turn_prompt(...)`.
 
 ## YAML / JSON prompt files
 
@@ -66,7 +66,7 @@ $ensure_all_keys: true
   system: You are a ticket triage assistant.
   info:
     severities: ["P0", "P1", "P2", "P3"]
-.request:
+.turn:
   instruct: Classify the ticket text.
   output:
     $format: json
@@ -87,12 +87,14 @@ agent = Agently.create_agent().load_yaml_prompt("prompts/triage.yaml")
 
 result = (
     agent
-    .set_request_prompt("input", "Login fails for all users in EU region.")
+    .set_turn_prompt("input", "Login fails for all users in EU region.")
     .start()
 )
 ```
 
 `load_json_prompt(...)` is the same API for JSON. Both accept either a path or a raw string body. Pick one config file per prompt or stack multiple prompts with `prompt_key_path="demo.output_control"` to select inside a multi-prompt file.
+
+Prompt config accepts `.request` for compatibility and `.turn` as the turn-scoped alias.
 
 `$ensure_all_keys: true` at the top makes all leaves required regardless of per-leaf `$ensure`. Use it when the entire schema must come back complete.
 

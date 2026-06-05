@@ -15,9 +15,9 @@ Agently.set_settings(
 def basic_prompt_methods():
     # .set_agent_prompt() will cache prompt in agent instance and reuse prompt in every future request until it is changed or removed
     agent.set_agent_prompt("system", "You are a useful assistant.")
-    # .set_request_prompt() will only use prompt in next request.
-    # Request prompt will be erased when response instance of next request is created
-    agent.set_request_prompt("input", "Hello")
+    # .set_turn_prompt() writes prompt for one turn only.
+    # Turn prompt will be erased when response instance of next request is created.
+    agent.set_turn_prompt("input", "Hello")
 
     print(agent.start())  # Have response
     print(agent.start())  # Raise error because of missing core prompt
@@ -70,11 +70,11 @@ def what_happen_when_start():
 ## Chaining Methods Support
 def chaining_methods_support():
     result = (
-        agent.set_request_prompt(
+        agent.set_turn_prompt(
             "input",
             "hello",
         )
-        .set_request_prompt(
+        .set_turn_prompt(
             "output",
             "your reply",
         )
@@ -108,11 +108,11 @@ def any_data_as_prompt():
         ],  # Nested data supported
     }
     result = (
-        agent.set_request_prompt(
+        agent.set_turn_prompt(
             "input",
             question_list,
         )
-        .set_request_prompt(
+        .set_turn_prompt(
             "info",
             role_info,
         )
@@ -127,7 +127,7 @@ def any_data_as_prompt():
 ## Prompt Slots
 def prompt_slots():
     # Every different setting of prompt is a prompt slot.
-    # The first parameter of .set_agent_prompt() and .set_request_prompt() is the title of this prompt slot.
+    # The first parameter of .set_agent_prompt() and .set_turn_prompt() is the title of this prompt slot.
     # In fact you can use any title as prompt slot title but using these suggested prompt title may help Agently understand what these prompts mean to do and handle them more properly:
     # "system",
     # "developer",
@@ -142,8 +142,8 @@ def prompt_slots():
     # "output_format",
     # "options"
     # "chat_history", ! Notice: chat_history is a special prompt slot which allows message list only
-    agent.set_request_prompt("input", "Is v3 or v4 is Agently's latest version?")
-    agent.set_request_prompt("agently_latest_version", "4.0.6.11")
+    agent.set_turn_prompt("input", "Is v3 or v4 is Agently's latest version?")
+    agent.set_turn_prompt("agently_latest_version", "4.0.6.11")
     print(agent.start())
 
 
@@ -155,14 +155,14 @@ def placeholder_mappings():
     # You can use ${<variable name>} in almost every position in prompt data as long as that position support string value.
     # Placeholder mappings should always be passed explicitly via mappings=...
     result = (
-        agent.set_request_prompt(
+        agent.set_turn_prompt(
             "input",
             "My question is ${question}",
             mappings={
                 "question": "Who're you?",
             },
         )
-        .set_request_prompt(
+        .set_turn_prompt(
             "info",
             {"${role_settings}": {"${name_key}": "${name_value}"}},
             mappings={
@@ -182,7 +182,7 @@ def placeholder_mappings():
 
 ## Quick Prompt Methods
 def quick_prompt_methods():
-    # Agent instance and Request instance provide quick prompt methods for developers. These methods were used more often than .set_agent_prompt() and .set_request_prompt() in real cases.
+    # Agent instance and Request instance provide quick prompt methods for developers. These methods were used more often than .set_agent_prompt() and .set_turn_prompt() in real cases.
     result = (
         agent.role(
             "You're a useful assistant named ${assistant_name}.",
@@ -223,7 +223,8 @@ def quick_prompt_methods():
 # How it works:
 # Two storage levels exist for prompts:
 #   set_agent_prompt(slot, value)   — persisted across all future requests on this agent
-#   set_request_prompt(slot, value) — consumed for the next request only, then cleared
+#   set_turn_prompt(slot, value)    — consumed for one turn only, then cleared
+#   set_request_prompt(slot, value) — compatibility alias for set_turn_prompt()
 # Quick methods like .role(), .input(), .output() are shorthand for the above.
 # Recognized slot names ("system", "input", "output", "instruct", …) are given special
 # treatment in prompt assembly; custom names are included as labelled info blocks.

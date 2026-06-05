@@ -123,9 +123,9 @@ task = (
 这份 prompt snapshot 会通过现有 Prompt generator 渲染成 Dynamic Task 的
 target。`output` slot 会成为 facade 级 `output_schema`，`output_format` 会成为
 默认 model-task format。`set_agent_prompt(...)` / `always=True` 写入的长期 prompt
-会被继承。quick prompt 链里的本轮 request prompt 保存在 AgentTurn draft 上，并被冻结
-到新 task；直接 `set_request_prompt(...)` / `agent.request` 仍是低层 request-builder
-兼容路径。显式传入的
+会被继承。quick prompt 链里的本轮 turn prompt 保存在 AgentTurn draft 上，并被冻结
+到新 task；直接 `set_turn_prompt(...)`、兼容别名 `set_request_prompt(...)` 和
+`agent.request` 仍是低层 request-builder 兼容路径。显式传入的
 `create_dynamic_task(target=..., output_schema=..., output_format=...)` 参数优先于
 prompt 推导值。
 

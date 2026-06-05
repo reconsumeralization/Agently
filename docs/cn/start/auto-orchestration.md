@@ -42,7 +42,7 @@ result = await turn.async_start()
 ```
 
 不要再依赖 `agent.input(...); agent.output(...); await agent.async_start()`
-来累计本轮 request prompt。Agent 生命周期状态使用 `always=True`、
+来累计本轮 turn prompt。Agent 生命周期状态使用 `always=True`、
 `set_agent_prompt(...)` 或稳定 setup 方法；只有明确需要低层 request-builder
 兼容面时才使用 `agent.create_request(...)` / `agent.request`。
 

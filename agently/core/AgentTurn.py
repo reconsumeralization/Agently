@@ -78,7 +78,7 @@ class AgentTurn:
         prompt_snapshot = self.request.prompt.get()
         return dict(prompt_snapshot) if isinstance(prompt_snapshot, dict) else {}
 
-    def set_request_prompt(
+    def set_turn_prompt(
         self,
         key: "PromptStandardSlot | str",
         value: Any,
@@ -87,6 +87,15 @@ class AgentTurn:
     ):
         self.request.prompt.set(key, value, mappings=mappings)
         return self
+
+    def set_request_prompt(
+        self,
+        key: "PromptStandardSlot | str",
+        value: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+    ):
+        return self.set_turn_prompt(key, value, mappings=mappings)
 
     def remove_request_prompt(self, key: "PromptStandardSlot | str"):
         self.request.prompt.set(key, None)
