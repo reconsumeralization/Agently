@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -92,10 +94,48 @@ class MockAgentExecutionActionRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockAgentTurnIsolationRequester(MockAgentExecutionRequester):
+    name = "MockAgentTurnIsolationRequester"
+
+    def generate_request_data(self):
+        return AgentlyRequestData(
+            client_options={},
+            headers={},
+            data={
+                "input": self.prompt.get("input"),
+                "system": self.prompt.get("system"),
+                "output": self.prompt.get("output"),
+            },
+            request_options={"stream": True},
+            request_url="mock://agent-turn-isolation",
+        )
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        await asyncio.sleep(0.1)
+        payload = DataFormatter.sanitize(request_data.data)
+        prompt_input = payload.get("input")
+        persistent_system = payload.get("system")
+        MockAgentExecutionRequester.requests.append(json.dumps(payload, ensure_ascii=False))
+        yield "message", json.dumps(
+            {
+                "answer": prompt_input,
+                "system": persistent_system,
+            },
+            ensure_ascii=False,
+        )
+
+
 def _create_agent(name: str = "agent-execution-step-test"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockAgentExecutionRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_turn_isolation_agent(name: str = "agent-turn-isolation-test"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockAgentTurnIsolationRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -125,6 +165,28 @@ Return a short structured answer for the task step contract.
 def test_execution_options_validate_known_route_schema():
     with pytest.raises(ValueError):
         ExecutionOptions.model_validate({"routes": {"skills": {"unknown": True}}})
+
+
+@pytest.mark.asyncio
+async def test_same_agent_quick_prompt_turns_are_request_scoped():
+    MockAgentExecutionRequester.requests = []
+    agent = _create_turn_isolation_agent("same-agent-turn-isolation")
+    agent.system("shared policy", always=True)
+
+    start = time.monotonic()
+    results = await asyncio.gather(
+        agent.input("request-A").output({"answer": (str, "answer", True)}, format="json").async_start(),
+        agent.input("request-B").output({"answer": (str, "answer", True)}, format="json").async_start(),
+        agent.input("request-C").output({"answer": (str, "answer", True)}, format="json").async_start(),
+    )
+    elapsed = time.monotonic() - start
+
+    assert [result["answer"] for result in results] == ["request-A", "request-B", "request-C"]
+    assert [result["system"] for result in results] == ["shared policy", "shared policy", "shared policy"]
+    assert elapsed < 0.25
+    assert agent.request.prompt.get(inherit=False) == {}
+    request_payloads = [json.loads(item) for item in MockAgentExecutionRequester.requests]
+    assert [payload["input"] for payload in request_payloads] == ["request-A", "request-B", "request-C"]
 
 
 @pytest.mark.asyncio
