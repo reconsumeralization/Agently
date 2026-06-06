@@ -110,7 +110,7 @@ async def stream_answer(request_data):
     )
     async for item in result.get_async_generator(type="instant"):
         if item.delta:
-            yield {"path": item.path, "delta": item.delta, "done": item.is_completed}
+            yield {"path": item.path, "delta": item.delta, "done": item.is_complete}
 
 app = FastAPIHelper(response_provider=stream_answer)
 app.use_sse("/answer/stream")

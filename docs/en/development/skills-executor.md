@@ -243,7 +243,7 @@ large rule sets into smaller judge calls.
 Direct Skills execution streams runtime items through `stream_handler`:
 
 - `skills.prompt_only.start`
-- `skills.model_stream` with `path`, `value`, `delta`, and `is_completed`
+- `skills.model_stream` with `path`, `value`, `delta`, and `is_complete`
 - `skills.prompt_only.done`
 - `skills.runtime_chain.*` when `effort="normal"` or `effort="max"` selects the
   built-in planner chain

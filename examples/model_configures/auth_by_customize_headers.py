@@ -38,7 +38,7 @@ async def main():
     async for event in instant_mode_result:
         print(
             event.path,
-            "[DONE]" if event.is_completed else "[>>>>]",
+            "[DONE]" if event.is_complete else "[>>>>]",
             event.value,
         )
 

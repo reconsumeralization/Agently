@@ -75,7 +75,7 @@ result = (
 - `result.get_generator(type="instant")` to stream structured fields
 
 Instant events provide:
-`path`, `wildcard_path`, `delta`, `value`, `is_completed`
+`path`, `wildcard_path`, `delta`, `value`, `is_complete`
 
 ```python
 result = (

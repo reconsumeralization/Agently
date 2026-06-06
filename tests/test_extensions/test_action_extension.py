@@ -498,7 +498,7 @@ async def test_action_extension_plan_handler_instant_response_short_circuit(monk
                 yield StreamingData(
                     path="$.next_action",
                     value="response",
-                    is_completed=True,
+                    is_complete=True,
                 )
 
             return gen()

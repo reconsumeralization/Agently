@@ -56,7 +56,7 @@ async def test_streaming_json_parser_basic():
     dones = [e for e in events if e.event_type == "done"]
 
     assert any("response.user.profile.name" in e.path and e.delta for e in deltas)
-    assert any(e.path == "response.user.profile.name" and e.is_completed for e in dones)
+    assert any(e.path == "response.user.profile.name" and e.is_complete for e in dones)
     assert any(e.path == "response.data.items[0].tags" and e.value == ["tag1", "tag2"] for e in dones)
     assert events[-1].path == "response"  # Final completion of root
 

@@ -191,11 +191,11 @@ async def main():
     }
 
     async for item in execution.get_async_generator(type="instant"):
-        if item.path == "route.selected" and item.is_completed:
+        if item.path == "route.selected" and item.is_complete:
             print(f"\n[route] selected: {(item.value or {}).get('selected_route')}")
             continue
 
-        if item.path == "task_dag.tasks.reply.complete" and item.is_completed:
+        if item.path == "task_dag.tasks.reply.complete" and item.is_complete:
             flags["reply_task_completed"] = True
             continue
 

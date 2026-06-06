@@ -122,14 +122,10 @@ def test_dynamic_task_plugin_registered():
     assert "local_handler" in task.resolver.keys()
 
 
-def test_streaming_data_prefers_is_completed_and_keeps_is_complete_compatibility():
-    preferred = StreamingData(path="reply", value="ok", is_completed=True)
-    compat = StreamingData(path="reply", value="ok", is_complete=True)
+def test_streaming_data_uses_is_complete_completion_field():
+    item = StreamingData(path="reply", value="ok", is_complete=True)
 
-    assert preferred.is_completed is True
-    assert preferred.is_complete is True
-    assert compat.is_completed is True
-    assert compat.is_complete is True
+    assert item.is_complete is True
 
 
 def test_model_response_direct_construction_warns_but_get_result_does_not():
@@ -259,7 +255,7 @@ async def test_agent_execution_stream_keeps_delta_events_raw():
         "A",
         delta="A",
         event_type="delta",
-        is_completed=False,
+        is_complete=False,
         source="model_request",
         meta={"response_id": "response-1", "field_path": "text"},
     )
@@ -268,7 +264,7 @@ async def test_agent_execution_stream_keeps_delta_events_raw():
         "AB",
         delta="B",
         event_type="delta",
-        is_completed=False,
+        is_complete=False,
         source="model_request",
         meta={"response_id": "response-1", "field_path": "text"},
     )
@@ -278,7 +274,7 @@ async def test_agent_execution_stream_keeps_delta_events_raw():
         "ABC",
         delta="C",
         event_type="delta",
-        is_completed=False,
+        is_complete=False,
         source="model_request",
         meta={"response_id": "response-1", "field_path": "text"},
     )
@@ -300,8 +296,8 @@ async def test_agent_execution_stream_default_delta_path_remains_uncoalesced():
         execution_mode="one_turn",
     )
 
-    await stream.emit("model.text", "A", delta="A", event_type="delta", is_completed=False)
-    await stream.emit("model.text", "AB", delta="B", event_type="delta", is_completed=False)
+    await stream.emit("model.text", "A", delta="A", event_type="delta", is_complete=False)
+    await stream.emit("model.text", "AB", delta="B", event_type="delta", is_complete=False)
 
     assert [item.delta for item in stream.items] == ["A", "B"]
 
@@ -316,7 +312,7 @@ async def test_agent_execution_progress_is_visible_with_raw_stream_delivery():
         "partial",
         delta="partial",
         event_type="delta",
-        is_completed=False,
+        is_complete=False,
         route="model_request",
     )
 
@@ -867,7 +863,7 @@ async def test_agent_execution_runs_submitted_dynamic_task_and_streams_process()
 
     stream_items = []
     async for item in execution.get_async_generator(type="instant"):
-        if item.is_completed:
+        if item.is_complete:
             stream_items.append(item)
 
     data = await execution.async_get_data()
@@ -1068,8 +1064,8 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
             yield StreamingData(path="prethinking", value="Check billing", delta=" billing", event_type="delta")
             yield StreamingData(path="reply", value="We are", delta="We are", event_type="delta")
             yield StreamingData(path="reply", value="We are investigating.", delta=" investigating.", event_type="delta")
-            yield StreamingData(path="prethinking", value="Check billing", event_type="done", is_completed=True)
-            yield StreamingData(path="reply", value="We are investigating.", event_type="done", is_completed=True)
+            yield StreamingData(path="prethinking", value="Check billing", event_type="done", is_complete=True)
+            yield StreamingData(path="reply", value="We are investigating.", event_type="done", is_complete=True)
 
         async def async_get_data(self, **kwargs):
             assert kwargs == {"ensure_keys": ["prethinking", "reply"]}
@@ -1130,7 +1126,7 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
     streamed = []
     async for item in execution.get_async_generator(type="instant"):
         if item.event_type == "delta":
-            streamed.append((item.path, item.delta, item.is_completed))
+            streamed.append((item.path, item.delta, item.is_complete))
 
     data = await execution.async_get_data()
 

@@ -299,7 +299,7 @@ class AgentlyActionRuntime:
             parent_run_context=parent_run_context,
         )
         async for instant in action_plan_result.get_async_generator(type="instant"):
-            if not instant.is_completed:
+            if not instant.is_complete:
                 continue
             if not self.action._is_next_action_path(instant.path):
                 continue

@@ -200,7 +200,7 @@ async def test_agent_execution_one_turn_keeps_compatibility_mode_and_stream_meta
         .create_execution()
     )
 
-    stream_items = [item async for item in execution.get_async_generator(type="instant") if item.is_completed]
+    stream_items = [item async for item in execution.get_async_generator(type="instant") if item.is_complete]
     data = await execution.async_get_data()
     meta = await execution.async_get_meta()
 
@@ -490,7 +490,7 @@ async def test_two_task_step_executions_can_be_correlated_as_developer_loop():
         )
     )
 
-    second_stream = [item async for item in second.get_async_generator(type="instant") if item.is_completed]
+    second_stream = [item async for item in second.get_async_generator(type="instant") if item.is_complete]
     second_meta = await second.async_get_meta()
 
     assert second_meta["lineage"]["parent_execution_id"] == first_meta["execution_id"]

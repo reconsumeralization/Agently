@@ -207,11 +207,11 @@ async def auto_loop_demo():
                     await data.async_put_into_stream("[thinking] ")
                     thinking_started = True
                 await data.async_put_into_stream(stream.delta)
-            if stream.wildcard_path == "next_step_thinking" and stream.is_completed:
+            if stream.wildcard_path == "next_step_thinking" and stream.is_complete:
                 await data.async_put_into_stream("\n")
-            if stream.wildcard_path == "next_step_action.type" and stream.is_completed:
+            if stream.wildcard_path == "next_step_action.type" and stream.is_complete:
                 await data.async_put_into_stream(f"[plan] next_action: {stream.value}\n")
-            if stream.wildcard_path == "next_step_action.tool_using.tool_name" and stream.is_completed:
+            if stream.wildcard_path == "next_step_action.tool_using.tool_name" and stream.is_complete:
                 await data.async_put_into_stream(f"[plan] tool: {stream.value}\n")
         parsed = await result.async_get_data()
         next_action = parsed["next_step_action"]

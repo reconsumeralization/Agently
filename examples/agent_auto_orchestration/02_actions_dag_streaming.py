@@ -327,7 +327,7 @@ async def main() -> None:
     stage_step = 0
 
     async for item in execution.get_async_generator(type="instant"):
-        if not item.is_completed:
+        if not item.is_complete:
             continue
         path = item.path
         stream_events.append(path)

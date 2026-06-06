@@ -54,7 +54,7 @@ meta = result.get_meta()        # 已缓存
 | `type` | 你拿到的 | 适合 |
 |---|---|---|
 | `"delta"` | 原始 token delta | 终端打字机 UX |
-| `"instant"` | 带 `path`、`delta`、`value`、`is_completed` 的结构化 `StreamingData` 事件 | 字段级 UI 更新 |
+| `"instant"` | 带 `path`、`delta`、`value`、`is_complete` 的结构化 `StreamingData` 事件 | 字段级 UI 更新 |
 | `"streaming_parse"` | 与 `instant` 使用同一个结构化流式 parser 的兼容别名 | 兼容 / 增量 dict 读取 |
 | `"specific"` | `(event, data)` 元组，按事件过滤（`delta`、`reasoning_delta`、`tool_calls` 等） | 精确订阅特定事件 |
 | `"original"` | 原始 provider 事件 | 调试 / passthrough |
@@ -91,16 +91,14 @@ gen = (
 for item in gen:
     if item.delta:
         print(f"[{item.path}] + {item.delta}")
-    if item.is_completed:
+    if item.is_complete:
         print(f"[{item.path}] done")
 ```
 
 `item` 暴露 `.path`（如 `"tips[0]"`）、`.wildcard_path`（`"tips[*]"`）、
-`.value`、`.delta`、`.is_completed` 和 `.event_type`。用 `.delta` 更新正在增长
-的字段；只有下游动作必须等字段关闭时，才用 `.is_completed` /
+`.value`、`.delta`、`.is_complete` 和 `.event_type`。用 `.delta` 更新正在增长
+的字段；只有下游动作必须等字段关闭时，才用 `.is_complete` /
 `event_type=="done"` 做触发条件。
-`.is_complete` 仍作为 stream event 兼容别名保留，但已废弃，并将在 Agently
-4.2 移除。
 
 ### 高价值模式：先流式更新 UI，再读取最终可靠结果
 
@@ -138,7 +136,7 @@ async def stream_triage_card(ticket_text: str):
             # 把字段级 patch 推给 UI / SSE / WebSocket。
             ui_state[item.path] += item.delta
             print({"path": item.path, "delta": item.delta})
-        if item.is_completed:
+        if item.is_complete:
             print({"path": item.path, "status": "done", "value": item.value})
 
     # 不会发第二次请求：这里读取的是同一个 result 的最终缓存解析结果。
@@ -189,7 +187,7 @@ import asyncio
 async def main():
     result = agent.input("...").output({...}).get_result()
     async for item in result.get_async_generator(type="instant"):
-        if item.is_completed:
+        if item.is_complete:
             print(item.path, item.value)
 
 asyncio.run(main())

@@ -158,15 +158,13 @@ class StreamingData(BaseModel):
         path (str): The dot-style path to the field in the JSON object.
         value (Any): The current value at this path.
         delta (Optional[str]): The incremental content (for delta events, typically used for string updates).
-        is_completed (bool): Whether this path/field is considered complete and will not change further.
-        is_complete (bool): Deprecated compatibility alias for is_completed. It will be removed in 4.2.
+        is_complete (bool): Whether this path/field is considered complete and will not change further.
         event_type (Literal["delta", "done"]): The type of event ("delta" for incremental update, "done" for completion).
     """
 
     path: str
     value: Any
     delta: str | None = None
-    is_completed: bool = False
     is_complete: bool = False
     wildcard_path: str | None = None
     indexes: tuple | None = None
@@ -208,12 +206,6 @@ class StreamingData(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def set_wildcard_path(cls, data: dict[str, Any]):
-        if "is_completed" not in data and "is_complete" in data:
-            data["is_completed"] = bool(data["is_complete"])
-        elif "is_complete" not in data and "is_completed" in data:
-            data["is_complete"] = bool(data["is_completed"])
-        elif "is_completed" in data:
-            data["is_complete"] = bool(data["is_completed"])
         data["wildcard_path"], data["indexes"] = StreamingData._process_path(data["path"])
         return data
 
@@ -221,7 +213,7 @@ class StreamingData(BaseModel):
 class AgentExecutionStreamData(StreamingData):
     """Process-stream item for an Agent execution route.
 
-    The type keeps the same path/value/is_completed shape as model instant
+    The type keeps the same path/value/is_complete shape as model instant
     streams, then adds route metadata for Actions, Skills, Dynamic Task, and
     TriggerFlow-backed process events.
     """

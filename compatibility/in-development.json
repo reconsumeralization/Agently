@@ -170,7 +170,6 @@
       "status": "in-development",
       "surface": [
         "StreamingData",
-        "StreamingData.is_completed",
         "StreamingData.is_complete",
         "AgentlyModelResultEvent",
         "AgentlyModelResultMessage",
@@ -192,8 +191,8 @@
         "SkillRuntimeStreamItem",
         "SkillRuntimeStreamHandler"
       ],
-      "contract": "Common generator and handler type annotations are exposed through agently and agently.types.data. Result-named aliases are the recommended root-level public names: delta yields str, instant/streaming_parse yields StreamingData with is_completed, specific/all yield event-tagged result messages, AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive SkillRuntimeStreamItem dictionaries. Response-named aliases are compatibility-only aliases under agently.types.data and are not re-exported from the agently root.",
-      "compatibility_policy": "Response-named type aliases and StreamingData.is_complete remain compatibility aliases in agently.types.data. is_complete is deprecated in favor of is_completed and will be removed in Agently 4.2; Response-named aliases are deprecated in favor of Result-named aliases and will be removed in Agently 4.2."
+      "contract": "Common generator and handler type annotations are exposed through agently and agently.types.data. Result-named aliases are the recommended root-level public names: delta yields str, instant/streaming_parse yields StreamingData with is_complete, specific/all yield event-tagged result messages, AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive SkillRuntimeStreamItem dictionaries. Response-named aliases are compatibility-only aliases under agently.types.data and are not re-exported from the agently root.",
+      "compatibility_policy": "StreamingData.is_complete remains the canonical instant/streaming_parse completion field. Response-named type aliases remain compatibility-only aliases in agently.types.data and are deprecated in favor of Result-named aliases; they will be removed in Agently 4.2."
     },
     "model_response_result_facade": {
       "status": "in-development",

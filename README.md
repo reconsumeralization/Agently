@@ -242,7 +242,7 @@ result = (
 for event in result.get_generator(type="instant"):
     if event.path == "definition" and event.delta:
         print(event.delta, end="", flush=True)
-    if event.wildcard_path == "examples[*]" and event.is_completed:
+    if event.wildcard_path == "examples[*]" and event.is_complete:
         print("\nEXAMPLE:", event.value)
 ```
 

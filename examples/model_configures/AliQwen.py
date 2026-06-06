@@ -34,7 +34,7 @@ async def main():
     async for event in instant_mode_result:
         print(
             event.path,
-            "[DONE]" if event.is_completed else "[>>>>]",
+            "[DONE]" if event.is_complete else "[>>>>]",
             event.value,
         )
 
@@ -48,4 +48,4 @@ asyncio.run(main())
 # Aliyun DashScope uses the OpenAI-compatible endpoint at dashscope.aliyuncs.com.
 # Set auth="<Aliyun API Key>" and model="qwen3-coder-flash" (or any DashScope model).
 # get_async_generator(type="instant") streams structured output as it generates;
-# event.path shows the current field, event.is_completed shows if the field is done.
+# event.path shows the current field, event.is_complete shows if the field is done.

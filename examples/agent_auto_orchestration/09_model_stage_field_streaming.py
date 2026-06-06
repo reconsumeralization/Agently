@@ -108,7 +108,7 @@ async def main() -> None:
         if item.get("type") != "skills.model_stream":
             return
         path = item.get("path")
-        if path and item.get("is_completed") and path not in streamed:
+        if path and item.get("is_complete") and path not in streamed:
             streamed.add(str(path))
             print(f"  [section ready] {path}")
 

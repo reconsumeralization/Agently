@@ -292,7 +292,7 @@ class StreamingJSONParser:
                             path=path,
                             value=current_data,
                             delta=delta,
-                            is_completed=False,
+                            is_complete=False,
                             event_type="delta",
                             full_data=self.current_data,  # Pass the full current_data here
                         )
@@ -305,7 +305,7 @@ class StreamingJSONParser:
                         path=path,
                         value=current_data,
                         delta=None,
-                        is_completed=True,
+                        is_complete=True,
                         event_type="done",
                         full_data=self.current_data,  # Pass the full current_data here
                     )
@@ -318,7 +318,7 @@ class StreamingJSONParser:
                         path=path,
                         value=current_data,
                         delta=str(current_data),
-                        is_completed=False,
+                        is_complete=False,
                         event_type="delta",
                         full_data=self.current_data,  # Pass the full current_data here
                     )
@@ -329,7 +329,7 @@ class StreamingJSONParser:
                         path=path,
                         value=current_data,
                         delta=None,
-                        is_completed=True,
+                        is_complete=True,
                         event_type="done",
                         full_data=self.current_data,  # Pass the full current_data here
                     )
@@ -352,7 +352,7 @@ class StreamingJSONParser:
                         path=path,
                         value=current_data,
                         delta=None,
-                        is_completed=True,
+                        is_complete=True,
                         event_type="done",
                         full_data=self.current_data,  # Pass the full current_data here
                     )
@@ -375,7 +375,7 @@ class StreamingJSONParser:
                         path=path,
                         value=current_data,
                         delta=None,
-                        is_completed=True,
+                        is_complete=True,
                         event_type="done",
                         full_data=self.current_data,  # Pass the full current_data here
                     )
@@ -444,7 +444,7 @@ class StreamingJSONParser:
                         path=path,
                         value=data,
                         delta=None,
-                        is_completed=True,
+                        is_complete=True,
                         event_type="done",
                         full_data=self.current_data,  # Pass the full current_data here
                     )
@@ -463,7 +463,7 @@ class StreamingJSONParser:
                         path=path,
                         value=data,
                         delta=None,
-                        is_completed=True,
+                        is_complete=True,
                         event_type="done",
                         full_data=self.current_data,  # Pass the full current_data here
                     )
@@ -476,7 +476,7 @@ class StreamingJSONParser:
                         path=path,
                         value=data,
                         delta=None,
-                        is_completed=True,
+                        is_complete=True,
                         event_type="done",
                         full_data=self.current_data,  # Pass the full current_data here
                     )

@@ -47,8 +47,7 @@ async def run_single_shot_strategy(
                 "path": getattr(item, "path", None),
                 "value": getattr(item, "value", None),
                 "delta": getattr(item, "delta", None),
-                "is_completed": bool(getattr(item, "is_completed", getattr(item, "is_complete", False))),
-                "is_complete": bool(getattr(item, "is_completed", getattr(item, "is_complete", False))),
+                "is_complete": bool(getattr(item, "is_complete", False)),
             },
         )
 

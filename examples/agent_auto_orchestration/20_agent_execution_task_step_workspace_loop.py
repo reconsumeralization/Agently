@@ -65,7 +65,7 @@ async def collect_stream_flags(execution, *, task_id: str) -> dict[str, bool]:
         "lineage_ok": True,
     }
     async for item in execution.get_async_generator(type="instant"):
-        if item.path == "route.selected" and item.is_completed:
+        if item.path == "route.selected" and item.is_complete:
             flags["route_selected"] = True
         meta = item.meta or {}
         if meta.get("execution_mode") != "task_step":

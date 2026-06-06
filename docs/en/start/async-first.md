@@ -23,13 +23,13 @@ Agently is async-native at the runtime layer. Sync methods are convenience wrapp
 
 The combination worth learning first:
 
-- `result.get_async_generator(type="instant")` — yields structured `StreamingData` patches with `path`, `delta`, `value`, and `is_completed`.
+- `result.get_async_generator(type="instant")` — yields structured `StreamingData` patches with `path`, `delta`, `value`, and `is_complete`.
 - `data.async_emit(...)` — turns nodes into TriggerFlow signals.
 - `data.async_put_into_stream(...)` — forwards intermediate state to UI / SSE / logs.
 
 `instant` events are field-level, not raw provider tokens. They can carry partial
 field text in `.delta` while the field is still growing, then emit a completion
-event when `.is_completed` becomes true. Treat these events as progressive UI
+event when `.is_complete` becomes true. Treat these events as progressive UI
 state; read `async_get_data()` at the end for the durable parsed object.
 Annotate these stream handlers with `StreamingData` from `agently` for the
 common import path, or from `agently.types.data` when you prefer the full typed
@@ -71,7 +71,7 @@ async def main():
     async for item in result.get_async_generator(type="instant"):
         if item.delta:
             print(item.path, "+", item.delta)
-        if item.is_completed:
+        if item.is_complete:
             print(item.path, "done")
 
     final = await result.async_get_data()

@@ -54,7 +54,7 @@ This is also how `.validate(...)` runs only once per result — the cached resul
 | `type` | What you get | Use it for |
 |---|---|---|
 | `"delta"` | raw token deltas | terminal-style typing UX |
-| `"instant"` | structured `StreamingData` events with `path`, `delta`, `value`, and `is_completed` | field-level UI updates |
+| `"instant"` | structured `StreamingData` events with `path`, `delta`, `value`, and `is_complete` | field-level UI updates |
 | `"streaming_parse"` | alias for the same structured streaming parser used by `instant` | compatibility / incremental dict reads |
 | `"specific"` | `(event, data)` tuples filtered by event type (`delta`, `reasoning_delta`, `tool_calls`, etc.) | pick exactly the events you care about |
 | `"original"` | raw provider events | debugging / passthrough |
@@ -92,16 +92,14 @@ gen = (
 for item in gen:
     if item.delta:
         print(f"[{item.path}] + {item.delta}")
-    if item.is_completed:
+    if item.is_complete:
         print(f"[{item.path}] done")
 ```
 
 `item` exposes `.path` (e.g. `"tips[0]"`), `.wildcard_path` (`"tips[*]"`),
-`.value`, `.delta`, `.is_completed`, and `.event_type`. Use `.delta` to update
-the visible field while it is growing. Use `.is_completed` / `event_type=="done"`
+`.value`, `.delta`, `.is_complete`, and `.event_type`. Use `.delta` to update
+the visible field while it is growing. Use `.is_complete` / `event_type=="done"`
 when downstream work should wait until the field is closed.
-`.is_complete` remains a compatibility alias for stream events, but it is
-deprecated and will be removed in Agently 4.2.
 
 ### High-value pattern: stream fields to UI, then read the durable result
 
@@ -140,7 +138,7 @@ async def stream_triage_card(ticket_text: str):
             # Render a field-level patch to your UI / SSE / WebSocket channel.
             ui_state[item.path] += item.delta
             print({"path": item.path, "delta": item.delta})
-        if item.is_completed:
+        if item.is_complete:
             print({"path": item.path, "status": "done", "value": item.value})
 
     # No second request: this reads the cached final parse from the same result.
@@ -193,7 +191,7 @@ import asyncio
 async def main():
     result = agent.input("...").output({...}).get_result()
     async for item in result.get_async_generator(type="instant"):
-        if item.is_completed:
+        if item.is_complete:
             print(item.path, item.value)
 
 asyncio.run(main())
