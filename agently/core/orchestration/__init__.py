@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .DynamicTask import ActionTaskAdapter, DynamicTask, SkillTaskAdapter
-from .TaskDAGExecutor import (
+from .TaskDAG import (
     CompiledTaskDAG,
-    DynamicTaskContext,
-    DynamicTaskHandler,
-    DynamicTaskResolver,
+    TaskDAGContext,
+    TaskDAGHandler,
+    TaskDAGResolver,
     TaskDAGExecutor,
     TaskDAGValidation,
     TaskDAGValidator,
@@ -31,13 +30,10 @@ from .TriggerFlow import (
 )
 
 __all__ = [
-    "ActionTaskAdapter",
     "CompiledTaskDAG",
-    "DynamicTask",
-    "DynamicTaskContext",
-    "DynamicTaskHandler",
-    "DynamicTaskResolver",
-    "SkillTaskAdapter",
+    "TaskDAGContext",
+    "TaskDAGHandler",
+    "TaskDAGResolver",
     "TaskDAGExecutor",
     "TaskDAGValidation",
     "TaskDAGValidator",

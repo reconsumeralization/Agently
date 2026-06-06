@@ -21,12 +21,11 @@ from typing import Any, AsyncGenerator, Generator, Sequence, TYPE_CHECKING, Lite
 from typing_extensions import Self
 
 from agently.core.extension import ExtensionHandlers
-from agently.core.application import AgentTask
+from agently.core.application import AgentTask, DynamicTask
 from agently.core.AgentTurn import AgentTurn
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
 from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
-from agently.core.orchestration import DynamicTask
 from agently.core.runtime import resolve_parent_run_context
 from agently.utils import DataFormatter, Settings
 

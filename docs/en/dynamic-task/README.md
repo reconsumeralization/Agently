@@ -201,7 +201,7 @@ Dynamic Task is split into four stages:
   output schema, `ensure_keys`, and validation retry.
 - `TaskDAGValidator` validates DAG syntax, dependencies, schema version,
   semantic outputs, side-effect policy, and resolver availability.
-- `DynamicTaskResolver` maps `task.binding`, `task.id`, then `task.kind` to a
+- `TaskDAGResolver` maps `task.binding`, `task.id`, then `task.kind` to a
   runnable handler.
 - `TaskDAGExecutor` compiles the validated DAG to ordinary TriggerFlow chunks
   and runs it through TriggerFlow lifecycle, stream, pause/resume, result, and
@@ -242,9 +242,9 @@ control:
 
 ```python
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
-from agently.core import DynamicTaskResolver, TaskDAGExecutor, TaskDAGValidator
+from agently.core import TaskDAGResolver, TaskDAGExecutor, TaskDAGValidator
 
-resolver = DynamicTaskResolver({"risk_check_handler": risk_check_handler})
+resolver = TaskDAGResolver({"risk_check_handler": risk_check_handler})
 validator = TaskDAGValidator(resolver)
 planner = AgentlyTaskDAGPlanner(validator=validator)
 
