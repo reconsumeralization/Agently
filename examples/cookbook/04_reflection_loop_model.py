@@ -14,7 +14,7 @@ def generate_draft(task: str) -> str:
         .input(task)
         .instruct("Write the first draft. Keep it concise.")
         .output({"result": ("str", "first draft")})
-        .get_response()
+        .get_result()
         .get_data(ensure_keys=["result"])
     )
     return data["result"]
@@ -34,7 +34,7 @@ def evaluate_draft(task: str, draft: str, criteria: list[str]) -> dict:
             "issues": (["str"], "concrete issues; empty if passed"),
             "suggestions": (["str"], "specific revision suggestions; empty if passed"),
         })
-        .get_response()
+        .get_result()
         .get_data(ensure_keys=["passed", "score", "issues", "suggestions"])
     )
 
@@ -52,7 +52,7 @@ def revise_draft(task: str, draft: str, suggestions: list[str]) -> str:
             "Keep the result under 80 English words.",
         ])
         .output({"result": ("str", "revised draft")})
-        .get_response()
+        .get_result()
         .get_data(ensure_keys=["result"])
     )
     return data["result"]

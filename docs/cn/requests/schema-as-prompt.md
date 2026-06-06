@@ -150,7 +150,7 @@ agent.output(Ticket)  # 等价于把 BaseModel 展开为嵌套叶子
 
 ## 纯文本
 
-需要纯文本而不是结构化输出时，**不要**用 `output()` —— `agent.input("...").start()` 直接返回字符串，或 `response.result.get_text()`。Schema as Prompt 是给结构化输出用的。
+需要纯文本而不是结构化输出时，**不要**用 `output()` —— `agent.input("...").start()` 直接返回字符串，或 `result.get_text()`。Schema as Prompt 是给结构化输出用的。
 
 ## 不在范围内
 

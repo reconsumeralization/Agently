@@ -62,21 +62,21 @@ def main():
 
     agent.use_actions([search.search, search.search_news, browse.browse])
 
-    response = (
+    result = (
         agent.input("How to use Agently TriggerFlow")
         .instruct(
             [
                 "Must with content that you actually browsed.",
             ]
         )
-        .get_response()
+        .get_result()
     )
-    result = response.result.get_data()
-    extra = response.result.full_result_data.get("extra", {})
+    data = result.get_data()
+    extra = result.full_result_data.get("extra", {})
     action_logs = extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else []
 
     print("[RESULT]")
-    print(result)
+    print(data)
     print("\n[ACTION_LOG_COUNT]")
     print(len(action_logs))
     print("\n[ACTION_CHAIN_VALIDATION]")

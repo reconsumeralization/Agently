@@ -50,7 +50,8 @@ class AgentExecutionStream:
         task_id: str | None = None,
         action_id: str | None = None,
         graph_id: str | None = None,
-        is_complete: bool = True,
+        is_completed: bool | None = None,
+        is_complete: bool | None = None,
         event_type: Literal["delta", "done"] = "done",
         meta: dict[str, Any] | None = None,
     ) -> AgentExecutionStreamData:
@@ -61,11 +62,16 @@ class AgentExecutionStream:
             item_meta.setdefault("execution_mode", self.execution_mode)
         if self.lineage:
             item_meta.setdefault("lineage", dict(self.lineage))
+        completed = event_type == "done"
+        if is_completed is not None:
+            completed = is_completed
+        elif is_complete is not None:
+            completed = is_complete
         item = AgentExecutionStreamData(
             path=path,
             value=DataFormatter.sanitize(value),
             delta=delta,
-            is_complete=is_complete,
+            is_completed=completed,
             event_type=event_type,
             source=source,
             route=route,
@@ -138,7 +144,7 @@ class AgentExecutionStream:
             task_id=task_id,
             action_id=action_id,
             graph_id=graph_id,
-            is_complete=bool(getattr(item, "is_complete", event_type == "done")),
+            is_completed=bool(getattr(item, "is_completed", getattr(item, "is_complete", event_type == "done"))),
             event_type=event_type,
             meta=item_meta,
         )
@@ -166,7 +172,7 @@ class AgentExecutionStream:
                 stage_id=stage_id,
                 task_id=task_id,
                 graph_id=graph_id,
-                is_complete=bool(item.get("is_complete", event_type == "done")),
+                is_completed=bool(item.get("is_completed", item.get("is_complete", event_type == "done"))),
                 event_type=event_type,
                 meta=payload if isinstance(payload, dict) else None,
             )
@@ -183,7 +189,7 @@ class AgentExecutionStream:
                 source="model_request",
                 stage_id=stage_id,
                 graph_id=graph_id,
-                is_complete=bool(item.get("is_complete", event_type == "done")),
+                is_completed=bool(item.get("is_completed", item.get("is_complete", event_type == "done"))),
                 event_type=event_type,
                 meta=payload if isinstance(payload, dict) else None,
             )
@@ -200,7 +206,7 @@ class AgentExecutionStream:
                 source="model_request",
                 task_id=task_id,
                 graph_id=graph_id,
-                is_complete=bool(item.get("is_complete", event_type == "done")),
+                is_completed=bool(item.get("is_completed", item.get("is_complete", event_type == "done"))),
                 event_type=event_type,
                 meta=payload if isinstance(payload, dict) else None,
             )

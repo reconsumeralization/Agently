@@ -13,7 +13,7 @@ A single Agently request has four moving parts:
 1. **Prompt** — what you say to the model. Built from layered slots: `role` / `system`, `info`, `instruct`, `input`, `output` schema. See [Prompt Management](prompt-management.md).
 2. **Output schema** — the structure you want back. Authored as nested dicts of `(type, "desc", ensure)` leaves. See [Schema as Prompt](schema-as-prompt.md).
 3. **Validation pipeline** — `output()` strict parse → `ensure_keys` → `.validate(...)` custom handlers → retry. See [Output Control](output-control.md).
-4. **Response** — text, structured data, metadata, and streaming events. Reusable via `response.result`. See [Model Response](model-response.md).
+4. **Result** — text, structured data, metadata, and streaming events. Reusable via `get_result()`. See [Model Result](model-response.md).
 
 ## The minimum shape
 
@@ -71,7 +71,7 @@ Use `file="..."` or `url="..."` for a single image, and `files=[...]` or `urls=[
 
 ## Sync vs async
 
-The chain above is sync because it ends in `.start()`. For services and streaming UI, use `.async_start()` or pull a reusable `response = ....get_response()` and consume it with `await response.result.async_get_data()`. See [Async First](../start/async-first.md).
+The chain above is sync because it ends in `.start()`. For services and streaming UI, use `.async_start()` or pull a reusable `result = ....get_result()` and consume it with `await result.async_get_data()`. See [Async First](../start/async-first.md).
 
 ## Where this fits in the stack
 

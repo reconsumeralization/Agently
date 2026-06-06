@@ -29,8 +29,8 @@ if __name__ == "__main__":
     records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
 
-    response = turn.get_response()
-    print_response(response)
+    result = turn.get_result()
+    print_response(result)
 
     print("[ACTION_CALL_HANDLES_AFTER_RELEASE]")
     print(Agently.execution_environment.list(scope="action_call"))
@@ -44,7 +44,7 @@ if __name__ == "__main__":
 # agent.enable_python(expose_to_model=True) registers a Python sandbox action that the
 # model can plan and call.  get_action_result() asks Ollama to generate the Python code
 # for the statistics task, runs it in the sandbox, and returns ActionResult records.
-# get_response() injects the records so the model can reference the exact numeric results
+# get_result() injects the records so the model can reference the exact numeric results
 # in its final reply.  Action-call-scoped handles are released after get_action_result().
 #
 # Flow:

@@ -37,8 +37,8 @@ def main():
     records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
 
-    response = turn.get_response()
-    print_model_reply(response)
+    result = turn.get_result()
+    print_model_reply(result)
 
     statuses = [record.get("status") for record in records]
     errors = [record.get("error") for record in records]

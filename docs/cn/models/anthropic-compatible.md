@@ -62,7 +62,7 @@ agent.set_settings("AnthropicCompatible", {"model": "${ENV.ANTHROPIC_MODEL_FAST}
 
 ## 流式
 
-`response.get_generator(type="delta")` / `get_async_generator(type="delta")` 产出增量文本。`type="instant"` 结构化流式与 `OpenAICompatible` 上一样 —— 区别仅在上游解析。
+`result.get_generator(type="delta")` / `get_async_generator(type="delta")` 产出增量文本。`type="instant"` 结构化流式与 `OpenAICompatible` 上一样 —— 区别仅在上游解析。
 
 ## Beta 特性
 

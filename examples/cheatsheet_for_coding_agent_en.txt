@@ -70,20 +70,20 @@ result = (
 ```
 
 ### Response consumption
-- `response.get_text()` for raw text
-- `response.get_data()` for parsed structured data
-- `response.get_generator(type="instant")` to stream structured fields
+- `result.get_text()` for raw text
+- `result.get_data()` for parsed structured data
+- `result.get_generator(type="instant")` to stream structured fields
 
 Instant events provide:
-`path`, `wildcard_path`, `delta`, `value`, `is_complete`
+`path`, `wildcard_path`, `delta`, `value`, `is_completed`
 
 ```python
-response = (
+result = (
     agent.input("Explain recursion")
     .output({"answer": ("str", "final answer")})
-    .get_response()
+    .get_result()
 )
-for msg in response.get_generator(type="instant"):
+for msg in result.get_generator(type="instant"):
     if msg.path == "answer" and msg.delta:
         print(msg.delta, end="", flush=True)
 print()

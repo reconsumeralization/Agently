@@ -198,23 +198,23 @@ async def auto_loop_demo():
                 }
             )
         )
-        response = request.get_response()
+        result = request.get_result()
         next_action = None
         thinking_started = False
-        async for stream in response.get_async_generator(type="instant"):
+        async for stream in result.get_async_generator(type="instant"):
             if stream.wildcard_path == "next_step_thinking" and stream.delta:
                 if not thinking_started:
                     await data.async_put_into_stream("[thinking] ")
                     thinking_started = True
                 await data.async_put_into_stream(stream.delta)
-            if stream.wildcard_path == "next_step_thinking" and stream.is_complete:
+            if stream.wildcard_path == "next_step_thinking" and stream.is_completed:
                 await data.async_put_into_stream("\n")
-            if stream.wildcard_path == "next_step_action.type" and stream.is_complete:
+            if stream.wildcard_path == "next_step_action.type" and stream.is_completed:
                 await data.async_put_into_stream(f"[plan] next_action: {stream.value}\n")
-            if stream.wildcard_path == "next_step_action.tool_using.tool_name" and stream.is_complete:
+            if stream.wildcard_path == "next_step_action.tool_using.tool_name" and stream.is_completed:
                 await data.async_put_into_stream(f"[plan] tool: {stream.value}\n")
-        result = await response.result.async_get_data()
-        next_action = result["next_step_action"]
+        parsed = await result.async_get_data()
+        next_action = parsed["next_step_action"]
         await data.async_put_into_stream("[status] planning done\n")
         await data.async_set_state("step", step + 1)
         await data.async_emit("Plan", next_action)

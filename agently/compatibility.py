@@ -234,16 +234,21 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
             "status": "released",
             "surface": [
                 "StreamingData",
+                "AgentlyModelResponseEvent",
                 "AgentlyModelResponseMessage",
                 "AgentlySpecificResponseMessage",
+                "AgentlyOriginalResponsePayload",
                 "ModelStreamingHandler",
+                "AgentExecutionStreamHandler",
                 "AttemptStreamMessage",
                 "AttemptStreamGenerator",
                 "AgentExecutionStreamData",
+                "SkillRuntimeStreamItem",
                 "SkillRuntimeStreamHandler",
             ],
             "contract": (
-                "Generator and handler type annotations are exposed through agently.types.data; delta yields str, "
+                "Common generator and handler type annotations are exposed through agently and agently.types.data; "
+                "delta yields str, "
                 "instant/streaming_parse yields StreamingData, specific/all yield event-tagged response messages, "
                 "AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive "
                 "SkillRuntimeStreamItem dictionaries."

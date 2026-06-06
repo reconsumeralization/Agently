@@ -156,15 +156,21 @@ class AgentExecution:
         task_id: str | None = None,
         action_id: str | None = None,
         graph_id: str | None = None,
-        is_complete: bool = True,
+        is_completed: bool | None = None,
+        is_complete: bool | None = None,
         event_type: Literal["delta", "done"] = "done",
         delta: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> AgentExecutionStreamData:
+        completed = event_type == "done"
+        if is_completed is not None:
+            completed = is_completed
+        elif is_complete is not None:
+            completed = is_complete
         if path != "error":
             self.execution_context.record_progress(
                 stage=path,
-                status="completed" if is_complete else "progress",
+                status="completed" if completed else "progress",
                 event_type=path,
                 meta=meta,
             )
@@ -184,7 +190,7 @@ class AgentExecution:
             task_id=task_id,
             action_id=action_id,
             graph_id=graph_id,
-            is_complete=is_complete,
+            is_completed=completed,
             event_type=event_type,
             meta=stream_meta,
         )

@@ -48,8 +48,8 @@ class KeyWaiterExtension(BaseAgent):
                 )
 
     def __get_consumer(self):
-        response = self.get_response()
-        return GeneratorConsumer(response.get_async_generator(type="instant"))
+        result = self.get_result()
+        return GeneratorConsumer(result.get_async_generator(type="instant"))
 
     async def async_get_key_result(
         self,
@@ -64,7 +64,7 @@ class KeyWaiterExtension(BaseAgent):
         consumer = self.__get_consumer()
 
         async for data in consumer.get_async_generator():
-            if key == data.path and data.is_complete:
+            if key == data.path and data.is_completed:
                 return data.value
 
     async def async_wait_keys(
@@ -80,7 +80,7 @@ class KeyWaiterExtension(BaseAgent):
         consumer = self.__get_consumer()
 
         async for data in consumer.get_async_generator():
-            if data.path in keys and data.is_complete:
+            if data.path in keys and data.is_completed:
                 yield data.path, data.value
 
     def wait_keys(
@@ -96,7 +96,7 @@ class KeyWaiterExtension(BaseAgent):
         consumer = self.__get_consumer()
 
         for data in consumer.get_generator():
-            if data.path in keys and data.is_complete:
+            if data.path in keys and data.is_completed:
                 yield data.path, data.value
 
     def on_key(self, key: str, handler: Callable[[Any], Any]):
@@ -122,7 +122,7 @@ class KeyWaiterExtension(BaseAgent):
             return path, value, await FunctionShifter.asyncify(handler)(value)
 
         async for data in consumer.get_async_generator():
-            if data.path in handler_keys and data.is_complete:
+            if data.path in handler_keys and data.is_completed:
                 for handler in self.__when_handlers[data.path]:
                     tasks.append(asyncio.create_task(handler_wrapper(data.path, data.value, handler)))
 
@@ -144,7 +144,7 @@ class KeyWaiterExtension(BaseAgent):
         results = []
 
         for data in consumer.get_generator():
-            if data.path in handler_keys and data.is_complete:
+            if data.path in handler_keys and data.is_completed:
                 for handler in self.__when_handlers[data.path]:
                     results.append(
                         (

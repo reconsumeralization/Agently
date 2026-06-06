@@ -23,25 +23,27 @@ Agently is async-native at the runtime layer. Sync methods are convenience wrapp
 
 The combination worth learning first:
 
-- `response.get_async_generator(type="instant")` — yields structured `StreamingData` patches with `path`, `delta`, `value`, and `is_complete`.
+- `result.get_async_generator(type="instant")` — yields structured `StreamingData` patches with `path`, `delta`, `value`, and `is_completed`.
 - `data.async_emit(...)` — turns nodes into TriggerFlow signals.
 - `data.async_put_into_stream(...)` — forwards intermediate state to UI / SSE / logs.
 
 `instant` events are field-level, not raw provider tokens. They can carry partial
 field text in `.delta` while the field is still growing, then emit a completion
-event when `.is_complete` becomes true. Treat these events as progressive UI
+event when `.is_completed` becomes true. Treat these events as progressive UI
 state; read `async_get_data()` at the end for the durable parsed object.
-Annotate these stream handlers with `StreamingData` from `agently.types.data`.
+Annotate these stream handlers with `StreamingData` from `agently` for the
+common import path, or from `agently.types.data` when you prefer the full typed
+data namespace.
 
 ## API surface map
 
 | Sync | Async equivalent |
 |---|---|
 | `agent.start()` / `request.start()` | `agent.async_start()` / `request.async_start()` |
-| `response.get_data()` | `response.async_get_data()` |
-| `response.get_text()` | `response.async_get_text()` |
-| `response.get_meta()` | `response.async_get_meta()` |
-| `response.get_generator(type=...)` | `response.get_async_generator(type=...)` |
+| `result.get_data()` | `result.async_get_data()` |
+| `result.get_text()` | `result.async_get_text()` |
+| `result.get_meta()` | `result.async_get_meta()` |
+| `result.get_generator(type=...)` | `result.get_async_generator(type=...)` |
 | `flow.start()` | `flow.async_start()` |
 | `execution.start()` / `execution.close()` | `execution.async_start()` / `execution.async_close()` |
 | `data.set_state(...)` / `data.emit(...)` | `data.async_set_state(...)` / `data.async_emit(...)` |
@@ -56,30 +58,30 @@ agent = Agently.create_agent()
 
 
 async def main():
-    response = (
+    result = (
         agent
         .input("Give me a title and two bullets.")
         .output({
             "title": (str, "Title", True),
             "items": [(str, "Bullet point", True)],
         })
-        .get_response()
+        .get_result()
     )
 
-    async for item in response.get_async_generator(type="instant"):
+    async for item in result.get_async_generator(type="instant"):
         if item.delta:
             print(item.path, "+", item.delta)
-        if item.is_complete:
+        if item.is_completed:
             print(item.path, "done")
 
-    final = await response.async_get_data()
+    final = await result.async_get_data()
     print(final)
 
 
 asyncio.run(main())
 ```
 
-`get_response()` returns a reusable `ModelResponse`. You can pull text, structured data, and metadata from the same response without re-issuing the request — see [Model Response](../requests/model-response.md).
+`get_result()` returns a reusable `ModelResponseResult`. You can pull text, structured data, and metadata from the same result without re-issuing the request — see [Model Result](../requests/model-response.md).
 
 ## Async + TriggerFlow
 

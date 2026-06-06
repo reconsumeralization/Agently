@@ -28,9 +28,9 @@ async def add(a: int, b: int) -> int:
     return a + b
 
 
-response = agent.input("34643523+52131231=? Use action to calculate!").use_actions(add).get_response()
-result = response.get_data()
-print("[Response]:", result)
+result = agent.input("34643523+52131231=? Use action to calculate!").use_actions(add).get_result()
+data = result.get_data()
+print("[Response]:", data)
 
 action_call = agent.input("34643523+52131231=? Use action to calculate!").use_actions(add).generate_action_call()
 print("[Only Action Call]:", action_call)

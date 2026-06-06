@@ -25,7 +25,7 @@ Agently.set_settings(
 
 def generate_plan(task: str) -> dict:
     """Ask the model to plan the task — output only, no execution."""
-    response = (
+    result = (
         Agently.create_agent()
         .input(task)
         .instruct([
@@ -47,9 +47,9 @@ def generate_plan(task: str) -> dict:
             "risk_reason": (str, "Why this risk level was assigned"),
             "reversible": (bool, "True if all changes can be fully undone"),
         })
-        .get_response()
+        .get_result()
     )
-    return response.result.get_data()
+    return result.get_data()
 
 
 def build_plan_executor() -> TriggerFlow:

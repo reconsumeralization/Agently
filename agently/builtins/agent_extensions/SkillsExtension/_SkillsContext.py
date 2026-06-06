@@ -71,13 +71,13 @@ class AgentSkillsRuntimeContext:
         request = self.agent.create_temp_request(model_key=model_key).input(self._normalize_model_prompt(prompt))
         if output_schema is not None:
             request = request.output(output_schema, format=output_format)
-        response = request.get_response()
+        result_handle = request.get_result()
         if stream_handler is not None:
-            async for item in response.get_async_generator(type="instant"):
+            async for item in result_handle.get_async_generator(type="instant"):
                 maybe_awaitable = stream_handler(item)
                 if inspect.isawaitable(maybe_awaitable):
                     await maybe_awaitable
-        result = await response.async_get_data(
+        result = await result_handle.async_get_data(
             ensure_keys=ensure_keys,
             max_retries=max(1, max_retries),
             raise_ensure_failure=False,

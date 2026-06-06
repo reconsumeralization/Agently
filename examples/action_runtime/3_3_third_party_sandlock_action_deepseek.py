@@ -152,8 +152,8 @@ if __name__ == "__main__":
         )
         records = agent.get_action_result(prompt=turn.prompt)
         print_action_results(records)
-        response = turn.get_response()
-        print_response(response)
+        result = turn.get_result()
+        print_response(result)
 
 # Expected key output after configuring DeepSeek on Linux 6.7+ with sandlock:
 # [ACTION_RECORDS] includes a successful sandlock_exec call.

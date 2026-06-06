@@ -40,13 +40,13 @@ async def request_model(data: ModelRequestData):
         case "text":
             llm.input(data.prompt)
 
-    response = llm.get_response()
+    result = llm.get_result()
 
     try:
         return {
             "ok": True,
-            "data": await response.async_get_data(),
-            "text": await response.async_get_text(),
+            "data": await result.async_get_data(),
+            "text": await result.async_get_text(),
         }
     except Exception as e:
         return {
@@ -81,7 +81,7 @@ if __name__ == "__main__":
 # select model settings + prompt style
 #   |
 #   v
-# Agently get_response()
+# Agently get_result()
 #   |
 #   v
 # JSON response with data/text

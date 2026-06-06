@@ -141,7 +141,7 @@ class FlatMarkdownStreamingParser:
                                 path=self._current_field,
                                 value=safe,
                                 delta=safe,
-                                is_complete=False,
+                                is_completed=False,
                                 event_type="delta",
                             )
                     # else: no newline at all — keep everything in buffer
@@ -161,7 +161,7 @@ class FlatMarkdownStreamingParser:
                         path=self._current_field,
                         value=pre_content,
                         delta=pre_content,
-                        is_complete=False,
+                        is_completed=False,
                         event_type="delta",
                     )
                 # Mark previous field as complete
@@ -170,7 +170,7 @@ class FlatMarkdownStreamingParser:
                     path=self._current_field,
                     value="",
                     delta="",
-                    is_complete=True,
+                    is_completed=True,
                     event_type="done",
                 )
 
@@ -181,7 +181,7 @@ class FlatMarkdownStreamingParser:
                 path=new_field_name,
                 value="",
                 delta="",
-                is_complete=False,
+                is_completed=False,
                 event_type="delta",
             )
 
@@ -205,7 +205,7 @@ class FlatMarkdownStreamingParser:
                     path=self._current_field,
                     value=remaining,
                     delta=remaining,
-                    is_complete=False,
+                    is_completed=False,
                     event_type="delta",
                 )
             if self._current_field not in self._field_completed:
@@ -213,7 +213,7 @@ class FlatMarkdownStreamingParser:
                     path=self._current_field,
                     value="",
                     delta="",
-                    is_complete=True,
+                    is_completed=True,
                     event_type="done",
                 )
             self._buffer = ""
@@ -225,6 +225,6 @@ class FlatMarkdownStreamingParser:
                     path=name,
                     value="",
                     delta="",
-                    is_complete=True,
+                    is_completed=True,
                     event_type="done",
                 )

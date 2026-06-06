@@ -218,7 +218,7 @@ judge。
 直接执行 Skills 时，`stream_handler` 会收到 runtime items：
 
 - `skills.prompt_only.start`
-- `skills.model_stream`，包含 `path`、`value`、`delta`、`is_complete`
+- `skills.model_stream`，包含 `path`、`value`、`delta`、`is_completed`
 - `skills.prompt_only.done`
 - `effort="normal"` 或 `effort="max"` 选中内置 planner chain 时，会收到
   `skills.runtime_chain.*`
@@ -228,7 +228,8 @@ judge。
 直接 Skills `stream_handler` 回调可用 `agently.types.data` 里的
 `SkillRuntimeStreamHandler` 标注。如果你在自定义 Skills effort strategy 里调用
 `context.async_request_model(..., stream_handler=...)`，这个模型流回调收到的是
-`StreamingData`，可用 `ModelStreamingHandler` 标注。
+`StreamingData`，可用 `ModelStreamingHandler` 标注。两个类型都可以从根入口导入：
+`from agently import StreamingData, ModelStreamingHandler`。
 
 `effort="fast"` 使用低开销 single-shot 路径。`effort="normal"` 固定走完整
 preflight -> research -> plan -> execute -> verify -> reflect -> finalize

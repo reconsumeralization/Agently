@@ -178,20 +178,20 @@ def build_flow() -> TriggerFlow:
                 }
             )
         )
-        response = request.get_response()
+        result = request.get_result()
         thinking_started = False
-        async for stream in response.get_async_generator(type="instant"):
+        async for stream in result.get_async_generator(type="instant"):
             if stream.wildcard_path == "next_step_thinking" and stream.delta:
                 if not thinking_started:
                     await _emit(data, "thinking_delta", "")
                     thinking_started = True
                 await data.async_put_into_stream(json.dumps({"type": "thinking_delta", "data": stream.delta}))
-            if stream.wildcard_path == "next_step_action.type" and stream.is_complete:
+            if stream.wildcard_path == "next_step_action.type" and stream.is_completed:
                 await _emit(data, "plan", {"next_action": stream.value})
-            if stream.wildcard_path == "next_step_action.tool_using.tool_name" and stream.is_complete:
+            if stream.wildcard_path == "next_step_action.tool_using.tool_name" and stream.is_completed:
                 await _emit(data, "plan", {"tool": stream.value})
-        result = await response.result.async_get_data()
-        next_action = result["next_step_action"]
+        parsed = await result.async_get_data()
+        next_action = parsed["next_step_action"]
         await _emit(data, "status", "planning done")
         await data.async_set_state("step", step + 1)
         await data.async_emit("Plan", next_action)

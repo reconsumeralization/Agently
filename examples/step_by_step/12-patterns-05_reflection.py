@@ -33,7 +33,7 @@ def build_reflection_flow(max_rounds: int = 3) -> TriggerFlow:
             Agently.create_agent()
             .input(task)
             .output({"content": (str, "Generated content matching the task requirements")})
-            .get_response()
+            .get_result()
         )
         draft = result.result.get_data().get("content", "")
         print(f"  Draft: {len(draft)} characters")
@@ -64,7 +64,7 @@ def build_reflection_flow(max_rounds: int = 3) -> TriggerFlow:
                 "issues": ([str], "Criteria that are not met; empty list if passed"),
                 "suggestions": ([str], "Specific improvements for each issue; empty if passed"),
             })
-            .get_response()
+            .get_result()
         )
         critique = result.result.get_data()
         passed = critique.get("passed", False)
@@ -101,7 +101,7 @@ def build_reflection_flow(max_rounds: int = 3) -> TriggerFlow:
                 "Do not introduce new issues while fixing existing ones.",
             ])
             .output({"content": (str, "Revised version of the content")})
-            .get_response()
+            .get_result()
         )
         improved = result.result.get_data().get("content", draft)
         print(f"  Revised: {len(draft)} → {len(improved)} characters")

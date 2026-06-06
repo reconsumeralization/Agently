@@ -61,7 +61,7 @@ EXAMPLE_TIMEOUT_SECONDS = 180
 async def collect_lineage_flags(execution) -> dict[str, bool | int]:
     flags: dict[str, bool | int] = {"lineage_ok": True, "route_selected": False, "action_events": 0}
     async for item in execution.get_async_generator(type="instant"):
-        if item.path == "route.selected" and item.is_complete:
+        if item.path == "route.selected" and item.is_completed:
             flags["route_selected"] = True
         if item.source == "action":
             flags["action_events"] = int(flags["action_events"]) + 1

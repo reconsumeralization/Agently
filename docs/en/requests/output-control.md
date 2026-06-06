@@ -36,7 +36,7 @@ explicitly. `yaml_literal` is explicit opt-in and is not selected by auto.
 | `xml_field` | Explicit format, or auto target, for flat string-only dict schemas. Agently parses this with a custom XML-like parser, not strict XML. | A downstream consumer expects real XML semantics, namespaces, entity escaping, or schema validation. |
 | `yaml_literal` | Explicit opt-in for teams that prefer YAML documents and can tolerate YAML indentation sensitivity. Long text/code fields use YAML literal scalars (`|`) inside `<<<BEGIN AGENTLY_YAML>>>` / `<<<END AGENTLY_YAML>>>` boundaries. | General auto mode, low-adherence models, or dense machine contracts where JSON is simpler and less indentation-sensitive. |
 | `json` | You need the strictest machine contract, nested data, arrays, interop with external systems, compatibility with old prompts/tests, or exact raw JSON behavior. | Large embedded documents or code blocks make escaping fragile or hard for the model to read. |
-| Plain text | The request asks for one freeform artifact: an article, email, explanation, report, Markdown page, HTML page, or other single multi-paragraph document. Do not call `output()`; use `start()` / `async_start()` directly or read `response.result.get_text()`. | You need separately addressable fields, path validation, `ensure_keys`, typed objects, or downstream branching. |
+| Plain text | The request asks for one freeform artifact: an article, email, explanation, report, Markdown page, HTML page, or other single multi-paragraph document. Do not call `output()`; use `start()` / `async_start()` directly or read `result.get_text()`. | You need separately addressable fields, path validation, `ensure_keys`, typed objects, or downstream branching. |
 
 ### Instant Streaming
 
@@ -54,7 +54,7 @@ field paths for instant events.
 - `wildcard_path` normalizes indexes, such as `risk_flags[*]`;
 - `delta` is the new fragment for progressive rendering;
 - `value` is the parser's current value for that path;
-- `is_complete` / `event_type == "done"` marks a field as closed.
+- `is_completed` / `event_type == "done"` marks a field as closed.
 
 Use the stream for provisional UI/progress. Use `get_data()` /
 `async_get_data()` after the stream for durable business state; it reads the
@@ -134,7 +134,7 @@ html = agent.input("Write a complete landing page as HTML.").start()
 Progressive UI example:
 
 ```python
-response = (
+result = (
     agent
     .input("Turn this incident note into a customer-safe update: ...")
     .output(
@@ -145,21 +145,21 @@ response = (
         },
         format="json",
     )
-    .get_response()
+    .get_result()
 )
 
 ui_state = {}
 
-async for item in response.get_async_generator(type="instant"):
+async for item in result.get_async_generator(type="instant"):
     if item.delta:
         ui_state[item.path] = ui_state.get(item.path, "") + item.delta
         await websocket.send_json({
             "path": item.path,
             "delta": item.delta,
-            "done": item.is_complete,
+            "done": item.is_completed,
         })
 
-final = await response.async_get_data()
+final = await result.async_get_data()
 await save_case_update(final)
 ```
 
@@ -308,7 +308,7 @@ Two caveats:
 
 ## Single execution per response
 
-Validation runs **once** per `ModelResponseResult` and the outcome is cached. Repeated calls — `get_data()` then `get_data()` again, or `get_data()` then `get_data_object()` — do **not** rerun validators. If you try to inject a different handler on the same response after validation has already finalized, the new handler is ignored with a warning.
+Validation runs **once** per `ModelResponseResult` and the outcome is cached. Repeated calls — `get_data()` then `get_data()` again, or `get_data()` then `get_data_object()` — do **not** rerun validators. If you try to inject a different handler on the same result after validation has already finalized, the new handler is ignored with a warning.
 
 This means: don't expect to swap validators per consumer. If you need different validation for different consumers, run the request twice.
 

@@ -53,8 +53,8 @@ if __name__ == "__main__":
     records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
 
-    response = turn.get_response()
-    print_response(response)
+    result = turn.get_result()
+    print_response(result)
 
     print("[ACTION_CALL_HANDLES_AFTER_RELEASE]")
     print(Agently.execution_environment.list(scope="action_call"))

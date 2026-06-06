@@ -51,15 +51,15 @@ def what_happen_when_start():
     # If any response consume command is given to the response instance, the actual model request start and save all result to a result instance inside the response instance.
     # So the actual behaviors are like these:
     turn = agent.input("hi")
-    response = turn.get_response()
-    result_data = response.result.get_data()
+    result = turn.get_result()
+    result_data = result.get_data()
     # You can get different content from result and the request will not be restarted again
     # Different contents will be stored in result instance when the request is finished.
-    result_meta = response.result.get_meta()
+    result_meta = result.get_meta()
     print(result_data)
     print(result_meta)
-    # You can also use methods like response.get_data() for short
-    # It's the same as response.result.get_data()
+    # You can also use methods like result.get_data() for short
+    # It's the same as result.get_data()
 
     ## Notice
     # If you wonder what methods that agent instance, request instance and response instance provide for short, I highly recommend checking codes in 'agently/core/Agent/Agent.py' and 'agently/core/Model/ModelRequest.py'
@@ -234,6 +234,6 @@ def quick_prompt_methods():
 # Recognized slot names ("system", "input", "output", "instruct", …) are given special
 # treatment in prompt assembly; custom names are included as labelled info blocks.
 # Placeholder syntax ${name} is resolved at request time when mappings={} is passed.
-# The response instance (get_response()) is a lazy handle: the actual model call
+# The result facade (get_result()) is a lazy handle: the actual model call
 # starts only when you consume data (get_data(), get_text(), get_generator(), …).
-# Consuming the same response multiple times reuses the cached result without re-requesting.
+# Consuming the same result multiple times reuses the cached data without re-requesting.

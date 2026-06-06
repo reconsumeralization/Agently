@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently.core import ModelRequest, PluginManager
+from agently.core import ModelRequest, ModelResponseResult, PluginManager
 from agently.core.runtime.AttemptRunner import core_attempt_runner_entrypoint
 from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState, RunContext
@@ -406,13 +406,17 @@ async def test_model_request_events_include_prompt_and_child_run_lineage():
         text = await response.async_get_text()
 
         assert "Morning briefing prepared." in text
-        assert response.run_context.parent_run_id == workflow_run.run_id
-        assert response.model_run_context.parent_run_id == response.run_context.run_id
-        assert response.model_run_context.run_kind == "model_request"
+        assert response.run_context is not None
+        assert response.model_run_context is not None
+        request_run = response.run_context
+        model_run = response.model_run_context
+        assert request_run.parent_run_id == workflow_run.run_id
+        assert model_run.parent_run_id == request_run.run_id
+        assert model_run.run_kind == "model_request"
 
-        request_events = [event for event in captured if event.run and event.run.run_id == response.run_context.run_id]
+        request_events = [event for event in captured if event.run and event.run.run_id == request_run.run_id]
         model_events = [
-            event for event in captured if event.run and event.run.run_id == response.model_run_context.run_id
+            event for event in captured if event.run and event.run.run_id == model_run.run_id
         ]
 
         assert [event.event_type for event in request_events if event.event_type.startswith("request.")] == [
@@ -442,6 +446,27 @@ async def test_model_request_events_include_prompt_and_child_run_lineage():
         assert meta_event.payload["meta"]["model"] == "mock-1"
     finally:
         Agently.event_center.unregister_hook(hook_name)
+
+
+def test_get_result_is_primary_response_facade():
+    request = _create_request()
+    request.input("Summarize the morning operations notes.")
+
+    result = request.get_result()
+
+    assert isinstance(result, ModelResponseResult)
+    assert result.result is result
+    assert result.id == result.response_id
+
+
+def test_get_response_returns_result_compatible_facade():
+    request = _create_request()
+    request.input("Summarize the morning operations notes.")
+
+    result = request.get_response()
+
+    assert isinstance(result, ModelResponseResult)
+    assert result.result is result
 
 
 @pytest.mark.asyncio
@@ -519,14 +544,16 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
         assert len(attempt_start_events) == 2
         assert [event.payload["attempt_index"] for event in attempt_start_events] == [1, 2]
         assert len({event.run.run_id for event in attempt_start_events if event.run is not None}) == 2
+        assert response.run_context is not None
+        request_run = response.run_context
         assert all(
-            event.run and event.run.parent_run_id == response.run_context.run_id for event in attempt_start_events
+            event.run and event.run.parent_run_id == request_run.run_id for event in attempt_start_events
         )
 
         retry_event = next(event for event in captured if event.event_type == "model.retrying")
         assert retry_event.payload["next_attempt_index"] == 2
         assert retry_event.run is not None
-        assert retry_event.run.run_id == response.run_context.run_id
+        assert retry_event.run.run_id == request_run.run_id
 
         completed_events = [event for event in captured if event.event_type == "model.completed"]
         assert len(completed_events) == 2

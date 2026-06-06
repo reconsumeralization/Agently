@@ -42,8 +42,8 @@ def demo_single_action():
     print("[action records]", records)
 
     # Phase 2: model writes the final reply using the action result
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
 
 
 # demo_single_action()
@@ -58,8 +58,8 @@ def demo_two_actions():
     )
     records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
 
 
 # demo_two_actions()
@@ -76,7 +76,7 @@ def demo_two_actions():
 # agent.use_actions() activates the listed actions for the upcoming request.
 # agent.get_action_result(prompt=turn.prompt) asks the model to plan which actions
 # to call, runs them through FunctionActionExecutor, and returns ActionResult records.
-# turn.get_response() feeds those records back so the model can cite exact values.
+# turn.get_result() feeds those records back so the model can cite exact values.
 #
 # Flow:
 # agent.use_actions([celsius_to_fahrenheit, fahrenheit_to_celsius])
@@ -91,6 +91,6 @@ def demo_two_actions():
 #   FunctionActionExecutor runs both calls
 #   |
 #   v
-# agent.get_response()
+# agent.get_result()
 #   model sees action results and writes:
 #   "The oven is 375°F (190.56°C), and the room is 22°C (71.6°F)."

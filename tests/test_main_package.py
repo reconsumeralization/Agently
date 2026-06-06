@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import warnings
 from typing import Any, cast
 
 import pytest
@@ -14,6 +15,7 @@ from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.application.AgentExecution import AgentExecutionContext
 from agently.core.extension.ExtensionHandlers import ExtensionHandlers
 from agently.core.model.ModelResponseResult import ModelResponseResult
+from agently.core.model.ModelResponse import ModelResponse
 from agently.core.model.Prompt import Prompt
 from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import Settings, SettingsNamespace
@@ -120,6 +122,41 @@ def test_dynamic_task_plugin_registered():
     assert "local_handler" in task.resolver.keys()
 
 
+def test_streaming_data_prefers_is_completed_and_keeps_is_complete_compatibility():
+    preferred = StreamingData(path="reply", value="ok", is_completed=True)
+    compat = StreamingData(path="reply", value="ok", is_complete=True)
+
+    assert preferred.is_completed is True
+    assert preferred.is_complete is True
+    assert compat.is_completed is True
+    assert compat.is_complete is True
+
+
+def test_model_response_direct_construction_warns_but_get_result_does_not():
+    from agently.core import ModelRequest
+    from agently.utils import DeprecationWarnings
+
+    DeprecationWarnings.reset_registry()
+    settings = Settings(name="DeprecatedModelResponseSettings", parent=Agently.settings)
+
+    with pytest.warns(DeprecationWarning, match="ModelResponse is deprecated"):
+        ModelResponse(
+            "deprecated-response",
+            Agently.plugin_manager,
+            settings,
+            Prompt(Agently.plugin_manager, settings),
+            ExtensionHandlers(),
+        )
+
+    DeprecationWarnings.reset_registry()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = ModelRequest(Agently.plugin_manager, parent_settings=Agently.settings).input("hello").get_result()
+
+    assert isinstance(result, ModelResponseResult)
+    assert not any("ModelResponse is deprecated" in str(item.message) for item in caught)
+
+
 def test_skills_executor_plugin_has_no_stage_action_resolution_defaults():
     assert Agently.settings.get("plugins.SkillsExecutor.AgentlySkillsExecutor.action_resolution") is None
     framework_default = Agently.settings.get("skills.action_resolution")
@@ -222,7 +259,7 @@ async def test_agent_execution_stream_keeps_delta_events_raw():
         "A",
         delta="A",
         event_type="delta",
-        is_complete=False,
+        is_completed=False,
         source="model_request",
         meta={"response_id": "response-1", "field_path": "text"},
     )
@@ -231,7 +268,7 @@ async def test_agent_execution_stream_keeps_delta_events_raw():
         "AB",
         delta="B",
         event_type="delta",
-        is_complete=False,
+        is_completed=False,
         source="model_request",
         meta={"response_id": "response-1", "field_path": "text"},
     )
@@ -241,7 +278,7 @@ async def test_agent_execution_stream_keeps_delta_events_raw():
         "ABC",
         delta="C",
         event_type="delta",
-        is_complete=False,
+        is_completed=False,
         source="model_request",
         meta={"response_id": "response-1", "field_path": "text"},
     )
@@ -263,8 +300,8 @@ async def test_agent_execution_stream_default_delta_path_remains_uncoalesced():
         execution_mode="one_turn",
     )
 
-    await stream.emit("model.text", "A", delta="A", event_type="delta", is_complete=False)
-    await stream.emit("model.text", "AB", delta="B", event_type="delta", is_complete=False)
+    await stream.emit("model.text", "A", delta="A", event_type="delta", is_completed=False)
+    await stream.emit("model.text", "AB", delta="B", event_type="delta", is_completed=False)
 
     assert [item.delta for item in stream.items] == ["A", "B"]
 
@@ -279,7 +316,7 @@ async def test_agent_execution_progress_is_visible_with_raw_stream_delivery():
         "partial",
         delta="partial",
         event_type="delta",
-        is_complete=False,
+        is_completed=False,
         route="model_request",
     )
 
@@ -830,7 +867,7 @@ async def test_agent_execution_runs_submitted_dynamic_task_and_streams_process()
 
     stream_items = []
     async for item in execution.get_async_generator(type="instant"):
-        if item.is_complete:
+        if item.is_completed:
             stream_items.append(item)
 
     data = await execution.async_get_data()
@@ -1031,8 +1068,8 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
             yield StreamingData(path="prethinking", value="Check billing", delta=" billing", event_type="delta")
             yield StreamingData(path="reply", value="We are", delta="We are", event_type="delta")
             yield StreamingData(path="reply", value="We are investigating.", delta=" investigating.", event_type="delta")
-            yield StreamingData(path="prethinking", value="Check billing", event_type="done", is_complete=True)
-            yield StreamingData(path="reply", value="We are investigating.", event_type="done", is_complete=True)
+            yield StreamingData(path="prethinking", value="Check billing", event_type="done", is_completed=True)
+            yield StreamingData(path="reply", value="We are investigating.", event_type="done", is_completed=True)
 
         async def async_get_data(self, **kwargs):
             assert kwargs == {"ensure_keys": ["prethinking", "reply"]}
@@ -1057,11 +1094,11 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
             self.output_format = format
             return self
 
-        def get_response(self, **_kwargs):
+        def get_result(self, **_kwargs):
             return FakeModelResponse()
 
-        async def async_start(self, **_kwargs):  # pragma: no cover - get_response path owns streaming
-            raise AssertionError("streaming model tasks should use get_response()")
+        async def async_start(self, **_kwargs):  # pragma: no cover - get_result path owns streaming
+            raise AssertionError("streaming model tasks should use get_result()")
 
     request = FakeModelRequest()
     agent = Agently.create_agent("execution-model-field-stream-agent")
@@ -1093,7 +1130,7 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
     streamed = []
     async for item in execution.get_async_generator(type="instant"):
         if item.event_type == "delta":
-            streamed.append((item.path, item.delta, item.is_complete))
+            streamed.append((item.path, item.delta, item.is_completed))
 
     data = await execution.async_get_data()
 

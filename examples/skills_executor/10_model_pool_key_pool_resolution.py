@@ -182,15 +182,15 @@ async def main():
     print("═" * 60)
 
     request = agent.create_temp_request(model_key="deepseek-v4")
-    response = (
+    result = (
         request
         .input("Return a JSON object with a single key 'status' set to 'ok'.")
         .output({"status": (str, "ok or error", True)}, format="json")
-        .get_response()
+        .get_result()
     )
-    result = await response.async_get_data()
-    print(f"  Response: {result}")
-    assert result.get("status") == "ok", f"Expected status 'ok', got {result}"
+    data = await result.async_get_data()
+    print(f"  Response: {data}")
+    assert data.get("status") == "ok", f"Expected status 'ok', got {data}"
     print("  model_key + structured output: OK")
 
     print()

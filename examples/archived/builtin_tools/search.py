@@ -49,7 +49,7 @@ agent = Agently.create_agent()
 
 agent.use_actions(search)
 
-response = agent.input("Search news about language model applications.").get_response()
-print(response.result.get_data())
-extra = response.result.full_result_data.get("extra") or {}
+result = agent.input("Search news about language model applications.").get_result()
+print(result.get_data())
+extra = result.full_result_data.get("extra") or {}
 print(extra.get("action_logs", extra.get("tool_logs", [])))

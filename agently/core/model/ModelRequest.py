@@ -32,12 +32,12 @@ if TYPE_CHECKING:
     from agently.core import PluginManager
     from agently.types.data import (
         InstantStreamingContentType,
-        AgentlyModelResponseMessage,
-        AgentlyOriginalResponsePayload,
-        AgentlySpecificResponseMessage,
+        AgentlyModelResultMessage,
+        AgentlyOriginalResultPayload,
+        AgentlySpecificResultMessage,
         OutputValidateHandler,
         PromptStandardSlot,
-        ResponseContentType,
+        ResultContentType,
         RunContext,
         SpecificEvents,
         StreamingData,
@@ -312,8 +312,8 @@ class ModelRequest:
         self.extension_handlers.append("validate_handlers", handler)
         return self
 
-    # Response & Result
-    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponse:
+    # Result
+    def _create_model_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
         if self._model_key:
             from agently.utils.ModelPool import resolve_model_pool_settings
             resolve_model_pool_settings(self._model_key, self.settings)
@@ -331,25 +331,29 @@ class ModelRequest:
             self.extension_handlers,
             run_context=self._create_request_run_context(parent_run_context=parent_run_context),
             agent_turn_run_context=agent_turn_run_context,
+            warn_deprecated=False,
         )
         response.run_context.response_id = response.id
         self.prompt.clear()
-        return response
+        return response.result
 
     def get_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
-        return self.get_response(parent_run_context=parent_run_context).result
+        return self._create_model_result(parent_run_context=parent_run_context)
+
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
+        return self.get_result(parent_run_context=parent_run_context)
 
     def get_meta(self, *, parent_run_context: "RunContext | None" = None):
-        return self.get_response(parent_run_context=parent_run_context).get_meta()
+        return self.get_result(parent_run_context=parent_run_context).get_meta()
 
     async def async_get_meta(self, *, parent_run_context: "RunContext | None" = None):
-        return await self.get_response(parent_run_context=parent_run_context).async_get_meta()
+        return await self.get_result(parent_run_context=parent_run_context).async_get_meta()
 
     def get_text(self, *, parent_run_context: "RunContext | None" = None) -> str:
-        return self.get_response(parent_run_context=parent_run_context).get_text()
+        return self.get_result(parent_run_context=parent_run_context).get_text()
 
     async def async_get_text(self, *, parent_run_context: "RunContext | None" = None):
-        return await self.get_response(parent_run_context=parent_run_context).async_get_text()
+        return await self.get_result(parent_run_context=parent_run_context).async_get_text()
 
     @overload
     def get_data(
@@ -416,8 +420,8 @@ class ModelRequest:
     ):
         if ensure_all_keys is not None:
             self.prompt.set("ensure_all_keys", ensure_all_keys)
-        response = self.get_response(parent_run_context=parent_run_context)
-        return await response.async_get_data(
+        result = self.get_result(parent_run_context=parent_run_context)
+        return await result.async_get_data(
             type=type,
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
@@ -491,8 +495,8 @@ class ModelRequest:
     ):
         if ensure_all_keys is not None:
             self.prompt.set("ensure_all_keys", ensure_all_keys)
-        response = self.get_response(parent_run_context=parent_run_context)
-        return await response.async_get_data_object(
+        result = self.get_result(parent_run_context=parent_run_context)
+        return await result.async_get_data_object(
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
             key_style=key_style,
@@ -560,7 +564,7 @@ class ModelRequest:
         type: Literal["all"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
+    ) -> Generator["AgentlyModelResultMessage", None, None]: ...
 
     @overload
     def get_generator(
@@ -568,7 +572,7 @@ class ModelRequest:
         type: Literal["specific"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
+    ) -> Generator["AgentlySpecificResultMessage", None, None]: ...
 
     @overload
     def get_generator(
@@ -584,25 +588,25 @@ class ModelRequest:
         type: Literal["original"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
+    ) -> Generator["AgentlyOriginalResultPayload", None, None]: ...
 
     @overload
     def get_generator(
         self,
-        type: "ResponseContentType | None" = "delta",
+        type: "ResultContentType | None" = "delta",
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> Generator: ...
 
     def get_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
     ) -> Generator:
-        return self.get_response(parent_run_context=parent_run_context).get_generator(
+        return self.get_result(parent_run_context=parent_run_context).get_generator(
             type=type,
             content=content,
             specific=specific,
@@ -622,7 +626,7 @@ class ModelRequest:
         type: Literal["all"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
+    ) -> AsyncGenerator["AgentlyModelResultMessage", None]: ...
 
     @overload
     def get_async_generator(
@@ -630,7 +634,7 @@ class ModelRequest:
         type: Literal["specific"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
+    ) -> AsyncGenerator["AgentlySpecificResultMessage", None]: ...
 
     @overload
     def get_async_generator(
@@ -646,25 +650,25 @@ class ModelRequest:
         type: Literal["original"],
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
-    ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
+    ) -> AsyncGenerator["AgentlyOriginalResultPayload", None]: ...
 
     @overload
     def get_async_generator(
         self,
-        type: "ResponseContentType | None" = "delta",
+        type: "ResultContentType | None" = "delta",
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
     ) -> AsyncGenerator: ...
 
     def get_async_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
     ) -> AsyncGenerator:
-        return self.get_response(parent_run_context=parent_run_context).get_async_generator(
+        return self.get_result(parent_run_context=parent_run_context).get_async_generator(
             type=type,
             content=content,
             specific=specific,

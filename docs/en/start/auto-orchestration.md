@@ -169,7 +169,7 @@ execution = (
 )
 
 async for item in execution.get_async_generator(type="instant"):
-    if item.is_complete:
+    if item.is_completed:
         print(item.path, item.value)
 
 data = await execution.async_get_data()
@@ -179,7 +179,7 @@ meta = await execution.async_get_meta()
 The execution object follows the same consumption style as model responses:
 `get_data`, `get_text`, `get_meta`, `get_generator`, and async equivalents.
 Execution streams yield `AgentExecutionStreamData` from `agently.types.data`.
-This type keeps the familiar `path`, `value`, `delta`, and `is_complete` fields
+This type keeps the familiar `path`, `value`, `delta`, and `is_completed` fields
 and adds route metadata for process-level events.
 
 `create_execution()` defaults to `mode="one_turn"`, which preserves the
@@ -368,7 +368,7 @@ item.path
 item.value
 item.delta
 item.event_type
-item.is_complete
+item.is_completed
 item.route
 item.stage_id
 item.task_id

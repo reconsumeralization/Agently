@@ -20,8 +20,8 @@ if __name__ == "__main__":
     )
     records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
-    response = turn.get_response()
-    print_response(response)
+    result = turn.get_result()
+    print_response(result)
 
 # Expected key output after configuring DeepSeek:
 # [ACTION_RECORDS] includes a successful add_invoice_amounts call with result 60525.
@@ -34,7 +34,7 @@ if __name__ == "__main__":
 # agent.use_actions() activates it for the current request.
 # get_action_result() asks the model to plan calls, executes them with the default
 # FunctionActionExecutor, and returns ActionResult records.
-# get_response() re-sends those records so the model can reference the exact result
+# get_result() re-sends those records so the model can reference the exact result
 # in its final reply.
 #
 # Flow:

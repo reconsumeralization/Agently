@@ -7,7 +7,7 @@ from _shared_model import configure_model, print_model_provider
 
 
 def plan_next_step(history: list[dict]) -> dict:
-    response = (
+    result = (
         Agently.create_agent()
         .input({
             "task": "Calculate (12 + 7) * 3.",
@@ -31,9 +31,9 @@ def plan_next_step(history: list[dict]) -> dict:
             "action_input": ("dict | null", "kwargs for the action"),
             "answer": ("str | null", "final answer when type is final"),
         })
-        .get_response()
+        .get_result()
     )
-    return response.get_data(ensure_keys=["type"])
+    return result.get_data(ensure_keys=["type"])
 
 
 def main():

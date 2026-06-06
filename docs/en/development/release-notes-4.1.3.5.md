@@ -100,7 +100,8 @@ to the model when the action is exposed.
   `set_turn_prompt(...)` compatibility.
 - Static typing regressions cover AgentTurn forwarding, ModelResponse stream
   facades, `specific` event tuple items, AgentExecution stream items, and
-  Skills stream handler aliases exposed from `agently.types.data`.
+  Skills stream handler aliases exposed from `agently` and
+  `agently.types.data`.
 - Agently-Skills guidance was updated and validated with the companion
   validation suite.
 

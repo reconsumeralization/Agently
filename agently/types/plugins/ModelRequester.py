@@ -23,7 +23,7 @@ ModelProviderResponseGenerator: TypeAlias = AsyncGenerator[Any, None]
 if TYPE_CHECKING:
     from agently.core import Prompt
     from agently.utils import Settings
-    from agently.types.data import AgentlyResponseGenerator, AgentlyRequestData
+    from agently.types.data import AgentlyResultGenerator, AgentlyRequestData
 
 
 class ModelRequester(AgentlyPlugin, Protocol):
@@ -98,7 +98,7 @@ class ModelRequester(AgentlyPlugin, Protocol):
         """
         ...
 
-    def broadcast_response(self, response_generator: ModelProviderResponseGenerator) -> "AgentlyResponseGenerator":
+    def broadcast_response(self, response_generator: ModelProviderResponseGenerator) -> "AgentlyResultGenerator":
         """
         Process and broadcast the model response stream in a standardized format.
 
@@ -106,7 +106,7 @@ class ModelRequester(AgentlyPlugin, Protocol):
             response_generator (AsyncGenerator): The model response stream.
 
         Returns:
-            AsyncGenerator[AgentlyModelResponseMessage, None]: Standardized response message stream.
+            AsyncGenerator[AgentlyModelResultMessage, None]: Standardized response message stream.
         """
         ...
 

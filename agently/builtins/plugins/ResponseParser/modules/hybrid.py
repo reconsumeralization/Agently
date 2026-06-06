@@ -150,7 +150,7 @@ class HybridStreamingParser:
                                 path=self._current_field,
                                 value=safe,
                                 delta=safe,
-                                is_complete=False,
+                                is_completed=False,
                                 event_type="delta",
                             )
                 return
@@ -164,7 +164,7 @@ class HybridStreamingParser:
                         path=self._current_field,
                         value=pre_content,
                         delta=pre_content,
-                        is_complete=False,
+                        is_completed=False,
                         event_type="delta",
                     )
                 self._field_completed.add(self._current_field)
@@ -172,7 +172,7 @@ class HybridStreamingParser:
                     path=self._current_field,
                     value="",
                     delta="",
-                    is_complete=True,
+                    is_completed=True,
                     event_type="done",
                 )
 
@@ -182,7 +182,7 @@ class HybridStreamingParser:
                 path=new_field_name,
                 value="",
                 delta="",
-                is_complete=False,
+                is_completed=False,
                 event_type="delta",
             )
 
@@ -198,7 +198,7 @@ class HybridStreamingParser:
                     path=self._current_field,
                     value=remaining,
                     delta=remaining,
-                    is_complete=False,
+                    is_completed=False,
                     event_type="delta",
                 )
             if self._current_field not in self._field_completed:
@@ -206,7 +206,7 @@ class HybridStreamingParser:
                     path=self._current_field,
                     value="",
                     delta="",
-                    is_complete=True,
+                    is_completed=True,
                     event_type="done",
                 )
             self._buffer = ""
@@ -217,6 +217,6 @@ class HybridStreamingParser:
                     path=name,
                     value="",
                     delta="",
-                    is_complete=True,
+                    is_completed=True,
                     event_type="done",
                 )

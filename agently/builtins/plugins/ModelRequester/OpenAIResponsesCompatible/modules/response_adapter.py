@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncGenerator
 
-from agently.types.data import AgentlyResponseGenerator
+from agently.types.data import AgentlyResultGenerator
 
 
 class OpenAIResponsesCompatibleResponseAdapterMixin:
@@ -118,7 +118,7 @@ class OpenAIResponsesCompatibleResponseAdapterMixin:
             return "length"
         return "stop"
 
-    async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResponseGenerator":
+    async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResultGenerator":
         meta: dict[str, Any] = {}
         content_buffer = ""
         reasoning_buffer = ""

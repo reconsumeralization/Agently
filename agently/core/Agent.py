@@ -36,21 +36,21 @@ if TYPE_CHECKING:
         AgentExecutionLineage,
         AgentExecutionLimits,
         AgentExecutionMode,
-        AgentlyModelResponseMessage,
-        AgentlyOriginalResponsePayload,
-        AgentlySpecificResponseMessage,
+        AgentlyModelResultMessage,
+        AgentlyOriginalResultPayload,
+        AgentlySpecificResultMessage,
         InstantStreamingContentType,
         OutputValidateHandler,
         PromptStandardSlot,
         ChatMessage,
         ChatMessageDict,
-        ResponseContentType,
+        ResultContentType,
         RunContext,
         SpecificEvents,
         StreamingData,
         TaskDAG,
     )
-    from agently.core.model import ModelResponse, ModelResponseResult
+    from agently.core.model import ModelResponseResult
     from agently.types.options import ExecutionOptions
 
 
@@ -446,7 +446,7 @@ class BaseAgent:
             }
         )
 
-    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponse":
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
         turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._emit_agent_turn_started(turn_run_context)
         return self.request.get_response(parent_run_context=turn_run_context)
@@ -576,7 +576,7 @@ class BaseAgent:
     def get_generator(
         self,
         type: "InstantStreamingContentType",
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
@@ -586,27 +586,27 @@ class BaseAgent:
     def get_generator(
         self,
         type: Literal["all"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
-    ) -> Generator["AgentlyModelResponseMessage", None, None]: ...
+    ) -> Generator["AgentlyModelResultMessage", None, None]: ...
 
     @overload
     def get_generator(
         self,
         type: Literal["specific"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
-    ) -> Generator["AgentlySpecificResponseMessage", None, None]: ...
+    ) -> Generator["AgentlySpecificResultMessage", None, None]: ...
 
     @overload
     def get_generator(
         self,
         type: Literal["delta"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
@@ -616,17 +616,17 @@ class BaseAgent:
     def get_generator(
         self,
         type: Literal["original"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
-    ) -> Generator["AgentlyOriginalResponsePayload", None, None]: ...
+    ) -> Generator["AgentlyOriginalResultPayload", None, None]: ...
 
     @overload
     def get_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
@@ -634,8 +634,8 @@ class BaseAgent:
 
     def get_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
@@ -653,7 +653,7 @@ class BaseAgent:
     def get_async_generator(
         self,
         type: "InstantStreamingContentType",
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
@@ -663,27 +663,27 @@ class BaseAgent:
     def get_async_generator(
         self,
         type: Literal["all"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
-    ) -> AsyncGenerator["AgentlyModelResponseMessage", None]: ...
+    ) -> AsyncGenerator["AgentlyModelResultMessage", None]: ...
 
     @overload
     def get_async_generator(
         self,
         type: Literal["specific"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
-    ) -> AsyncGenerator["AgentlySpecificResponseMessage", None]: ...
+    ) -> AsyncGenerator["AgentlySpecificResultMessage", None]: ...
 
     @overload
     def get_async_generator(
         self,
         type: Literal["delta"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
@@ -693,17 +693,17 @@ class BaseAgent:
     def get_async_generator(
         self,
         type: Literal["original"],
-        content: "ResponseContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
-    ) -> AsyncGenerator["AgentlyOriginalResponsePayload", None]: ...
+    ) -> AsyncGenerator["AgentlyOriginalResultPayload", None]: ...
 
     @overload
     def get_async_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
@@ -711,8 +711,8 @@ class BaseAgent:
 
     def get_async_generator(
         self,
-        type: "ResponseContentType | None" = None,
-        content: "ResponseContentType | None" = None,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
         *,
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,

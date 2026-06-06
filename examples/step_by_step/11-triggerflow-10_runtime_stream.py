@@ -49,11 +49,11 @@ async def triggerflow_agent_stream_demo():
     async def stream_reply(data: TriggerFlowRuntimeData):
         agent = Agently.create_agent()
         agent.role("Reply in one short sentence.", always=True)
-        response = agent.input(str(data.input)).get_response()
-        async for delta in response.get_async_generator(type="delta"):
+        result = agent.input(str(data.input)).get_result()
+        async for delta in result.get_async_generator(type="delta"):
             if delta:
                 await data.async_put_into_stream({"event": "delta", "content": delta})
-        final_reply = await response.async_get_text()
+        final_reply = await result.async_get_text()
         await data.async_put_into_stream({"event": "final", "content": final_reply})
         await data.async_set_state("reply", final_reply)
 

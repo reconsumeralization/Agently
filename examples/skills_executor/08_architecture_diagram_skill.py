@@ -67,7 +67,7 @@ top to bottom, with the listed components:
    Agent, TriggerFlow, plus Agent Extensions (Skills, Action, Session/ChatSession,
    ConfigurePrompt, AutoFunc, KeyWaiter, StreamingPrint).
 3. Core Contracts (core colour, from agently/core): Agent, Session, Prompt,
-   ModelRequest, ModelResponse, DynamicTask, TaskDAGExecutor, TriggerFlow,
+   ModelRequest, ModelResponseResult, DynamicTask, TaskDAGExecutor, TriggerFlow,
    ExecutionEnvironment, Action, Tool, SkillsExecutor, PluginManager, EventCenter.
 4. Plugins / Providers (plugin colour, from agently/builtins/plugins):
    ModelRequester (OpenAICompatible), PromptGenerator, ResponseParser,

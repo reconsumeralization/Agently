@@ -80,7 +80,7 @@ Python：`>=3.10`。
 
 实际差异主要体现在四层：
 
-- **相对 LangChain 的 integration-first 风格：** LangChain 适合需要广泛、灵活地组合模型、工具、检索和 agent 构建块的场景。Agently 的判断是：生产级模型应用需要更统一的 request contract，不同模型 provider 仍应进入同一套 Prompt 槽位、结构化 parser、retry/validation 路径、`ModelResponse` 读取方式和 Action Runtime。这样在替换基础模型或 provider 时，下游业务逻辑更不容易被输出形态或工具调用形态冲击。可从 [Requests 概览](docs/cn/requests/overview.md) 和 [Action Runtime](docs/cn/actions/action-runtime.md) 开始。
+- **相对 LangChain 的 integration-first 风格：** LangChain 适合需要广泛、灵活地组合模型、工具、检索和 agent 构建块的场景。Agently 的判断是：生产级模型应用需要更统一的 request contract，不同模型 provider 仍应进入同一套 Prompt 槽位、结构化 parser、retry/validation 路径、可复用 result 读取方式和 Action Runtime。这样在替换基础模型或 provider 时，下游业务逻辑更不容易被输出形态或工具调用形态冲击。可从 [Requests 概览](docs/cn/requests/overview.md) 和 [Action Runtime](docs/cn/actions/action-runtime.md) 开始。
 - **相对只依赖 provider-native structured output：** Agently 可以使用模型 provider，但输出质量保障不只依赖 provider 侧 JSON schema 或 tool-calling 参数。框架内建 schema-as-prompt authoring、必填字段提取、parser feedback、重试、`ensure_keys`、`ensure_all_keys` 和 validation handlers。当目标模型没有和另一个 provider 完全一致的 structured-output 或 tool-calling 语义时，这一点尤其重要。见 [Schema as Prompt](docs/cn/requests/schema-as-prompt.md) 和 [输出控制](docs/cn/requests/output-control.md)。
 - **相对 graph-only orchestration：** LangGraph 很适合图式 stateful agents 和 durable execution。TriggerFlow 的核心是事件/信号驱动，Agently 的 `instant` response mode 可以在模型仍在流式输出时暴露结构化字段，因此 workflow signals 可以由局部结构化输出、Action 结果、人工输入或 sub-flow state 驱动，而不必等完整模型响应结束。见 [模型响应](docs/cn/requests/model-response.md)、[TriggerFlow 事件与流](docs/cn/triggerflow/events-and-streams.md) 和 [`examples/fastapi/`](examples/fastapi/) 中的流式/服务化模式。
 - **相对把多 Agent 当作框架根抽象：** 多 Agent 协作很有用，但在 Agently 里它是建立在 requests、Actions、TriggerFlow signals、sub-flows、Session 和 runtime resources 之上的可开发场景。Router、To-Do/dependency execution、planning、reflection、evaluator/reviser 和 agent-team patterns 都是同一套底层工程底座之上的组合。见 [Playbooks](docs/cn/playbooks/overview.md)、[TriggerFlow 模型集成](docs/cn/triggerflow/model-integration.md) 和 [`examples/step_by_step/`](examples/step_by_step/)。
@@ -180,7 +180,7 @@ Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 Prompt 由命名槽位组成。这样应用意图、约束、上下文和输出契约都可以被审阅：
 
 ```python
-response = (
+result = (
     agent
     .role("你是简洁的 release note 作者。")
     .info({"version": "4.1.3.5", "audience": "framework users"})
@@ -190,15 +190,15 @@ response = (
         "headline": (str, "短标题", True),
         "bullets": [(str, "一个稳定事实")],
     })
-    .get_response()
+    .get_result()
 )
 
-data = response.result.get_data()
-text = response.result.get_text()
-meta = response.result.get_meta()
+data = result.get_data()
+text = result.get_text()
+meta = result.get_meta()
 ```
 
-当同一次模型调用需要用多种方式读取时，使用 `get_response()`。
+当同一次模型调用需要用多种方式读取时，使用 `get_result()`。
 
 ### 2. 契约式输出控制
 
@@ -226,20 +226,20 @@ YAML 和 JSON prompt 文件也可以通过 `$ensure: true` 承载同样的契约
 Instant 事件允许 UI、服务或下游消费者在结构化字段变化时立刻响应：
 
 ```python
-response = (
+result = (
     agent
     .input("解释递归，并给两个示例。")
     .output({
         "definition": (str, "一句话定义", True),
         "examples": [(str, "带解释的示例")],
     })
-    .get_response()
+    .get_result()
 )
 
-for event in response.get_generator(type="instant"):
+for event in result.get_generator(type="instant"):
     if event.path == "definition" and event.delta:
         print(event.delta, end="", flush=True)
-    if event.wildcard_path == "examples[*]" and event.is_complete:
+    if event.wildcard_path == "examples[*]" and event.is_completed:
         print("\nEXAMPLE:", event.value)
 ```
 
@@ -261,14 +261,14 @@ def calculate_total(price: float, quantity: int) -> float:
 
 agent.use_actions(calculate_total)
 
-response = (
+result = (
     agent
     .input("使用可用 action 计算 19.5 * 4，并解释结果。")
-    .get_response()
+    .get_result()
 )
 
-print(response.result.get_text())
-print(response.result.full_result_data["extra"].get("action_logs", []))
+print(result.get_text())
+print(result.full_result_data["extra"].get("action_logs", []))
 ```
 
 常用能力 helper：
@@ -468,7 +468,7 @@ graph TB
     Prompt["Prompt 槽位与输出 schema"]
     Agent["Agent 请求层"]
     Model["Model requester plugins"]
-    Response["ModelResponse: text, data, meta, stream"]
+    Result["ModelResponseResult: text, data, meta, stream"]
     Action["Action Runtime: planning, dispatch, logs"]
     Env["Execution Environment: MCP, Python, Bash, Node, Browser, SQLite"]
     Flow["TriggerFlow: branch, fan-out, stream, pause/resume, persist"]
@@ -479,7 +479,7 @@ graph TB
     Settings --> Agent
     Prompt --> Agent
     Agent --> Model
-    Model --> Response
+    Model --> Result
     Agent --> Action
     Action --> Env
     App --> Flow

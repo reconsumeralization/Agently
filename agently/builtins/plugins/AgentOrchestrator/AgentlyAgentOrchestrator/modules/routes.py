@@ -38,14 +38,14 @@ async def run_model_request_route(
     await agent._async_emit_agent_turn_started(turn_run_context)
     if ensure_all_keys is not None:
         agent.request.prompt.set("ensure_all_keys", ensure_all_keys)
-    response = agent.request.get_response(parent_run_context=turn_run_context)
-    execution.record_model_response_id(response.id)
+    result = agent.request.get_result(parent_run_context=turn_run_context)
+    execution.record_model_response_id(result.id)
     has_structured_stream = bool(execution.prompt_snapshot.get("output"))
     if has_structured_stream:
-        async for item in response.get_async_generator(type="instant"):
+        async for item in result.get_async_generator(type="instant"):
             await execution.bridge_model_stream_item(item, route="model_request")
     else:
-        async for event, data in response.get_async_generator(type="all"):
+        async for event, data in result.get_async_generator(type="all"):
             if event in {"action", "tool"}:
                 await execution.record_action_log(
                     data,
@@ -60,7 +60,7 @@ async def run_model_request_route(
                     source="model_request",
                     delta=str(data),
                     event_type="delta",
-                    is_complete=False,
+                    is_completed=False,
                 )
             elif event == "done":
                 await execution.emit_stream(
@@ -69,7 +69,7 @@ async def run_model_request_route(
                     route="model_request",
                     source="model_request",
                 )
-    data = await response.async_get_data(
+    data = await result.async_get_data(
         type=type,
         ensure_keys=ensure_keys,
         validate_handler=validate_handler,
@@ -77,7 +77,7 @@ async def run_model_request_route(
         max_retries=max_retries,
         raise_ensure_failure=raise_ensure_failure,
     )
-    full_result_data = getattr(getattr(response, "result", None), "full_result_data", {})
+    full_result_data = result.full_result_data
     extra = full_result_data.get("extra", {}) if isinstance(full_result_data, dict) else {}
     if isinstance(extra, dict):
         action_logs = extra.get("action_logs", [])

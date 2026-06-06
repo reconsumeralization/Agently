@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncGenerator, cast
 
-from agently.types.data import AgentlyResponseGenerator
+from agently.types.data import AgentlyResultGenerator
 from agently.utils import DataFormatter, DataLocator
 
 from .types import ContentMapping
@@ -28,7 +28,7 @@ class OpenAICompatibleResponseAdapterMixin:
     model_type: str
     plugin_settings: Any
 
-    async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResponseGenerator":
+    async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResultGenerator":
         meta = {}
         message_record = {}
         reasoning_buffer = ""

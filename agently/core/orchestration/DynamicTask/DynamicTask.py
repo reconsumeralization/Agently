@@ -264,11 +264,12 @@ class DynamicTask:
             start_kwargs["ensure_keys"] = normalized_ensure_keys
         if isinstance(max_retries, int):
             start_kwargs["max_retries"] = max_retries
-        if hasattr(prepared_request, "get_response"):
-            response = prepared_request.get_response(parent_run_context=context.runtime_data.chunk_run_context)
-            async for item in response.get_async_generator(type="instant"):
+        if hasattr(prepared_request, "get_result") or hasattr(prepared_request, "get_response"):
+            getter = getattr(prepared_request, "get_result", None) or getattr(prepared_request, "get_response")
+            result = getter(parent_run_context=context.runtime_data.chunk_run_context)
+            async for item in result.get_async_generator(type="instant"):
                 await self._put_model_stream_item(context, item)
-            return await response.async_get_data(**start_kwargs)
+            return await result.async_get_data(**start_kwargs)
         return await prepared_request.async_start(**start_kwargs)
 
     def _normalize_model_output_format(
@@ -301,7 +302,8 @@ class DynamicTask:
                 "field_path": field_path,
                 "value": getattr(item, "value", None),
                 "delta": getattr(item, "delta", None),
-                "is_complete": bool(getattr(item, "is_complete", event_type == "done")),
+                "is_completed": bool(getattr(item, "is_completed", getattr(item, "is_complete", event_type == "done"))),
+                "is_complete": bool(getattr(item, "is_completed", getattr(item, "is_complete", event_type == "done"))),
                 "payload": {
                     "field_path": field_path,
                     "wildcard_path": getattr(item, "wildcard_path", None),
