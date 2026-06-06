@@ -17,11 +17,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, TYPE_CHECKING, Literal, cast
 
-from agently.core.orchestration.TaskDAGExecutor import (
+from agently.core.orchestration.TaskDAG import (
     CompiledTaskDAG,
-    DynamicTaskContext,
-    DynamicTaskHandler,
-    DynamicTaskResolver,
+    TaskDAGContext,
+    TaskDAGHandler,
+    TaskDAGResolver,
     TaskDAGExecutor,
     TaskDAGValidation,
     TaskDAGValidator,
@@ -38,7 +38,7 @@ class ActionTaskAdapter:
     def __init__(self, action: Any):
         self.action = action
 
-    async def __call__(self, context: DynamicTaskContext):
+    async def __call__(self, context: TaskDAGContext):
         action_id = None
         if isinstance(context.task.binding, str):
             action_id = context.task.binding
@@ -65,7 +65,7 @@ class SkillTaskAdapter:
     def __init__(self, skills_executor: Any):
         self.skills_executor = skills_executor
 
-    async def __call__(self, context: DynamicTaskContext):
+    async def __call__(self, context: TaskDAGContext):
         if hasattr(self.skills_executor, "async_run_skills_task"):
             skill_id = context.task.binding if isinstance(context.task.binding, str) else context.task.id
             return await self.skills_executor.async_run_skills_task(
@@ -88,7 +88,7 @@ class DynamicTask:
         model: Any = None,
         actions: Any = None,
         skills: Any = None,
-        handlers: Mapping[str, DynamicTaskHandler] | None = None,
+        handlers: Mapping[str, TaskDAGHandler] | None = None,
         parent_settings: Settings | None = None,
         name: str | None = None,
         max_tasks: int | None = None,
@@ -132,8 +132,8 @@ class DynamicTask:
         self.run = FunctionShifter.syncify(self.async_run)
         self.plan = FunctionShifter.syncify(self.async_plan)
 
-    def _make_resolver(self) -> DynamicTaskResolver:
-        resolver = DynamicTaskResolver()
+    def _make_resolver(self) -> TaskDAGResolver:
+        resolver = TaskDAGResolver()
         resolver.register("model", self._run_model_task)
         if self.actions is not None:
             resolver.register("action", ActionTaskAdapter(self.actions))
@@ -201,7 +201,7 @@ class DynamicTask:
         source = self.planner_source if self.planner_source is not None else self.model_source
         return self._new_request(source, name)
 
-    async def _run_model_task(self, context: DynamicTaskContext):
+    async def _run_model_task(self, context: TaskDAGContext):
         request = self._new_model_request(f"{ self.name }-{ context.task.id }")
         if not hasattr(request, "input") or not hasattr(request, "async_start"):
             raise TypeError("Model dynamic task handler requires an Agent or ModelRequest-like object.")
@@ -287,7 +287,7 @@ class DynamicTask:
             )
         return cast(Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"], output_format)
 
-    async def _put_model_stream_item(self, context: DynamicTaskContext, item: Any) -> None:
+    async def _put_model_stream_item(self, context: TaskDAGContext, item: Any) -> None:
         event_type = str(getattr(item, "event_type", "done"))
         if event_type not in {"delta", "done"}:
             event_type = "done"

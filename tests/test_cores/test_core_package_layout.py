@@ -56,8 +56,8 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.execution.ExecutionEnvironment import ExecutionEnvironmentManager
     from agently.core.extension import ExtensionHandlers, PluginManager
     from agently.core.model import ModelRequest, ModelResponse, ModelResponseResult, Prompt
-    from agently.core.orchestration.DynamicTask import DynamicTask
-    from agently.core.orchestration.TaskDAGExecutor import TaskDAGExecutor
+    from agently.core.application.DynamicTask import DynamicTask
+    from agently.core.orchestration.TaskDAG import TaskDAGExecutor
     from agently.core.orchestration.TriggerFlow import TriggerFlow
     from agently.core.runtime import AttemptRunner, EventCenter, RuntimeEvent, bind_runtime_context
     from agently.core.session import RecallProfile, Session, Workspace
@@ -76,8 +76,8 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.extension.PluginManager").PluginManager is PluginManager
     assert importlib.import_module("agently.core.extension.ExtensionHandlers").ExtensionHandlers is ExtensionHandlers
     assert importlib.import_module("agently.core.session.Session").Session is Session
-    assert importlib.import_module("agently.core.orchestration.DynamicTask.DynamicTask").DynamicTask is DynamicTask
-    assert importlib.import_module("agently.core.orchestration.TaskDAGExecutor.TaskDAGExecutor").TaskDAGExecutor is TaskDAGExecutor
+    assert importlib.import_module("agently.core.application.DynamicTask.DynamicTask").DynamicTask is DynamicTask
+    assert importlib.import_module("agently.core.orchestration.TaskDAG.TaskDAGExecutor").TaskDAGExecutor is TaskDAGExecutor
     assert importlib.import_module("agently.core.orchestration.TriggerFlow.TriggerFlow").TriggerFlow is TriggerFlow
     assert importlib.import_module("agently.core.execution.Action.Action").Action is Action
     assert importlib.import_module("agently.core.execution.Action").Tool is Tool
@@ -109,8 +109,10 @@ def test_core_layout_keeps_only_classified_root_packages():
     assert (core_root / "session" / "Workspace").is_dir()
     assert (core_root / "session" / "Recall").is_dir()
     assert (core_root / "orchestration" / "TriggerFlow").is_dir()
-    assert (core_root / "orchestration" / "TaskDAGExecutor").is_dir()
-    assert (core_root / "orchestration" / "DynamicTask").is_dir()
+    assert (core_root / "orchestration" / "TaskDAG").is_dir()
+    assert (core_root / "application" / "DynamicTask").is_dir()
+    assert not (core_root / "orchestration" / "TaskDAGExecutor").exists()
+    assert not (core_root / "orchestration" / "DynamicTask").exists()
 
     assert not (core_root / "Tool.py").exists()
     assert not (core_root / "Tool").exists()
@@ -124,6 +126,8 @@ def test_removed_flat_core_submodules_do_not_resolve():
         "agently.core.ModelRequest",
         "agently.core.RuntimeEvents",
         "agently.core.Tool",
+        "agently.core.orchestration.DynamicTask",
+        "agently.core.orchestration.TaskDAGExecutor",
     ]
 
     for module_name in removed_modules:

@@ -153,7 +153,7 @@ appropriate only when the capability is genuinely small and splitting it would
 be over-design.
 
 Landed examples include `core/Action`, `core/TriggerFlow`,
-`core/TaskDAGExecutor`, `core/Workspace`,
+`core/orchestration/TaskDAG`, `core/session/Workspace`,
 `builtins/plugins/ExecutionEnvironmentProvider`, and
 `builtins/plugins/SkillsExecutor`. Keep public imports stable through package
 `__init__.py` files and top-level re-exports.

@@ -18,10 +18,10 @@ from .TaskDAGExecutor import (
     _TASK_ID_PATTERN,
 )
 from .TaskDAGResolver import (
-    DynamicTaskContext,
-    DynamicTaskHandler,
-    DynamicTaskResolver,
-    dynamic_task_resolver_factory,
+    TaskDAGContext,
+    TaskDAGHandler,
+    TaskDAGResolver,
+    task_dag_resolver_factory,
 )
 from .TaskDAGRuntime import CompiledTaskDAG, compile_task_dag
 from .TaskDAGValidation import (
@@ -33,14 +33,14 @@ from .TaskDAGValidation import (
 
 __all__ = [
     "CompiledTaskDAG",
-    "DynamicTaskContext",
-    "DynamicTaskHandler",
-    "DynamicTaskResolver",
+    "TaskDAGContext",
+    "TaskDAGHandler",
+    "TaskDAGResolver",
     "TaskDAGExecutor",
     "TaskDAGValidation",
     "TaskDAGValidator",
     "compile_task_dag",
-    "dynamic_task_resolver_factory",
+    "task_dag_resolver_factory",
     "validate_task_dag",
     "validate_task_dag_planner_output",
     "_GRAPH_SCHEMA_VERSION",

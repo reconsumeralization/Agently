@@ -40,7 +40,7 @@ from .TaskDAGHelpers import (
     _is_approval_task,
     _start_task_event,
 )
-from .TaskDAGResolver import DynamicTaskContext, DynamicTaskResolver, _coerce_resolver
+from .TaskDAGResolver import TaskDAGContext, TaskDAGResolver, _coerce_resolver
 from .TaskDAGValidation import TaskDAGValidation, validate_task_dag
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ class CompiledTaskDAG:
 def compile_task_dag(
     graph: TaskDAG | Mapping[str, Any],
     *,
-    resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+    resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
     flow: "TriggerFlow | None" = None,
     name: str | None = None,
 ) -> CompiledTaskDAG:
@@ -202,7 +202,7 @@ def _make_task_runner(
     *,
     graph: TaskDAG,
     task: TaskDAGNode,
-    resolver: DynamicTaskResolver,
+    resolver: TaskDAGResolver,
     result_lock: asyncio.Lock,
 ):
     async def run_task(data: TriggerFlowRuntimeData):
@@ -265,7 +265,7 @@ def _make_task_runner(
             if _is_approval_task(resolved_task) and output is None:
                 output = {"status": "approved", "approved": True, "reason": "Task DAG approval passed."}
             if not _is_approval_task(resolved_task):
-                context = DynamicTaskContext(
+                context = TaskDAGContext(
                     graph=graph,
                     task=resolved_task,
                     task_input=task_input,
@@ -436,7 +436,7 @@ def _make_finalize_handler(graph: TaskDAG):
     return finalize
 
 
-async def _execute_handler(handler: Any, context: DynamicTaskContext):
+async def _execute_handler(handler: Any, context: TaskDAGContext):
     from agently.core.orchestration.TriggerFlow import TriggerFlow
 
     if isinstance(handler, TriggerFlow):
