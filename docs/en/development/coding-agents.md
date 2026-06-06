@@ -36,7 +36,7 @@ The companion repo does not become a runtime dependency of your Agently app. It 
 
 | Skill | Use when the user is |
 |---|---|
-| `agently-playbook` | starting fresh — picking the right structure for a new Agently project |
+| `agently` | starting fresh — picking the right structure for a new Agently project |
 | `agently-request` | model setup, prompt management, structured output, response reuse, session memory, embeddings, retrieval |
 | `agently-runtime` | Action Runtime, built-in actions, MCP, Execution Environment, FastAPI exposure, DevTools wiring |
 | `agently-dynamic-task` | model-generated or app-submitted DAG planning, validation, and execution |
@@ -63,7 +63,7 @@ For CLI-based installs, the default `app` bundle is:
 
 ```bash
 for skill in \
-  agently-playbook \
+  agently \
   agently-request \
   agently-runtime \
   agently-dynamic-task \

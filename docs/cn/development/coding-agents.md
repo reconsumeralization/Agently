@@ -36,7 +36,7 @@ skill **不是**纯文档。它为 coding agent 结构化：每个 skill 告诉 
 
 | Skill | 用户在做的事 |
 |---|---|
-| `agently-playbook` | 从零开始 —— 选合适的项目结构 |
+| `agently` | 从零开始 —— 选合适的项目结构 |
 | `agently-request` | 模型接入、Prompt 管理、结构化输出、响应复用、session memory、embedding、检索 |
 | `agently-runtime` | Action Runtime、内置 actions、MCP、Execution Environment、FastAPI 暴露、DevTools 接入 |
 | `agently-dynamic-task` | 模型生成或应用提交的 DAG 规划、校验和执行 |
@@ -63,7 +63,7 @@ skill 是纯文本 + 脚本；安装时不跑 Agently 特定的东西。
 
 ```bash
 for skill in \
-  agently-playbook \
+  agently \
   agently-request \
   agently-runtime \
   agently-dynamic-task \

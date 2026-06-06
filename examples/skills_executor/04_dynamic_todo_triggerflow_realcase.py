@@ -12,7 +12,7 @@ Environment:
 
 Expected key output from a real DeepSeek run after this diagnostic passes:
     [SKILLS_EXECUTOR_PLAN]
-    selected_skills=['agently-playbook', 'agently-request', 'agently-triggerflow']
+    selected_skills=['agently', 'agently-request', 'agently-triggerflow']
     [MODEL_GENERATED_ARTIFACT]
     generated_file=.example_runtime/skills_executor/dynamic_todo/generated_dynamic_todo_executor.py
     [EVALUATION]
@@ -66,7 +66,7 @@ from agently.types.data import SkillExecutionPlan
 
 RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor" / "dynamic_todo"
 GENERATED_PATH = RUNTIME_ROOT / "generated_dynamic_todo_executor.py"
-SKILL_IDS = ["agently-playbook", "agently-request", "agently-triggerflow"]
+SKILL_IDS = ["agently", "agently-request", "agently-triggerflow"]
 PROBLEM = (
     "Use Agently and TriggerFlow to solve a complex planning problem: generate "
     "a Todo List with non-trivial task dependencies for the first production "
