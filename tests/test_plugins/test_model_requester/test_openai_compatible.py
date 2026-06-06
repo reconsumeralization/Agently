@@ -216,6 +216,39 @@ async def test_broadcast_response_maps_non_stream_chat_message_content():
 
 
 @pytest.mark.asyncio
+async def test_broadcast_response_handles_usage_only_final_chunk_without_choices():
+    # Regression for #287: some OpenAI-compatible gateways (YuDing, MiMo) send a
+    # usage-only final chunk with an empty "choices" array before [DONE]. The done
+    # handler must not raise IndexError and must preserve the accumulated content.
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": True,
+        },
+        {"input": "hello"},
+    )
+
+    async def response_generator():
+        yield "message", '{"id":"1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}'
+        yield "message", '{"id":"1","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}'
+        yield "message", '{"id":"1","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}'
+        yield "message", '{"id":"1","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}]}'
+        yield "message", '{"id":"1","choices":[],"usage":{"prompt_tokens":27,"completion_tokens":17,"total_tokens":44}}'
+        yield "message", "[DONE]"
+
+    events = []
+    async for event, payload in plugin.broadcast_response(response_generator()):
+        events.append((event, payload))
+
+    assert ("done", "hello world") in events
+    original_done = next(payload for event, payload in events if event == "original_done")
+    assert original_done["choices"][0]["message"]["content"] == "hello world"
+    meta = next(payload for event, payload in events if event == "meta")
+    assert meta["usage"]["total_tokens"] == 44
+
+
+@pytest.mark.asyncio
 async def test_main(require_ollama):
     request_settings = cast(
         ModelRequesterSettings,

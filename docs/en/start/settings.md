@@ -22,8 +22,9 @@ The first argument to `set_settings(...)` is a dotted path. Common paths:
 
 | Path | Meaning |
 |---|---|
-| `OpenAICompatible` | shorthand alias resolved to `plugins.ModelRequester.OpenAICompatible` |
-| `AnthropicCompatible` | shorthand for the Claude requester |
+| `OpenAICompatible` / `OpenAI` / `OAIClient` | shorthand aliases resolved to `plugins.ModelRequester.OpenAICompatible` |
+| `OpenAIResponsesCompatible` / `OpenAIResponses` / `Responses` | shorthand aliases for the Responses API requester (`plugins.ModelRequester.OpenAIResponsesCompatible`) |
+| `AnthropicCompatible` / `Anthropic` / `Claude` | shorthand aliases for the Claude requester (`plugins.ModelRequester.AnthropicCompatible`) |
 | `plugins.ModelRequester.<Name>` | full path; same as the shorthand |
 | `debug` | enable streaming console logs of the model request |
 | `runtime.show_model_logs` | enable console logs for model requests and response parsing; `True` is equivalent to `"simple"` |

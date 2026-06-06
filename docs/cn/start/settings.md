@@ -24,8 +24,9 @@ Agently 设置是一个分层 key-value 存储，分三个 scope：
 
 | 路径 | 含义 |
 |---|---|
-| `OpenAICompatible` | `plugins.ModelRequester.OpenAICompatible` 的别名 |
-| `AnthropicCompatible` | Claude requester 的别名 |
+| `OpenAICompatible` / `OpenAI` / `OAIClient` | `plugins.ModelRequester.OpenAICompatible` 的别名 |
+| `OpenAIResponsesCompatible` / `OpenAIResponses` / `Responses` | `plugins.ModelRequester.OpenAIResponsesCompatible` 的别名 |
+| `AnthropicCompatible` / `Anthropic` / `Claude` | `plugins.ModelRequester.AnthropicCompatible` 的别名 |
 | `plugins.ModelRequester.<Name>` | 完整路径，与上面别名等价 |
 | `debug` | 打开模型请求的流式控制台日志 |
 | `runtime.show_model_logs` | 打开模型请求与响应解析的控制台日志；`True` 等价于 `"simple"` |
