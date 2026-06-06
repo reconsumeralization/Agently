@@ -66,7 +66,8 @@ meta = result.get_meta()        # 已缓存
 `AgentlyModelResultMessage` 对应 `all`。完整 typed data 命名空间仍可从
 `agently.types.data` 导入。
 旧的 `AgentlySpecificResponseMessage`、`AgentlyModelResponseMessage` 以及相关
-`Response` 别名会继续兼容，但推荐使用 `Result` 命名。
+`Response` 别名会继续在 `agently.types.data` 里兼容，但不会从 `agently`
+根入口重新导出。推荐使用 `Result` 命名。
 
 ### Delta 例子
 

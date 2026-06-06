@@ -5,19 +5,18 @@ from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import assert_type
 
+import agently as agently_package
 from agently import (
     Agent,
     AgentExecutionStreamData as RootAgentExecutionStreamData,
     Agently,
     AgentlyModelResultEvent as RootAgentlyModelResultEvent,
     AgentlyModelResultMessage as RootAgentlyModelResultMessage,
-    AgentlyModelResponseMessage as RootAgentlyModelResponseMessage,
     AgentlyOriginalResultPayload as RootAgentlyOriginalResultPayload,
-    AgentlyOriginalResponsePayload as RootAgentlyOriginalResponsePayload,
     AgentlySpecificResultMessage as RootAgentlySpecificResultMessage,
-    AgentlySpecificResponseMessage as RootAgentlySpecificResponseMessage,
     EventHook as RootEventHook,
     ModelStreamingHandler as RootModelStreamingHandler,
+    ResultContentType as RootResultContentType,
     RuntimeEvent as RootRuntimeEvent,
     RuntimeEventHook as RootRuntimeEventHook,
     SkillRuntimeStreamHandler as RootSkillRuntimeStreamHandler,
@@ -29,12 +28,16 @@ from agently.types.data import (
     AgentExecutionStreamData,
     AgentlyModelResultEvent,
     AgentlyModelResultMessage,
+    AgentlyResultGenerator,
     AgentlyModelResponseMessage,
+    AgentlyResponseGenerator,
     AgentlyOriginalResultPayload,
     AgentlyOriginalResponsePayload,
     AgentlySpecificResultMessage,
     AgentlySpecificResponseMessage,
     ModelStreamingHandler,
+    ResponseContentType,
+    ResultContentType,
     SkillRuntimeStreamHandler,
     StreamingData,
 )
@@ -107,12 +110,24 @@ def test_common_types_are_available_from_package_root():
         assert_type(cast(RootAgentlyModelResultMessage, object()), AgentlyModelResultMessage)
         assert_type(cast(RootAgentlySpecificResultMessage, object()), AgentlySpecificResultMessage)
         assert_type(cast(RootAgentlyOriginalResultPayload, object()), AgentlyOriginalResultPayload)
-        assert_type(cast(RootAgentlyModelResponseMessage, object()), AgentlyModelResponseMessage)
-        assert_type(cast(RootAgentlySpecificResponseMessage, object()), AgentlySpecificResponseMessage)
-        assert_type(cast(RootAgentlyOriginalResponsePayload, object()), AgentlyOriginalResponsePayload)
+        assert_type(cast(RootResultContentType, "all"), ResultContentType)
         assert_type(cast(RootModelStreamingHandler, object()), ModelStreamingHandler)
         assert_type(cast(RootSkillRuntimeStreamItem, object()), dict[str, Any])
         assert_type(cast(RootSkillRuntimeStreamHandler, object()), SkillRuntimeStreamHandler)
         assert_type(cast(RootRuntimeEvent, object()), RootRuntimeEvent)
         assert_type(cast(RootEventHook, object()), RootEventHook)
         assert_type(cast(RootRuntimeEventHook, object()), RootRuntimeEventHook)
+
+
+def test_response_named_aliases_stay_in_typed_data_namespace_only():
+    assert not hasattr(agently_package, "AgentlyModelResponseMessage")
+    assert not hasattr(agently_package, "AgentlySpecificResponseMessage")
+    assert not hasattr(agently_package, "AgentlyResponseGenerator")
+    assert not hasattr(agently_package, "ResponseContentType")
+
+    if TYPE_CHECKING:
+        assert_type(cast(AgentlyModelResponseMessage, object()), AgentlyModelResultMessage)
+        assert_type(cast(AgentlySpecificResponseMessage, object()), AgentlySpecificResultMessage)
+        assert_type(cast(AgentlyOriginalResponsePayload, object()), AgentlyOriginalResultPayload)
+        assert_type(cast(AgentlyResponseGenerator, object()), AgentlyResultGenerator)
+        assert_type(cast(ResponseContentType, "all"), ResultContentType)

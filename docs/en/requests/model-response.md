@@ -66,8 +66,9 @@ For common type annotations, import the public stream item types from
 `AgentlyModelResultMessage` for `all`. The same types remain available from
 `agently.types.data` when you want the full typed data namespace.
 The older `AgentlySpecificResponseMessage`, `AgentlyModelResponseMessage`, and
-related `Response` aliases remain available for compatibility, but the `Result`
-names are the recommended API.
+related `Response` aliases remain available from `agently.types.data` for
+compatibility, but they are not re-exported from the `agently` root. The
+`Result` names are the recommended API.
 
 ### Delta example
 

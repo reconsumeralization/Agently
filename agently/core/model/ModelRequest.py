@@ -312,8 +312,8 @@ class ModelRequest:
         self.extension_handlers.append("validate_handlers", handler)
         return self
 
-    # Response & Result
-    def _create_model_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponse:
+    # Result
+    def _create_model_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
         if self._model_key:
             from agently.utils.ModelPool import resolve_model_pool_settings
             resolve_model_pool_settings(self._model_key, self.settings)
@@ -335,10 +335,10 @@ class ModelRequest:
         )
         response.run_context.response_id = response.id
         self.prompt.clear()
-        return response
+        return response.result
 
     def get_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
-        return self._create_model_response(parent_run_context=parent_run_context).result
+        return self._create_model_result(parent_run_context=parent_run_context)
 
     def get_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
         return self.get_result(parent_run_context=parent_run_context)
