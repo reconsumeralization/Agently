@@ -79,6 +79,16 @@ def collect_events(plugin: OpenAIResponsesCompatible, request_events: list[tuple
     return asyncio.run(_run())
 
 
+def test_friendly_settings_path_aliases_are_declared():
+    # Parity with OpenAICompatible (OpenAI / OAIClient) and AnthropicCompatible
+    # (Anthropic / Claude): the Responses requester exposes short settings aliases.
+    mappings = OpenAIResponsesCompatible.DEFAULT_SETTINGS["$mappings"]["path_mappings"]
+    target = "plugins.ModelRequester.OpenAIResponsesCompatible"
+    assert mappings["OpenAIResponsesCompatible"] == target
+    assert mappings["OpenAIResponses"] == target
+    assert mappings["Responses"] == target
+
+
 def test_generate_request_uses_responses_path_and_latest_default_model():
     request = generate_request(
         {

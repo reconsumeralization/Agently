@@ -165,6 +165,35 @@ async def test_attempt_runner_propagates_cancellation_without_error_handler():
 
 
 @pytest.mark.asyncio
+async def test_attempt_runner_propagates_generator_exit_without_error_handler():
+    # Regression: when a downstream consumer (e.g. a response adapter that breaks
+    # after the terminal event) closes the stream early, GeneratorExit must be a
+    # clean control signal — not routed through error classification, which would
+    # emit a spurious empty-message requester error.
+    handled = False
+
+    async def execute(_state: AttemptState):
+        yield "message", "first"
+        yield "message", "second"
+
+    async def handle_error(error: BaseException, _state: AttemptState):
+        nonlocal handled
+        handled = True
+        return AttemptDecision.yield_error(error)
+
+    runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error))
+    stream = runner.run_stream()
+
+    first = await anext(stream)
+    assert first == ("message", "first")
+
+    # Closing the suspended generator raises GeneratorExit at the paused yield.
+    await stream.aclose()
+
+    assert handled is False
+
+
+@pytest.mark.asyncio
 async def test_attempt_runner_preserves_timeout_when_error_handler_raises():
     timeout = TimeoutError("deadline")
 

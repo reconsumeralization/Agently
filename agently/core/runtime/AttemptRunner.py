@@ -88,7 +88,11 @@ class AttemptRunner:
                     yield item
                 return
             except BaseException as error:
-                if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                if isinstance(error, (GeneratorExit, asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                    # Control-flow signals, not classifiable attempt errors. GeneratorExit is
+                    # raised when a downstream consumer closes the stream early (e.g. a response
+                    # adapter that breaks after the terminal event); routing it through error
+                    # classification would emit a spurious, empty-message requester error.
                     raise
                 decision = await self._maybe_await(self.handlers.handle_error(error, self.state))
                 if not isinstance(decision, AttemptDecision):
