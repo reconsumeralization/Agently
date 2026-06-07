@@ -100,6 +100,14 @@ for item in gen:
 的字段；只有下游动作必须等字段关闭时，才用 `.is_complete` /
 `event_type=="done"` 做触发条件。
 
+如果多个字段共用一个 CLI 输出区域，不要把 `.is_complete` 当成全局展示顺序屏障。
+结构化 parser 往往是因为已经看到下一个 path 开始，才确认上一个 path 已关闭，
+所以下一个 path 的首个 `.delta` 可能和上一个 path 的 done 事件几乎同时到达
+consumer。Web UI、SSE 和 WebSocket 通常应把不同 `path` 渲染到各自的 UI slot。
+如果 CLI 必须把多个 path 按固定阅读顺序打印到同一个终端区域，在 consumer
+里维护一个很小的状态 flag 或 buffer，等前一个 path 的 `.is_complete` 事件已经
+被处理后，再 flush 后一个 path 的内容。
+
 ### 高价值模式：先流式更新 UI，再读取最终可靠结果
 
 当应用可以在完整回答结束前展示或路由单个结构化字段时，用 `instant`。流式事件用于

@@ -101,6 +101,15 @@ for item in gen:
 the visible field while it is growing. Use `.is_complete` / `event_type=="done"`
 when downstream work should wait until the field is closed.
 
+For shared-output CLI rendering, do not treat `.is_complete` as a global
+display-order barrier. A structured parser often confirms that one path is
+closed because it has already seen the next path begin, so a later path's first
+`.delta` can arrive at the consumer near the earlier path's done event. Web UIs,
+SSE, and WebSocket consumers should usually render each `path` into its own UI
+slot. If a CLI must print several paths into one terminal area in a fixed human
+order, keep a small state flag or buffer in the consumer and flush the later
+path only after the earlier path's `.is_complete` event has been handled.
+
 ### High-value pattern: stream fields to UI, then read the durable result
 
 Use `instant` when the application can show or route individual structured
