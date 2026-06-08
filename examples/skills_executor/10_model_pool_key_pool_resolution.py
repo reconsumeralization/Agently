@@ -11,6 +11,15 @@ This demo validates the public three-layer resolution path:
 It makes real DeepSeek calls to verify resolution works end-to-end. It uses
 public request and Skills APIs only; deterministic internals belong in tests.
 
+Expected key output from a real DeepSeek run on 2026-06-08:
+  Demo 1 resolves model_key 'deepseek-v4' to model 'deepseek-v4-pro'
+    and key_pool auth.
+  Demo 2 response is 'OK' through the global model fallback.
+  Demo 3 response is 'OK' after agent.activate_model("deepseek-v4").
+  Demo 4 Skills finalizer response is {'status': 'ok'}.
+  Demo 5 direct structured request response is {'status': 'ok'}.
+  The script prints "Model pool + key pool resolution validated end-to-end".
+
 Environment:
     DEEPSEEK_API_KEY must be available in the shell or a .env file.
     Optional:

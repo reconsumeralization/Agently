@@ -19,9 +19,10 @@ def plan_next_step(history: list[dict]) -> dict:
         })
         .instruct([
             "You are the planner in a plan -> action -> observe loop.",
-            "If history is empty, choose action add with a=12 and b=7.",
-            "If history contains add result 19 but not multiply result 57, choose action multiply with a=19 and b=3.",
-            "If history already contains multiply result 57, choose final and answer '(12 + 7) * 3 = 57'.",
+            "Use the available actions to compute arithmetic instead of doing arithmetic silently.",
+            "Inspect the task expression, the available action contracts, and the history.",
+            "If another action is needed, choose exactly one available action and provide concrete integer kwargs.",
+            "Return final only after the action history contains enough evidence to support the complete expression value.",
             "Do not skip action execution.",
         ])
         .output({
@@ -96,20 +97,23 @@ def main():
 if __name__ == "__main__":
     main()
 
-# Expected key output with DeepSeek or local Ollama configured:
-# [MODEL_PROVIDER] prints deepseek or ollama.
+# Expected key output from a real DeepSeek run on 2026-06-08:
+# [MODEL_PROVIDER] prints deepseek.
 # [MODEL_DECISION_ROUND_*] prints real model planner decisions.
 # One action result is 19 and one action result is 57.
-# [FINAL_ANSWER] states the final result is 57.
+# [FINAL_ANSWER] prints 57.
 
 # How it works:
-# A plan-action-observe loop where the model acts as planner: each round it inspects
-# history and returns {type, action_id, action_input} or {type:"final", answer}.
+# A plan-action-observe loop where the model acts as planner: each round it
+# inspects the task, available action contracts, and history, then returns
+# {type, action_id, action_input} or {type:"final", answer}. The prompt does not
+# prescribe which action id or arguments must appear in a given round; local
+# assertions only verify the observed action results and final answer.
 # Local add() and multiply() are registered as @agent.action_func.
 # execute_action() runs each planned action directly (no model planning of the call).
 # The loop asserts that intermediate results 19 and 57 appear and the final answer is 57.
 #
-# Flow:
+# Verified flow from the 2026-06-08 DeepSeek run:
 # round 1: model plans add(12,7) -> 19; execute_action("add",{a:12,b:7}) -> 19
 #   |
 #   v
