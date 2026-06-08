@@ -715,12 +715,15 @@ class TriggerFlowBlueprint:
         concurrency = operator["options"].get("concurrency")
 
         async def send_to_branches(data):
+            data.layer_in()
+            layer_marks = data._layer_marks.copy()
+
             async def emit_branch(signal: dict[str, Any]):
                 if concurrency is None or concurrency <= 0:
                     await data.async_emit(
                         signal["trigger_event"],
                         data.value,
-                        _layer_marks=data._layer_marks.copy(),
+                        _layer_marks=layer_marks,
                     )
                     return
                 semaphore_key = f"batch_fanout_semaphores.{ operator['id'] }"
@@ -732,10 +735,13 @@ class TriggerFlowBlueprint:
                     await data.async_emit(
                         signal["trigger_event"],
                         data.value,
-                        _layer_marks=data._layer_marks.copy(),
+                        _layer_marks=layer_marks,
                     )
 
-            await gather_cancel_on_error(*[emit_branch(signal) for signal in operator["emit_signals"]])
+            try:
+                await gather_cancel_on_error(*[emit_branch(signal) for signal in operator["emit_signals"]])
+            finally:
+                data.layer_out()
 
         for signal in operator["listen_signals"]:
             self.add_handler(signal["trigger_type"], signal["trigger_event"], send_to_branches, id=operator["id"])
@@ -765,6 +771,7 @@ class TriggerFlowBlueprint:
             for done in state["triggers"].values():
                 if done is False:
                     return
+            data.layer_out()
             await data.async_emit(
                 emit_signal["trigger_event"],
                 state["results"],
@@ -777,6 +784,17 @@ class TriggerFlowBlueprint:
 
     def _compile_for_each_split_operator(self, operator: dict[str, Any]):
         emit_signal = operator["emit_signals"][0]
+        end_signal = next(
+            (
+                signal
+                for signal in operator.get("emit_signals", [])
+                if str(signal.get("trigger_event", "")).endswith("-End")
+            ),
+            None,
+        )
+        if end_signal is None:
+            group_id = operator.get("group_id") or str(operator["id"]).removeprefix("for_each-split-")
+            end_signal = self.make_signal("event", f"ForEach-{ group_id }-End", role="continuation")
         concurrency = operator["options"].get("concurrency")
 
         async def send_items(data):
@@ -816,6 +834,14 @@ class TriggerFlowBlueprint:
 
             if not isinstance(data.value, str) and isinstance(data.value, Sequence):
                 items = list(data.value)
+                if not items:
+                    data.layer_out()
+                    await data.async_emit(
+                        end_signal["trigger_event"],
+                        [],
+                        data._layer_marks.copy(),
+                    )
+                    return
                 for item in items:
                     layer_marks, item_value = prepare_item(item)
                     send_tasks.append(emit_item(item_value, layer_marks))
@@ -915,6 +941,7 @@ class TriggerFlowBlueprint:
                         _layer_marks=data._layer_marks.copy(),
                     )
                 else:
+                    data.layer_out()
                     await data.async_emit(
                         emit_signal["trigger_event"],
                         data.value,

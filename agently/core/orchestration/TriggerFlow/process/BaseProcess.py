@@ -35,6 +35,7 @@ from ..Chunk import TriggerFlowChunk
 from agently.types.data import EMPTY
 from agently.types.trigger_flow import TriggerFlowBlockData
 from agently.utils import DeprecationWarnings
+from .._async_utils import gather_cancel_on_error
 
 
 class _UnsetType:
@@ -507,6 +508,7 @@ class TriggerFlowBaseProcess:
         }
         batch_id = self._blue_print.make_stable_identity_digest(batch_identity)
         batch_trigger = f"Batch-{ batch_id }"
+        batch_fanout_operator_id = f"batch-fanout-{ batch_id }"
         batch_collect_operator_id = f"batch-collect-{ batch_id }"
         results_template: dict[str, Any] = {}
         triggers_template: dict[str, bool] = {}
@@ -514,6 +516,35 @@ class TriggerFlowBaseProcess:
         branch_input_signals: list[dict[str, Any]] = []
         branch_output_signals: list[dict[str, Any]] = []
         result_keys: dict[str, str] = {}
+
+        async def send_to_branches(data: "TriggerFlowRuntimeData"):
+            data.layer_in()
+            layer_marks = data._layer_marks.copy()
+
+            async def emit_branch(signal: dict[str, Any]):
+                if concurrency is None or concurrency <= 0:
+                    await data.async_emit(
+                        signal["trigger_event"],
+                        data.value,
+                        _layer_marks=layer_marks,
+                    )
+                    return
+                semaphore_key = f"batch_fanout_semaphores.{ batch_id }"
+                semaphore = data._system_runtime_data.get(semaphore_key, inherit=False)
+                if not isinstance(semaphore, Semaphore):
+                    semaphore = Semaphore(concurrency)
+                    data._system_runtime_data.set(semaphore_key, semaphore)
+                async with semaphore:
+                    await data.async_emit(
+                        signal["trigger_event"],
+                        data.value,
+                        _layer_marks=layer_marks,
+                    )
+
+            try:
+                await gather_cancel_on_error(*[emit_branch(signal) for signal in branch_input_signals])
+            finally:
+                data.layer_out()
 
         async def wait_all_chunks(data: "TriggerFlowRuntimeData"):
             if data.event not in trigger_to_chunk_name:
@@ -532,12 +563,20 @@ class TriggerFlowBaseProcess:
             for done in state["triggers"].values():
                 if done is False:
                     return
+            data.layer_out()
             await data.async_emit(
                 batch_trigger,
                 state["results"],
                 _layer_marks=data._layer_marks.copy(),
             )
             del data._system_runtime_data[state_key]
+
+        self._blue_print.add_handler(
+            self.trigger_type,
+            self.trigger_event,
+            send_to_branches,
+            id=batch_fanout_operator_id,
+        )
 
         for typed_chunk in normalized_chunks:
             triggers_template[typed_chunk.trigger] = False
@@ -570,8 +609,8 @@ class TriggerFlowBaseProcess:
                 handler = make_handler(typed_chunk)
 
             self._blue_print.add_handler(
-                self.trigger_type,
-                self.trigger_event,
+                "event",
+                branch_input_event,
                 handler,
                 id=typed_chunk.id,
             )
@@ -590,7 +629,7 @@ class TriggerFlowBaseProcess:
             )
 
         self._blue_print.definition.add_operator(
-            id=f"batch-fanout-{ batch_id }",
+            id=batch_fanout_operator_id,
             kind="batch_fanout",
             name=f"batch:{ batch_id }",
             listen_signals=self._definition_signals,

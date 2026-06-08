@@ -402,7 +402,8 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         ):
             kwargs.setdefault("_source", "chunk")
             kwargs["_meta"] = _chunk_signal_meta(kwargs.get("_meta"))
-            return execution.emit(trigger_event, value, _layer_marks, **kwargs)
+            layer_marks = self._layer_marks.copy() if _layer_marks is None else _layer_marks
+            return execution.emit(trigger_event, value, layer_marks, **kwargs)
 
         async def _async_emit_from_chunk(
             trigger_event: str,
@@ -412,7 +413,8 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         ):
             kwargs.setdefault("_source", "chunk")
             kwargs["_meta"] = _chunk_signal_meta(kwargs.get("_meta"))
-            return await execution.async_emit(trigger_event, value, _layer_marks, **kwargs)
+            layer_marks = self._layer_marks.copy() if _layer_marks is None else _layer_marks
+            return await execution.async_emit(trigger_event, value, layer_marks, **kwargs)
 
         def _emit_nowait_from_chunk(
             trigger_event: str,
@@ -422,7 +424,8 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         ):
             kwargs.setdefault("_source", "chunk")
             kwargs["_meta"] = _chunk_signal_meta(kwargs.get("_meta"))
-            return execution.emit_nowait(trigger_event, value, _layer_marks, **kwargs)
+            layer_marks = self._layer_marks.copy() if _layer_marks is None else _layer_marks
+            return execution.emit_nowait(trigger_event, value, layer_marks, **kwargs)
 
         async def _async_emit_nowait_from_chunk(
             trigger_event: str,
@@ -432,7 +435,8 @@ class TriggerFlowRuntimeData(Generic[ValueT, StreamT, ResultT]):
         ):
             kwargs.setdefault("_source", "chunk")
             kwargs["_meta"] = _chunk_signal_meta(kwargs.get("_meta"))
-            return await execution.async_emit_nowait(trigger_event, value, _layer_marks, **kwargs)
+            layer_marks = self._layer_marks.copy() if _layer_marks is None else _layer_marks
+            return await execution.async_emit_nowait(trigger_event, value, layer_marks, **kwargs)
 
         self.emit = _emit_from_chunk
         self.async_emit = _async_emit_from_chunk

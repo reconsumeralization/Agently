@@ -151,6 +151,9 @@
         "selection_handler",
         "failover_handler"
       ]
+    },
+    "triggerflow": {
+      "runtime_integrity_contract": "TriggerFlow preserves execution-local runtime scope across framework-owned fan-out and chunk-internal emits; batch creates a real fan-out signal and isolates concurrent invocations; empty for_each emits an empty collected result; no-hit match restores its layer before continuing; falsy state/flow_data values can be deleted; loaded blueprints/configs restore contract metadata; async_close runs once and removes closed executions from the live registry; execution concurrency is a global handler dispatch limit with permit yielding around awaited internal dispatch."
     }
   },
   "request_input": {

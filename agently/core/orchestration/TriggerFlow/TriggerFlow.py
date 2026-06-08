@@ -15,6 +15,7 @@
 import uuid
 import asyncio
 import warnings
+import copy
 from pathlib import Path
 
 from typing import Callable, Any, Literal, TYPE_CHECKING, overload, AsyncGenerator, Generator, Generic, TypeVar, cast
@@ -77,6 +78,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         self._skip_exceptions = skip_exceptions
         self._executions: dict[str, "TriggerFlowExecution[InputT, StreamT, ResultT]"] = {}
         self._contract = TriggerFlowContract[InputT, StreamT, ResultT]()
+        self._contract_metadata: TriggerFlowContractMetadata | None = None
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
 
@@ -302,6 +304,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             result=result,
             meta=meta,
         )
+        self._contract_metadata = None
         self._blue_print.definition.contract = self._contract.export_metadata()
         return self
 
@@ -309,7 +312,14 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         return self._contract.snapshot()
 
     def get_contract_metadata(self) -> TriggerFlowContractMetadata:
+        if self._contract_metadata is not None:
+            return copy.deepcopy(self._contract_metadata)
         return self._contract.export_metadata()
+
+    def _sync_contract_from_blueprint(self):
+        self._contract = TriggerFlowContract[InputT, StreamT, ResultT]()
+        contract_metadata = self._blue_print.definition.contract
+        self._contract_metadata = copy.deepcopy(contract_metadata) if contract_metadata else None
 
     def _set_runtime_resource(self, key: str, value: Any):
         self._runtime_resources.set(str(key), value)
@@ -471,7 +481,8 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
                 self._flow_data.append(key, value)
                 value = self._flow_data[key]
             case "del":
-                if self._flow_data.get(key, None):
+                missing = object()
+                if self._flow_data.get(key, missing) is not missing:
                     del self._flow_data[key]
                     value = None
                 else:
@@ -725,7 +736,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
 
     def load_blueprint(self, new_blueprint: TriggerFlowBlueprint):
         self._blue_print = new_blueprint
-        self._contract = TriggerFlowContract[InputT, StreamT, ResultT]()
+        self._sync_contract_from_blueprint()
         self.register_chunk_handler = self._blue_print.register_chunk_handler
         self.register_condition_handler = self._blue_print.register_condition_handler
         self._bind_start_process()
@@ -765,7 +776,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         replace: bool = True,
     ):
         self._blue_print.load_flow_config(config, replace=replace)
-        self._contract = TriggerFlowContract[InputT, StreamT, ResultT]()
+        self._sync_contract_from_blueprint()
         self.name = self._blue_print.name
         self._bind_start_process()
         return self
@@ -782,7 +793,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             replace=replace,
             encoding=encoding,
         )
-        self._contract = TriggerFlowContract[InputT, StreamT, ResultT]()
+        self._sync_contract_from_blueprint()
         self.name = self._blue_print.name
         self._bind_start_process()
         return self
@@ -799,7 +810,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             replace=replace,
             encoding=encoding,
         )
-        self._contract = TriggerFlowContract[InputT, StreamT, ResultT]()
+        self._sync_contract_from_blueprint()
         self.name = self._blue_print.name
         self._bind_start_process()
         return self

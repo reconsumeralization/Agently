@@ -100,6 +100,7 @@ class TriggerFlowMatchCaseProcess(TriggerFlowBaseProcess):
                         _layer_marks=data._layer_marks.copy(),
                     )
                 else:
+                    data.layer_out()
                     await data.async_emit(
                         f"Match-{ match_id }-Result",
                         data.value,

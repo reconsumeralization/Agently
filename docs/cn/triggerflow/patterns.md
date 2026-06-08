@@ -80,6 +80,12 @@ execution 级限并发：
 execution = flow.create_execution(concurrency=2)
 ```
 
+execution concurrency 是该 execution 的全局 handler dispatch 上限，包括 chunk
+continuation 和 `data.async_emit(...)` 触发的嵌套 dispatch。handler 等待内部
+dispatch 时，TriggerFlow 会临时让出并在返回前重新取得 permit，所以
+`concurrency=1` 下普通链式 flow 不会死锁。`batch(..., concurrency=...)`
+和 `for_each(..., concurrency=...)` 仍是 operator 局部 fan-out 上限。
+
 ## for_each —— 对序列输入 fan-out
 
 ```python

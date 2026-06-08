@@ -41,6 +41,7 @@ class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
             },
         )
         send_item_trigger = f"ForEach-{ for_each_id }-Send"
+        end_for_each_trigger = f"ForEach-{ for_each_id }-End"
         split_operator_id = f"for_each-split-{ for_each_id }"
 
         async def send_items(data: "TriggerFlowRuntimeData"):
@@ -81,6 +82,14 @@ class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
 
             if not isinstance(data.value, str) and isinstance(data.value, Sequence):
                 items = list(data.value)
+                if not items:
+                    data.layer_out()
+                    await data.async_emit(
+                        end_for_each_trigger,
+                        [],
+                        data._layer_marks.copy(),
+                    )
+                    return
                 for item in items:
                     _, layer_marks, item_value = prepare_item(item)
                     send_tasks.append(emit_item(item_value, layer_marks))
@@ -100,7 +109,10 @@ class TriggerFlowForEachProcess(TriggerFlowBaseProcess):
             kind="for_each_split",
             name=f"for_each:{ for_each_id }",
             listen_signals=self._definition_signals,
-            emit_signals=[self._event_signal(send_item_trigger, role="continuation")],
+            emit_signals=[
+                self._event_signal(send_item_trigger, role="continuation"),
+                self._event_signal(end_for_each_trigger, role="continuation"),
+            ],
             options={"concurrency": concurrency},
             group_id=for_each_id,
             group_kind="for_each",

@@ -71,6 +71,14 @@ flow.when({"event": ["done:a", "done:b"]}, mode="and").to(continue_after_both)
 The join state belongs to one execution. It must not leak across executions or
 be stored in shared flow data.
 
+Signals emitted from inside a chunk inherit the current runtime scope. That
+keeps framework-owned fan-out, such as `batch`, `for_each`, and chunk-internal
+emits, correlated for `when(..., mode="and")` joins. External emits that do not
+share a runtime scope are separate business events; if a host needs to join
+externally submitted `A` / `B` events for the same business item, route them
+through one scoped flow stage or carry an explicit correlation key in the
+payload and branch on it.
+
 ### Emitting from outside
 
 While the execution is `open`, outside code can emit too:

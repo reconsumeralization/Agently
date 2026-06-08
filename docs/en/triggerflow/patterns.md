@@ -80,6 +80,13 @@ Throttle concurrency at the execution level:
 execution = flow.create_execution(concurrency=2)
 ```
 
+Execution concurrency is a global handler-dispatch limit for that execution,
+including nested dispatch from chunk continuations and `data.async_emit(...)`.
+When a handler awaits an internal dispatch, TriggerFlow yields and later
+reacquires the permit so ordinary chains do not deadlock at
+`concurrency=1`. Operator-level `batch(..., concurrency=...)` and
+`for_each(..., concurrency=...)` remain local fan-out caps.
+
 ## for_each — fan-out over a sequence input
 
 ```python

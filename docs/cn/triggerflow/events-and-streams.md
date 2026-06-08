@@ -68,6 +68,12 @@ flow.when({"event": ["done:a", "done:b"]}, mode="and").to(continue_after_both)
 
 join 状态属于单个 execution，不能跨 execution 泄漏，也不应放进共享 flow data。
 
+chunk 内部 emit 的信号会继承当前 runtime scope。这样 `batch`、`for_each`
+以及 chunk 内部 fan-out 产生的信号，在 `when(..., mode="and")` join 时会保留
+同一组关联。没有共同 runtime scope 的外部 emit 是彼此独立的业务事件；如果 host
+需要把外部提交的 `A` / `B` 事件按同一个业务对象 join，应让它们经过同一个有 scope
+的 flow stage，或在 payload 中携带显式 correlation key 并据此分支。
+
 ### 外部 emit
 
 execution 还 `open` 时外部也可 emit：
