@@ -121,11 +121,20 @@ the target contract.
 
 ## Foundation Example Effect Gate
 
-Foundation-layer capabilities are release-critical substrate. When a release
-touches or claims a capability that the architecture specs position as
-Foundation, tests are not enough by themselves: the release reviewer must also
-run the corresponding core example under `examples/` and confirm the real effect
-still works through the recommended public API.
+Foundation-layer capabilities are release-critical framework substrate, not
+application-level use cases. Examples include ModelRequest/ModelResponse,
+TriggerFlow, Dynamic Task/TaskDAG, ActionRuntime, ExecutionEnvironment,
+Workspace/Recall, RuntimeEvent/EventCenter, and provider protocols. When a
+release touches or claims one of these substrate capabilities, tests are not
+enough by themselves: the release reviewer must also run the corresponding core
+example under `examples/` and confirm the real effect still works through the
+recommended public API.
+
+AgentExecution, AgentTaskLoop, Skills workflows, and business examples can be
+release use-case checks, but they are not Foundation checks by themselves. Map
+them to this gate only when the release also touches a Foundation substrate they
+depend on, such as ModelRequest result materialization, TriggerFlow lifecycle,
+or Dynamic Task DAG execution.
 
 For each affected Foundation capability:
 

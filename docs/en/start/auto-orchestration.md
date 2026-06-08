@@ -72,7 +72,7 @@ loop instead of one direct AgentExecution. It returns a task-strategy
 owned by one Agent: plan, execute one bounded step, write Workspace evidence,
 verify, replan when needed, then finish as complete or blocked.
 
-In the 4.1.3.6 development line this is a narrow public task-loop slice, not
+In 4.1.3.6 this is a narrow public task-loop slice, not
 the full future AgentTask system. `agent.create_task_loop(...)` is the explicit
 spelling for the same long-task strategy when code wants to make the strategy
 choice visible. Both APIs still return `AgentExecution`; new code should

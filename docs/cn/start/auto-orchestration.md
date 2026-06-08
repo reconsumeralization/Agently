@@ -65,7 +65,7 @@ plugin 的内部实现。
 bounded step、写入 Workspace 证据、验证、必要时 replan，最后以 complete 或
 blocked 结束。
 
-在 4.1.3.6 development line 里，这是一个有明确边界的公开 task-loop slice，
+在 4.1.3.6 里，这是一个有明确边界的公开 task-loop slice，
 不是完整未来版 AgentTask 系统。`agent.create_task_loop(...)` 是同一个长任务
 strategy 的显式写法，适合代码需要把 strategy 选择说清楚的场景。两个 API 仍然
 返回 `AgentExecution`；新代码应通过 `execution.get_result()` 或 execution 的
