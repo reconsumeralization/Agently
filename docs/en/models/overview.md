@@ -14,7 +14,7 @@ Agently has three protocol-level request plugins, plus per-provider configuratio
 Application code
       │
       ▼
-  ModelRequest  ──►  ModelResponse
+  ModelRequest  ──►  ModelResponseResult
       │
       ▼
 ModelRequester plugin (the "protocol layer")
@@ -31,6 +31,11 @@ The protocol plugin is what builds the HTTP request body and parses the wire res
 ## Why three plugins, not one
 
 Earlier versions of the docs implied "every provider goes through `OpenAICompatible`". That is no longer accurate. `OpenAICompatible`, `OpenAIResponsesCompatible`, and `AnthropicCompatible` are separate requester plugins. Each one directly implements the `ModelRequester` protocol and owns its own protocol mapping. Anthropic in particular builds its own request bodies — `anthropic_version`, `anthropic_beta`, an explicit `max_tokens` requirement, and the `messages`/`system` field shape Claude expects. Those differences are real enough that lumping Claude under "OpenAICompatible" produces wrong configurations.
+
+For custom requester handlers, `build_request_handlers()` returns
+`AttemptHandlers`; annotate the handler stream with `AttemptStreamMessage` /
+`AttemptStreamGenerator` from `agently.types.data`. `broadcast_response(...)`
+then maps that attempt/provider stream into the public `AgentlyResultGenerator`.
 
 If you are pointing at `https://api.anthropic.com` (or a Claude-compatible proxy that speaks the same protocol), use [AnthropicCompatible](anthropic-compatible.md). For everything else (OpenAI, DeepSeek, Qwen, Ollama, Kimi, GLM, MiniMax, Doubao, SiliconFlow, Groq, ERNIE, Gemini's OpenAI-compat endpoint, plus any private gateway speaking the OpenAI Chat Completions API), use [OpenAICompatible](openai-compatible.md).
 

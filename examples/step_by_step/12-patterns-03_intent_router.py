@@ -24,7 +24,7 @@ Agently.set_settings(
 
 def classify_intent(user_input: str) -> dict:
     """Classify the user message into a support category."""
-    response = (
+    result = (
         Agently.create_agent()
         .input(user_input)
         .instruct(["Classify the user's support request into the most appropriate category."])
@@ -36,9 +36,9 @@ def classify_intent(user_input: str) -> dict:
             ),
             "confidence": ("'high' | 'medium' | 'low'", "Classification confidence"),
         })
-        .get_response()
+        .get_result()
     )
-    return response.result.get_data()
+    return result.get_data()
 
 
 def build_support_router() -> TriggerFlow:

@@ -32,11 +32,17 @@ should be added here; new plugin Protocols belong in their own file.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
+from agently.types.data import (
+    ModelStreamingHandler,
+    SkillContract,
+    SkillExecutionPlan,
+    SkillMode,
+    SkillsPackRecord,
+)
 
 
 @runtime_checkable
@@ -54,7 +60,7 @@ class SkillsPlanningContext(Protocol):
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         ensure_keys: list[str] | None = None,
         max_retries: int = 3,
-        stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
+        stream_handler: ModelStreamingHandler | None = None,
     ) -> Any: ...
 
 

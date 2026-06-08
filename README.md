@@ -1,6 +1,6 @@
 <img width="640" alt="Agently" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4.1.3.5 - AI Application Runtime Framework
+# Agently 4.1.3.6 - AI Application Runtime Framework
 
 > Build AI service backends with structured outputs, observable Actions, runtime Skills, MCP capabilities, process streams, and recoverable workflows.
 
@@ -32,10 +32,12 @@ Agently is for teams moving from "the model can do it once" to "the application 
 
 The main design question is simple: how do you keep model behavior useful while still giving application code stable contracts, observable execution, and restart-safe workflow boundaries?
 
-Agently 4.1.3.5 makes request and output control defaults safer: structured
-output defaults are settings-owned, required fields must resolve to meaningful
-values, Agent quick prompt chains isolate turn-local prompt drafts, and
-`set_turn_prompt(...)` names the one-turn prompt write surface. Read the
+Agently 4.1.3.6 makes `AgentExecution` the recommended one-run owner: quick
+prompt chains are consumed through `AgentExecutionResult`, Result-first readers
+cover text/data/meta/streams/task refs, bounded task loops return task-strategy
+`AgentExecution` drafts, and OpenAI-compatible stream completion handles
+usage-only final chunks. Read the
+[4.1.3.6 Release Notes](docs/en/development/release-notes-4.1.3.6.md),
 [4.1.3.5 Release Notes](docs/en/development/release-notes-4.1.3.5.md),
 [4.1.3.4 Release Notes](docs/en/development/release-notes-4.1.3.4.md),
 [4.1.3.3 Release Notes](docs/en/development/release-notes-4.1.3.3.md),
@@ -50,7 +52,7 @@ Many AI frameworks are strong at exploration or at assembling broad integration 
 
 Agently is a good fit when you care about:
 
-- **AI services should be runtime executions, not prompt glue** - one Agent turn can declare candidate Actions, Skills, MCP services, Dynamic Task planning, process streams, and output contracts, then execute through the same runtime surface. Read [4.1.3 Release Notes](docs/en/development/release-notes-4.1.3.md), [Agent Auto Orchestration examples](examples/agent_auto_orchestration/), and [Skills Executor examples](examples/skills_executor/).
+- **AI services should be runtime executions, not prompt glue** - one Agent execution can declare candidate Actions, Skills, MCP services, Dynamic Task planning, process streams, and output contracts, then execute through the same runtime surface. Read [4.1.3.6 Release Notes](docs/en/development/release-notes-4.1.3.6.md), [Agent Auto Orchestration examples](examples/agent_auto_orchestration/), and [Skills Executor examples](examples/skills_executor/).
 - **Model switching should not rewrite business logic** - Agently normalizes provider setup, prompt slots, response parsing, action execution, and response reading into one request/runtime contract. Read [Model Setup](docs/en/start/model-setup.md), [Models Overview](docs/en/models/overview.md), and [Requests Overview](docs/en/requests/overview.md).
 - **Structured output should be a framework guarantee, not only a provider feature** - `.output(...)` schemas, required field extraction, parser feedback, retries, `ensure_keys`, `ensure_all_keys`, and validation handlers work together inside Agently. Read [Schema as Prompt](docs/en/requests/schema-as-prompt.md), [Output Control](docs/en/requests/output-control.md), and examples in [`examples/basic/`](examples/basic/).
 - **Streaming should expose structure before the final token** - `instant` mode lets consumers react to structured fields while the model is still streaming, which is useful for UI updates, SSE routes, and workflow signals. Read [Model Response](docs/en/requests/model-response.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [`examples/fastapi/`](examples/fastapi/).
@@ -62,7 +64,7 @@ Agently is a good fit when you care about:
 - **Common model-app patterns should be composable** - router, To-Do/dependency execution, planning, reflection, evaluator/reviser, and multi-agent collaboration can be built from the same request/action/signal primitives. Read [Playbooks](docs/en/playbooks/overview.md), [TriggerFlow Model Integration](docs/en/triggerflow/model-integration.md), and [`examples/step_by_step/`](examples/step_by_step/).
 - **Services should keep clean project boundaries** - async APIs, FastAPI helpers, settings files, prompt files, DevTools observation, and companion coding-agent skills fit non-trivial projects. Read [Project Framework](docs/en/start/project-framework.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [Observability](docs/en/observability/overview.md).
 
-Current framework version: `4.1.3.5`.
+Current framework version: `4.1.3.6`.
 
 Python: `>=3.10`.
 
@@ -82,7 +84,7 @@ Use Agently when the application needs an AI execution substrate. Stay closer to
 
 The practical differences show up in four layers:
 
-- **Against LangChain's integration-first style:** LangChain is strong when you want a broad, flexible set of model, tool, retrieval, and agent building blocks. Agently's bet is that production model apps need a more uniform request contract: different model providers should still feed the same prompt slots, structured parser, retry/validation path, `ModelResponse` readers, and Action Runtime. That reduces the chance that swapping the base model or provider changes the shape expected by downstream business logic. Start with [Requests Overview](docs/en/requests/overview.md) and [Action Runtime](docs/en/actions/action-runtime.md).
+- **Against LangChain's integration-first style:** LangChain is strong when you want a broad, flexible set of model, tool, retrieval, and agent building blocks. Agently's bet is that production model apps need a more uniform request contract: different model providers should still feed the same prompt slots, structured parser, retry/validation path, reusable result readers, and Action Runtime. That reduces the chance that swapping the base model or provider changes the shape expected by downstream business logic. Start with [Requests Overview](docs/en/requests/overview.md) and [Action Runtime](docs/en/actions/action-runtime.md).
 - **Against provider-native structured output as the only guarantee:** Agently can use model providers, but its output quality path does not depend only on provider-side JSON schema or tool-calling parameters. The framework owns schema-as-prompt authoring, required-field extraction, parser feedback, retries, `ensure_keys`, `ensure_all_keys`, and validation handlers. That matters when the target model does not expose the same structured-output or tool-calling semantics as another provider. See [Schema as Prompt](docs/en/requests/schema-as-prompt.md) and [Output Control](docs/en/requests/output-control.md).
 - **Against graph-only orchestration:** LangGraph is strong for graph-shaped stateful agents and durable execution. TriggerFlow's core is event/signal-driven, and Agently's `instant` response mode can surface structured fields while the model is still streaming. That lets workflow signals be driven by partial structured output, action results, human input, or sub-flow state instead of waiting for a whole model response to finish. See [Model Response](docs/en/requests/model-response.md), [TriggerFlow Events and Streams](docs/en/triggerflow/events-and-streams.md), and [`examples/fastapi/`](examples/fastapi/) for streaming/service patterns.
 - **Against treating multi-agent as the framework root:** Multi-agent collaboration is useful, but in Agently it is a scenario you can build on top of requests, Actions, TriggerFlow signals, sub-flows, Session, and runtime resources. Router, To-Do/dependency execution, planning, reflection, evaluator/reviser, and agent-team patterns are all compositions over the same lower-level engineering substrate. See [Playbooks](docs/en/playbooks/overview.md), [TriggerFlow Model Integration](docs/en/triggerflow/model-integration.md), and [`examples/step_by_step/`](examples/step_by_step/).
@@ -183,25 +185,25 @@ Agently.load_settings("yaml_file", "settings.yaml", auto_load_env=True)
 Prompts are composed from named slots. That keeps application intent, constraints, context, and output contracts reviewable:
 
 ```python
-response = (
+result = (
     agent
     .role("You are a concise release-note writer.")
-    .info({"version": "4.1.3.5", "audience": "framework users"})
+    .info({"version": "4.1.3.6", "audience": "framework users"})
     .instruct("Return only facts grounded in the input.")
     .input("Summarize this release line for an engineering changelog.")
     .output({
         "headline": (str, "short headline", True),
         "bullets": [(str, "one stable fact")],
     })
-    .get_response()
+    .get_result()
 )
 
-data = response.result.get_data()
-text = response.result.get_text()
-meta = response.result.get_meta()
+data = result.get_data()
+text = result.get_text()
+meta = result.get_meta()
 ```
 
-Use `get_response()` when the same model call will be inspected in more than one way.
+Use `get_result()` when the same model call will be inspected in more than one way.
 
 ### 2. Contract-First Output Control
 
@@ -229,17 +231,17 @@ YAML and JSON prompt files can carry the same contract through `$ensure: true`, 
 Instant events let a UI, service, or downstream consumer react as each structured field changes:
 
 ```python
-response = (
+result = (
     agent
     .input("Explain recursion with two examples.")
     .output({
         "definition": (str, "one sentence", True),
         "examples": [(str, "example with explanation")],
     })
-    .get_response()
+    .get_result()
 )
 
-for event in response.get_generator(type="instant"):
+for event in result.get_generator(type="instant"):
     if event.path == "definition" and event.delta:
         print(event.delta, end="", flush=True)
     if event.wildcard_path == "examples[*]" and event.is_complete:
@@ -264,14 +266,14 @@ def calculate_total(price: float, quantity: int) -> float:
 
 agent.use_actions(calculate_total)
 
-response = (
+result = (
     agent
     .input("Use the available action to calculate 19.5 * 4, then explain the result.")
-    .get_response()
+    .get_result()
 )
 
-print(response.result.get_text())
-print(response.result.full_result_data["extra"].get("action_logs", []))
+print(result.get_text())
+print(result.full_result_data["extra"].get("action_logs", []))
 ```
 
 Common capability helpers:
@@ -461,7 +463,7 @@ pip install agently-devtools
 agently-devtools init my_project
 ```
 
-Agently 4.1.3.5 recommends `agently-devtools >=0.1.7,<0.2.0`.
+Agently 4.1.3.6 recommends `agently-devtools >=0.1.7,<0.2.0`.
 
 ## Architecture
 
@@ -476,7 +478,7 @@ graph TB
     Prompt["Prompt slots and output schema"]
     Agent["Agent request layer"]
     Model["Model requester plugins"]
-    Response["ModelResponse: text, data, meta, stream"]
+    Result["ModelResponseResult: text, data, meta, stream"]
     Action["Action Runtime: planning, dispatch, logs"]
     Env["Execution Environment: MCP, Python, Bash, Node, Browser, SQLite"]
     Flow["TriggerFlow: branch, fan-out, stream, pause/resume, persist"]
@@ -487,7 +489,7 @@ graph TB
     Settings --> Agent
     Prompt --> Agent
     Agent --> Model
-    Model --> Response
+    Model --> Result
     Agent --> Action
     Action --> Env
     App --> Flow
@@ -693,8 +695,8 @@ Use the async request APIs directly or wrap agents, requests, generators, Trigge
 
 ## Compatibility Notes
 
-- The current package version is `4.1.3.5`.
-- The current release manifest is `compatibility/releases/4.1.3.5.json`.
+- The current package version is `4.1.3.6`.
+- The current release manifest is `compatibility/releases/4.1.3.6.json`.
 - Development-line planning belongs in `compatibility/in-development.json`; do not treat planned future versions as released.
 - README examples use the current Action and TriggerFlow close-snapshot paths.
 - Deprecated APIs emit warnings once per Python process unless `runtime.show_deprecation_warnings` is disabled.

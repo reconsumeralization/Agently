@@ -39,8 +39,8 @@ def demo_python_sandbox():
     )
     records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
 
 
 # demo_python_sandbox()
@@ -55,8 +55,8 @@ def demo_python_sandbox_sorting():
     )
     records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
 
 
 # demo_python_sandbox_sorting()
@@ -91,5 +91,5 @@ def demo_python_sandbox_sorting():
 #   result = {'total': 188.49, 'average': 37.698, 'range': 83.75}
 #   |
 #   v
-# agent.get_response()
+# agent.get_result()
 #   model reads model_digest and replies with all three computed values

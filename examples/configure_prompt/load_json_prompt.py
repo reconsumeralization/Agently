@@ -19,16 +19,20 @@ agent.load_json_prompt(
         ],
     },
 )
-print("AGENT PROMPT:", agent.prompt.get())
-print("REQUEST PROMPT:", agent.request.prompt.get(inherit=False))
+execution = agent.create_execution()
+
+print("AGENT PROMPT:", agent.agent_prompt.get())
+print("EXECUTION PROMPT:", execution.request_prompt.get(inherit=False))
+print("AGENT PENDING PROMPT AFTER CAPTURE:", agent.request.prompt.get(inherit=False))
 
 # Expected output (deterministic — no model call):
-# AGENT PROMPT: {...}   — all placeholder tokens replaced (IN VALUE!, KEY_NAME, list)
-# REQUEST PROMPT: {}    — empty because no request-level overrides were set
+# AGENT PROMPT: {...}        — persistent .agent / $... prompt slots
+# EXECUTION PROMPT: {...}    — .execution and top-level prompt slots for one run
+# AGENT PENDING PROMPT AFTER CAPTURE: {} — create_execution() consumed the pending draft
 #
 # How it works:
 # load_json_prompt() reads the JSON prompt file, fills in ${placeholder} tokens from
 # mappings= with the provided values, and applies the result to the agent's prompt store.
-# The agent-level prompt is inherited by every request from this agent.
-# The request-level prompt is a per-call overlay; inspecting it separately shows it is
-# empty here because all configuration was at the agent level.
+# The agent-level prompt is inherited by every execution from this agent.
+# The execution prompt is a one-run overlay; create_execution() captures it from
+# the agent pending draft and then clears that pending area.

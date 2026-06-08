@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncGenerator, cast
 
-from agently.types.data import AgentlyResponseGenerator
+from agently.types.data import AgentlyResultGenerator
 from agently.utils import DataFormatter, DataLocator
 
 from .types import ContentMapping
@@ -28,7 +28,7 @@ class OpenAICompatibleResponseAdapterMixin:
     model_type: str
     plugin_settings: Any
 
-    async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResponseGenerator":
+    async def broadcast_response(self, response_generator: AsyncGenerator) -> "AgentlyResultGenerator":
         meta = {}
         message_record = {}
         reasoning_buffer = ""
@@ -161,14 +161,20 @@ class OpenAICompatibleResponseAdapterMixin:
                         yield "original_done", message_record
                     case _:
                         done_message = message_record
-                        if "message" not in done_message["choices"][0]:
-                            done_message["choices"][0].update({"message": {}})
-                        done_message["choices"][0]["message"].update(
-                            {
-                                "role": meta["role"] if "role" in meta else "assistant",
-                                "content": done_content if done_content else content_buffer,
-                            }
-                        )
+                        assistant_message = {
+                            "role": meta["role"] if "role" in meta else "assistant",
+                            "content": done_content if done_content else content_buffer,
+                        }
+                        # Some OpenAI-compatible gateways send a usage-only final chunk with an
+                        # empty or missing "choices" array (e.g. YuDing, MiMo). Guard against it so
+                        # the accumulated content is preserved instead of raising IndexError/KeyError.
+                        choices = done_message.get("choices")
+                        if isinstance(choices, list) and len(choices) > 0:
+                            if "message" not in choices[0]:
+                                choices[0].update({"message": {}})
+                            choices[0]["message"].update(assistant_message)
+                        else:
+                            done_message["choices"] = [{"message": assistant_message}]
                         yield "original_done", done_message
                 if finish_reason_mapping:
                     meta.update(

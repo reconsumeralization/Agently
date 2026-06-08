@@ -585,6 +585,7 @@ class ModelResponseDataFlow:
             result._extension_handlers,
             run_context=result.request_run_context,
             attempt_index=result.attempt_index + 1,
+            warn_deprecated=False,
         ).result.async_get_data(
             type=type,
             ensure_keys=ensure_keys,

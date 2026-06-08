@@ -272,7 +272,7 @@ async def test_execution_environment_approval_denied_returns_blocked_action_resu
 
 @pytest.mark.asyncio
 async def test_execution_environment_provider_failure_does_not_poison_registry():
-    from agently.core.execution.ExecutionEnvironment import ExecutionEnvironmentManager
+    from agently.core.operation.ExecutionEnvironment import ExecutionEnvironmentManager
     from agently.utils import Settings
 
     settings = Settings(name="FailProviderTestSettings", parent=Agently.settings)

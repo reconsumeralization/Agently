@@ -311,7 +311,7 @@ For one-off calls, `create_request(model_key=...)` still overrides the active
 Agent model:
 
 ```python
-response = agent.create_request(model_key="deepseek-v4").input("Draft the customer reply.").start()
+result = agent.create_request(model_key="deepseek-v4").input("Draft the customer reply.").start()
 ```
 
 Skills planning and execution stages use the same model-key layer rather than

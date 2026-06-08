@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import warnings
 from typing import Any, cast
 
 import pytest
@@ -14,6 +15,7 @@ from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.application.AgentExecution import AgentExecutionContext
 from agently.core.extension.ExtensionHandlers import ExtensionHandlers
 from agently.core.model.ModelResponseResult import ModelResponseResult
+from agently.core.model.ModelResponse import ModelResponse
 from agently.core.model.Prompt import Prompt
 from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import Settings, SettingsNamespace
@@ -118,6 +120,37 @@ def test_dynamic_task_plugin_registered():
     assert "AgentlyTaskDAGPlanner" in planner_plugins
     assert task.planner.name == "AgentlyTaskDAGPlanner"
     assert "local_handler" in task.resolver.keys()
+
+
+def test_streaming_data_uses_is_complete_completion_field():
+    item = StreamingData(path="reply", value="ok", is_complete=True)
+
+    assert item.is_complete is True
+
+
+def test_model_response_direct_construction_warns_but_get_result_does_not():
+    from agently.core import ModelRequest
+    from agently.utils import DeprecationWarnings
+
+    DeprecationWarnings.reset_registry()
+    settings = Settings(name="DeprecatedModelResponseSettings", parent=Agently.settings)
+
+    with pytest.warns(DeprecationWarning, match="ModelResponse is deprecated"):
+        ModelResponse(
+            "deprecated-response",
+            Agently.plugin_manager,
+            settings,
+            Prompt(Agently.plugin_manager, settings),
+            ExtensionHandlers(),
+        )
+
+    DeprecationWarnings.reset_registry()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = ModelRequest(Agently.plugin_manager, parent_settings=Agently.settings).input("hello").get_result()
+
+    assert isinstance(result, ModelResponseResult)
+    assert not any("ModelResponse is deprecated" in str(item.message) for item in caught)
 
 
 def test_skills_executor_plugin_has_no_stage_action_resolution_defaults():
@@ -1057,11 +1090,11 @@ async def test_agent_execution_dynamic_task_streams_model_field_deltas():
             self.output_format = format
             return self
 
-        def get_response(self, **_kwargs):
+        def get_result(self, **_kwargs):
             return FakeModelResponse()
 
-        async def async_start(self, **_kwargs):  # pragma: no cover - get_response path owns streaming
-            raise AssertionError("streaming model tasks should use get_response()")
+        async def async_start(self, **_kwargs):  # pragma: no cover - get_result path owns streaming
+            raise AssertionError("streaming model tasks should use get_result()")
 
     request = FakeModelRequest()
     agent = Agently.create_agent("execution-model-field-stream-agent")

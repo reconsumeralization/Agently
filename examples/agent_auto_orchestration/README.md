@@ -53,6 +53,8 @@ python examples/agent_auto_orchestration/18_amap_mcp_trip_planner.py   # needs A
 python examples/agent_auto_orchestration/19_remote_skills_weather_event_ops.py
 python examples/agent_auto_orchestration/20_agent_execution_task_step_workspace_loop.py
 python examples/agent_auto_orchestration/21_agent_execution_github_issue_intake.py
+python examples/agent_auto_orchestration/22_unified_agent_execution_result.py
+python examples/agent_auto_orchestration/23_agent_execution_auto_dispatch.py
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` is the canonical reference for the
@@ -145,6 +147,23 @@ single-shot Skill + host orchestration pattern.
   `limits.max_no_progress_seconds`; expensive RuntimeEvent outlets should use
   EventCenter hook `delivery_policy` for summary delivery when the host does not
   need token-level updates. Requires authenticated GitHub CLI.
+
+- **22 — Unified AgentExecution Result.** Minimal real-model example for the
+  unified AgentExecution expression. It uses `agent.define(...)` for reusable
+  Agent definition state, a quick prompt `AgentExecutionResult` for structured
+  classification, and `agent.create_task_loop(...)` as an explicit task-loop
+  strategy that is still consumed through the same execution result/stream/meta
+  facade.
+
+- **23 — AgentExecution Auto Dispatch.** Minimal real-model route-selection
+  example. A quick prompt execution proves the default `model_request` route,
+  then an execution draft with `goal(...)` plus `success_criteria(...)` proves
+  automatic dispatch into the task-strategy `agent_task` route. The task step
+  calls a real GitHub issue-fetch Action for the first visible
+  `AgentEra/Agently` issues page, the model summarizes still-pending maintainer
+  work from the fetched issues, and AgentTask records observations, checkpoints,
+  and verification before the example reads refs through AgentExecution
+  metadata.
 
 ## Actions / Dynamic-Task DAG examples (not Skills)
 

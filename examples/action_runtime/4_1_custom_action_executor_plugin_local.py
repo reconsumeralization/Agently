@@ -61,8 +61,8 @@ if __name__ == "__main__":
     turn = agent.input("Use the reverse_text action on `Action Runtime`, then answer with the reversed text and length.")
     records = agent.get_action_result(prompt=turn.prompt)
     print_action_results(records)
-    response = turn.get_response()
-    print_response(response)
+    result = turn.get_result()
+    print_response(result)
 
 # Expected key output after configuring DeepSeek:
 # [ACTION_RECORDS] includes a successful reverse_text call.

@@ -32,7 +32,7 @@ SIMULATED_DURATIONS = {
 
 def plan_tasks(goal: str) -> dict:
     """Ask the model to break a goal into a task graph with dependency annotations."""
-    response = (
+    result = (
         Agently.create_agent()
         .input(goal)
         .instruct([
@@ -50,9 +50,9 @@ def plan_tasks(goal: str) -> dict:
             }],
             "summary": (str, "Brief rationale for how the goal was decomposed"),
         })
-        .get_response()
+        .get_result()
     )
-    return response.result.get_data()
+    return result.get_data()
 
 
 async def execute_task(task: dict) -> dict:

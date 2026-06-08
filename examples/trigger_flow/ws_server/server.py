@@ -28,13 +28,13 @@ flow = TriggerFlow(name="ws-stream-demo")
 async def model_response(data: TriggerFlowRuntimeData):
     agent = Agently.create_agent()
     agent.role("You are a concise and helpful assistant.", always=True)
-    response = agent.input(str(data.input)).get_response()
+    result = agent.input(str(data.input)).get_result()
 
-    async for delta in response.get_async_generator(type="delta"):
+    async for delta in result.get_async_generator(type="delta"):
         if delta:
             await data.async_put_into_stream({"event": "delta", "content": delta})
 
-    full_reply = await response.async_get_text()
+    full_reply = await result.async_get_text()
     await data.async_put_into_stream({"event": "final", "content": full_reply})
     await data.async_set_state("reply", full_reply)
 

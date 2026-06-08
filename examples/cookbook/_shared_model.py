@@ -78,11 +78,11 @@ def print_action_results(records):
     pprint(Action.to_action_results(records))
 
 
-def print_model_reply(response):
+def print_model_reply(result):
     print("[MODEL_REPLY]")
-    print(response.result.get_text())
+    print(result.get_text())
 
-    extra = response.result.full_result_data.get("extra") or {}
+    extra = result.full_result_data.get("extra") or {}
     action_logs = extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else []
     print("[ACTION_LOGS_FROM_RESPONSE_RESULT]")
     pprint(action_logs)
@@ -92,7 +92,7 @@ def print_model_reply(response):
 #   configure_model(temperature=0.7) — reads DEEPSEEK_* or OLLAMA_* env vars and
 #     configures Agently.set_settings("OpenAICompatible", {...}); returns provider name
 #   print_model_provider(provider) — prints [MODEL_PROVIDER] deepseek or ollama
-#   print_response(response) — prints MODEL_REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
+#   print_response(result) — prints MODEL_REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
 #
 # How it works:
 # If DEEPSEEK_API_KEY is set, the model is configured for DeepSeek; otherwise Ollama.

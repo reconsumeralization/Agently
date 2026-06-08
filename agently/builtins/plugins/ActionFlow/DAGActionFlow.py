@@ -68,7 +68,7 @@ class DAGActionFlow:
         planning_protocol: str | None = None,
         runtime_observation_handler: "ActionFlowObservationHandler | None" = None,
     ) -> list["ActionResult"]:
-        from agently.core.orchestration.TaskDAGExecutor import TaskDAGExecutor
+        from agently.core.orchestration.TaskDAG import TaskDAGExecutor
         from agently.core.orchestration.TriggerFlow import TriggerFlow
         from agently.types.data import RunContext
         from agently.types.data.task_dag import TaskDAGNode

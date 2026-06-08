@@ -34,6 +34,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
+from agently.types.data import ModelStreamingHandler, SkillRuntimeStreamHandler
 from agently.types.plugins import SkillsRuntimeContext
 
 
@@ -44,7 +45,7 @@ class AgentSkillsRuntimeContext:
         self,
         agent: Any,
         *,
-        runtime_stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        runtime_stream_handler: SkillRuntimeStreamHandler | None = None,
         resource_reader: Callable[
             [str, str, int], str | Awaitable[str]
         ] | None = None,
@@ -65,18 +66,18 @@ class AgentSkillsRuntimeContext:
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         ensure_keys: list[str] | None = None,
         max_retries: int = 3,
-        stream_handler: Callable[[Any], Awaitable[None] | None] | None = None,
+        stream_handler: ModelStreamingHandler | None = None,
     ) -> Any:
         request = self.agent.create_temp_request(model_key=model_key).input(self._normalize_model_prompt(prompt))
         if output_schema is not None:
             request = request.output(output_schema, format=output_format)
-        response = request.get_response()
+        result_handle = request.get_result()
         if stream_handler is not None:
-            async for item in response.get_async_generator(type="instant"):
+            async for item in result_handle.get_async_generator(type="instant"):
                 maybe_awaitable = stream_handler(item)
                 if inspect.isawaitable(maybe_awaitable):
                     await maybe_awaitable
-        result = await response.async_get_data(
+        result = await result_handle.async_get_data(
             ensure_keys=ensure_keys,
             max_retries=max(1, max_retries),
             raise_ensure_failure=False,
@@ -222,7 +223,7 @@ class AgentSkillsRuntimeContext:
 def create_agent_skills_runtime_context(
     agent: Any,
     *,
-    runtime_stream_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    runtime_stream_handler: SkillRuntimeStreamHandler | None = None,
     resource_reader: Callable[
         [str, str, int], str | Awaitable[str]
     ] | None = None,

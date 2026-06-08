@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Generator
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, TYPE_CHECKING, runtime_checkable
 
 from agently.types.data import (
     AgentExecutionLineage,
@@ -27,6 +27,9 @@ from agently.types.data import (
     OutputValidateHandler,
 )
 
+if TYPE_CHECKING:
+    from agently.core.application.AgentExecution import AgentExecutionResult
+
 
 @runtime_checkable
 class AgentExecution(Protocol):
@@ -36,10 +39,51 @@ class AgentExecution(Protocol):
     mode: AgentExecutionMode
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
-    options: dict[str, Any]
+    options: Any
     effective_options: dict[str, Any]
     consumed_options: dict[str, Any]
     status: str
+    request: Any
+    request_prompt: Any
+    prompt: Any
+    stream: Any
+    execution_context: Any
+
+    def __getattr__(self, name: str) -> Any: ...
+
+    def input(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
+
+    def output(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
+
+    def instruct(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
+
+    def goal(self, goal: Any) -> "AgentExecution": ...
+
+    def goals(self, *goals: Any) -> "AgentExecution": ...
+
+    def success_criteria(self, criteria: Any = None, *more: Any) -> "AgentExecution": ...
+
+    def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution": ...
+
+    def create_execution(self, **kwargs: Any) -> "AgentExecution": ...
+
+    def get_result(self) -> "AgentExecutionResult": ...
+
+    def validate(self, handler: OutputValidateHandler) -> "AgentExecution": ...
+
+    def create_dynamic_task(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def run_skills_task(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    async def async_run_skills_task(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    async def select_route(self) -> tuple[str, dict[str, Any]]: ...
+
+    async def emit_stream(self, *args: Any, **kwargs: Any) -> AgentExecutionStreamData: ...
+
+    async def close_streams(self) -> None: ...
+
+    def start(self, **kwargs: Any) -> Any: ...
 
     async def async_start(
         self,
@@ -51,6 +95,7 @@ class AgentExecution(Protocol):
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
+        parent_run_context: Any = None,
     ) -> Any: ...
 
     async def async_get_data(
@@ -63,9 +108,10 @@ class AgentExecution(Protocol):
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
+        parent_run_context: Any = None,
     ) -> Any: ...
 
-    async def async_get_text(self) -> str: ...
+    async def async_get_text(self, **kwargs: Any) -> str: ...
 
     async def async_get_meta(self) -> AgentExecutionMeta: ...
 
@@ -85,22 +131,22 @@ class AgentExecution(Protocol):
         profile: str = "fast",
     ) -> AgentExecutionWorkspaceRecord: ...
 
-    async def get_async_generator(
+    def get_async_generator(
         self,
         type: Literal["instant", "streaming_parse", "all"] | str | None = "instant",
         content: Any = None,
         **kwargs: Any,
-    ) -> AsyncGenerator[AgentExecutionStreamData | tuple[str, AgentExecutionStreamData], None]: ...
+    ) -> AsyncGenerator[AgentExecutionStreamData, None]: ...
 
     def get_data(self, **kwargs: Any) -> Any: ...
 
-    def get_text(self) -> str: ...
+    def get_text(self, **kwargs: Any) -> str: ...
 
     def get_meta(self) -> AgentExecutionMeta: ...
 
     def record_workspace(self, **kwargs: Any) -> AgentExecutionWorkspaceRecord: ...
 
-    def get_generator(self, *args: Any, **kwargs: Any) -> Generator[Any, None, None]: ...
+    def get_generator(self, *args: Any, **kwargs: Any) -> Generator[AgentExecutionStreamData, None, None]: ...
 
 
 @runtime_checkable

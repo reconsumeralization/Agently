@@ -1,123 +1,116 @@
-import asyncio
-import time
+"""ModelRequest result facade foundation probe.
+
+Run:
+    python examples/step_by_step/05-response_result.py
+
+Environment:
+    DEEPSEEK_API_KEY in the shell or .env file.
+    Set DYNAMIC_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
+
+This is a Foundation example effect check for the low-level ModelRequest /
+ModelResponseResult substrate. It intentionally avoids AgentExecution so release
+reviewers can verify the request foundation directly:
+
+    request = Agently.create_request()
+    result = request.input(...).output(...).get_result()
+
+Expected key output from one real DeepSeek run on 2026-06-08:
+    provider=deepseek
+    result_type=ModelResponseResult
+    data_has_definition=True
+    data_has_example=True
+    text_nonempty=True
+    meta_has_id=True
+    result_cached=True
+    delta_event_count_positive=True
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from agently import Agently
-
-agent = Agently.create_agent()
-
-Agently.set_settings(
-    "OpenAICompatible",
-    {
-        "base_url": "http://127.0.0.1:11434/v1",
-        "model": "qwen2.5:7b",
-    },
-)
+from agently.core import ModelResponseResult
+from examples.dynamic_task._shared import configure_model
 
 
-## Different Response Results and Use Cases
-def different_response_results():
-    # Create a response instance once.
-    # The actual request runs when you consume data from response.result,
-    # and the result can be reused multiple times without re-requesting.
-    response = (
-        agent.input("Please explain recursion with a short example.")
+def build_result_request() -> ModelResponseResult:
+    Agently.set_settings("OpenAICompatible.stream", False)
+    request = Agently.create_request()
+    result = (
+        request.input(
+            "Explain recursion for a junior Python developer. Keep the answer short and concrete."
+        )
         .output(
             {
-                "definition": (str, "Short definition"),
-                "example": (str, "Simple example"),
+                "definition": (str, "One short definition of recursion.", True),
+                "example": (str, "One short Python-flavored example.", True),
             },
+            format="json",
         )
-        .get_response()
+        .get_result()
     )
-
-    # 1) get_text(): plain text, best for quick chat outputs.
-    text = response.result.get_text()
-    print("[text]", text)
-
-    # 2) get_data(): parsed structured data (when output() is used).
-    data = response.result.get_data()
-    print("[data]", data)
-
-    # 3) get_data_object(): Pydantic model instance for strict typing.
-    # Useful when you want attribute access and validation.
-    data_object = response.result.get_data_object()
-    print("[data_object]", data_object)
-
-    # 4) get_meta(): request/response metadata (tokens, model info, etc.).
-    meta = response.result.get_meta()
-    print("[meta]", meta)
-
-    # 5) get_generator(): streaming outputs for realtime UX or incremental parsing.
-    # type can be: "delta", "specific", "instant", "streaming_parse", "original", "all"
-    # "delta" yields tokens; "instant"/"streaming_parse" yields structured path updates.
-    response_stream = agent.input("List 3 recursion tips.").output({"tips": [(str, "Short tip")]}).get_response()
-    for item in response_stream.result.get_generator(type="delta"):
-        print(item, end="", flush=True)
-    print()
+    if not isinstance(result, ModelResponseResult):
+        raise TypeError(f"Expected ModelResponseResult, got {type(result).__name__}")
+    return result
 
 
-# different_response_results()
+def run_stream_probe() -> int:
+    Agently.set_settings("OpenAICompatible.stream", True)
+    request = Agently.create_request()
+    result = request.input("List three recursion tips in one compact sentence.").get_result()
+    delta_count = 0
+    for delta in result.get_generator(type="delta"):
+        if delta:
+            delta_count += 1
+    return delta_count
 
 
-## Async Variants (same result types with async APIs)
-async def async_request_support():
-    response = (
-        agent.input("Please explain recursion with a short example.")
-        .output({"definition": (str, "Short definition"), "example": (str, "Simple example")})
-        .get_response()
-    )
-    text = await response.result.async_get_text()
-    data = await response.result.async_get_data()
-    data_object = await response.result.async_get_data_object()
-    meta = await response.result.async_get_meta()
-    print("[async text]", text)
-    print("[async data]", data)
-    print("[async data_object]", data_object)
-    print("[async meta]", meta)
+def main() -> None:
+    provider = configure_model(temperature=0.0)
+    Agently.set_settings("OpenAICompatible.stream_idle_timeout", 45.0)
+    Agently.set_settings("OpenAIResponsesCompatible.stream_idle_timeout", 45.0)
+    Agently.set_settings("response.materialization_idle_timeout", 45.0)
+    result = build_result_request()
+
+    data = result.get_data()
+    text = result.get_text()
+    meta = result.get_meta()
+    cached_data = result.get_data()
+    delta_event_count = run_stream_probe()
+
+    data_dict: dict[str, Any] = data if isinstance(data, dict) else {}
+
+    print(f"provider={provider}")
+    print("result_type=ModelResponseResult")
+    print(f"data_has_definition={bool(data_dict.get('definition'))}")
+    print(f"data_has_example={bool(data_dict.get('example'))}")
+    print(f"text_nonempty={bool(str(text).strip())}")
+    print(f"meta_has_id={bool(meta.get('id'))}")
+    print(f"result_cached={cached_data == data}")
+    print(f"delta_event_count_positive={delta_event_count > 0}")
 
 
-## Async Concurrency (two requests in parallel)
-async def concurrent_requests():
-    start_time = time.perf_counter()
-
-    async def ask(prompt: str):
-        print("[concurrent start]:", prompt, start_time)
-        response = agent.input(prompt).get_response()
-        return await response.result.async_get_text()
-
-    result_1, result_2 = await asyncio.gather(
-        ask("Summarize recursion in one sentence."),
-        ask("Give one example of recursion in Python."),
-    )
-    end_time = time.perf_counter()
-    print("[concurrent end]", end_time)
-    print("[concurrent elapsed]", end_time - start_time)
-    print("[concurrent result 1]", result_1)
-    print("[concurrent result 2]", result_2)
+if __name__ == "__main__":
+    main()
 
 
-async def main():
-    # await async_request_support()
-    # await concurrent_requests()
-    pass
-
-
-asyncio.run(main())
-
-# All functions are commented out — uncomment one to run with a local Ollama model.
-# Model output is non-deterministic text; structure of meta is stable.
-#
 # How it works:
-# get_response() returns a lazy response handle; the model request does not start until
-# data is consumed.  Once consumed, all result types (text, data, data_object, meta)
-# are cached on the result instance and can be read multiple times without re-requesting.
+#
+# get_result() returns a lazy result facade; the model request does not start
+# until data is consumed. Once consumed, all result types (text, data,
+# data_object, meta) are cached on the result instance and can be read multiple
+# times without re-requesting.
+#
 # Result accessor pairs:
-#   get_text()        / async_get_text()        — raw reply as a string
-#   get_data()        / async_get_data()        — parsed structured dict (requires .output())
-#   get_data_object() / async_get_data_object() — Pydantic model of the structured dict
-#   get_meta()        / async_get_meta()        — request metadata (model, tokens, timing, …)
-#   get_generator()   / get_async_generator()   — streaming iterator; type=
-#     "delta"          : raw token strings
-#     "instant"        : streaming_parse nodes with .path, .delta, .wildcard_path
-#     "specific"       : (event_name, data) tuples (delta, reasoning_delta, tool_calls)
-# concurrent_requests() shows that multiple async_get_text() calls on separate response
-# handles run in parallel via asyncio.gather(), each making its own independent request.
+#   get_text()        / async_get_text()        - raw reply as a string
+#   get_data()        / async_get_data()        - parsed structured dict
+#   get_data_object() / async_get_data_object() - Pydantic model
+#   get_meta()        / async_get_meta()        - request metadata
+#   get_generator()   / get_async_generator()   - streaming iterator

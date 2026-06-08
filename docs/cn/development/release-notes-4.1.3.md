@@ -288,7 +288,7 @@ result = (
 单次调用仍然可以用 `create_request(model_key=...)` 覆盖当前 Agent 模型：
 
 ```python
-response = agent.create_request(model_key="deepseek-v4").input("Draft the customer reply.").start()
+result = agent.create_request(model_key="deepseek-v4").input("Draft the customer reply.").start()
 ```
 
 Skills 规划和执行阶段使用同一层 model key，而不是硬编码 provider model name：

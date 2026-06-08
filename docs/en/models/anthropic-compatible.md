@@ -62,7 +62,7 @@ agent.set_settings("AnthropicCompatible", {"model": "${ENV.ANTHROPIC_MODEL_FAST}
 
 ## Streaming
 
-`response.get_generator(type="delta")` / `get_async_generator(type="delta")` yields incremental text. `type="instant"` for structured streaming works the same way as on `OpenAICompatible` — the difference is purely upstream parsing.
+`result.get_generator(type="delta")` / `get_async_generator(type="delta")` yields incremental text. `type="instant"` for structured streaming works the same way as on `OpenAICompatible` — the difference is purely upstream parsing.
 
 ## Beta features
 

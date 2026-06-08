@@ -9,7 +9,7 @@ from _shared_model import configure_model, print_model_provider
 def classify_intent(user_input: str) -> dict:
     from agently import Agently
 
-    response = (
+    result = (
         Agently.create_agent()
         .input(user_input)
         .instruct([
@@ -24,9 +24,9 @@ def classify_intent(user_input: str) -> dict:
             "confidence": ("float", "0 to 1 classification confidence"),
             "reason": ("str", "short reason"),
         })
-        .get_response()
+        .get_result()
     )
-    return response.get_data(ensure_keys=["route", "confidence", "reason"])
+    return result.get_data(ensure_keys=["route", "confidence", "reason"])
 
 
 async def model_answer(question: str, role: str) -> str:

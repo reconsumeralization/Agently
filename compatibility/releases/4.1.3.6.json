@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "framework": "agently",
+  "framework_version": "4.1.3.6",
+  "release_train": "2026-06-4.1.3.6",
+  "released_at": "2026-06-08",
+  "notes": "Version-scoped companion compatibility manifest for the Agently 4.1.3.6 release-line AgentExecution ownership and result facade slice, including OpenAI-compatible stream-end hardening, Result-named stream/result aliases, ModelResponseResult facade guidance, and the narrow AgentExecution task-loop contract.",
+  "companions": {
+    "devtools": {
+      "companion_package": "agently-devtools",
+      "runtime_protocol": "agently-devtools.observation-runtime.v1",
+      "event_naming": {
+        "preferred_event_type": "RuntimeEvent",
+        "devtools_projection_type": "ObservationEvent",
+        "event_center_dispatch": "RuntimeEvent",
+        "compatibility_input_type": "ObservationEvent"
+      },
+      "runtime_control": {
+        "runtime_event_ownership": {
+          "official_event_producer": "core",
+          "plugin_contract": "plugins return observations/errors/decisions; core maps them to official RuntimeEvent records",
+          "builtin_direct_emitters_for_official_events": false,
+          "agent_execution_stream_owner": "agently.core.application.AgentExecution.AgentExecutionStream"
+        },
+        "runtime_naming": {
+          "agent_turn": "run_kind for one Agent-facing turn",
+          "attempt_index": "model-request retry attempt metadata; not an agent turn counter"
+        },
+        "agent_execution_limits": [
+          "max_seconds",
+          "max_no_progress_seconds"
+        ],
+        "provider_stream_idle_timeout": [
+          "OpenAICompatible.stream_idle_timeout",
+          "OpenAIResponsesCompatible.stream_idle_timeout"
+        ],
+        "response_materialization_idle_timeout": "response.materialization_idle_timeout",
+        "typed_stall_error": "RuntimeStageStallError",
+        "typed_provider_stall_stages": [
+          "response_first_event",
+          "response_stream"
+        ],
+        "action_runtime_stall_stages": [
+          "action_planning",
+          "tool_call_selection",
+          "action_execution",
+          "action_loop_close"
+        ],
+        "event_center_delivery_policy": {
+          "register_hook_parameter": "delivery_policy",
+          "hooker_attribute": "delivery_policy",
+          "fields": [
+            "mode",
+            "dispatch",
+            "emit_interval",
+            "max_items",
+            "high_frequency_only",
+            "max_summary_items"
+          ],
+          "background_reclaim": "idle_flush_and_explicit_flush",
+          "default_delivery": "raw",
+          "summary_marker": "meta.coalesced"
+        }
+      },
+      "recommended_version_specifier": ">=0.1.7,<0.2.0"
+    },
+    "skills": {
+      "repository": "Agently-Skills",
+      "authoring_protocol": "agently-skills.authoring.v2",
+      "authoring_format": "standard SKILL.md only",
+      "runtime_capability_contract": {
+        "skill_capability_needs": "SkillsExecutor records selected Skill capability needs in SkillExecutionPlan.capability_needs from SKILL.md guidance, resource indexes, public compatibility, public metadata, and optional model-assisted inference.",
+        "model_assisted_discovery_setting": "skills.capability_discovery.model_assisted",
+        "host_policy_surface": "agent.configure_skill_capabilities(auto_load={...}, workspace_root=..., mcp_config=..., python=..., search=...) plus agent.configure_policy_approval(handler=...)",
+        "search_provider": "Framework Search uses the ddgs package by default, keeps backend configurable through host policy, supports host-approved ddgs refresh before search runs, treats no-result search as a successful empty result, and falls back through configured/default ddgs backends when a selected backend returns no usable parsed result.",
+        "workspace_file_action_owner": "Workspace owns file action roots and path boundaries; SkillsExecutor prefers workspace.enable_file_actions(agent, ...) before falling back to agent.enable_workspace_file_actions(...).",
+        "policy_approval_surface": "Skills capability approval uses the framework-wide PolicyApproval handler surface: input_timeout_fail by default, fail_closed for pending diagnostics/TriggerFlow gates, auto_approve for tests, input, or registered service-specific handlers.",
+        "policy_modes": [
+          "allow",
+          "approval",
+          "off"
+        ],
+        "auto_loadable_needs": [
+          "web_search",
+          "web_browse",
+          "http_request",
+          "workspace_read",
+          "workspace_write",
+          "python",
+          "shell",
+          "script_run",
+          "mcp"
+        ],
+        "removed_private_skill_fields": [
+          "allowed-actions",
+          "allowed_actions",
+          "allow-scripts",
+          "allow_scripts",
+          "mcp",
+          "mcpServers",
+          "mcp_servers",
+          "execution",
+          "stages"
+        ]
+      },
+      "devtools_guidance_protocol": "agently-skills.devtools-guidance.v1",
+      "catalog_generation": "v2",
+      "recommended_bundle": "app",
+      "recommended_ref": "main",
+      "legacy_generations": [
+        {
+          "generation": "v1",
+          "last_supported_framework_version": "4.1.1",
+          "status": "frozen"
+        }
+      ]
+    },
+    "docs": {
+      "repository": "docs",
+      "public_surface_protocol": "agently-docs.public-surface.v1"
+    },
+    "action_runtime": {
+      "action_statuses": [
+        "success",
+        "partial_success",
+        "error",
+        "approval_required",
+        "blocked",
+        "skipped"
+      ],
+      "partial_success_contract": "Action results with status=partial_success keep success=True/ok=True and carry diagnostics for degraded providers or fallback recovery. ActionFlow treats partial_success as continuable evidence, not action.failed.",
+      "search_partial_success": "Built-in Search returns partial_success when earlier ddgs backends fail or return empty parsed results but a later fallback backend returns usable results.",
+      "bash_sandbox_model_description": "Model-visible bash sandbox action descriptions include the allowed command prefixes, allowed working-directory roots, and timeout when the action is registered or enabled through agent.enable_shell(...)."
+    },
+    "configuration": {
+      "settings_contract": "dict-compatible typed helpers under agently.types.settings",
+      "default_output_format": "Omitted .output(..., format=...) reads prompt.default_output_format from the current settings chain; the global default is json, while explicit format=\"auto\" and per-agent/request prompt.default_output_format=\"auto\" remain available for schema-driven selection.",
+      "tuple_ensure_value_contract": "Tuple ensure flags and ensure_keys require paths to resolve to meaningful values: missing keys, None, blank strings, empty wildcard matches, and wildcard matches containing blank required values fail and share the normal retry budget; False and 0 remain valid typed values.",
+      "options_contract": "dict-compatible typed helpers under agently.types.options",
+      "plugin_schema_registration": [
+        "SETTINGS_SCHEMAS",
+        "OPTIONS_SCHEMAS"
+      ],
+      "model_routing_layers": [
+        "model_pool",
+        "model_profiles",
+        "api_key_pools"
+      ],
+      "api_key_pools": [
+        "selection_policy",
+        "failover_policy",
+        "selection_handler",
+        "failover_handler"
+      ]
+    }
+  },
+  "request_input": {
+    "agent_turn_request_scope": {
+      "status": "released",
+      "surface": [
+        "AgentExecution",
+        "AgentExecutionResult",
+        "AgentTurn",
+        "Agent.create_turn",
+        "prompt config .execution",
+        "Agent quick prompt chain",
+        "Agent.set_turn_prompt",
+        "AgentTurn.set_turn_prompt"
+      ],
+      "contract": "Non-always Agent quick prompt calls create an isolated AgentExecution draft; AgentExecution owns execution-local ModelRequest prompt state and returns AgentExecutionResult. Prompt config .execution is the recommended one-run prompt section. AgentTurn/create_turn/set_turn_prompt remain compatibility aliases with deprecation warnings; Agent-level persistent state remains on define(...), always=True, set_agent_prompt(...), and stable setup APIs.",
+      "compatibility_policy": "Expression-local chaining is the recommended execution-scoped shape. Multi-statement setup should capture execution = agent.create_execution() or use agent.input(...). set_turn_prompt(...) and set_request_prompt(...) remain compatibility aliases for set_execution_prompt(...); prompt config .turn and .request remain compatibility aliases for .execution; explicit low-level agent.create_request()/agent.request builders remain available for direct ModelRequest use."
+    },
+    "response_stream_type_surface": {
+      "status": "released",
+      "surface": [
+        "StreamingData",
+        "StreamingData.is_complete",
+        "AgentlyModelResultEvent",
+        "AgentlyModelResultMessage",
+        "AgentlySpecificResultMessage",
+        "AgentlyOriginalResultPayload",
+        "AgentlyResultGenerator",
+        "ResultContentType",
+        "AgentlyModelResponseEvent",
+        "AgentlyModelResponseMessage",
+        "AgentlySpecificResponseMessage",
+        "AgentlyOriginalResponsePayload",
+        "AgentlyResponseGenerator",
+        "ResponseContentType",
+        "ModelStreamingHandler",
+        "AgentExecutionStreamHandler",
+        "AttemptStreamMessage",
+        "AttemptStreamGenerator",
+        "AgentExecutionStreamData",
+        "SkillRuntimeStreamItem",
+        "SkillRuntimeStreamHandler"
+      ],
+      "contract": "Common generator and handler type annotations are exposed through agently and agently.types.data. Result-named aliases are the recommended root-level public names: delta yields str, instant/streaming_parse yields StreamingData with is_complete, specific/all yield event-tagged result messages, AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive SkillRuntimeStreamItem dictionaries. Response-named aliases are compatibility-only aliases under agently.types.data and are not re-exported from the agently root.",
+      "compatibility_policy": "StreamingData.is_complete remains the canonical instant/streaming_parse completion field. Response-named type aliases remain compatibility-only aliases in agently.types.data and are deprecated in favor of Result-named aliases; they will be removed in Agently 4.2."
+    },
+    "model_response_result_facade": {
+      "status": "released",
+      "surface": [
+        "ModelRequest.get_result",
+        "AgentExecution.get_result",
+        "AgentExecutionResult",
+        "Agent.get_result",
+        "AgentTurn.get_result",
+        "ModelRequest.get_response",
+        "AgentExecution.get_response",
+        "Agent.get_response",
+        "AgentTurn.get_response",
+        "ModelResponse",
+        "ModelResponseResult"
+      ],
+      "contract": "get_result() is the recommended reusable facade for text, data, metadata, and streaming readers. Agent quick prompt chains return AgentExecutionResult; direct ModelRequest calls return ModelResponseResult. get_response() remains a compatibility alias. ModelResponseResult.result points to itself so older response.result reader chains continue to work.",
+      "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); data = result.get_data(). Code that already calls get_response() and then reader methods or response.result reader chains remains supported. Direct ModelResponse construction is deprecated and will be removed in Agently 4.2."
+    },
+    "agent_execution_task_loop": {
+      "status": "released",
+      "surface": [
+        "Agent.create_task",
+        "Agent.create_task_loop",
+        "AgentExecution.strategy(\"task\")",
+        "AgentExecution.strategy(\"task_loop\")",
+        "AgentExecutionResult.task_refs",
+        "AgentExecutionResult.get_async_generator",
+        "AgentExecutionResult.async_get_meta",
+        "AgentExecutionResult.async_resume"
+      ],
+      "contract": "The 4.1.3.6 task-loop contract is a narrow single-task, single-Agent-owner slice carried by AgentExecution. agent.create_task(...) and agent.create_task_loop(...) return task-strategy AgentExecution drafts, not a separate recommended AgentTask execution owner. Consumers read final data, text, streams, metadata, and task refs through AgentExecutionResult or the execution stream/meta facade. Completion acceptance requires model-owned verification plus conservative host guards; completed means accepted=true and artifact_status=accepted, while max_iterations can return accepted=false and artifact_status=partial. AgentExecutionResult resume is reserved and reports supported=false until a resumable strategy lands.",
+      "scope": {
+        "current_slice": [
+          "one Agent-owned business task",
+          "bounded 2-5 iteration task-loop guidance",
+          "explicitly enabled Actions, Skills, or Dynamic Task candidates as step capabilities",
+          "model-owned planning, verification, and replan decisions",
+          "host guards for missing criteria, risky action evidence, approval-required actions, and missing final deliverables",
+          "structured task refs, diagnostics, progress/snapshot stream items, and result facade consumption"
+        ],
+        "deferred": [
+          "multi-task scheduling",
+          "background autonomous scheduler",
+          "distributed lease or cross-worker ownership",
+          "durable pause/resume beyond the reserved result surface",
+          "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging"
+        ]
+      },
+      "compatibility_policy": "New documentation and examples should keep AgentExecutionResult as the common consumption surface. Task-style compatibility readers may remain callable, but they should not be promoted as a second recommended public lifecycle. Future 4.1.3.7 AgentTaskLoop hardening must strengthen the task strategy behind AgentExecution without changing this public ownership boundary."
+    },
+    "image": {
+      "status": "released",
+      "surface": [
+        "ModelRequest.image",
+        "Agent.image"
+      ],
+      "shape": "image(question=..., file=...|url=...|files=[...]|urls=[...])",
+      "attachment_contract": "Builds text plus image_url rich-content blocks and keeps attachment as the low-level passthrough.",
+      "local_image_mime_types": [
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "image/bmp"
+      ],
+      "common_file_handling_target": "4.1.4"
+    }
+  }
+}

@@ -32,8 +32,14 @@ if TYPE_CHECKING:
         ActionPlanningRequest,
         ActionResult,
         ActionRunContext,
+        RunContext,
     )
     from agently.utils import Settings
+
+
+def _get_model_request_result(request: Any, *, parent_run_context: "RunContext | None" = None) -> Any:
+    getter = getattr(request, "get_result", None) or getattr(request, "get_response")
+    return getter(parent_run_context=parent_run_context)
 
 
 class AgentlyActionRuntime:
@@ -288,20 +294,24 @@ class AgentlyActionRuntime:
                 ],
             }
         )
-        action_plan_response = action_plan_request.get_response(parent_run_context=parent_run_context)
-        async for instant in action_plan_response.get_async_generator(type="instant"):
+        action_plan_result = _get_model_request_result(
+            action_plan_request,
+            parent_run_context=parent_run_context,
+        )
+        async for instant in action_plan_result.get_async_generator(type="instant"):
             if not instant.is_complete:
                 continue
             if not self.action._is_next_action_path(instant.path):
                 continue
             if isinstance(instant.value, str) and instant.value.strip().lower() == "response":
-                await self.action._try_close_response_stream(action_plan_response)
+                await self.action._try_close_response_stream(action_plan_result)
                 return {
                     "next_action": "response",
                     "execution_commands": [],
                 }
             break
-        result = await action_plan_response.result.async_get_data()
+        result_reader = getattr(action_plan_result, "result", action_plan_result)
+        result = await result_reader.async_get_data()
         if not isinstance(result, dict):
             return {"next_action": "response", "execution_commands": []}
         return cast("ActionDecision", result)
@@ -350,9 +360,9 @@ class AgentlyActionRuntime:
             ]
         )
         action_request.prompt.set("tools", action_list)
-        response = action_request.get_response(parent_run_context=parent_run_context)
+        result = _get_model_request_result(action_request, parent_run_context=parent_run_context)
         tool_call_chunks: list[Any] = []
-        async for event, data in response.get_async_generator(type="specific", specific=["tool_calls", "done"]):
+        async for event, data in result.get_async_generator(type="specific", specific=["tool_calls", "done"]):
             if event == "tool_calls":
                 tool_call_chunks.append(data)
             elif event == "done":

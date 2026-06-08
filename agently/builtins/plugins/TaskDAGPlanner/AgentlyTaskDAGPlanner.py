@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, cast
 
-from agently.core.orchestration.TaskDAGExecutor import (
+from agently.core.orchestration.TaskDAG import (
     _GRAPH_SCHEMA_VERSION,
     _TASK_ID_PATTERN,
     TaskDAGValidator,

@@ -133,10 +133,10 @@ The prompt snapshot is rendered through the normal Prompt generator to become
 the Dynamic Task target. The `output` slot becomes the facade-level
 `output_schema`, and `output_format` becomes the default model-task format.
 `set_agent_prompt(...)` / `always=True` values are inherited. In a quick prompt
-chain, turn prompt values are held on the AgentTurn draft and frozen into the
-new task; direct `set_turn_prompt(...)`, compatibility
-`set_request_prompt(...)`, and `agent.request` values remain the lower-level
-request-builder compatibility path. Explicit
+chain, execution prompt values are held on the AgentExecution draft and frozen
+into the new task; direct `set_turn_prompt(...)`, compatibility
+`set_request_prompt(...)`, and `agent.request` values remain lower-level
+compatibility paths. Explicit
 `create_dynamic_task(target=..., output_schema=..., output_format=...)`
 arguments override prompt-derived defaults.
 
@@ -201,7 +201,7 @@ Dynamic Task is split into four stages:
   output schema, `ensure_keys`, and validation retry.
 - `TaskDAGValidator` validates DAG syntax, dependencies, schema version,
   semantic outputs, side-effect policy, and resolver availability.
-- `DynamicTaskResolver` maps `task.binding`, `task.id`, then `task.kind` to a
+- `TaskDAGResolver` maps `task.binding`, `task.id`, then `task.kind` to a
   runnable handler.
 - `TaskDAGExecutor` compiles the validated DAG to ordinary TriggerFlow chunks
   and runs it through TriggerFlow lifecycle, stream, pause/resume, result, and
@@ -242,9 +242,9 @@ control:
 
 ```python
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
-from agently.core import DynamicTaskResolver, TaskDAGExecutor, TaskDAGValidator
+from agently.core import TaskDAGResolver, TaskDAGExecutor, TaskDAGValidator
 
-resolver = DynamicTaskResolver({"risk_check_handler": risk_check_handler})
+resolver = TaskDAGResolver({"risk_check_handler": risk_check_handler})
 validator = TaskDAGValidator(resolver)
 planner = AgentlyTaskDAGPlanner(validator=validator)
 

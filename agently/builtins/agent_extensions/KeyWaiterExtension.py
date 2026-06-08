@@ -48,8 +48,8 @@ class KeyWaiterExtension(BaseAgent):
                 )
 
     def __get_consumer(self):
-        response = self.get_response()
-        return GeneratorConsumer(response.get_async_generator(type="instant"))
+        result = self.get_result()
+        return GeneratorConsumer(result.get_async_generator(type="instant"))
 
     async def async_get_key_result(
         self,

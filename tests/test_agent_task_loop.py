@@ -109,6 +109,28 @@ def _create_agent(name: str = "agent-task-loop-test"):
 
 
 @pytest.mark.asyncio
+async def test_agent_goal_success_criteria_uses_task_execution_path(tmp_path):
+    MockAgentTaskRequester.reset()
+    agent = _create_agent("agent-goal-task-path").use_workspace(tmp_path / "task-workspace")
+
+    execution = (
+        agent
+        .goal("Repair a legacy Agently script so it runs on the current API.")
+        .success_criteria(["The script runs successfully."])
+        .strategy("task", max_iterations=2)
+    )
+
+    result = await execution.async_start()
+    meta = await execution.async_get_meta()
+
+    assert result["status"] == "completed"
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert meta["task_refs"]["task_id"]
+    assert meta["task_refs"]["status"] == "completed"
+    assert meta["success_criteria"] == ["The script runs successfully."]
+
+
+@pytest.mark.asyncio
 async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     MockAgentTaskRequester.reset()
     agent = _create_agent()
@@ -127,12 +149,21 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
         options={"agent_task": {"stream_progress": True}},
     )
 
-    stream_items = [item async for item in task.stream()]
-    result = await task.run()
+    result_facade = task.get_result()
+    stream_items = [item async for item in result_facade.get_async_generator()]
+    result = await result_facade.async_get_data()
+    execution_meta = await result_facade.async_get_meta()
     meta = await task.meta()
+    resume = await result_facade.async_resume()
 
     assert result["status"] == "completed"
     assert result["iterations"] == 2
+    assert result_facade.task_refs["task_id"] == "legacy-script-upgrade"
+    assert result_facade.task_refs["status"] == "completed"
+    assert execution_meta["task_refs"]["task_id"] == "legacy-script-upgrade"
+    assert execution_meta["task_refs"]["status"] == "completed"
+    assert resume["supported"] is False
+    assert resume["reason"] == "AgentExecution resume is reserved for resumable strategies."
     assert meta["status"] == "completed"
     assert len(meta["iterations"]) == 2
     assert MockAgentTaskRequester.verification_calls == 2

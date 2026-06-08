@@ -3,7 +3,7 @@
 These examples are written for the Action-based runtime. Every numbered example
 creates a request-scoped `turn`, passes `turn.prompt` into
 `agent.get_action_result(...)` to inspect intermediate `ActionResult` records
-first, then uses `turn.get_response()` to produce the final DeepSeek reply
+first, then uses `turn.get_result()` to produce the final DeepSeek reply
 through `OpenAICompatible`.
 
 Before running them, set:
@@ -38,7 +38,7 @@ Example groups:
 
 Shared helper:
 
-- `_shared.py` loads `.env`, configures DeepSeek, prints intermediate action records, and prints final reply logs from `response.result.full_result_data["extra"]["action_logs"]`
+- `_shared.py` loads `.env`, configures DeepSeek, prints intermediate action records, and prints final reply logs from `result.full_result_data["extra"]["action_logs"]`
 
 Notes:
 
@@ -46,7 +46,7 @@ Notes:
 - Future action examples must be runnable in their declared environment and must include an `Expected key output` comment in the file. For model-backed examples, the comment should describe the stable action/result shape rather than an exact model sentence.
 - Cookbook examples must call DeepSeek or local Ollama for planner/classifier/evaluator/reviser steps. Local functions are acceptable only as the business capability being called by an Action or workflow step, not as a model-decision substitute.
 - By default, `agent.get_action_result(prompt=turn.prompt)` stores
-  `action_results` on that turn prompt so the following `turn.get_response()`
+  `action_results` on that turn prompt so the following `turn.get_result()`
   can reuse those intermediate results instead of executing the action loop
   again. Pass `store_for_reply=False` when you only want isolated inspection.
 - Instruction-heavy actions expose compact `model_digest` data to later model context and keep full raw input/output behind `artifact_refs`; `3_5_action_execution_recall_local.py` shows explicit artifact recall through `agent.action.read_action_artifact(...)`.

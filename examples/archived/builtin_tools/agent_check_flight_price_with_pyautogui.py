@@ -341,7 +341,7 @@ def run_one_open_step(
     trimmed_rejected_urls = rejected_urls[-8:]
     trimmed_recent_failures = recent_failures[-8:]
     trimmed_blocked_domains = blocked_domains[-8:]
-    response = (
+    result = (
         scan_agent.input(
             {
                 "route_from": ROUTE_FROM,
@@ -376,15 +376,15 @@ def run_one_open_step(
                 "note": (str, "Short note for this step"),
             }
         )
-        .get_response()
+        .get_result()
     )
-    result = response.result.get_data()
-    extra = response.result.full_result_data.get("extra", {})
-    return result, extra.get("action_logs", extra.get("tool_logs", []))
+    data = result.get_data()
+    extra = result.full_result_data.get("extra", {})
+    return data, extra.get("action_logs", extra.get("tool_logs", []))
 
 
 def run_one_read_step(read_agent, target_url: str):
-    response = (
+    result = (
         read_agent.input(
             {
                 "route_from": ROUTE_FROM,
@@ -424,11 +424,11 @@ def run_one_read_step(read_agent, target_url: str):
                 "note": (str, "Extraction note"),
             }
         )
-        .get_response()
+        .get_result()
     )
-    result = response.result.get_data()
-    extra = response.result.full_result_data.get("extra", {})
-    return result, extra.get("action_logs", extra.get("tool_logs", []))
+    data = result.get_data()
+    extra = result.full_result_data.get("extra", {})
+    return data, extra.get("action_logs", extra.get("tool_logs", []))
 
 
 def post_process_read_result(read_result: dict, read_logs: list[dict], target_url: str) -> dict:
@@ -504,7 +504,7 @@ def summarize_execution(
     read_step_results: list[dict],
     programmatic_best_offer: dict | None,
 ):
-    response = (
+    result = (
         summary_agent.input(
             {
                 "route_from": ROUTE_FROM,
@@ -545,55 +545,55 @@ def summarize_execution(
                 "manual_review_checklist": [(str, "Manual verification checklist")],
             }
         )
-        .get_response()
+        .get_result()
     )
-    result = response.result.get_data()
-    if not isinstance(result, dict):
-        result = {}
+    data = result.get_data()
+    if not isinstance(data, dict):
+        data = {}
 
-    if not result.get("route"):
-        result["route"] = f"{ROUTE_FROM} to {ROUTE_TO}"
-    if not result.get("travel_date"):
-        result["travel_date"] = TRAVEL_DATE
-    if not isinstance(result.get("opened_url_count"), int):
-        result["opened_url_count"] = len(opened_urls)
-    if not isinstance(result.get("analyzed_url_count"), int):
-        result["analyzed_url_count"] = len(read_step_results)
+    if not data.get("route"):
+        data["route"] = f"{ROUTE_FROM} to {ROUTE_TO}"
+    if not data.get("travel_date"):
+        data["travel_date"] = TRAVEL_DATE
+    if not isinstance(data.get("opened_url_count"), int):
+        data["opened_url_count"] = len(opened_urls)
+    if not isinstance(data.get("analyzed_url_count"), int):
+        data["analyzed_url_count"] = len(read_step_results)
 
     if programmatic_best_offer:
-        final_summary = str(result.get("final_price_summary", "")).strip().lower()
+        final_summary = str(data.get("final_price_summary", "")).strip().lower()
         if not final_summary or final_summary == "manual_required":
-            result["final_price_summary"] = programmatic_best_offer.get("price_text", "manual_required")
-        best_offer = result.get("best_offer")
+            data["final_price_summary"] = programmatic_best_offer.get("price_text", "manual_required")
+        best_offer = data.get("best_offer")
         if not isinstance(best_offer, dict) or not best_offer.get("price_text"):
-            result["best_offer"] = {
+            data["best_offer"] = {
                 "source": programmatic_best_offer.get("source", ""),
                 "price_text": programmatic_best_offer.get("price_text", ""),
                 "url": programmatic_best_offer.get("url", ""),
                 "confidence": programmatic_best_offer.get("confidence", "medium"),
             }
-        if not result.get("buying_recommendation"):
-            result["buying_recommendation"] = (
+        if not data.get("buying_recommendation"):
+            data["buying_recommendation"] = (
                 f"Current best observed fare is {programmatic_best_offer.get('price_text', '')}. "
                 "If your schedule is fixed, consider booking now after checking baggage and refund rules."
             )
     else:
-        if not result.get("final_price_summary"):
-            result["final_price_summary"] = "manual_required"
-        best_offer = result.get("best_offer")
+        if not data.get("final_price_summary"):
+            data["final_price_summary"] = "manual_required"
+        best_offer = data.get("best_offer")
         if not isinstance(best_offer, dict):
-            result["best_offer"] = {
+            data["best_offer"] = {
                 "source": "",
                 "price_text": "",
                 "url": "",
                 "confidence": "low",
             }
-        if not result.get("buying_recommendation"):
-            result["buying_recommendation"] = (
+        if not data.get("buying_recommendation"):
+            data["buying_recommendation"] = (
                 "No reliable fare quote was extracted. Use at least two different flight search sites manually, "
                 "then compare fare rules (refund/change/baggage) before purchase."
             )
-    return result
+    return data
 
 
 def main():

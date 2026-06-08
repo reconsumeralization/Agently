@@ -43,7 +43,7 @@ class ConfigurePromptExtension(BaseAgent):
     ):
         prompt_data = {
             ".agent": self.agent_prompt.to_serializable_prompt_data(),
-            ".request": self.request_prompt.to_serializable_prompt_data(),
+            ".execution": self.request_prompt.to_serializable_prompt_data(),
         }
         content = json5.dumps(
             prompt_data,
@@ -64,7 +64,7 @@ class ConfigurePromptExtension(BaseAgent):
     ):
         prompt_data = {
             ".agent": self.agent_prompt.to_serializable_prompt_data(),
-            ".request": self.request_prompt.to_serializable_prompt_data(),
+            ".execution": self.request_prompt.to_serializable_prompt_data(),
         }
         content = yaml.safe_dump(
             prompt_data,
@@ -148,17 +148,27 @@ class ConfigurePromptExtension(BaseAgent):
             return
         setter(prompt_key, prompt_value, mappings=mappings)
 
-    def _apply_turn_prompt_config(self, prompt_value: Any, variable_mappings: dict[str, Any] | None):
+    def _set_pending_execution_prompt(
+        self,
+        key: str,
+        value: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+    ):
+        self.request_prompt.set(key, value, mappings=mappings)
+        return self
+
+    def _apply_execution_prompt_config(self, prompt_value: Any, variable_mappings: dict[str, Any] | None):
         if isinstance(prompt_value, dict):
             for request_prompt_key, request_prompt_value in prompt_value.items():
                 self._set_configured_prompt_value(
-                    self.set_turn_prompt,
+                    self._set_pending_execution_prompt,
                     request_prompt_key,
                     request_prompt_value,
                     mappings=variable_mappings,
                 )
         else:
-            self.set_turn_prompt(
+            self._set_pending_execution_prompt(
                 "input",
                 prompt_value,
                 mappings=variable_mappings,
@@ -182,8 +192,8 @@ class ConfigurePromptExtension(BaseAgent):
                             prompt_value,
                             mappings=variable_mappings,
                         )
-                case ".request" | ".turn":
-                    self._apply_turn_prompt_config(prompt_value, variable_mappings)
+                case ".execution" | ".request" | ".turn":
+                    self._apply_execution_prompt_config(prompt_value, variable_mappings)
                 case ".alias":
                     if isinstance(prompt_value, dict):
                         for alias_name, alias_parameters in prompt_value.items():
@@ -241,7 +251,7 @@ class ConfigurePromptExtension(BaseAgent):
                         )
                     else:
                         self._set_configured_prompt_value(
-                            self.set_turn_prompt,
+                            self._set_pending_execution_prompt,
                             prompt_key,
                             prompt_value,
                             mappings=variable_mappings,

@@ -7,6 +7,7 @@ from pathlib import Path
 def test_core_root_exports_remain_stable():
     from agently.core import (
         Action,
+        AgentExecutionResult,
         AgentExecutionStream,
         BaseAgent,
         DynamicTask,
@@ -28,6 +29,7 @@ def test_core_root_exports_remain_stable():
     )
 
     assert BaseAgent.__name__ == "BaseAgent"
+    assert AgentExecutionResult.__name__ == "AgentExecutionResult"
     assert AgentExecutionStream.__name__ == "AgentExecutionStream"
     assert DynamicTask.__name__ == "DynamicTask"
     assert EventCenter.__name__ == "EventCenter"
@@ -52,14 +54,15 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.application.AgentExecution import AgentExecutionStream
     from agently.core.application.SkillsExecutor import SkillsExecutor
     from agently.core.Agent import BaseAgent
-    from agently.core.execution.Action import Action, Tool
-    from agently.core.execution.ExecutionEnvironment import ExecutionEnvironmentManager
+    from agently.core.operation.Action import Action, Tool
+    from agently.core.operation.ExecutionEnvironment import ExecutionEnvironmentManager
     from agently.core.extension import ExtensionHandlers, PluginManager
     from agently.core.model import ModelRequest, ModelResponse, ModelResponseResult, Prompt
-    from agently.core.orchestration.DynamicTask import DynamicTask
-    from agently.core.orchestration.TaskDAGExecutor import TaskDAGExecutor
+    from agently.core.application.DynamicTask import DynamicTask
+    from agently.core.orchestration.TaskDAG import TaskDAGExecutor
     from agently.core.orchestration.TriggerFlow import TriggerFlow
-    from agently.core.runtime import AttemptRunner, EventCenter, RuntimeEvent, bind_runtime_context
+    from agently.core.model import AttemptRunner
+    from agently.core.runtime import EventCenter, RuntimeEvent, bind_runtime_context
     from agently.core.session import RecallProfile, Session, Workspace
 
     assert importlib.import_module("agently.core.Agent").BaseAgent is BaseAgent
@@ -68,19 +71,19 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.model.ModelResponse").ModelResponse is ModelResponse
     assert importlib.import_module("agently.core.model.ModelResponseResult").ModelResponseResult is ModelResponseResult
     assert importlib.import_module("agently.core.model.Prompt").Prompt is Prompt
-    assert importlib.import_module("agently.core.runtime.AttemptRunner").AttemptRunner is AttemptRunner
+    assert importlib.import_module("agently.core.model.AttemptRunner").AttemptRunner is AttemptRunner
     assert importlib.import_module("agently.core.runtime.EventCenter").EventCenter is EventCenter
     assert importlib.import_module("agently.core.runtime").RuntimeEvent is RuntimeEvent
     assert importlib.import_module("agently.core.runtime.RuntimeContext").bind_runtime_context is bind_runtime_context
-    assert importlib.import_module("agently.core.execution.ExecutionEnvironment.ExecutionEnvironment").ExecutionEnvironmentManager is ExecutionEnvironmentManager
+    assert importlib.import_module("agently.core.operation.ExecutionEnvironment.ExecutionEnvironment").ExecutionEnvironmentManager is ExecutionEnvironmentManager
     assert importlib.import_module("agently.core.extension.PluginManager").PluginManager is PluginManager
     assert importlib.import_module("agently.core.extension.ExtensionHandlers").ExtensionHandlers is ExtensionHandlers
     assert importlib.import_module("agently.core.session.Session").Session is Session
-    assert importlib.import_module("agently.core.orchestration.DynamicTask.DynamicTask").DynamicTask is DynamicTask
-    assert importlib.import_module("agently.core.orchestration.TaskDAGExecutor.TaskDAGExecutor").TaskDAGExecutor is TaskDAGExecutor
+    assert importlib.import_module("agently.core.application.DynamicTask.DynamicTask").DynamicTask is DynamicTask
+    assert importlib.import_module("agently.core.orchestration.TaskDAG.TaskDAGExecutor").TaskDAGExecutor is TaskDAGExecutor
     assert importlib.import_module("agently.core.orchestration.TriggerFlow.TriggerFlow").TriggerFlow is TriggerFlow
-    assert importlib.import_module("agently.core.execution.Action.Action").Action is Action
-    assert importlib.import_module("agently.core.execution.Action").Tool is Tool
+    assert importlib.import_module("agently.core.operation.Action.Action").Action is Action
+    assert importlib.import_module("agently.core.operation.Action").Tool is Tool
     assert importlib.import_module("agently.core.application.SkillsExecutor.SkillsExecutor").SkillsExecutor is SkillsExecutor
     assert importlib.import_module("agently.core.session.Workspace.Workspace").Workspace is Workspace
     assert importlib.import_module("agently.core.session.Recall").RecallProfile is RecallProfile
@@ -95,28 +98,31 @@ def test_core_layout_keeps_only_classified_root_packages():
     assert root_files == ["Agent.py", "AgentTurn.py", "__init__.py"]
     assert root_dirs == [
         "application",
-        "execution",
         "extension",
         "model",
+        "operation",
         "orchestration",
         "runtime",
         "session",
     ]
     assert (core_root / "application" / "AgentExecution").is_dir()
     assert (core_root / "application" / "SkillsExecutor").is_dir()
-    assert (core_root / "execution" / "Action").is_dir()
-    assert (core_root / "execution" / "ExecutionEnvironment").is_dir()
+    assert (core_root / "operation" / "Action").is_dir()
+    assert (core_root / "operation" / "ExecutionEnvironment").is_dir()
     assert (core_root / "session" / "Workspace").is_dir()
     assert (core_root / "session" / "Recall").is_dir()
     assert (core_root / "orchestration" / "TriggerFlow").is_dir()
-    assert (core_root / "orchestration" / "TaskDAGExecutor").is_dir()
-    assert (core_root / "orchestration" / "DynamicTask").is_dir()
+    assert (core_root / "orchestration" / "TaskDAG").is_dir()
+    assert (core_root / "application" / "DynamicTask").is_dir()
+    assert not (core_root / "orchestration" / "TaskDAGExecutor").exists()
+    assert not (core_root / "orchestration" / "DynamicTask").exists()
 
     assert not (core_root / "Tool.py").exists()
     assert not (core_root / "Tool").exists()
     assert not (core_root / "foundation").exists()
-    assert not (core_root / "execution" / "Tool.py").exists()
-    assert not (core_root / "execution" / "Tool").exists()
+    assert not (core_root / "execution").exists()
+    assert not (core_root / "operation" / "Tool.py").exists()
+    assert not (core_root / "operation" / "Tool").exists()
 
 
 def test_removed_flat_core_submodules_do_not_resolve():
@@ -124,6 +130,8 @@ def test_removed_flat_core_submodules_do_not_resolve():
         "agently.core.ModelRequest",
         "agently.core.RuntimeEvents",
         "agently.core.Tool",
+        "agently.core.orchestration.DynamicTask",
+        "agently.core.orchestration.TaskDAGExecutor",
     ]
 
     for module_name in removed_modules:

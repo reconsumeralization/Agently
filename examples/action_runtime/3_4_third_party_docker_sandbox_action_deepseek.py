@@ -259,8 +259,8 @@ if __name__ == "__main__":
         )
         records = agent.get_action_result(prompt=turn.prompt)
         print_action_results(records)
-        response = turn.get_response()
-        print_response(response)
+        result = turn.get_result()
+        print_response(result)
 
 # Expected key output after configuring DeepSeek with Docker running:
 # [ACTION_RECORDS] includes a successful docker_sandbox_exec call.

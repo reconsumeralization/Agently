@@ -42,7 +42,7 @@ _RESERVED_RESOLVER_KEYS = frozenset(
 
 
 @dataclass(frozen=True)
-class DynamicTaskContext:
+class TaskDAGContext:
     graph: TaskDAG
     task: TaskDAGNode
     task_input: Mapping[str, Any]
@@ -57,10 +57,10 @@ class DynamicTaskContext:
         return self.runtime_data.execution
 
 
-DynamicTaskHandler = Callable[[DynamicTaskContext], Any]
+TaskDAGHandler = Callable[[TaskDAGContext], Any]
 
 
-class DynamicTaskResolver:
+class TaskDAGResolver:
     def __init__(self, entries: Mapping[str, Any] | None = None):
         self._entries: dict[str, Any] = {}
         self.register("validate", _default_validate_task)
@@ -72,10 +72,10 @@ class DynamicTaskResolver:
     def register(self, key: str, value: Any):
         normalized_key = str(key).strip()
         if not normalized_key:
-            raise ValueError("DynamicTaskResolver.register() requires a non-empty key.")
+            raise ValueError("TaskDAGResolver.register() requires a non-empty key.")
         if not _TASK_ID_PATTERN.fullmatch(normalized_key):
             raise ValueError(
-                f"Dynamic task resolver key '{ normalized_key }' is invalid. "
+                f"TaskDAG resolver key '{ normalized_key }' is invalid. "
                 "Use letters, digits, underscore, dot, or dash."
             )
         self._entries[normalized_key] = value
@@ -109,22 +109,22 @@ class DynamicTaskResolver:
     def _resolve_registered(value: Any, task: TaskDAGNode):
         return value(task) if _is_task_resolver_factory(value) else value
 
-def _coerce_resolver(value: DynamicTaskResolver | Mapping[str, Any] | None) -> DynamicTaskResolver:
-    if isinstance(value, DynamicTaskResolver):
+def _coerce_resolver(value: TaskDAGResolver | Mapping[str, Any] | None) -> TaskDAGResolver:
+    if isinstance(value, TaskDAGResolver):
         return value
-    return DynamicTaskResolver(value)
+    return TaskDAGResolver(value)
 
 def _is_task_resolver_factory(binding: Any) -> bool:
-    marker = getattr(binding, "dynamic_task_resolver_factory", False)
+    marker = getattr(binding, "task_dag_resolver_factory", False)
     return bool(marker)
 
 
-def dynamic_task_resolver_factory(func: Callable[[TaskDAGNode], Any]):
-    setattr(func, "dynamic_task_resolver_factory", True)
+def task_dag_resolver_factory(func: Callable[[TaskDAGNode], Any]):
+    setattr(func, "task_dag_resolver_factory", True)
     return func
 
 
-async def _default_validate_task(context: DynamicTaskContext):
+async def _default_validate_task(context: TaskDAGContext):
     return {
         "ok": True,
         "task_id": context.task.id,
@@ -133,7 +133,7 @@ async def _default_validate_task(context: DynamicTaskContext):
     }
 
 
-async def _default_emit_task(context: DynamicTaskContext):
+async def _default_emit_task(context: TaskDAGContext):
     payload = context.task.inputs
     await context.runtime_data.execution.async_put_into_stream(
         {

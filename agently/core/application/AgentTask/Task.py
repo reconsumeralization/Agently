@@ -18,7 +18,7 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
@@ -414,33 +414,6 @@ class AgentTask:
         plan: dict[str, Any],
         context_pack: "WorkspaceContextPack",
     ) -> tuple[Any, dict[str, Any]]:
-        self.agent.request.prompt.set(
-            "input",
-            {
-                "task_id": self.id,
-                "goal": self.goal,
-                "success_criteria": self.success_criteria,
-                "iteration": iteration_index,
-                "plan": plan,
-                "context_pack": DataFormatter.sanitize(context_pack),
-            },
-        )
-        self.agent.request.prompt.set(
-            "instruct",
-            (
-                "Execute exactly one bounded step for the AgentTask. "
-                "Return concrete evidence for the verifier. Do not claim final completion unless evidence supports it."
-            ),
-        )
-        self.agent.request.prompt.set(
-            "output",
-            {
-                "step_result": (str, "Concrete result of this bounded step", True),
-                "evidence": ([str], "Evidence produced by the step", True),
-                "remaining_work": ([str], "Known remaining work, empty when none"),
-            },
-        )
-        self.agent.request.prompt.set("output_format", "json")
         execution = self.agent.create_execution(
             mode="task_step",
             lineage={
@@ -450,6 +423,30 @@ class AgentTask:
             },
             limits=self.limits,
             options=self.options,
+        )
+        execution.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "iteration": iteration_index,
+                "plan": plan,
+                "context_pack": DataFormatter.sanitize(context_pack),
+            }
+        )
+        execution.instruct(
+            (
+                "Execute exactly one bounded step for the AgentTask. "
+                "Return concrete evidence for the verifier. Do not claim final completion unless evidence supports it."
+            )
+        )
+        execution.output(
+            {
+                "step_result": (str, "Concrete result of this bounded step", True),
+                "evidence": ([str], "Evidence produced by the step", True),
+                "remaining_work": ([str], "Known remaining work, empty when none"),
+            },
+            format="json",
         )
         await self._emit(f"agent_task.iteration.{iteration_index}.execution.started", {"execution_id": execution.id})
         result = await execution.async_get_data()
@@ -785,7 +782,7 @@ class AgentTask:
             if queue in self._stream_queues:
                 self._stream_queues.remove(queue)
 
-    def _get_generator(self, *args: Any, **kwargs: Any):
+    def _get_generator(self, *args: Any, **kwargs: Any) -> Generator[AgentExecutionStreamData, None, None]:
         return FunctionShifter.syncify_async_generator(self.get_async_generator(*args, **kwargs))
 
     async def _emit_progress(

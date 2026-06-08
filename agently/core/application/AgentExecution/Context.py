@@ -164,8 +164,8 @@ class AgentExecutionContext:
         *,
         execution_id: str,
         mode: AgentExecutionMode,
-        lineage: AgentExecutionLineage,
-        limits: AgentExecutionLimits,
+        lineage: AgentExecutionLineage | dict[str, Any],
+        limits: AgentExecutionLimits | dict[str, Any],
     ):
         self.execution_id = execution_id
         self.mode = mode

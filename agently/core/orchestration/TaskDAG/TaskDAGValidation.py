@@ -31,7 +31,7 @@ from .TaskDAGHelpers import (
 from .TaskDAGResolver import (
     _GRAPH_SCHEMA_VERSION,
     _TASK_ID_PATTERN,
-    DynamicTaskResolver,
+    TaskDAGResolver,
     _coerce_resolver,
 )
 
@@ -47,7 +47,7 @@ class TaskDAGValidation:
 class TaskDAGValidator:
     def __init__(
         self,
-        resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+        resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
         *,
         schema_version: str = _GRAPH_SCHEMA_VERSION,
     ):
@@ -58,7 +58,7 @@ class TaskDAGValidator:
         self,
         graph: TaskDAG | Mapping[str, Any],
         *,
-        resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+        resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
         strict_schema_version: bool = False,
     ) -> TaskDAGValidation:
         validation = validate_task_dag(
@@ -77,7 +77,7 @@ class TaskDAGValidator:
         result: Mapping[str, Any],
         context: Any = None,
         *,
-        resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+        resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
     ):
         return validate_task_dag_planner_output(
             result,
@@ -85,10 +85,10 @@ class TaskDAGValidator:
             schema_version=self.schema_version,
         )
 
-    def _merge_resolver(self, resolver: DynamicTaskResolver | Mapping[str, Any] | None):
+    def _merge_resolver(self, resolver: TaskDAGResolver | Mapping[str, Any] | None):
         if resolver is None:
             return self.resolver
-        merged = DynamicTaskResolver(self.resolver.to_mapping())
+        merged = TaskDAGResolver(self.resolver.to_mapping())
         for key, value in _coerce_resolver(resolver).to_mapping().items():
             merged.register(key, value)
         return merged
@@ -96,7 +96,7 @@ class TaskDAGValidator:
 def validate_task_dag(
     graph: TaskDAG | Mapping[str, Any],
     *,
-    resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+    resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
 ) -> TaskDAGValidation:
     normalized = TaskDAG.from_value(graph)
     resolved_resolver = _coerce_resolver(resolver)
@@ -182,7 +182,7 @@ def validate_task_dag(
 def validate_task_dag_planner_output(
     result: Mapping[str, Any],
     *,
-    resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+    resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
     schema_version: str = _GRAPH_SCHEMA_VERSION,
 ):
     try:
@@ -210,7 +210,7 @@ def _prune_unresolved_optional_tasks(
     task_by_id: dict[str, TaskDAGNode],
     roots: tuple[str, ...],
     ordered: tuple[str, ...],
-    resolver: DynamicTaskResolver,
+    resolver: TaskDAGResolver,
 ) -> tuple[TaskDAG, list[TaskDAGNode], dict[str, TaskDAGNode], tuple[str, ...], tuple[str, ...]]:
     required_ids = _semantic_required_task_ids(graph, task_by_id)
     pruned: set[str] = set()

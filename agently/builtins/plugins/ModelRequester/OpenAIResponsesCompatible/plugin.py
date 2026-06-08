@@ -52,6 +52,7 @@ class OpenAIResponsesCompatible(
             "path_mappings": {
                 "OpenAIResponsesCompatible": "plugins.ModelRequester.OpenAIResponsesCompatible",
                 "OpenAIResponses": "plugins.ModelRequester.OpenAIResponsesCompatible",
+                "Responses": "plugins.ModelRequester.OpenAIResponsesCompatible",
             },
         },
         "model": None,

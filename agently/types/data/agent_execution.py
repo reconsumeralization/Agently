@@ -24,7 +24,7 @@ AgentExecutionMode: TypeAlias = Literal["one_turn", "task_step"]
 AgentExecutionStatus: TypeAlias = Literal["created", "running", "success", "blocked", "error", "cancelled"] | str
 
 
-class AgentExecutionLineage(TypedDict, total=False):
+class AgentExecutionLineage(TypedDict):
     task_id: str | None
     iteration_id: str | None
     step_id: str | None
@@ -32,7 +32,7 @@ class AgentExecutionLineage(TypedDict, total=False):
     scope: dict[str, Any]
 
 
-class AgentExecutionLimits(TypedDict, total=False):
+class AgentExecutionLimits(TypedDict):
     allow_create_task: bool
     max_model_requests: int | None
     max_nested_agent_steps: int | None
@@ -40,7 +40,7 @@ class AgentExecutionLimits(TypedDict, total=False):
     max_no_progress_seconds: float | None
 
 
-class AgentExecutionWorkspaceRefs(TypedDict, total=False):
+class AgentExecutionWorkspaceRefs(TypedDict):
     observations: list[str]
     artifacts: list[str]
     decisions: list[str]
@@ -48,7 +48,7 @@ class AgentExecutionWorkspaceRefs(TypedDict, total=False):
     verification_evidence: list[str]
 
 
-class AgentExecutionDiagnostics(TypedDict, total=False):
+class AgentExecutionDiagnostics(TypedDict):
     budget: dict[str, Any]
     limit_events: list[dict[str, Any]]
     errors: list[dict[str, Any]]
@@ -58,7 +58,7 @@ class AgentExecutionDiagnostics(TypedDict, total=False):
     last_progress: dict[str, Any]
 
 
-class AgentExecutionRouteInfo(TypedDict, total=False):
+class AgentExecutionRouteInfo(TypedDict):
     selected_route: str
     selected_by: str | None
     options: dict[str, Any]
@@ -77,10 +77,15 @@ class AgentExecutionActionLog(TypedDict, total=False):
     artifact_refs: list[dict[str, Any]]
 
 
-class AgentExecutionMeta(TypedDict, total=False):
+class AgentExecutionMeta(TypedDict):
     execution_id: str
     execution_mode: AgentExecutionMode
     status: AgentExecutionStatus
+    strategy: str | None
+    goals: list[str]
+    success_criteria: list[str]
+    generated_success_criteria: list[str]
+    task_refs: dict[str, Any]
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
     options: dict[str, Any]
@@ -100,7 +105,7 @@ class AgentExecutionStreamMeta(TypedDict, total=False):
     lineage: AgentExecutionLineage
 
 
-class AgentExecutionWorkspaceRecord(TypedDict, total=False):
+class AgentExecutionWorkspaceRecord(TypedDict):
     record: WorkspaceRecordRef
     checkpoint: WorkspaceRecordRef | None
     workspace_refs: AgentExecutionWorkspaceRefs

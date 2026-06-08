@@ -168,9 +168,9 @@ execution = await (
 )
 ```
 
-`set_agent_prompt(...)` 写入的长期 prompt 会被继承并保留给后续轮次；
+`set_agent_prompt(...)` 写入的长期 prompt 会被继承并保留给后续 execution；
 `set_turn_prompt(...)`、兼容别名 `set_request_prompt(...)` 和 quick prompt 写入的
-本轮 turn prompt 会被冻结到这次 Skill run，然后从 pending request 清理。显式传入的 `output=` 和
+本轮 execution prompt 会被冻结到这次 Skill run，然后从 pending execution prompt 清理。显式传入的 `output=` 和
 `output_format=` 参数优先于 prompt 推导值。
 
 `output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认
@@ -224,6 +224,12 @@ judge。
   `skills.runtime_chain.*`
 - 选中多步策略时，还会收到 `skills.staged.*`、`skills.react.*` 和 `block.*`
   事件
+
+直接 Skills `stream_handler` 回调可用 `agently.types.data` 里的
+`SkillRuntimeStreamHandler` 标注。如果你在自定义 Skills effort strategy 里调用
+`context.async_request_model(..., stream_handler=...)`，这个模型流回调收到的是
+`StreamingData`，可用 `ModelStreamingHandler` 标注。两个类型都可以从根入口导入：
+`from agently import StreamingData, ModelStreamingHandler`。
 
 `effort="fast"` 使用低开销 single-shot 路径。`effort="normal"` 固定走完整
 preflight -> research -> plan -> execute -> verify -> reflect -> finalize

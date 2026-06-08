@@ -61,7 +61,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.5"
+    assert in_development["target_version"] == "4.1.3.6"
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",
@@ -129,8 +129,23 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert in_development["companions"]["skills"]["catalog_generation"] == "v2"
     assert in_development["companions"]["skills"]["recommended_bundle"] == "app"
     turn_contract = in_development["request_input"]["agent_turn_request_scope"]
+    assert "AgentExecution" in turn_contract["surface"]
+    assert "AgentExecutionResult" in turn_contract["surface"]
     assert "AgentTurn" in turn_contract["surface"]
-    assert "isolated AgentTurn request draft" in turn_contract["contract"]
+    assert "isolated AgentExecution draft" in turn_contract["contract"]
+    assert "compatibility aliases" in turn_contract["contract"]
+    task_loop_contract = in_development["request_input"]["agent_execution_task_loop"]
+    assert "Agent.create_task" in task_loop_contract["surface"]
+    assert "Agent.create_task_loop" in task_loop_contract["surface"]
+    assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
+    assert "task-strategy AgentExecution drafts" in task_loop_contract["contract"]
+    assert "not a separate recommended AgentTask execution owner" in task_loop_contract["contract"]
+    assert "accepted=true" in task_loop_contract["contract"]
+    assert "artifact_status=partial" in task_loop_contract["contract"]
+    assert "supported=false" in task_loop_contract["contract"]
+    assert "multi-task scheduling" in task_loop_contract["scope"]["deferred"]
+    assert "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging" in task_loop_contract["scope"]["deferred"]
+    assert "AgentExecutionResult as the common consumption surface" in task_loop_contract["compatibility_policy"]
     assert in_development["companions"]["skills"]["legacy_generations"] == [
         {
             "generation": "v1",

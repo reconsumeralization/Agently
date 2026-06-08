@@ -16,18 +16,30 @@ import inspect
 import json
 import uuid
 
-from typing import Any, AsyncGenerator, TYPE_CHECKING, cast
+from typing import Any, AsyncGenerator, Generator, Literal, TYPE_CHECKING, cast, overload
 
 from agently.core.extension import ExtensionHandlers
 from agently.core.runtime import bind_runtime_context, get_current_agent_execution_context
-from agently.utils import Settings, DataFormatter
+from agently.utils import DeprecationWarnings, Settings, DataFormatter
 
 from .Prompt import Prompt
-from .ModelResponseResult import ModelResponseResult
+from .ModelResponseResult import DEFAULT_SPECIFIC_EVENTS, ModelResponseResult
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
+
     from agently.core import PluginManager
-    from agently.types.data import AgentlyModelResponseMessage, RunContext
+    from agently.types.data import (
+        AgentlyModelResultMessage,
+        AgentlyOriginalResultPayload,
+        AgentlySpecificResultMessage,
+        InstantStreamingContentType,
+        OutputValidateHandler,
+        ResultContentType,
+        RunContext,
+        SpecificEvents,
+        StreamingData,
+    )
     from agently.types.plugins import ModelRequester
 
 
@@ -44,7 +56,15 @@ class ModelResponse:
         parent_run_context: "RunContext | None" = None,
         agent_turn_run_context: "RunContext | None" = None,
         attempt_index: int = 1,
+        warn_deprecated: bool = True,
     ):
+        if warn_deprecated:
+            DeprecationWarnings.warn_deprecated_once(
+                "ModelResponse",
+                "ModelResponse is deprecated and will be removed in Agently 4.2. "
+                "Use ModelResponseResult returned by get_result() instead.",
+                stacklevel=2,
+            )
         self.agent_name = agent_name
         self.id = uuid.uuid4().hex
         self.attempt_index = attempt_index
@@ -98,19 +118,325 @@ class ModelResponse:
             model_run_context=self.model_run_context,
             attempt_index=self.attempt_index,
         )
-        self.get_meta = self.result.get_meta
-        self.async_get_meta = self.result.async_get_meta
-        self.get_text = self.result.get_text
-        self.async_get_text = self.result.async_get_text
-        self.get_data = self.result.get_data
-        self.async_get_data = self.result.async_get_data
-        self.get_data_object = self.result.get_data_object
-        self.async_get_data_object = self.result.async_get_data_object
-        self.get_generator = self.result.get_generator
-        self.get_async_generator = self.result.get_async_generator
 
     def cancel_logs(self):
         self.settings.set("$log.cancel_logs", True)
+
+    def get_meta(self):
+        return self.result.get_meta()
+
+    async def async_get_meta(self):
+        return await self.result.async_get_meta()
+
+    def get_text(self) -> str:
+        return self.result.get_text()
+
+    async def async_get_text(self) -> str:
+        return await self.result.async_get_text()
+
+    @overload
+    def get_data(
+        self,
+        *,
+        type: Literal['parsed'],
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    def get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any: ...
+
+    def get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any:
+        return self.result.get_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            _retry_count=_retry_count,
+        )
+
+    @overload
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['parsed'],
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any: ...
+
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any:
+        return await self.result.async_get_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            _retry_count=_retry_count,
+        )
+
+    @overload
+    def get_data_object(self) -> "BaseModel | None": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel | None": ...
+
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ):
+        return self.result.get_data_object(
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
+
+    @overload
+    async def async_get_data_object(self) -> "BaseModel | None": ...
+
+    @overload
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel": ...
+
+    @overload
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel | None": ...
+
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ):
+        return await self.result.async_get_data_object(
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
+
+    @overload
+    def get_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["StreamingData", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["all"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlyModelResultMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlySpecificResultMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["original"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlyOriginalResultPayload", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator: ...
+
+    def get_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator:
+        return cast(Any, self.result).get_generator(type=type, content=content, specific=specific)
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["StreamingData", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["all"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlyModelResultMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlySpecificResultMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["original"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlyOriginalResultPayload", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator: ...
+
+    def get_async_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator:
+        return cast(Any, self.result).get_async_generator(type=type, content=content, specific=specific)
 
     def _build_prompt_payload(self) -> dict[str, Any]:
         prompt_snapshot = self.prompt.to_serializable_prompt_data()
@@ -157,7 +483,7 @@ class ModelResponse:
         data.update(options)
         return data
 
-    async def _get_response_generator(self) -> AsyncGenerator["AgentlyModelResponseMessage", None]:
+    async def _get_response_generator(self) -> AsyncGenerator["AgentlyModelResultMessage", None]:
         from agently.base import async_emit_runtime
 
         with bind_runtime_context(
@@ -253,7 +579,7 @@ class ModelResponse:
                     )
                 build_request_handlers = getattr(model_requester, "build_request_handlers", None)
                 if callable(build_request_handlers):
-                    from agently.core.runtime.AttemptRunner import AttemptRunner, is_core_attempt_runner_entrypoint
+                    from agently.core.model.AttemptRunner import AttemptRunner, is_core_attempt_runner_entrypoint
                     from agently.types.data import AttemptHandlers, AttemptObservation, AttemptState
 
                     if is_core_attempt_runner_entrypoint(getattr(model_requester, "request_model", None)):

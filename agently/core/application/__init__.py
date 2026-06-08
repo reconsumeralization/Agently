@@ -15,17 +15,23 @@
 from .AgentExecution import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
+    AgentExecutionResult,
     AgentExecutionStream,
     RuntimeStageStallError,
 )
 from .AgentTask import AgentTask
+from .DynamicTask import ActionTaskAdapter, DynamicTask, SkillTaskAdapter
 from .SkillsExecutor import SkillsExecutor
 
 __all__ = [
+    "ActionTaskAdapter",
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
+    "AgentExecutionResult",
     "AgentExecutionStream",
     "AgentTask",
+    "DynamicTask",
     "RuntimeStageStallError",
+    "SkillTaskAdapter",
     "SkillsExecutor",
 ]

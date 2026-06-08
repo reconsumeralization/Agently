@@ -36,7 +36,7 @@ The companion repo does not become a runtime dependency of your Agently app. It 
 
 | Skill | Use when the user is |
 |---|---|
-| `agently-playbook` | starting fresh — picking the right structure for a new Agently project |
+| `agently` | starting fresh — picking the right structure for a new Agently project |
 | `agently-request` | model setup, prompt management, structured output, response reuse, session memory, embeddings, retrieval |
 | `agently-runtime` | Action Runtime, built-in actions, MCP, Execution Environment, FastAPI exposure, DevTools wiring |
 | `agently-dynamic-task` | model-generated or app-submitted DAG planning, validation, and execution |
@@ -63,7 +63,7 @@ For CLI-based installs, the default `app` bundle is:
 
 ```bash
 for skill in \
-  agently-playbook \
+  agently \
   agently-request \
   agently-runtime \
   agently-dynamic-task \
@@ -116,7 +116,7 @@ When you audit or author guidance for Agently `4.1+`, these are the defaults cod
 - TriggerFlow state: use `get_state(...)` / `set_state(...)` for per-execution data. Treat `flow_data` as an intentionally risky shared scope, not a normal state store.
 - Settings loading: when provider settings live in files, prefer `Agently.load_settings("yaml_file", path, auto_load_env=True)`. Keep `Agently.set_settings(...)` for inline overrides.
 - Execution style: prefer async-first for services, streaming, and workflows. Treat sync APIs as wrappers for scripts, REPL use, or compatibility bridges.
-- Response reuse: when one model call must be consumed as text, parsed data, metadata, or structured stream updates, prefer `get_response()` and reuse the same response object rather than re-requesting.
+- Result reuse: when one model call must be consumed as text, parsed data, metadata, or structured stream updates, prefer `get_result()` and reuse the same result object rather than re-requesting.
 
 ## When to write your own skill
 

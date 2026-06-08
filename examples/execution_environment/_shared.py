@@ -73,10 +73,10 @@ def print_action_results(records):
     print_section("ACTION_RESULTS_INJECTED_TO_REPLY", Action.to_action_results(records))
 
 
-def print_response(response):
-    print_section("MODEL_REPLY", response.result.get_text())
+def print_response(result):
+    print_section("MODEL_REPLY", result.get_text())
 
-    extra = response.result.full_result_data.get("extra") or {}
+    extra = result.full_result_data.get("extra") or {}
     action_logs = extra.get("action_logs", extra.get("tool_logs", [])) if isinstance(extra, dict) else []
 
     print_section("ACTION_LOGS_FROM_RESPONSE_RESULT", action_logs)
@@ -85,7 +85,7 @@ def print_response(response):
 # Imported by execution_environment examples to provide:
 #   create_agent(provider, system_prompt, temperature=0.7) — configures Ollama or DeepSeek
 #   print_action_results(records) — prints ACTION_RECORDS and ACTION_RESULTS_INJECTED_TO_REPLY
-#   print_response(response) — prints MODEL_REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
+#   print_response(result) — prints MODEL_REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT
 #
 # How it works:
 # Callers supply provider name ("ollama" or "deepseek"); create_agent() reads the matching

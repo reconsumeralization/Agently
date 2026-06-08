@@ -15,12 +15,12 @@ Agently.set_settings(
 def basic_prompt_methods():
     # .set_agent_prompt() will cache prompt in agent instance and reuse prompt in every future request until it is changed or removed
     agent.set_agent_prompt("system", "You are a useful assistant.")
-    # .set_turn_prompt() writes prompt for one turn only.
-    # Hold the turn if setup is split across statements.
-    turn = agent.create_turn()
-    turn.set_turn_prompt("input", "Hello")
+    # .set_execution_prompt() writes prompt for one execution only.
+    # Hold the execution if setup is split across statements.
+    execution = agent.create_execution()
+    execution.set_execution_prompt("input", "Hello")
 
-    print(turn.start())  # Have response
+    print(execution.start())  # Have response
     print(agent.start())  # Raise error because of missing core prompt
 
     # reset prompt
@@ -50,16 +50,16 @@ def what_happen_when_start():
     # In fact, .start() or .get_data() will create a response instance to storage a snapshot of all runtime information for this request first
     # If any response consume command is given to the response instance, the actual model request start and save all result to a result instance inside the response instance.
     # So the actual behaviors are like these:
-    turn = agent.input("hi")
-    response = turn.get_response()
-    result_data = response.result.get_data()
+    execution = agent.input("hi")
+    result = execution.get_result()
+    result_data = result.get_data()
     # You can get different content from result and the request will not be restarted again
     # Different contents will be stored in result instance when the request is finished.
-    result_meta = response.result.get_meta()
+    result_meta = result.get_meta()
     print(result_data)
     print(result_meta)
-    # You can also use methods like response.get_data() for short
-    # It's the same as response.result.get_data()
+    # You can also use methods like result.get_data() for short
+    # It's the same as result.get_data()
 
     ## Notice
     # If you wonder what methods that agent instance, request instance and response instance provide for short, I highly recommend checking codes in 'agently/core/Agent/Agent.py' and 'agently/core/Model/ModelRequest.py'
@@ -71,12 +71,12 @@ def what_happen_when_start():
 ## Chaining Methods Support
 def chaining_methods_support():
     result = (
-        agent.create_turn()
-        .set_turn_prompt(
+        agent.create_execution()
+        .set_execution_prompt(
             "input",
             "hello",
         )
-        .set_turn_prompt(
+        .set_execution_prompt(
             "output",
             "your reply",
         )
@@ -110,12 +110,12 @@ def any_data_as_prompt():
         ],  # Nested data supported
     }
     result = (
-        agent.create_turn()
-        .set_turn_prompt(
+        agent.create_execution()
+        .set_execution_prompt(
             "input",
             question_list,
         )
-        .set_turn_prompt(
+        .set_execution_prompt(
             "info",
             role_info,
         )
@@ -130,7 +130,7 @@ def any_data_as_prompt():
 ## Prompt Slots
 def prompt_slots():
     # Every different setting of prompt is a prompt slot.
-    # The first parameter of .set_agent_prompt() and .set_turn_prompt() is the title of this prompt slot.
+    # The first parameter of .set_agent_prompt() and .set_execution_prompt() is the title of this prompt slot.
     # In fact you can use any title as prompt slot title but using these suggested prompt title may help Agently understand what these prompts mean to do and handle them more properly:
     # "system",
     # "developer",
@@ -145,10 +145,10 @@ def prompt_slots():
     # "output_format",
     # "options"
     # "chat_history", ! Notice: chat_history is a special prompt slot which allows message list only
-    turn = agent.create_turn()
-    turn.set_turn_prompt("input", "Is v3 or v4 is Agently's latest version?")
-    turn.set_turn_prompt("agently_latest_version", "4.0.6.11")
-    print(turn.start())
+    execution = agent.create_execution()
+    execution.set_execution_prompt("input", "Is v3 or v4 is Agently's latest version?")
+    execution.set_execution_prompt("agently_latest_version", "4.0.6.11")
+    print(execution.start())
 
 
 # prompt_slots()
@@ -159,15 +159,15 @@ def placeholder_mappings():
     # You can use ${<variable name>} in almost every position in prompt data as long as that position support string value.
     # Placeholder mappings should always be passed explicitly via mappings=...
     result = (
-        agent.create_turn()
-        .set_turn_prompt(
+        agent.create_execution()
+        .set_execution_prompt(
             "input",
             "My question is ${question}",
             mappings={
                 "question": "Who're you?",
             },
         )
-        .set_turn_prompt(
+        .set_execution_prompt(
             "info",
             {"${role_settings}": {"${name_key}": "${name_value}"}},
             mappings={
@@ -187,7 +187,7 @@ def placeholder_mappings():
 
 ## Quick Prompt Methods
 def quick_prompt_methods():
-    # Agent instance and Request instance provide quick prompt methods for developers. These methods were used more often than .set_agent_prompt() and .set_turn_prompt() in real cases.
+    # Agent instance and Request instance provide quick prompt methods for developers. These methods were used more often than .set_agent_prompt() and .set_execution_prompt() in real cases.
     result = (
         agent.role(
             "You're a useful assistant named ${assistant_name}.",
@@ -228,12 +228,12 @@ def quick_prompt_methods():
 # How it works:
 # Two storage levels exist for prompts:
 #   set_agent_prompt(slot, value)   — persisted across all future requests on this agent
-#   set_turn_prompt(slot, value)    — consumed for one turn only, then cleared
-#   set_request_prompt(slot, value) — compatibility alias for set_turn_prompt()
+#   set_execution_prompt(slot, value)    — consumed for one execution only, then cleared
+#   set_request_prompt(slot, value) — compatibility alias for set_execution_prompt()
 # Quick methods like .role(), .input(), .output() are shorthand for the above.
 # Recognized slot names ("system", "input", "output", "instruct", …) are given special
 # treatment in prompt assembly; custom names are included as labelled info blocks.
 # Placeholder syntax ${name} is resolved at request time when mappings={} is passed.
-# The response instance (get_response()) is a lazy handle: the actual model call
+# The result facade (get_result()) is a lazy handle: the actual model call
 # starts only when you consume data (get_data(), get_text(), get_generator(), …).
-# Consuming the same response multiple times reuses the cached result without re-requesting.
+# Consuming the same result multiple times reuses the cached data without re-requesting.

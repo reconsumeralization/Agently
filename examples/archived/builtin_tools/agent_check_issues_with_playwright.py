@@ -124,7 +124,7 @@ def has_next_page_from_action_logs(action_logs: list[dict], current_page: int) -
 
 
 def analyze_one_page(scan_agent, page_url: str, page: int):
-    response = (
+    result = (
         scan_agent.input(
             {
                 "target_repo": "AgentEra/Agently",
@@ -155,15 +155,15 @@ def analyze_one_page(scan_agent, page_url: str, page: int):
                 "note": (str, "Short note for this page"),
             }
         )
-        .get_response()
+        .get_result()
     )
-    result = response.result.get_data()
-    extra = response.result.full_result_data.get("extra", {})
-    return result, extra.get("action_logs", extra.get("tool_logs", []))
+    data = result.get_data()
+    extra = result.full_result_data.get("extra", {})
+    return data, extra.get("action_logs", extra.get("tool_logs", []))
 
 
 def analyze_issue_detail(scan_agent, issue_url: str):
-    response = (
+    result = (
         scan_agent.input(
             {
                 "issue_url": issue_url,
@@ -186,15 +186,15 @@ def analyze_issue_detail(scan_agent, issue_url: str):
                 "summary": (str, "1-3 sentence issue summary"),
             }
         )
-        .get_response()
+        .get_result()
     )
-    result = response.result.get_data()
-    extra = response.result.full_result_data.get("extra", {})
-    return result, extra.get("action_logs", extra.get("tool_logs", []))
+    data = result.get_data()
+    extra = result.full_result_data.get("extra", {})
+    return data, extra.get("action_logs", extra.get("tool_logs", []))
 
 
 def summarize_all(summary_agent, page_results: list[dict], issues: list[dict], issue_details: list[dict]):
-    response = (
+    result = (
         summary_agent.input(
             {
                 "target_repo": "AgentEra/Agently",
@@ -229,9 +229,9 @@ def summarize_all(summary_agent, page_results: list[dict], issues: list[dict], i
                 "next_actions": [(str, "Concrete action item")],
             }
         )
-        .get_response()
+        .get_result()
     )
-    return response.result.get_data()
+    return result.get_data()
 
 
 def main():

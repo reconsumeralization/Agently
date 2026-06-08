@@ -102,13 +102,13 @@ generator 函数与 async generator 包装为 `StreamingResponse`：
 
 ```python
 async def stream_answer(request_data):
-    response = (
+    result = (
         agent
         .input(request_data["data"])
         .output({"title": (str, "标题", True), "body": (str, "正文", True)})
-        .get_response()
+        .get_result()
     )
-    async for item in response.get_async_generator(type="instant"):
+    async for item in result.get_async_generator(type="instant"):
         if item.delta:
             yield {"path": item.path, "delta": item.delta, "done": item.is_complete}
 

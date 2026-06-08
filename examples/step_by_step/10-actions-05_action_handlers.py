@@ -100,8 +100,8 @@ def demo_augmented_planning():
         "What is the price of a laptop after a 20% discount? Use the actions."
     )
     records = agent.get_action_result(prompt=turn.prompt)
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
     agent.register_action_planning_handler(None)  # reset to default
 
 
@@ -152,8 +152,8 @@ def demo_scripted_planning():
     )
     records = agent.get_action_result(prompt=turn.prompt)
     print("[action records]", records)
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
     agent.register_action_planning_handler(None)
 
 
@@ -197,8 +197,8 @@ def demo_execution_handler():
     agent.use_actions(["lookup_price", "apply_discount"])
     turn = agent.input("What is the 15% discounted price of a laptop? Use actions.")
     records = agent.get_action_result(prompt=turn.prompt)
-    response = turn.get_response()
-    print(response.result.get_text())
+    result = turn.get_result()
+    print(result.get_text())
     agent.register_action_planning_handler(None)
     agent.register_action_execution_handler(None)
 
@@ -232,7 +232,7 @@ def demo_execution_handler():
 # Execution handler:
 #   receives context={action, settings, ...} + request={action_calls, concurrency}
 #   runs each action call via action.async_execute_action() with timing wraparound
-#   returns list[ActionResult] — same format expected by get_response()
+#   returns list[ActionResult] — same format injected before get_result() consumption
 #
 # Flow (demo_execution_handler with scripted planning):
 # agent.get_action_result(prompt=turn.prompt)
@@ -241,5 +241,5 @@ def demo_execution_handler():
 #   Round 1: scripted_planning_handler -> apply_discount(1299.99, 15)
 #            timed_execution_handler  -> result: {discounted: 1104.99}
 #   Round 2: scripted_planning_handler -> next_action='response'
-# agent.get_response()
+# agent.get_result()
 #   model reads action records -> final reply

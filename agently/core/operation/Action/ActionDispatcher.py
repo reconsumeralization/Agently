@@ -18,7 +18,7 @@ import asyncio
 import json
 from typing import Any, cast
 
-from agently.core.execution.ExecutionEnvironment import (
+from agently.core.operation.ExecutionEnvironment import (
     ExecutionEnvironmentApprovalDenied,
     ExecutionEnvironmentApprovalRequired,
     ExecutionEnvironmentError,

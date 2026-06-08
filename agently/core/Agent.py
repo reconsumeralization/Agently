@@ -17,16 +17,17 @@ import os
 import uuid
 
 from collections.abc import Mapping
-from typing import Any, Sequence, TYPE_CHECKING, Literal, cast
+from typing import Any, AsyncGenerator, Generator, Sequence, TYPE_CHECKING, Literal, cast, overload
+from typing_extensions import Self
 
 from agently.core.extension import ExtensionHandlers
-from agently.core.application import AgentTask
+from agently.core.application import AgentTask, DynamicTask
 from agently.core.AgentTurn import AgentTurn
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
-from agently.core.orchestration import DynamicTask
+from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
-from agently.utils import DataFormatter, Settings
+from agently.utils import DataFormatter, DeprecationWarnings, Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
@@ -34,14 +35,114 @@ if TYPE_CHECKING:
         AgentExecutionLineage,
         AgentExecutionLimits,
         AgentExecutionMode,
+        AgentlyModelResultMessage,
+        AgentlyOriginalResultPayload,
+        AgentlySpecificResultMessage,
+        InstantStreamingContentType,
         OutputValidateHandler,
         PromptStandardSlot,
         ChatMessage,
         ChatMessageDict,
+        ResultContentType,
         RunContext,
+        SpecificEvents,
+        StreamingData,
         TaskDAG,
     )
+    from agently.core.model import ModelResponseResult
     from agently.types.options import ExecutionOptions
+    from agently.types.plugins import AgentExecution
+
+
+class _AgentDefinitionBuilder:
+    def __init__(self, agent: "BaseAgent"):
+        self._agent = agent
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._agent, name)
+
+    def activate_model(self, model_key: str | None = None):
+        self._agent.activate_model(model_key)
+        return self
+
+    def set_settings(self, *args: Any, **kwargs: Any):
+        self._agent.set_settings(*args, **kwargs)
+        return self
+
+    def use_workspace(self, *args: Any, **kwargs: Any):
+        cast(Any, self._agent).use_workspace(*args, **kwargs)
+        return self
+
+    def configure_policy_approval(self, *args: Any, **kwargs: Any):
+        self._agent.configure_policy_approval(*args, **kwargs)
+        return self
+
+    def set_agent_prompt(
+        self,
+        key: "PromptStandardSlot | str",
+        value: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+    ):
+        self._agent.set_agent_prompt(key, value, mappings=mappings)
+        return self
+
+    def system(self, prompt: Any, *, mappings: dict[str, Any] | None = None):
+        self._agent.system(prompt, mappings=mappings, always=True)
+        return self
+
+    def rule(self, prompt: Any, *, mappings: dict[str, Any] | None = None):
+        self._agent.rule(prompt, mappings=mappings, always=True)
+        return self
+
+    def role(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.role(*args, **kwargs)
+        return self
+
+    def user_info(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.user_info(*args, **kwargs)
+        return self
+
+    def input(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.input(*args, **kwargs)
+        return self
+
+    def info(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.info(*args, **kwargs)
+        return self
+
+    def instruct(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.instruct(*args, **kwargs)
+        return self
+
+    def examples(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.examples(*args, **kwargs)
+        return self
+
+    def output(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.output(*args, **kwargs)
+        return self
+
+    def attachment(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.attachment(*args, **kwargs)
+        return self
+
+    def image(self, *args: Any, **kwargs: Any):
+        kwargs["always"] = True
+        self._agent.image(*args, **kwargs)
+        return self
+
+    def options(self, options: dict[str, Any]):
+        self._agent.options(options, always=True)
+        return self
 
 
 class BaseAgent:
@@ -114,6 +215,54 @@ class BaseAgent:
         self.request._model_key = normalized
         return self
 
+    def define(
+        self,
+        *,
+        model: str | None = None,
+        prompt: Mapping[str, Any] | Any | None = None,
+        actions: Any = None,
+        skills: Any = None,
+        workspace: str | os.PathLike[str] | None = None,
+        policy: Mapping[str, Any] | None = None,
+        settings: Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ):
+        builder = _AgentDefinitionBuilder(self)
+        if model is not None:
+            self.activate_model(model)
+        if settings is not None:
+            for key, value in settings.items():
+                self.settings.set(str(key), value)
+        if prompt is not None:
+            if isinstance(prompt, Mapping):
+                for key, value in prompt.items():
+                    self.set_agent_prompt(str(key), value)
+            else:
+                self.set_agent_prompt("system", prompt)
+        if actions is not None:
+            use_actions = getattr(self, "use_actions", None)
+            if not callable(use_actions):
+                raise AttributeError("agent.define(actions=...) requires the Actions extension.")
+            use_actions(actions)
+        if skills is not None:
+            use_skills = getattr(self, "use_skills", None)
+            if not callable(use_skills):
+                raise AttributeError("agent.define(skills=...) requires the Skills extension.")
+            if isinstance(skills, (list, tuple)):
+                for item in skills:
+                    use_skills(item)
+            else:
+                use_skills(skills)
+        if workspace is not None:
+            cast(Any, self).use_workspace(workspace)
+        if policy is not None:
+            handler = policy.get("handler")
+            self.configure_policy_approval(handler=str(handler) if handler is not None else None)
+        for key, value in kwargs.items():
+            if value is not None:
+                self.settings.set(f"agent.define.{ key }", value)
+        return builder
+
     # Create Request
     def create_request(
         self,
@@ -122,7 +271,7 @@ class BaseAgent:
         inherit_agent_prompt: bool = True,
         inherit_extension_handlers: bool = True,
         model_key: str | None = None,
-    ):
+    ) -> ModelRequest:
         """
         Create a request instance.
 
@@ -151,7 +300,13 @@ class BaseAgent:
             model_key=model_key,
         )
 
-    def create_turn(self):
+    def create_turn(self) -> AgentTurn:
+        DeprecationWarnings.warn_deprecated_once(
+            "BaseAgent.create_turn",
+            "agent.create_turn() is a compatibility API. "
+            "Use agent.create_execution() or non-always quick prompt methods to create an AgentExecution draft.",
+            stacklevel=2,
+        )
         request = self.create_request()
         prompt_snapshot = self._snapshot_request_prompt()
         if prompt_snapshot:
@@ -436,12 +591,12 @@ class BaseAgent:
             }
         )
 
-    def get_response(self, *, parent_run_context: "RunContext | None" = None):
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
         turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._emit_agent_turn_started(turn_run_context)
         return self.request.get_response(parent_run_context=turn_run_context)
 
-    def get_result(self, *, parent_run_context: "RunContext | None" = None):
+    def get_result(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
         turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._emit_agent_turn_started(turn_run_context)
         return self.request.get_result(parent_run_context=turn_run_context)
@@ -562,15 +717,159 @@ class BaseAgent:
             parent_run_context=turn_run_context,
         )
 
-    def get_generator(self, *args, parent_run_context: "RunContext | None" = None, **kwargs):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
-        return cast(Any, self.request).get_generator(*args, parent_run_context=turn_run_context, **kwargs)
+    @overload
+    def get_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator["StreamingData", None, None]: ...
 
-    def get_async_generator(self, *args, parent_run_context: "RunContext | None" = None, **kwargs):
+    @overload
+    def get_generator(
+        self,
+        type: Literal["all"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator["AgentlyModelResultMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator["AgentlySpecificResultMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["original"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator["AgentlyOriginalResultPayload", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator: ...
+
+    def get_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Generator:
         turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
         self._emit_agent_turn_started(turn_run_context)
-        return cast(Any, self.request).get_async_generator(*args, parent_run_context=turn_run_context, **kwargs)
+        return cast(Any, self.request).get_generator(
+            type=type,
+            content=content,
+            specific=specific,
+            parent_run_context=turn_run_context,
+        )
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator["StreamingData", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["all"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator["AgentlyModelResultMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator["AgentlySpecificResultMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["original"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator["AgentlyOriginalResultPayload", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator: ...
+
+    def get_async_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+        parent_run_context: "RunContext | None" = None,
+    ) -> AsyncGenerator:
+        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_turn_started(turn_run_context)
+        return cast(Any, self.request).get_async_generator(
+            type=type,
+            content=content,
+            specific=specific,
+            parent_run_context=turn_run_context,
+        )
 
     def start(
         self,
@@ -641,7 +940,7 @@ class BaseAgent:
         self,
         *,
         goal: str,
-        success_criteria: list[str],
+        success_criteria: list[str] | None = None,
         workspace: str | os.PathLike[str] | None = None,
         max_iterations: int = 3,
         verify: Literal["before_done"] = "before_done",
@@ -651,8 +950,48 @@ class BaseAgent:
         options: dict[str, Any] | None = None,
         task_id: str | None = None,
     ):
-        return AgentTask(
-            self,
+        if workspace is not None:
+            cast(Any, self).use_workspace(workspace)
+        task_options = {
+            "goal": goal,
+            "success_criteria": success_criteria,
+            "workspace": workspace,
+            "max_iterations": max_iterations,
+            "verify": verify,
+            "recall_profile": recall_profile,
+            "context_budget": context_budget,
+            "limits": limits,
+            "options": options,
+            "task_id": task_id,
+        }
+        execution = self.create_execution(
+            lineage={"task_id": task_id} if task_id is not None else None,
+            options={
+                "strategy": "task",
+                "task": {key: value for key, value in task_options.items() if value is not None},
+            },
+        )
+        execution.goal(goal)
+        if success_criteria:
+            execution.success_criteria(success_criteria)
+        execution.workspace = getattr(self, "workspace", None)
+        return execution
+
+    def create_task_loop(
+        self,
+        *,
+        goal: str,
+        success_criteria: list[str] | None = None,
+        workspace: str | os.PathLike[str] | None = None,
+        max_iterations: int = 3,
+        verify: Literal["before_done"] = "before_done",
+        recall_profile: str = "software_dev",
+        context_budget: dict[str, Any] | None = None,
+        limits: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        task_id: str | None = None,
+    ):
+        execution = self.create_task(
             goal=goal,
             success_criteria=success_criteria,
             workspace=workspace,
@@ -664,6 +1003,8 @@ class BaseAgent:
             options=options,
             task_id=task_id,
         )
+        execution.strategy("task_loop")
+        return execution
 
     def validate(self, handler: "OutputValidateHandler"):
         self.extension_handlers.append("validate_handlers", handler)
@@ -687,6 +1028,13 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
     ):
+        DeprecationWarnings.warn_deprecated_once(
+            "BaseAgent.set_turn_prompt",
+            "agent.set_turn_prompt(...) is a compatibility API. "
+            "Use agent.input(...), agent.create_execution().set_execution_prompt(...), "
+            "or agent.set_agent_prompt(...) for persistent Agent definition state.",
+            stacklevel=2,
+        )
         self.request.prompt.set(key, value, mappings=mappings)
         return self
 
@@ -742,6 +1090,24 @@ class BaseAgent:
         return self
 
     # Quick Prompt
+    @overload
+    def system(
+        self,
+        prompt: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def system(
+        self,
+        prompt: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
     def system(
         self,
         prompt: Any,
@@ -752,7 +1118,25 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("system", prompt, mappings=mappings)
             return self
-        return self.create_turn().system(prompt, mappings=mappings)
+        return self.create_execution().system(prompt, mappings=mappings)
+
+    @overload
+    def rule(
+        self,
+        prompt: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def rule(
+        self,
+        prompt: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
 
     def rule(
         self,
@@ -765,7 +1149,29 @@ class BaseAgent:
             self.agent_prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
             self.agent_prompt.set("system.rule", prompt, mappings=mappings)
             return self
-        return self.create_turn().rule(prompt, mappings=mappings)
+        return self.create_execution().rule(prompt, mappings=mappings)
+
+    @overload
+    def role(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+        **kwargs: Any,
+    ) -> Self: ...
+
+    @overload
+    def role(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+        **kwargs: Any,
+    ) -> "AgentExecution": ...
 
     def role(
         self,
@@ -781,7 +1187,29 @@ class BaseAgent:
             self.agent_prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
             self.agent_prompt.set("system.your_role", prompt, mappings=mappings)
             return self
-        return self.create_turn().role(prompt, mappings=mappings)
+        return self.create_execution().role(prompt, mappings=mappings)
+
+    @overload
+    def user_info(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+        **kwargs: Any,
+    ) -> Self: ...
+
+    @overload
+    def user_info(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+        **kwargs: Any,
+    ) -> "AgentExecution": ...
 
     def user_info(
         self,
@@ -797,7 +1225,29 @@ class BaseAgent:
             self.agent_prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
             self.agent_prompt.set("system.user_info", prompt, mappings=mappings)
             return self
-        return self.create_turn().user_info(prompt, mappings=mappings)
+        return self.create_execution().user_info(prompt, mappings=mappings)
+
+    @overload
+    def input(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+        **kwargs: Any,
+    ) -> Self: ...
+
+    @overload
+    def input(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+        **kwargs: Any,
+    ) -> "AgentExecution": ...
 
     def input(
         self,
@@ -812,7 +1262,29 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("input", prompt, mappings=mappings)
             return self
-        return self.create_turn().input(prompt, mappings=mappings)
+        return self.create_execution().input(prompt, mappings=mappings)
+
+    @overload
+    def info(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+        **kwargs: Any,
+    ) -> Self: ...
+
+    @overload
+    def info(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+        **kwargs: Any,
+    ) -> "AgentExecution": ...
 
     def info(
         self,
@@ -827,7 +1299,29 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("info", prompt, mappings=mappings)
             return self
-        return self.create_turn().info(prompt, mappings=mappings)
+        return self.create_execution().info(prompt, mappings=mappings)
+
+    @overload
+    def instruct(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+        **kwargs: Any,
+    ) -> Self: ...
+
+    @overload
+    def instruct(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+        **kwargs: Any,
+    ) -> "AgentExecution": ...
 
     def instruct(
         self,
@@ -842,7 +1336,29 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("instruct", prompt, mappings=mappings)
             return self
-        return self.create_turn().instruct(prompt, mappings=mappings)
+        return self.create_execution().instruct(prompt, mappings=mappings)
+
+    @overload
+    def examples(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+        **kwargs: Any,
+    ) -> Self: ...
+
+    @overload
+    def examples(
+        self,
+        prompt: Any = _UNSET,
+        value: Any = _UNSET,
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+        **kwargs: Any,
+    ) -> "AgentExecution": ...
 
     def examples(
         self,
@@ -857,7 +1373,37 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("examples", prompt, mappings=mappings)
             return self
-        return self.create_turn().examples(prompt, mappings=mappings)
+        return self.create_execution().examples(prompt, mappings=mappings)
+
+    @overload
+    def output(
+        self,
+        prompt: (
+            dict[str, tuple[type, str | None, str, None] | Any]
+            | list[tuple[type, str | None, str, None] | Any]
+            | tuple[type, str | None, str, None]
+            | Any
+        ),
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
+    ) -> Self: ...
+
+    @overload
+    def output(
+        self,
+        prompt: (
+            dict[str, tuple[type, str | None, str, None] | Any]
+            | list[tuple[type, str | None, str, None] | Any]
+            | tuple[type, str | None, str, None]
+            | Any
+        ),
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+        format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
+    ) -> "AgentExecution": ...
 
     def output(
         self,
@@ -877,7 +1423,25 @@ class BaseAgent:
             if format is not None:
                 self.agent_prompt.set("output_format", format)
             return self
-        return self.create_turn().output(prompt, mappings=mappings, format=format)
+        return self.create_execution().output(prompt, mappings=mappings, format=format)
+
+    @overload
+    def attachment(
+        self,
+        prompt: list[dict[str, Any]],
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def attachment(
+        self,
+        prompt: list[dict[str, Any]],
+        *,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
 
     def attachment(
         self,
@@ -889,7 +1453,35 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("attachment", prompt, mappings=mappings)
             return self
-        return self.create_turn().attachment(prompt, mappings=mappings)
+        return self.create_execution().attachment(prompt, mappings=mappings)
+
+    @overload
+    def image(
+        self,
+        *,
+        question: str,
+        file: str | os.PathLike[str] | None = None,
+        url: str | None = None,
+        files: list[str | os.PathLike[str]] | tuple[str | os.PathLike[str], ...] | None = None,
+        urls: list[str] | tuple[str, ...] | None = None,
+        detail: ImageDetail | None = None,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def image(
+        self,
+        *,
+        question: str,
+        file: str | os.PathLike[str] | None = None,
+        url: str | None = None,
+        files: list[str | os.PathLike[str]] | tuple[str | os.PathLike[str], ...] | None = None,
+        urls: list[str] | tuple[str, ...] | None = None,
+        detail: ImageDetail | None = None,
+        mappings: dict[str, Any] | None = None,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
 
     def image(
         self,
@@ -914,7 +1506,23 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("attachment", attachment, mappings=mappings)
             return self
-        return self.create_turn().attachment(attachment, mappings=mappings)
+        return self.create_execution().attachment(attachment, mappings=mappings)
+
+    @overload
+    def options(
+        self,
+        options: dict[str, Any],
+        *,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def options(
+        self,
+        options: dict[str, Any],
+        *,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
 
     def options(
         self,
@@ -925,7 +1533,28 @@ class BaseAgent:
         if always:
             self.agent_prompt.set("options", options)
             return self
-        return self.create_turn().options(options)
+        return self.create_execution().set_prompt_options(options)
+
+    def goal(self, goal: Any):
+        return self.create_execution().goal(goal)
+
+    def goals(self, *goals: Any):
+        return self.create_execution().goals(*goals)
+
+    def success_criteria(self, criteria: Any = None, *more: Any):
+        return self.create_execution().success_criteria(criteria, *more)
+
+    def success_standards(self, criteria: Any = None, *more: Any):
+        return self.create_execution().success_criteria(criteria, *more)
+
+    def effort(self, value: Any):
+        return self.create_execution().effort(value)
+
+    def route_policy(self, value: Any):
+        return self.create_execution().route_policy(value)
+
+    def strategy(self, value: str | None = None, **options: Any):
+        return self.create_execution().strategy(value, **options)
 
     # Prompt
     def get_prompt_text(self):

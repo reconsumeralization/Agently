@@ -150,7 +150,7 @@ agent.output(Ticket)  # equivalent to expanding the BaseModel into nested leaves
 
 ## Plain text
 
-When you want plain text rather than structured output, **don't** use `output()` — just `agent.input("...").start()` returns a string, or use `response.result.get_text()`. Schema as Prompt is for structured outputs.
+When you want plain text rather than structured output, **don't** use `output()` — just `agent.input("...").start()` returns a string, or use `result.get_text()`. Schema as Prompt is for structured outputs.
 
 ## Out of scope
 

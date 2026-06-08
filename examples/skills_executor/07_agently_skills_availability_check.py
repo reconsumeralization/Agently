@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -21,7 +22,8 @@ from agently import Agently
 # installed and passes executor eligibility checks when explicitly selected.
 # This is not an Agent auto-orchestration acceptance example and it does not
 # prove model-owned route selection. This script:
-#   1. Installs the active skills from a local Agently-Skills clone.
+#   1. Installs the active skills from a local Agently-Skills clone in a fresh
+#      local registry.
 #   2. Lists each installed skill with its purpose and activation hints.
 #   3. Runs a plan-resolution check for every skill using required mode and the
 #      deterministic planner — no model API key is needed.
@@ -37,17 +39,17 @@ from agently import Agently
 # installed_count=6
 #
 # Installed Agently-Skills (6):
-#   agently-dynamic-task: Use when the user needs Agently Dynamic Task...
-#   agently-migration: Use when the user wants to migrate an existing...
-#   agently-playbook: Use when the user wants to build, initialize...
-#   agently-request: Use when the user is shaping Agently request-side...
-#   agently-runtime: Use when the user wants Agently runtime extension...
-#   agently-triggerflow: Use when the user needs workflow orchestration...
+#   agently:
+#   agently-dynamic-task:
+#   agently-migration:
+#   agently-request:
+#   agently-runtime:
+#   agently-triggerflow:
 #
 # Availability check (deterministic planner, no model call):
+#   agently              → resolved
 #   agently-dynamic-task → resolved
 #   agently-migration    → resolved
-#   agently-playbook     → resolved
 #   agently-request      → resolved
 #   agently-runtime      → resolved
 #   agently-triggerflow  → resolved
@@ -55,9 +57,9 @@ from agently import Agently
 # all_available=True
 #
 # Skill activation hints:
-#   agently-playbook:
+#   agently:
 #     keywords: []
-#     invocation_names: ['agently-playbook', 'agently playbook']
+#     invocation_names: []
 #   ...
 #
 # Note: these guidance-only skills carry no activation keywords by default.
@@ -77,7 +79,9 @@ def main() -> None:
         print(f"Expected 'skills/' directory not found inside: {AGENTLY_SKILLS_ROOT}")
         return
 
-    # Step 1: Install the active skills from the local repo.
+    # Step 1: Install the active skills from the local repo into a fresh registry.
+    if RUNTIME_ROOT.exists():
+        shutil.rmtree(RUNTIME_ROOT)
     Agently.skills_executor.configure(registry_root=str(RUNTIME_ROOT / "registry"))
     print("Installing Agently-Skills pack from local repo...")
     pack_report = Agently.skills_executor.install_skills_pack(

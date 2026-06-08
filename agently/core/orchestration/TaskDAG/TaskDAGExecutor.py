@@ -22,10 +22,10 @@ from agently.types.data import TaskDAG, TaskDAGNode
 from .TaskDAGResolver import (
     _GRAPH_SCHEMA_VERSION,
     _TASK_ID_PATTERN,
-    DynamicTaskContext,
-    DynamicTaskHandler,
-    DynamicTaskResolver,
-    dynamic_task_resolver_factory,
+    TaskDAGContext,
+    TaskDAGHandler,
+    TaskDAGResolver,
+    task_dag_resolver_factory,
     _coerce_resolver,
 )
 from .TaskDAGRuntime import CompiledTaskDAG, compile_task_dag
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 class TaskDAGExecutor:
     def __init__(
         self,
-        resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+        resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
         *,
         flow: "TriggerFlow | None" = None,
         name: str | None = None,
@@ -58,7 +58,7 @@ class TaskDAGExecutor:
         self,
         graph: TaskDAG | Mapping[str, Any],
         *,
-        resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+        resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
         flow: "TriggerFlow | None" = None,
         name: str | None = None,
     ) -> CompiledTaskDAG:
@@ -79,7 +79,7 @@ class TaskDAGExecutor:
         graph: TaskDAG | Mapping[str, Any],
         graph_input: Any = None,
         *,
-        resolver: DynamicTaskResolver | Mapping[str, Any] | None = None,
+        resolver: TaskDAGResolver | Mapping[str, Any] | None = None,
         timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
@@ -92,14 +92,14 @@ class TaskDAGExecutor:
             runtime_resources=runtime_resources,
         )
 
-    def _merge_resolver(self, resolver: DynamicTaskResolver | Mapping[str, Any] | None):
+    def _merge_resolver(self, resolver: TaskDAGResolver | Mapping[str, Any] | None):
         if resolver is None:
             return self.resolver
-        merged = DynamicTaskResolver(self.resolver.to_mapping())
+        merged = TaskDAGResolver(self.resolver.to_mapping())
         for key, value in _coerce_resolver(resolver).to_mapping().items():
             merged.register(key, value)
         return merged
 
     @staticmethod
     def resolver_factory(func: Callable[[TaskDAGNode], Any]):
-        return dynamic_task_resolver_factory(func)
+        return task_dag_resolver_factory(func)

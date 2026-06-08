@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.3.5",
-  "release_train": "2026-06-4.1.3.5-dev",
-  "notes": "Current public development-line manifest for the 4.1.3.5 work batch after the 4.1.3.4 release-line hardening slice, continuing preparation for the 4.1.4 AgentTask target.",
+  "target_version": "4.1.3.6",
+  "release_train": "2026-06-4.1.3.6-dev",
+  "notes": "Current public development-line manifest for the 4.1.3.6 compatibility work batch after the 4.1.3.5 release-line hardening slice, continuing preparation for the 4.1.4 AgentTask target.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
@@ -157,14 +157,95 @@
     "agent_turn_request_scope": {
       "status": "in-development",
       "surface": [
+        "AgentExecution",
+        "AgentExecutionResult",
         "AgentTurn",
         "Agent.create_turn",
+        "prompt config .execution",
         "Agent quick prompt chain",
         "Agent.set_turn_prompt",
         "AgentTurn.set_turn_prompt"
       ],
-      "contract": "Non-always Agent quick prompt calls create an isolated AgentTurn request draft; set_turn_prompt(...) names the one-turn prompt write surface; Agent-level persistent state remains on always=True/set_agent_prompt/stable setup APIs.",
-      "compatibility_policy": "Expression-local chaining is the recommended request-scoped shape. Multi-statement setup should capture turn = agent.create_turn() and mutate that turn. set_request_prompt(...) remains a compatibility alias for set_turn_prompt(...); explicit low-level agent.create_request()/agent.request builders remain available."
+      "contract": "Non-always Agent quick prompt calls create an isolated AgentExecution draft; AgentExecution owns execution-local ModelRequest prompt state and returns AgentExecutionResult. Prompt config .execution is the recommended one-run prompt section. AgentTurn/create_turn/set_turn_prompt remain compatibility aliases with deprecation warnings; Agent-level persistent state remains on define(...), always=True, set_agent_prompt(...), and stable setup APIs.",
+      "compatibility_policy": "Expression-local chaining is the recommended execution-scoped shape. Multi-statement setup should capture execution = agent.create_execution() or use agent.input(...). set_turn_prompt(...) and set_request_prompt(...) remain compatibility aliases for set_execution_prompt(...); prompt config .turn and .request remain compatibility aliases for .execution; explicit low-level agent.create_request()/agent.request builders remain available for direct ModelRequest use."
+    },
+    "response_stream_type_surface": {
+      "status": "in-development",
+      "surface": [
+        "StreamingData",
+        "StreamingData.is_complete",
+        "AgentlyModelResultEvent",
+        "AgentlyModelResultMessage",
+        "AgentlySpecificResultMessage",
+        "AgentlyOriginalResultPayload",
+        "AgentlyResultGenerator",
+        "ResultContentType",
+        "AgentlyModelResponseEvent",
+        "AgentlyModelResponseMessage",
+        "AgentlySpecificResponseMessage",
+        "AgentlyOriginalResponsePayload",
+        "AgentlyResponseGenerator",
+        "ResponseContentType",
+        "ModelStreamingHandler",
+        "AgentExecutionStreamHandler",
+        "AttemptStreamMessage",
+        "AttemptStreamGenerator",
+        "AgentExecutionStreamData",
+        "SkillRuntimeStreamItem",
+        "SkillRuntimeStreamHandler"
+      ],
+      "contract": "Common generator and handler type annotations are exposed through agently and agently.types.data. Result-named aliases are the recommended root-level public names: delta yields str, instant/streaming_parse yields StreamingData with is_complete, specific/all yield event-tagged result messages, AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive SkillRuntimeStreamItem dictionaries. Response-named aliases are compatibility-only aliases under agently.types.data and are not re-exported from the agently root.",
+      "compatibility_policy": "StreamingData.is_complete remains the canonical instant/streaming_parse completion field. Response-named type aliases remain compatibility-only aliases in agently.types.data and are deprecated in favor of Result-named aliases; they will be removed in Agently 4.2."
+    },
+    "model_response_result_facade": {
+      "status": "in-development",
+      "surface": [
+        "ModelRequest.get_result",
+        "AgentExecution.get_result",
+        "AgentExecutionResult",
+        "Agent.get_result",
+        "AgentTurn.get_result",
+        "ModelRequest.get_response",
+        "AgentExecution.get_response",
+        "Agent.get_response",
+        "AgentTurn.get_response",
+        "ModelResponse",
+        "ModelResponseResult"
+      ],
+      "contract": "get_result() is the recommended reusable facade for text, data, metadata, and streaming readers. Agent quick prompt chains return AgentExecutionResult; direct ModelRequest calls return ModelResponseResult. get_response() remains a compatibility alias. ModelResponseResult.result points to itself so older response.result reader chains continue to work.",
+      "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); data = result.get_data(). Code that already calls get_response() and then reader methods or response.result reader chains remains supported. Direct ModelResponse construction is deprecated and will be removed in Agently 4.2."
+    },
+    "agent_execution_task_loop": {
+      "status": "in-development",
+      "surface": [
+        "Agent.create_task",
+        "Agent.create_task_loop",
+        "AgentExecution.strategy(\"task\")",
+        "AgentExecution.strategy(\"task_loop\")",
+        "AgentExecutionResult.task_refs",
+        "AgentExecutionResult.get_async_generator",
+        "AgentExecutionResult.async_get_meta",
+        "AgentExecutionResult.async_resume"
+      ],
+      "contract": "The 4.1.3.6 task-loop contract is a narrow single-task, single-Agent-owner slice carried by AgentExecution. agent.create_task(...) and agent.create_task_loop(...) return task-strategy AgentExecution drafts, not a separate recommended AgentTask execution owner. Consumers read final data, text, streams, metadata, and task refs through AgentExecutionResult or the execution stream/meta facade. Completion acceptance requires model-owned verification plus conservative host guards; completed means accepted=true and artifact_status=accepted, while max_iterations can return accepted=false and artifact_status=partial. AgentExecutionResult resume is reserved and reports supported=false until a resumable strategy lands.",
+      "scope": {
+        "current_slice": [
+          "one Agent-owned business task",
+          "bounded 2-5 iteration task-loop guidance",
+          "explicitly enabled Actions, Skills, or Dynamic Task candidates as step capabilities",
+          "model-owned planning, verification, and replan decisions",
+          "host guards for missing criteria, risky action evidence, approval-required actions, and missing final deliverables",
+          "structured task refs, diagnostics, progress/snapshot stream items, and result facade consumption"
+        ],
+        "deferred": [
+          "multi-task scheduling",
+          "background autonomous scheduler",
+          "distributed lease or cross-worker ownership",
+          "durable pause/resume beyond the reserved result surface",
+          "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging"
+        ]
+      },
+      "compatibility_policy": "New documentation and examples should keep AgentExecutionResult as the common consumption surface. Task-style compatibility readers may remain callable, but they should not be promoted as a second recommended public lifecycle. Future 4.1.3.7 AgentTaskLoop hardening must strengthen the task strategy behind AgentExecution without changing this public ownership boundary."
     },
     "image": {
       "status": "in-development",

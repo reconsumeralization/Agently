@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from agently.utils import Settings
     from agently.types.data.event import RunContext
 
-AgentlyModelResponseEvent = Literal[
+AgentlyModelResultEvent = Literal[
     "error",
     "original_delta",
     "reasoning_delta",
@@ -39,14 +39,23 @@ AgentlyModelResponseEvent = Literal[
     "extra",
 ]
 
-AgentlyModelResponseMessage: TypeAlias = tuple[AgentlyModelResponseEvent, Any]
-AgentlyResponseGenerator: TypeAlias = AsyncGenerator[AgentlyModelResponseMessage, None]
+AgentlyModelResultMessage: TypeAlias = tuple[AgentlyModelResultEvent, Any]
+AgentlySpecificResultMessage: TypeAlias = AgentlyModelResultMessage
+AgentlyOriginalResultPayload: TypeAlias = Any
+AgentlyResultGenerator: TypeAlias = AsyncGenerator[AgentlyModelResultMessage, None]
+
+AgentlyModelResponseEvent: TypeAlias = AgentlyModelResultEvent
+AgentlyModelResponseMessage: TypeAlias = AgentlyModelResultMessage
+AgentlySpecificResponseMessage: TypeAlias = AgentlySpecificResultMessage
+AgentlyOriginalResponsePayload: TypeAlias = AgentlyOriginalResultPayload
+AgentlyResponseGenerator: TypeAlias = AgentlyResultGenerator
 
 NormalStreamingContentType: TypeAlias = Literal["delta", "original", "specific"]
 InstantStreamingContentType: TypeAlias = Literal["instant", "streaming_parse"]
 StreamingContentType: TypeAlias = NormalStreamingContentType | InstantStreamingContentType
-ResponseContentType: TypeAlias = Literal["all"] | StreamingContentType
-SpecificEvents: TypeAlias = list[AgentlyModelResponseEvent] | AgentlyModelResponseEvent | None
+ResultContentType: TypeAlias = Literal["all"] | StreamingContentType
+ResponseContentType: TypeAlias = ResultContentType
+SpecificEvents: TypeAlias = list[AgentlyModelResultEvent] | AgentlyModelResultEvent | None
 
 
 class AgentlyModelResult(TypedDict):
@@ -216,3 +225,7 @@ class AgentExecutionStreamData(StreamingData):
     action_id: str | None = None
     graph_id: str | None = None
     meta: dict[str, Any] | None = None
+
+
+ModelStreamingHandler: TypeAlias = Callable[[StreamingData], Awaitable[None] | None]
+AgentExecutionStreamHandler: TypeAlias = Callable[[AgentExecutionStreamData], Awaitable[None] | None]
