@@ -110,7 +110,7 @@ DeepSeek or local Ollama when model-owned behavior is involved.
 
 - Package version: `4.1.3.6`.
 - Release manifest: `compatibility/releases/4.1.3.6.json`.
-- Recommended `agently-devtools`: `>=0.1.7,<0.2.0`.
+- Recommended `agently-devtools`: `>=0.1.8,<0.2.0`.
 - `AgentTurn`, `create_turn(...)`, `set_turn_prompt(...)`, and
   `set_request_prompt(...)` remain compatible migration surfaces.
 - DevTools display issues #288 and #289 are DevTools-side work and are not

@@ -456,7 +456,7 @@ pip install agently-devtools
 agently-devtools init my_project
 ```
 
-Agently 4.1.3.6 推荐 `agently-devtools >=0.1.7,<0.2.0`。
+Agently 4.1.3.6 推荐 `agently-devtools >=0.1.8,<0.2.0`。
 
 ## 架构
 
