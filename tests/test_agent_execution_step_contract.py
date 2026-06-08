@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import warnings
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -11,10 +12,11 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.core.application.AgentExecution import AgentExecutionLimitExceeded
+from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, AgentExecutionResult
 from agently.types.data import AgentlyRequestData
 from agently.types.options import ExecutionOptions, SkillsRouteOptions
 from agently.utils import DataFormatter
+from agently.utils import DeprecationWarnings
 from agently.utils import Settings
 
 
@@ -168,6 +170,90 @@ def test_execution_options_validate_known_route_schema():
 
 
 @pytest.mark.asyncio
+async def test_agent_quick_prompt_returns_execution_and_result_facade():
+    MockAgentExecutionRequester.requests = []
+    agent = _create_agent("quick-prompt-execution-result")
+
+    execution = agent.input("quick prompt").output({"answer": (str, "answer", True)}, format="json")
+    result = execution.get_result()
+    data = await result.async_get_data()
+    meta = await result.async_get_meta()
+
+    assert type(execution).__name__ == "AgentExecution"
+    assert isinstance(result, AgentExecutionResult)
+    assert data["answer"] == "ok-1"
+    assert meta["execution_id"] == execution.id
+    assert agent.request.prompt.get(inherit=False) == {}
+
+
+def test_agent_define_parameter_and_builder_forms_write_definition_state():
+    agent = _create_agent("agent-define-contract")
+
+    builder = agent.define(
+        model="mock-model",
+        prompt={"system": "Base policy"},
+        settings={"runtime.session_id": "define-session"},
+        policy={"handler": "default"},
+    )
+    assert builder.info({"tenant": "demo"}) is builder
+
+    prompt_snapshot = agent.agent_prompt.get(inherit=False)
+    assert isinstance(prompt_snapshot, dict)
+    assert prompt_snapshot["system"] == "Base policy"
+    assert prompt_snapshot["info"] == {"tenant": "demo"}
+    assert agent.request.prompt.get(inherit=False) == {}
+    assert agent.settings.get("runtime.session_id") == "define-session"
+    assert agent.settings.get("policy_approval.handler") == "default"
+
+    builder_agent = _create_agent("agent-define-builder-contract")
+    builder_2 = builder_agent.define()
+    assert builder_2.role("Support assistant") is builder_2
+    assert builder_agent.agent_prompt.get("system.your_role", inherit=False) == "Support assistant"
+    assert builder_agent.request.prompt.get(inherit=False) == {}
+
+
+def test_create_task_and_task_loop_return_strategy_execution_drafts(tmp_path):
+    agent = _create_agent("task-strategy-drafts")
+
+    task_execution = agent.create_task(
+        task_id="task-draft",
+        goal="Draft a task",
+        success_criteria=["The task is drafted."],
+        workspace=tmp_path / "task",
+    )
+    loop_execution = agent.create_task_loop(
+        task_id="loop-draft",
+        goal="Loop a task",
+        success_criteria=["The loop is drafted."],
+        workspace=tmp_path / "loop",
+    )
+
+    assert type(task_execution).__name__ == "AgentExecution"
+    assert task_execution.strategy_name == "task"
+    assert task_execution.task_options["task_id"] == "task-draft"
+    assert type(loop_execution).__name__ == "AgentExecution"
+    assert loop_execution.strategy_name == "task_loop"
+
+
+def test_agent_turn_compatibility_surfaces_warn_and_remain_callable():
+    agent = _create_agent("agent-turn-warning-compat")
+    DeprecationWarnings.reset_registry()
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always", DeprecationWarning)
+        agent.set_turn_prompt("input", "pending")
+        turn = agent.create_turn()
+        turn.set_turn_prompt("instruct", "reply")
+
+    messages = [str(item.message) for item in captured]
+    assert turn.request_prompt.get("input", inherit=False) == "pending"
+    assert turn.request_prompt.get("instruct", inherit=False) == "reply"
+    assert agent.request.prompt.get(inherit=False) == {}
+    assert any("set_turn_prompt" in message for message in messages)
+    assert any("create_turn" in message for message in messages)
+
+
+@pytest.mark.asyncio
 async def test_same_agent_quick_prompt_turns_are_request_scoped():
     MockAgentExecutionRequester.requests = []
     agent = _create_turn_isolation_agent("same-agent-turn-isolation")
@@ -279,6 +365,7 @@ async def test_agent_execution_model_request_exposes_action_logs_and_artifacts()
     assert meta["logs"]["action_logs"][0]["route"] == "model_request"
     assert meta["logs"]["artifact_refs"]
     assert action_items
+    assert action_items[0].meta is not None
     assert action_items[0].meta["lineage"]["task_id"] == "action-task"
 
 

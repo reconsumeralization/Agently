@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .Prompt import Prompt
+from .AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint, is_core_attempt_runner_entrypoint
 from .ModelResponseResult import ModelResponseResult
 from .ModelResponse import ModelResponse
 from .ModelRequest import ModelRequest, _UNSET, _resolve_quick_prompt_input
@@ -20,6 +21,9 @@ from .AttachmentInput import ImageDetail, build_image_attachment, image_file_to_
 
 __all__ = [
     "Prompt",
+    "AttemptRunner",
+    "core_attempt_runner_entrypoint",
+    "is_core_attempt_runner_entrypoint",
     "ModelRequest",
     "ModelResponse",
     "ModelResponseResult",

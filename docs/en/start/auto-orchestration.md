@@ -21,11 +21,11 @@ Candidate injection is the boundary. If no Actions, Skills, Skills Packs, or
 Dynamic Task candidates are registered, `agent.start()` remains an ordinary
 model request.
 
-Quick prompt chains are request-scoped. The Agent can be kept as a service
-singleton for shared settings, model activation, Actions, Skills, Workspace, and
-`always=True` prompt, while `.input(...)`, `.system(...)`, `.output(...)`,
-attachments, and per-turn options in one chain are written to an isolated
-`AgentTurn` draft:
+Quick prompt chains create execution-scoped drafts. The Agent can be kept as a
+service singleton for shared settings, model activation, Actions, Skills,
+Workspace, and `define(...)` / `always=True` prompt, while `.input(...)`,
+`.system(...)`, `.output(...)`, attachments, and per-execution options in one
+chain are written to an isolated `AgentExecution` draft:
 
 ```python
 results = await asyncio.gather(
@@ -35,18 +35,20 @@ results = await asyncio.gather(
 )
 ```
 
-For multi-statement setup, capture the turn draft explicitly:
+For multi-statement setup, capture the execution draft explicitly:
 
 ```python
-turn = agent.create_turn()
-turn.input("Review this renewal risk.")
-turn.output({"answer": (str, "final answer", True)})
-result = await turn.async_start()
+execution = agent.create_execution()
+execution.input("Review this renewal risk.")
+execution.output({"answer": (str, "final answer", True)})
+result = await execution.async_start()
 ```
 
 Do not rely on `agent.input(...); agent.output(...); await agent.async_start()`
-for turn-scoped prompt accumulation. Use `always=True`,
+for execution prompt accumulation. Use `always=True`,
 `set_agent_prompt(...)`, or stable setup methods for Agent-lifetime state; use
+`agent.define(...)` for reusable Agent definition state; use
+`agent.create_turn()` / `set_turn_prompt(...)` only as compatibility aliases and
 `agent.create_request(...)` / `agent.request` only when you intentionally want
 the lower-level request-builder surface.
 
@@ -65,12 +67,13 @@ replaceable without teaching core about builtin plugin internals.
 ## AgentTask Loop
 
 Use `agent.create_task(...)` when the business goal needs a bounded multi-round
-loop instead of one Agent turn. AgentTask V1 runs one task owned by one Agent:
-plan, execute one bounded step, write Workspace evidence, verify, replan when
-needed, then finish as complete or blocked.
+loop instead of one direct AgentExecution. It returns a task-strategy
+`AgentExecution` draft; internally the retained `AgentTask` record runs one task
+owned by one Agent: plan, execute one bounded step, write Workspace evidence,
+verify, replan when needed, then finish as complete or blocked.
 
 ```python
-task = agent.create_task(
+execution = agent.create_task(
     goal="Upgrade a legacy Agently script so it runs on the current 4.1.x API.",
     success_criteria=[
         "The original failure is recorded.",
@@ -92,14 +95,14 @@ task = agent.create_task(
     },
 )
 
-async for item in task.stream():
+async for item in execution.get_async_generator():
     if (item.meta or {}).get("stream_kind") == "progress":
         print("[PROGRESS]", item.value["message"])
     elif (item.meta or {}).get("stream_kind") == "snapshot":
         print("[SNAPSHOT]", item.path, item.value["snapshot"])
 
-result = await task.run()
-meta = await task.meta()
+result = await execution.async_start()
+meta = await execution.async_get_meta()
 ```
 
 Each iteration writes planning decisions, execution observations, verification
@@ -114,8 +117,9 @@ blocked, approval is still required, or a required final deliverable is absent.
 Those guard decisions are recorded in task diagnostics so the next iteration can
 replan from concrete evidence instead of accepting a weak completion claim.
 
-`task.stream()` emits structured result events and, by default, compact
-intermediate `snapshot` items. Natural-language `progress` items are opt-in with
+The task-strategy AgentExecution stream emits structured result events and, by
+default, compact intermediate `snapshot` items. Natural-language `progress`
+items are opt-in with
 `options={"agent_task": {"stream_progress": True}}`; the built-in descriptions
 are template-based when no `progress_model_key` is configured, so they do not
 add model requests or token usage. When `progress_model_key` is set, AgentTask
@@ -123,7 +127,7 @@ uses that separate model key in a background task to summarize the already
 emitted snapshot and task metadata. The main loop does not produce extra fields
 for progress narration and does not wait for progress narration to finish.
 Progress narrator failures are side-channel diagnostics and warning-level
-runtime events; they do not turn the main task into `model.request_failed`.
+runtime events; they do not turn the main execution into `model.request_failed`.
 Model progress narration receives an operator-safe snapshot; developer
 diagnostics such as low-level Workspace/SQLite fallback details remain in
 snapshots and `task.meta()["diagnostics"]`, but are omitted from the progress

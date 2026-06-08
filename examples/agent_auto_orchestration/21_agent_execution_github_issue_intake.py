@@ -41,6 +41,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -107,7 +108,7 @@ def normalize_issues(value: Any) -> list[dict[str, Any]]:
     return issues
 
 
-def action_stdout(meta: dict[str, Any], command_token: str) -> str:
+def action_stdout(meta: Mapping[str, Any], command_token: str) -> str:
     logs = meta.get("logs", {})
     action_logs = logs.get("action_logs", []) if isinstance(logs, dict) else []
     seen: list[dict[str, Any]] = []

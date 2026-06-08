@@ -212,22 +212,28 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {
         "agent_turn_request_scope": {
             "status": "released",
             "surface": [
+                "AgentExecution",
+                "AgentExecutionResult",
                 "AgentTurn",
                 "Agent.create_turn",
+                "prompt config .execution",
                 "Agent quick prompt chain",
                 "Agent.set_turn_prompt",
                 "AgentTurn.set_turn_prompt",
             ],
             "contract": (
-                "Non-always Agent quick prompt calls create an isolated AgentTurn request draft; "
-                "set_turn_prompt(...) names the one-turn prompt write surface; Agent-level persistent state remains "
-                "on always=True/set_agent_prompt/stable setup APIs."
+                "Non-always Agent quick prompt calls create an isolated AgentExecution draft; "
+                "AgentExecution owns execution-local ModelRequest prompt state and returns AgentExecutionResult. "
+                "Prompt config .execution is the recommended one-run prompt section. "
+                "AgentTurn/create_turn/set_turn_prompt remain compatibility aliases with deprecation warnings; "
+                "Agent-level persistent state remains on define(...), always=True, set_agent_prompt(...), and stable setup APIs."
             ),
             "compatibility_policy": (
-                "Expression-local chaining is the recommended request-scoped shape. Multi-statement setup should "
-                "capture turn = agent.create_turn() and mutate that turn. set_request_prompt(...) remains a "
-                "compatibility alias for set_turn_prompt(...); explicit low-level agent.create_request()/agent.request "
-                "builders remain available."
+                "Expression-local chaining is the recommended execution-scoped shape. Multi-statement setup should "
+                "capture execution = agent.create_execution() or use agent.input(...). set_turn_prompt(...) and "
+                "set_request_prompt(...) remain compatibility aliases for set_execution_prompt(...); prompt config "
+                ".turn and .request remain compatibility aliases for .execution; explicit low-level agent.create_request()/agent.request "
+                "builders remain available for direct ModelRequest use."
             ),
         },
         "response_stream_type_surface": {

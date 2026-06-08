@@ -16,7 +16,8 @@ def load_yaml_prompt():
     # YAML Prompt is a declarative form of the same prompt structure used in code.
     # Mapping rules:
     # - .agent.* -> agent-level prompt (persistent)
-    # - .turn.* / .request.* or top-level keys -> turn-level prompt (single turn)
+    # - .execution.* or top-level keys -> execution prompt (one execution)
+    # - .turn.* / .request.* -> compatibility aliases for .execution.*
     # - $role / $system is shorthand for agent system role
     # See demo_docs/CONFIGURE_PROMPT_RELATION.md for details.
     #
@@ -26,8 +27,10 @@ def load_yaml_prompt():
     #   system: You are an Agently enhanced agent.
     #   info:
     #     Agently: "Speed up your AI application development. Official website: https://Agently.tech."
-    # .turn:
+    # .execution:
     #   input: Say hello.
+    #   instruct:
+    #     - Reply {input} politely
     #   output:
     #     $format: auto
     #     thinking:
@@ -48,11 +51,6 @@ def load_yaml_prompt():
     #           $type: str
     #           $desc: how do you thinking user's emotion is going to be after {reply}?
     #       $desc: extra info you need to collect and analysis
-    # .alias:
-    #   set_turn_prompt:
-    #     .args:
-    #       - instruct
-    #       - Reply {input} politely
     # $extra_info: This is an extra information for agent prompt.
     # extra_request_info: This is an extra information for next request.
     # in_value_placeholder_test: "in_value_placeholder: ${in_value_placeholder}"
@@ -63,7 +61,8 @@ def load_yaml_prompt():
     # You can load YAML prompt from file path or raw string content.
     result = (
         agent.load_yaml_prompt("examples/configure_prompt/yaml_prompt.yaml")
-        .set_turn_prompt("input", "Explain recursion in one paragraph.")
+        .create_execution()
+        .set_execution_prompt("input", "Explain recursion in one paragraph.")
         .start()
     )
     print(result)
@@ -84,8 +83,9 @@ def load_json_prompt():
     #       "Agently": "Speed up your AI application development. Official website: https://Agently.tech."
     #     }
     #   },
-    #   ".turn": {
+    #   ".execution": {
     #     "input": "Say hello.",
+    #     "instruct": ["Reply {input} politely."],
     #     "output": {
     #       "$format": "auto",
     #       "thinking": {
@@ -109,7 +109,6 @@ def load_json_prompt():
     #       }
     #     }
     #   },
-    #   ".alias": {"set_turn_prompt": {".args": ["instruct", "Reply {input} politely."]}},
     #   "$extra_info": "This is an extra information for agent prompt.",
     #   "extra_request_info": "This is an extra information for next request.",
     #   "in_value_placeholder_test": "in_value_placeholder: ${in_value_placeholder}",
@@ -121,7 +120,8 @@ def load_json_prompt():
     # You can load JSON prompt from file path or raw string content.
     result = (
         agent.load_json_prompt("examples/configure_prompt/json_prompt.json")
-        .set_turn_prompt("input", "Explain recursion with a short example.")
+        .create_execution()
+        .set_execution_prompt("input", "Explain recursion with a short example.")
         .start()
     )
     print(result)
@@ -135,9 +135,10 @@ def load_multiple_prompts():
     result = (
         agent.load_yaml_prompt(
             "examples/configure_prompt/multiple_yaml_prompts.yaml",
-            prompt_key_path="demo.output_control",
+            prompt_key_path="prompt_1",
         )
-        .set_turn_prompt("input", "Explain recursion.")
+        .create_execution()
+        .set_execution_prompt("input", "Explain recursion.")
         .start()
     )
     print(result)
@@ -154,7 +155,7 @@ def load_from_string():
 $ensure_all_keys: true
 .agent:
   system: You are an Agently enhanced agent.
-.turn:
+.execution:
   input: Say hello.
   output:
     reply:
@@ -165,25 +166,31 @@ $ensure_all_keys: true
 {
   "$ensure_all_keys": true,
   ".agent": { "system": "You are an Agently enhanced agent." },
-  ".turn": {
+  ".execution": {
     "input": "Say hello.",
     "output": { "reply": { "$type": "str", "$ensure": true } }
   }
 }
 """
-    agent.load_yaml_prompt(yaml_prompt_text)
-    agent.load_json_prompt(json_prompt_text)
-    print(agent.get_prompt_text())
+    yaml_execution = agent.load_yaml_prompt(yaml_prompt_text).create_execution()
+    print("[YAML EXECUTION PROMPT]")
+    print(yaml_execution.get_prompt_text())
+
+    json_execution = agent.load_json_prompt(json_prompt_text).create_execution()
+    print("[JSON EXECUTION PROMPT]")
+    print(json_execution.get_prompt_text())
 
 
 # load_multiple_prompts()
 
 
 def roundtrip_configure_prompt():
-    # Convert native prompt -> YAML/JSON -> load again.
-    result = (
-        agent.role("You are an Agently enhanced agent.", always=True)
-        .info({"Agently": "Speed up your AI application development."}, always=True)
+    # Convert native execution prompt -> YAML/JSON -> load again.
+    execution = (
+        agent.define()
+        .role("You are an Agently enhanced agent.")
+        .info({"Agently": "Speed up your AI application development."})
+        .create_execution()
         .input("Say hello.")
         .instruct(["Reply {input} politely."])
         .set_agent_prompt("ensure_all_keys", True)  # outermost strict guarantee
@@ -193,8 +200,8 @@ def roundtrip_configure_prompt():
             }
         )
     )
-    yaml_prompt = result.get_yaml_prompt()
-    json_prompt = result.get_json_prompt()
+    yaml_prompt = execution.get_yaml_prompt()
+    json_prompt = execution.get_json_prompt()
     print("[YAML PROMPT]")
     print(yaml_prompt)
     print("[JSON PROMPT]")
@@ -202,8 +209,9 @@ def roundtrip_configure_prompt():
 
     agent_2 = Agently.create_agent()
     agent_2.load_yaml_prompt(yaml_prompt)
+    execution_2 = agent_2.create_execution()
     print("[AGENT 2 PROMPT]")
-    print(agent_2.get_prompt_text())
+    print(execution_2.get_prompt_text())
 
 
 # roundtrip_configure_prompt()
@@ -216,11 +224,10 @@ def roundtrip_configure_prompt():
 # YAML and JSON prompt files are a declarative form of the same prompt structure used in code.
 # Key rules in the file schema:
 #   .agent.*   keys  -> agent-level prompts (persistent across requests)
-#   .turn.* keys     -> turn-level prompts (single turn only)
-#   .request.* keys  -> compatibility alias for .turn.*
-#   top-level keys without dots -> also turn-level
+#   .execution.* keys -> execution prompts (one execution only)
+#   .turn.* / .request.* keys -> compatibility aliases for .execution.*
+#   top-level keys without dots -> also execution-level
 #   $ensure_all_keys: true -> require all output keys to be present
-#   .alias.set_turn_prompt -> shorthand to call set_turn_prompt() via config
 #
 # get_yaml_prompt() / get_json_prompt() serialize the current agent prompt config back to
 # string; load_yaml_prompt(string) / load_json_prompt(string) accept both file paths and

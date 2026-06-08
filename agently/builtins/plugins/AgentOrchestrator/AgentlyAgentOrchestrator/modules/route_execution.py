@@ -1,0 +1,179 @@
+# Copyright 2023-2026 AgentEra(Agently.Tech)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Literal, TYPE_CHECKING
+
+from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, RuntimeStageStallError
+from agently.core.runtime.RuntimeContext import bind_runtime_context
+from agently.utils import DataFormatter
+
+from .routes import run_dynamic_task_route, run_model_request_route, run_skills_route
+from .task_strategy import run_agent_task_route
+
+if TYPE_CHECKING:
+    from agently.types.data import OutputValidateHandler, RunContext
+
+    from .execution import AgentExecution
+
+
+async def async_execute_route(
+    owner: "AgentExecution",
+    *,
+    type: Literal["original", "parsed", "all"],
+    ensure_keys: list[str] | None,
+    ensure_all_keys: bool | None,
+    validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None",
+    key_style: Literal["dot", "slash"],
+    max_retries: int,
+    raise_ensure_failure: bool,
+) -> tuple[str, Any]:
+    with bind_runtime_context(agent_execution_context=owner.execution_context):
+        owner.execution_context.record_progress(stage="route_selection", status="started")
+        route, route_meta = await owner.select_route()
+        owner.execution_context.record_progress(stage="route_selection", status="completed")
+        owner.route_plan = owner.route_planner.build_route_plan(
+            execution_id=owner.id,
+            route=route,
+            route_meta=route_meta,
+        )
+        owner.route_info.setdefault("selected_route", route)
+        owner.route_info.setdefault("options", DataFormatter.sanitize(route_meta))
+        owner.route_info.setdefault("reusable", True)
+        await owner.emit_stream("route.selected", owner.route_plan, route=route)
+        if route == "skills":
+            result = await run_skills_route(owner, route_meta)
+        elif route == "dynamic_task":
+            result = await run_dynamic_task_route(owner, route_meta)
+        elif route == "agent_task":
+            result = await run_agent_task_route(owner, route_meta)
+        else:
+            result = await run_model_request_route(
+                owner,
+                type=type,
+                ensure_keys=ensure_keys,
+                ensure_all_keys=ensure_all_keys,
+                validate_handler=validate_handler,
+                key_style=key_style,
+                max_retries=max_retries,
+                raise_ensure_failure=raise_ensure_failure,
+            )
+        return route, result
+
+
+async def start_execution(
+    owner: "AgentExecution",
+    *,
+    type: Literal["original", "parsed", "all"],
+    ensure_keys: list[str] | None,
+    ensure_all_keys: bool | None,
+    validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None",
+    key_style: Literal["dot", "slash"],
+    max_retries: int,
+    raise_ensure_failure: bool,
+    parent_run_context: "RunContext | None",
+) -> Any:
+    if parent_run_context is not None:
+        owner.parent_run_context = parent_run_context
+    async with owner._start_lock:
+        if owner._completed:
+            if owner._error is not None:
+                raise owner._error
+            return owner.result
+        if owner._started:
+            while not owner._completed:
+                await asyncio.sleep(0.01)
+            if owner._error is not None:
+                raise owner._error
+            return owner.result
+        owner._started = True
+        owner.status = "running"
+        try:
+            owner.execution_context.record_progress(
+                stage="agent_execution",
+                status="started",
+                event_type="agent_execution.started",
+                meta={"execution_id": owner.id, "execution_mode": owner.mode},
+            )
+            run_coro = owner._async_execute_route(
+                type=type,
+                ensure_keys=ensure_keys,
+                ensure_all_keys=ensure_all_keys,
+                validate_handler=validate_handler,
+                key_style=key_style,
+                max_retries=max_retries,
+                raise_ensure_failure=raise_ensure_failure,
+            )
+            route, owner.result = await owner._await_route_with_limits(run_coro)
+            if owner.status == "running":
+                owner.status = "success"
+            await owner.emit_stream("result", owner.result, route=route, source="agent_execution")
+            return owner.result
+        except RuntimeStageStallError as error:
+            owner.status = "timed_out" if error.status == "timed_out" else "stalled"
+            owner._error = error
+            owner._record_error_diagnostic(error)
+            await owner.emit_stream(
+                "error",
+                error.to_diagnostic(),
+                source="agent_execution",
+            )
+            raise
+        except asyncio.TimeoutError as error:
+            owner.status = "timed_out"
+            timeout_error = RuntimeStageStallError(
+                (
+                    "AgentExecution hard deadline exceeded: "
+                    f"max_seconds={ owner.limits.get('max_seconds') }."
+                ),
+                stage=str((owner.execution_context.last_progress_event or {}).get("stage") or "agent_execution"),
+                status="timed_out",
+                elapsed_seconds=None,
+                timeout_seconds=owner.limits.get("max_seconds"),
+                last_progress_event=(owner.execution_context.last_progress_event or {}).get("event_type"),
+            )
+            owner._error = timeout_error
+            owner._record_error_diagnostic(timeout_error)
+            await owner.emit_stream(
+                "error",
+                timeout_error.to_diagnostic(),
+                source="agent_execution",
+            )
+            raise timeout_error from error
+        except AgentExecutionLimitExceeded as error:
+            owner.status = "blocked"
+            owner._error = error
+            owner._record_error_diagnostic(error)
+            await owner.emit_stream(
+                "error",
+                {"type": error.__class__.__name__, "message": str(error), "limit_name": error.limit_name},
+                source="agent_execution",
+            )
+            raise
+        except BaseException as error:
+            owner.status = "error"
+            owner._error = error
+            owner._record_error_diagnostic(error)
+            await owner.emit_stream(
+                "error",
+                {"type": error.__class__.__name__, "message": str(error)},
+                source="agent_execution",
+            )
+            raise
+        finally:
+            owner._refresh_diagnostics()
+            owner._completed = True
+            await owner.close_streams()

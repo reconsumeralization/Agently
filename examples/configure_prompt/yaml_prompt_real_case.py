@@ -24,7 +24,8 @@ output:
 cat_words = "This is delicious!"
 
 agent = Agently.create_agent()
-result = agent.load_yaml_prompt(yaml_prompt, mappings={"cat_words": cat_words}).start()
+execution = agent.load_yaml_prompt(yaml_prompt, mappings={"cat_words": cat_words}).create_execution()
+result = execution.start()
 print(result)
 
 # Expected output (content is variable — requires local Ollama):
@@ -34,5 +35,6 @@ print(result)
 # load_yaml_prompt() accepts an inline YAML string (not only a file path).
 # The YAML DSL maps $role, input, and output sections onto Agently prompt slots.
 # mappings={"cat_words": cat_words} substitutes ${cat_words} tokens in the YAML at
-# load time, before the prompt is built.  .start() sends the assembled prompt to the
-# local model and returns the structured dict.
+# load time, before the prompt is built. create_execution() captures the one-run
+# prompt draft, and .start() sends that assembled execution prompt to the local
+# model and returns the structured dict.

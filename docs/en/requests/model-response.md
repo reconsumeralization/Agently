@@ -8,7 +8,11 @@ keywords: Agently, result, get_result, get_data, get_text, get_meta, generator, 
 
 > Languages: **English** · [中文](../../cn/requests/model-response.md)
 
-`agent.input(...).start()` is a convenience that runs the request and returns the parsed dict. For everything more interesting — text, metadata, streaming, reuse — go through `get_result()`.
+`agent.input(...).start()` is a convenience that creates an `AgentExecution`,
+runs it, and returns the parsed data. For everything more interesting — text,
+metadata, streaming, reuse, status, or task refs — go through `get_result()`.
+Quick prompt chains return an `AgentExecutionResult`; direct
+`agent.create_request(...).get_result()` still returns `ModelResponseResult`.
 
 ## Two consumption styles
 

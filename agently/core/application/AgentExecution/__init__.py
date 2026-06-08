@@ -21,11 +21,15 @@ from .Context import (
     normalize_execution_lineage,
     normalize_execution_mode,
 )
+from .PromptDraft import AgentExecutionPromptDraft
+from .Result import AgentExecutionResult
 from .Stream import AgentExecutionStream
 
 __all__ = [
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
+    "AgentExecutionPromptDraft",
+    "AgentExecutionResult",
     "AgentExecutionStream",
     "RuntimeStageStallError",
     "merge_stream_meta",

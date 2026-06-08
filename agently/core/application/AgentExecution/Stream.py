@@ -37,6 +37,16 @@ class AgentExecutionStream:
         self.execution_id = execution_id
         self.execution_mode = execution_mode
         self.lineage = dict(lineage or {})
+        self._execution: Any = None
+
+    def bind_execution(self, execution: Any):
+        self._execution = execution
+        return self
+
+    def __call__(self, *args: Any, **kwargs: Any):
+        if self._execution is None:
+            raise TypeError("AgentExecutionStream is not bound to an AgentExecution.")
+        return self._execution.get_async_generator(*args, **kwargs)
 
     async def emit(
         self,
@@ -223,4 +233,24 @@ class AgentExecutionStream:
             task_id=task_id,
             graph_id=graph_id,
             meta=payload if isinstance(payload, dict) else None,
+        )
+
+    async def bridge_agent_task_item(self, item: Any, *, route: str = "agent_task"):
+        if not isinstance(item, AgentExecutionStreamData):
+            await self.emit("agent_task.stream", item, route=route, source="agent_task")
+            return
+        item_meta = dict(item.meta or {})
+        await self.emit(
+            item.path,
+            item.value,
+            delta=item.delta,
+            route=route,
+            source=item.source or "agent_task",
+            stage_id=item.stage_id,
+            task_id=item.task_id,
+            action_id=item.action_id,
+            graph_id=item.graph_id,
+            is_complete=item.is_complete,
+            event_type="delta" if item.event_type == "delta" else "done",
+            meta=item_meta,
         )

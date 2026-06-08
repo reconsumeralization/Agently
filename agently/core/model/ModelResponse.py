@@ -579,7 +579,7 @@ class ModelResponse:
                     )
                 build_request_handlers = getattr(model_requester, "build_request_handlers", None)
                 if callable(build_request_handlers):
-                    from agently.core.runtime.AttemptRunner import AttemptRunner, is_core_attempt_runner_entrypoint
+                    from agently.core.model.AttemptRunner import AttemptRunner, is_core_attempt_runner_entrypoint
                     from agently.types.data import AttemptHandlers, AttemptObservation, AttemptState
 
                     if is_core_attempt_runner_entrypoint(getattr(model_requester, "request_model", None)):

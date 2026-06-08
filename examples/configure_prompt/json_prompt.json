@@ -6,8 +6,9 @@
             "Agently": "Speed up your AI application development. Official website: https://Agently.tech."
         }
     },
-    ".turn": {
+    ".execution": {
         "input": "Say hello.",
+        "instruct": ["Reply {input} politely."],
         "output": {
             "$format": "auto",
             "thinking": {
@@ -35,11 +36,6 @@
                 },
                 "$desc": "extra info you need to collect and analysis"
             }
-        }
-    },
-    ".alias": {
-        "set_turn_prompt": {
-            ".args": ["instruct", "Reply {input} politely."]
         }
     },
     "$extra_info": "This is an extra information for agent prompt.",

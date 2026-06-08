@@ -1,6 +1,6 @@
 prompt_1:
-  .turn:
+  .execution:
     instruct: Say "Mew" to everything
 prompt_2:
-  .turn:
+  .execution:
     instruct: Response as a stereotype AI

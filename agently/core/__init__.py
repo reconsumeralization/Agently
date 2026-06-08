@@ -19,13 +19,14 @@ from .AgentTurn import AgentTurn
 from .application import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
+    AgentExecutionResult,
     AgentExecutionStream,
     AgentTask,
     DynamicTask,
     RuntimeStageStallError,
     SkillsExecutor,
 )
-from .execution import (
+from .operation import (
     Action,
     ActionDispatcher,
     ActionRegistry,
@@ -37,7 +38,15 @@ from .execution import (
     Tool,
 )
 from .extension import ExtensionHandlers, PluginManager
-from .model import ModelRequest, ModelResponse, ModelResponseResult, Prompt
+from .model import (
+    AttemptRunner,
+    ModelRequest,
+    ModelResponse,
+    ModelResponseResult,
+    Prompt,
+    core_attempt_runner_entrypoint,
+    is_core_attempt_runner_entrypoint,
+)
 from .orchestration import (
     CompiledTaskDAG,
     TaskDAGContext,
@@ -53,14 +62,11 @@ from .orchestration import (
     TriggerFlowExecutionResult,
 )
 from .runtime import (
-    AttemptRunner,
     EventCenter,
     ObservationEventEmitter,
     RuntimeEvent,
     RuntimeEventEmitter,
     bind_runtime_context,
-    core_attempt_runner_entrypoint,
-    is_core_attempt_runner_entrypoint,
 )
 from .session import (
     DefaultContextBuilder,
@@ -82,6 +88,7 @@ __all__ = [
     "ActionRegistry",
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
+    "AgentExecutionResult",
     "AgentExecutionStream",
     "AgentTask",
     "AgentTurn",

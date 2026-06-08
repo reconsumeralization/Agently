@@ -541,7 +541,7 @@ async def main(argv: list[str] | None = None):
         "After writing the file, the execution evidence includes a file readback or validation checklist for the final Markdown content.",
     ]
 
-    task = agent.create_task(
+    execution = agent.create_task(
         task_id=task_id,
         goal=(
             "Use the interview-question-preparer Skill to prepare a blog-style interview preparation brief for these target "
@@ -568,7 +568,7 @@ async def main(argv: list[str] | None = None):
     stream_items = []
     try:
         with stream_trace_path.open("w", encoding="utf-8") as trace_file:
-            async for item in task.stream():
+            async for item in execution.get_async_generator():
                 stream_items.append(item)
                 trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
                 trace_file.flush()
@@ -580,11 +580,11 @@ async def main(argv: list[str] | None = None):
                 elif stream_kind == "snapshot":
                     stage = value.get("stage") or item.path.rsplit(".", 1)[-1]
                     print(f"[SNAPSHOT] {stage}: {message}", flush=True)
-        result = await task.run()
+        result = await execution.async_start()
     except Exception:
         print(f"[STREAM_TRACE] {stream_trace_path}", flush=True)
         raise
-    meta = await task.meta()
+    meta = await execution.async_get_meta()
 
     output_path = workspace_dir / output_file
     file_exists = output_path.is_file()

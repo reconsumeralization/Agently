@@ -10,10 +10,10 @@ from agently import Agently
 
 def test_prompt_to_json_yaml_prompt_returns_string():
     agent = Agently.create_agent()
-    turn = agent.input("hello").instruct("say hi")
+    execution = agent.input("hello").instruct("say hi")
 
-    json_content = turn.request_prompt.to_json_prompt()
-    yaml_content = turn.request_prompt.to_yaml_prompt()
+    json_content = execution.request_prompt.to_json_prompt()
+    yaml_content = execution.request_prompt.to_yaml_prompt()
 
     json_data = json.loads(json_content)
     yaml_data = yaml.safe_load(yaml_content)
@@ -23,13 +23,13 @@ def test_prompt_to_json_yaml_prompt_returns_string():
 
 def test_get_json_yaml_prompt_save_to_file(tmp_path: Path):
     agent = Agently.create_agent()
-    turn = agent.input("demo input").instruct("demo instruct")
+    execution = agent.input("demo input").instruct("demo instruct")
 
     json_path = tmp_path / "configured_prompt.json"
     yaml_path = tmp_path / "configured_prompt.yaml"
 
-    json_prompt = turn.request_prompt.to_json_prompt()
-    yaml_prompt = turn.request_prompt.to_yaml_prompt()
+    json_prompt = execution.request_prompt.to_json_prompt()
+    yaml_prompt = execution.request_prompt.to_yaml_prompt()
     json_path.write_text(json_prompt, encoding="utf-8")
     yaml_path.write_text(yaml_prompt, encoding="utf-8")
 
@@ -132,6 +132,58 @@ def test_load_yaml_prompt_accepts_turn_scope_and_set_turn_prompt_alias():
 
     assert agent.request_prompt.get("input", inherit=False) == "Hello Alice"
     assert agent.request_prompt.get("instruct", inherit=False) == "Reply briefly."
+
+
+def test_load_yaml_prompt_accepts_execution_scope():
+    agent = Agently.create_agent()
+    yaml_prompt = """
+.execution:
+  input: "Hello ${name}"
+  instruct: "Reply briefly."
+"""
+
+    agent.load_yaml_prompt(yaml_prompt, mappings={"name": "Alice"})
+
+    assert agent.request_prompt.get("input", inherit=False) == "Hello Alice"
+    assert agent.request_prompt.get("instruct", inherit=False) == "Reply briefly."
+
+
+def test_agent_prompt_serializes_execution_scope_for_pending_prompt():
+    agent = Agently.create_agent()
+    agent.load_yaml_prompt("input: hello\n")
+
+    json_content = agent.get_json_prompt()
+    yaml_content = agent.get_yaml_prompt()
+
+    json_data = json5.loads(json_content)
+    yaml_data = yaml.safe_load(yaml_content)
+    assert isinstance(json_data, dict)
+    assert isinstance(yaml_data, dict)
+    assert ".execution" in json_data
+    assert ".request" not in json_data
+    assert json_data[".execution"]["input"] == "hello"
+    assert ".execution" in yaml_data
+    assert ".request" not in yaml_data
+    assert yaml_data[".execution"]["input"] == "hello"
+
+
+def test_agent_execution_prompt_serializes_execution_scope():
+    agent = Agently.create_agent()
+    execution = agent.input("hello").instruct("say hi")
+
+    json_content = execution.get_json_prompt()
+    yaml_content = execution.get_yaml_prompt()
+
+    json_data = json5.loads(json_content)
+    yaml_data = yaml.safe_load(yaml_content)
+    assert isinstance(json_data, dict)
+    assert isinstance(yaml_data, dict)
+    assert json_data[".execution"]["input"] == "hello"
+    assert json_data[".execution"]["instruct"] == "say hi"
+    assert ".request" not in json_data
+    assert yaml_data[".execution"]["input"] == "hello"
+    assert yaml_data[".execution"]["instruct"] == "say hi"
+    assert ".request" not in yaml_data
 
 
 def test_load_yaml_prompt_rejects_positional_mappings():

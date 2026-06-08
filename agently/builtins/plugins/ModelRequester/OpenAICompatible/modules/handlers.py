@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator
 from httpx import HTTPStatusError, RequestError
 from httpx_sse import SSEError
 
-from agently.core.runtime.AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint
+from agently.core.model.AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState
 
 

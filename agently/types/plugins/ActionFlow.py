@@ -21,7 +21,7 @@ ActionFlowObservationHandler = Callable[[dict[str, Any]], Awaitable[None] | None
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.execution.Action import Action
+    from agently.core.operation.Action import Action
     from agently.core.extension.PluginManager import PluginManager
     from agently.types.data import ActionResult
     from agently.utils import Settings

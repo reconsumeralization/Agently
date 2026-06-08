@@ -20,7 +20,7 @@ from typing import Any, AsyncGenerator, Generator, TYPE_CHECKING, Literal, cast,
 from agently.core.model import _UNSET, _resolve_quick_prompt_input
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
-from agently.utils import FunctionShifter
+from agently.utils import DeprecationWarnings, FunctionShifter
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -92,6 +92,12 @@ class AgentTurn:
         *,
         mappings: dict[str, Any] | None = None,
     ):
+        DeprecationWarnings.warn_deprecated_once(
+            "AgentTurn.set_turn_prompt",
+            "AgentTurn.set_turn_prompt(...) is a compatibility API. "
+            "Use AgentExecution.set_execution_prompt(...) on an execution draft.",
+            stacklevel=2,
+        )
         self.request.prompt.set(key, value, mappings=mappings)
         return self
 

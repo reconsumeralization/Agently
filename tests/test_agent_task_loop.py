@@ -109,6 +109,28 @@ def _create_agent(name: str = "agent-task-loop-test"):
 
 
 @pytest.mark.asyncio
+async def test_agent_goal_success_criteria_uses_task_execution_path(tmp_path):
+    MockAgentTaskRequester.reset()
+    agent = _create_agent("agent-goal-task-path").use_workspace(tmp_path / "task-workspace")
+
+    execution = (
+        agent
+        .goal("Repair a legacy Agently script so it runs on the current API.")
+        .success_criteria(["The script runs successfully."])
+        .strategy("task", max_iterations=2)
+    )
+
+    result = await execution.async_start()
+    meta = await execution.async_get_meta()
+
+    assert result["status"] == "completed"
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert meta["task_refs"]["task_id"]
+    assert meta["task_refs"]["status"] == "completed"
+    assert meta["success_criteria"] == ["The script runs successfully."]
+
+
+@pytest.mark.asyncio
 async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     MockAgentTaskRequester.reset()
     agent = _create_agent()

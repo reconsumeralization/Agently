@@ -185,10 +185,10 @@ execution = await (
 )
 ```
 
-`set_agent_prompt(...)` values are inherited and kept for later turns.
+`set_agent_prompt(...)` values are inherited and kept for later executions.
 `set_turn_prompt(...)`, compatibility `set_request_prompt(...)`, and quick
 prompt values are frozen into the Skill run and then cleared from the pending
-request. Explicit `output=` and
+execution prompt. Explicit `output=` and
 `output_format=` arguments override prompt-derived defaults.
 
 `output_format=` selects how that model response is controlled. Leave it as

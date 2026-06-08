@@ -264,7 +264,7 @@ async def main(argv: list[str] | None = None):
     print(f"[SETUP] Initial returncode: {initial_run.returncode}")
     print(f"[SETUP] Initial stderr: {initial_run.stderr.strip()[:240]}")
 
-    task = agent.create_task(
+    execution = agent.create_task(
         task_id="legacy_agently_script_upgrade",
         goal=(
             "Upgrade legacy_script.py from an incompatible legacy Agently API to a current 4.1.x-compatible "
@@ -304,14 +304,14 @@ async def main(argv: list[str] | None = None):
     stream_trace_path = workspace_dir / "outputs" / "legacy_script_upgrade_stream.jsonl"
     stream_trace_path.parent.mkdir(parents=True, exist_ok=True)
     with stream_trace_path.open("w", encoding="utf-8") as trace_file:
-        async for item in task.stream():
+        async for item in execution.get_async_generator():
             stream_items.append(item)
             trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
             trace_file.flush()
             _print_stream_item(item)
 
-    result = await task.run()
-    meta = await task.meta()
+    result = await execution.async_start()
+    meta = await execution.async_get_meta()
     final_run = _run_script(script_path, env=run_env)
     validation = _validate_fixed_script(script_path, final_run)
     deterministic_validation_passed = bool(

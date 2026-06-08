@@ -23,7 +23,7 @@ from agently import (
     SkillRuntimeStreamItem as RootSkillRuntimeStreamItem,
     StreamingData as RootStreamingData,
 )
-from agently.core import AgentTurn, BaseAgent, ModelResponseResult
+from agently.core import AgentExecutionResult, AgentTurn, BaseAgent, ModelResponseResult
 from agently.types.data import (
     AgentExecutionStreamData,
     AgentlyModelResultEvent,
@@ -48,10 +48,12 @@ def test_agent_turn_and_model_response_streaming_type_contracts():
     if TYPE_CHECKING:
         agent: BaseAgent = Agently.create_agent("typing-contract")
 
-        assert_type(agent.input("hello"), AgentTurn)
+        assert_type(agent.input("hello"), AgentExecution)
         assert_type(agent.input("persistent", always=True), Agent)
+        assert_type(agent.input("hello").get_result(), AgentExecutionResult)
 
         turn = agent.create_turn().input("hello").output({"reply": (str,)})
+        assert_type(turn, AgentTurn)
         assert_type(turn.get_generator(type="delta"), Generator[str, None, None])
         assert_type(turn.get_generator(type="instant"), Generator[StreamingData, None, None])
         assert_type(turn.get_generator(type="specific"), Generator[AgentlySpecificResultMessage, None, None])

@@ -37,8 +37,8 @@ async def run_model_request_route(
     turn_run_context = agent._create_agent_turn_run_context(parent_run_context=execution.parent_run_context)
     await agent._async_emit_agent_turn_started(turn_run_context)
     if ensure_all_keys is not None:
-        agent.request.prompt.set("ensure_all_keys", ensure_all_keys)
-    result = agent.request.get_result(parent_run_context=turn_run_context)
+        execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
+    result = execution.request.get_result(parent_run_context=turn_run_context)
     execution.record_model_response_id(result.id)
     has_structured_stream = bool(execution.prompt_snapshot.get("output"))
     if has_structured_stream:

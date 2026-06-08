@@ -129,8 +129,11 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert in_development["companions"]["skills"]["catalog_generation"] == "v2"
     assert in_development["companions"]["skills"]["recommended_bundle"] == "app"
     turn_contract = in_development["request_input"]["agent_turn_request_scope"]
+    assert "AgentExecution" in turn_contract["surface"]
+    assert "AgentExecutionResult" in turn_contract["surface"]
     assert "AgentTurn" in turn_contract["surface"]
-    assert "isolated AgentTurn request draft" in turn_contract["contract"]
+    assert "isolated AgentExecution draft" in turn_contract["contract"]
+    assert "compatibility aliases" in turn_contract["contract"]
     assert in_development["companions"]["skills"]["legacy_generations"] == [
         {
             "generation": "v1",

@@ -15,6 +15,7 @@
 from .AgentExecution import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
+    AgentExecutionResult,
     AgentExecutionStream,
     RuntimeStageStallError,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "ActionTaskAdapter",
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
+    "AgentExecutionResult",
     "AgentExecutionStream",
     "AgentTask",
     "DynamicTask",

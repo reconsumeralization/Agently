@@ -96,7 +96,7 @@ async def main() -> None:
     print(f"[SETUP] Workspace: {workspace_dir}")
     print(f"[SETUP] Provider: {provider}, model_key={TASK_MODEL_KEY}")
 
-    task = agent.create_task(
+    execution = agent.create_task(
         task_id=TASK_ID,
         goal=(
             "Prepare a customer-facing answer for security questionnaire SECQ-77. Use fetch_security_context "
@@ -127,14 +127,14 @@ async def main() -> None:
     stream_trace_path = workspace_dir / "outputs" / "vendor_security_questionnaire_stream.jsonl"
     stream_trace_path.parent.mkdir(parents=True, exist_ok=True)
     with stream_trace_path.open("w", encoding="utf-8") as trace_file:
-        async for item in task.stream():
+        async for item in execution.get_async_generator():
             stream_items.append(item)
             trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
             trace_file.flush()
             print_stream_item(item)
 
-    result = await task.run()
-    meta = await task.meta()
+    result = await execution.async_start()
+    meta = await execution.async_get_meta()
     output_path = workspace.files_root / OUTPUT_FILE
     artifact_text = output_path.read_text(encoding="utf-8") if output_path.is_file() else ""
     model_judge = await judge_business_artifact(

@@ -8,7 +8,10 @@ keywords: Agently, result, get_result, get_data, get_text, get_meta, generator, 
 
 > 语言：[English](../../en/requests/model-response.md) · **中文**
 
-`agent.input(...).start()` 是便捷写法 —— 跑请求并直接返回解析后的 dict。其他更有意思的事（text、metadata、流式、复用）都走 `get_result()`。
+`agent.input(...).start()` 是便捷写法 —— 创建 `AgentExecution`、执行它并直接返回
+解析后的 data。其他更有意思的事（text、metadata、流式、复用、status 或 task
+refs）都走 `get_result()`。quick prompt 链返回 `AgentExecutionResult`；直接
+`agent.create_request(...).get_result()` 仍返回 `ModelResponseResult`。
 
 ## 两种消费方式
 

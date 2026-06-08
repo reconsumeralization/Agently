@@ -19,15 +19,20 @@ agent.load_yaml_prompt(
         ],
     },
 )
-print("AGENT PROMPT:", agent.prompt.get())
-print("REQUEST PROMPT:", agent.request.prompt.get(inherit=False))
+execution = agent.create_execution()
+
+print("AGENT PROMPT:", agent.agent_prompt.get())
+print("EXECUTION PROMPT:", execution.request_prompt.get(inherit=False))
+print("AGENT PENDING PROMPT AFTER CAPTURE:", agent.request.prompt.get(inherit=False))
 
 # Expected output (deterministic — no model call):
-# AGENT PROMPT: {...}   — all placeholder tokens replaced (IN VALUE!, KEY_NAME, list)
-# REQUEST PROMPT: {}    — empty because no request-level overrides were set
+# AGENT PROMPT: {...}        — persistent .agent / $... prompt slots
+# EXECUTION PROMPT: {...}    — .execution and top-level prompt slots for one run
+# AGENT PENDING PROMPT AFTER CAPTURE: {} — create_execution() consumed the pending draft
 #
 # How it works:
 # load_yaml_prompt() reads the YAML prompt file, fills in ${placeholder} tokens from
 # mappings= with the provided values, and applies the result to the agent's prompt store.
-# The YAML format mirrors the JSON format but is more readable for multi-field prompts.
-# Agent-level vs request-level inheritance behaves identically to the JSON variant.
+# The YAML format mirrors the JSON format but is more readable for multi-field
+# prompts. .agent writes persistent Agent definition prompt, while .execution
+# writes a one-run prompt draft that create_execution() captures and clears.
