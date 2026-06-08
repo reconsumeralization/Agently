@@ -134,6 +134,18 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentTurn" in turn_contract["surface"]
     assert "isolated AgentExecution draft" in turn_contract["contract"]
     assert "compatibility aliases" in turn_contract["contract"]
+    task_loop_contract = in_development["request_input"]["agent_execution_task_loop"]
+    assert "Agent.create_task" in task_loop_contract["surface"]
+    assert "Agent.create_task_loop" in task_loop_contract["surface"]
+    assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
+    assert "task-strategy AgentExecution drafts" in task_loop_contract["contract"]
+    assert "not a separate recommended AgentTask execution owner" in task_loop_contract["contract"]
+    assert "accepted=true" in task_loop_contract["contract"]
+    assert "artifact_status=partial" in task_loop_contract["contract"]
+    assert "supported=false" in task_loop_contract["contract"]
+    assert "multi-task scheduling" in task_loop_contract["scope"]["deferred"]
+    assert "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging" in task_loop_contract["scope"]["deferred"]
+    assert "AgentExecutionResult as the common consumption surface" in task_loop_contract["compatibility_policy"]
     assert in_development["companions"]["skills"]["legacy_generations"] == [
         {
             "generation": "v1",

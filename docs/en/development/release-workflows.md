@@ -119,6 +119,31 @@ link to it. Do not accept a release by pointing directly at existing examples,
 tests, or closed issues without first checking that those evidence sources cover
 the target contract.
 
+## Foundation Example Effect Gate
+
+Foundation-layer capabilities are release-critical substrate. When a release
+touches or claims a capability that the architecture specs position as
+Foundation, tests are not enough by themselves: the release reviewer must also
+run the corresponding core example under `examples/` and confirm the real effect
+still works through the recommended public API.
+
+For each affected Foundation capability:
+
+- name the protected Foundation capability and the user-visible effect
+- list the runnable core example that proves that effect, adding one before
+  release when none exists
+- run the example against the release candidate after pyright and pytest
+- use real DeepSeek or local Ollama when the effect includes model-owned
+  planning, routing, verification, or response generation
+- record command, environment, and stable key output, artifact, stream,
+  metadata, or side-effect evidence in the release PR body or review notes
+
+This gate fails closed. Do not release by arguing that unit tests passed if the
+Foundation example effect check is missing or broken. Either fix the example or
+the release candidate, remove the release claim, explicitly defer the affected
+Foundation capability in specs and release notes, or record a maintainer waiver
+with the residual risk.
+
 ## Release PR Body
 
 The release PR from `dev` to `main` must include enough information for a
@@ -131,6 +156,7 @@ At minimum, include:
 - change summary grouped by user-visible capability
 - coverage-first acceptance argument or matrix
 - validation commands and results, including any skipped or failed checks
+- Foundation example effect checks for touched Foundation-layer capabilities
 - clean install smoke environment and result
 - compatibility manifest updates and companion repository status
 - DevTools version or protocol recommendation when runtime events,

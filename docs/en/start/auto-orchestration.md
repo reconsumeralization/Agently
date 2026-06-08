@@ -72,6 +72,14 @@ loop instead of one direct AgentExecution. It returns a task-strategy
 owned by one Agent: plan, execute one bounded step, write Workspace evidence,
 verify, replan when needed, then finish as complete or blocked.
 
+In the 4.1.3.6 development line this is a narrow public task-loop slice, not
+the full future AgentTask system. `agent.create_task_loop(...)` is the explicit
+spelling for the same long-task strategy when code wants to make the strategy
+choice visible. Both APIs still return `AgentExecution`; new code should
+consume data, text, stream, metadata, status, and task refs through
+`execution.get_result()` or the execution stream/meta facade instead of treating
+`AgentTask` as a second public lifecycle.
+
 ```python
 execution = agent.create_task(
     goal="Upgrade a legacy Agently script so it runs on the current 4.1.x API.",
@@ -95,14 +103,17 @@ execution = agent.create_task(
     },
 )
 
-async for item in execution.get_async_generator():
+result = execution.get_result()
+
+async for item in result.get_async_generator():
     if (item.meta or {}).get("stream_kind") == "progress":
         print("[PROGRESS]", item.value["message"])
     elif (item.meta or {}).get("stream_kind") == "snapshot":
         print("[SNAPSHOT]", item.path, item.value["snapshot"])
 
-result = await execution.async_start()
-meta = await execution.async_get_meta()
+data = await result.async_get_data()
+meta = await result.async_get_meta()
+task_refs = result.task_refs
 ```
 
 Each iteration writes planning decisions, execution observations, verification
@@ -143,7 +154,9 @@ The first public slice is intentionally narrow: single task, one Agent owner,
 roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps
 may use Actions, Skills, or Dynamic Task candidates that the host already
 enabled on the Agent. AgentTask does not provide multi-task coordination,
-background autonomy, distributed leases, or long-term memory management.
+background autonomy, distributed leases, full durable pause/resume, or long-term
+memory management. `AgentExecutionResult.resume()` is a reserved surface for
+future resumable strategies and reports `supported=False` in this slice.
 
 For examples that validate model-owned semantic content, combine deterministic
 smoke checks with a second Agently model-judge request. Structural checks such

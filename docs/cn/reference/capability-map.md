@@ -46,7 +46,7 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 | 把 agent 包成服务 | [FastAPI 服务封装](../services/fastapi.md) |
 | 需要查看观测事件 | [Event Center](../observability/event-center.md) → [DevTools](../observability/devtools.md) |
 | 需要一次 Agent turn 在模型响应、Actions、Skills 或 Dynamic Task 中选路线 | [Agent 自动编排](../start/auto-orchestration.md) |
-| 单个业务任务需要计划 → 有边界执行 → 证据 → 验证 → replan | [Agent 自动编排](../start/auto-orchestration.md#agenttask-loop)，从 `agent.create_task(...)` 开始 |
+| 单个业务任务需要计划 → 有边界执行 → 证据 → 验证 → replan | [Agent 自动编排](../start/auto-orchestration.md#agenttask-loop)，从 `agent.create_task(...)` 开始，并按 `AgentExecution` result 消费 |
 | 模型生成或应用提交的 DAG 需要先校验再执行 | [Dynamic Task](../dynamic-task/README.md) |
 | 多阶段带分支的工作流 | [TriggerFlow 概览](../triggerflow/overview.md) → [模式](../triggerflow/patterns.md) |
 | 长跑流程带人工审批 / 中断 | [Pause 与 Resume](../triggerflow/pause-and-resume.md) |
@@ -60,7 +60,7 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 - 「Sync 还是 async？」——脚本和 demo 用 sync。服务、流式 UI 与 TriggerFlow 用 async。见 [Async First](../start/async-first.md)。
 - 「Action 还是 tool API？」——新代码：`Agently.action` / `agent.use_actions(...)`、来自 `agently.builtins.actions` 的内置 package，以及 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)` 等场景 helper。已有的 `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` 仍可用，但定位为兼容入口；见 [Action Runtime](../actions/action-runtime.md)。
 - 「Agent start 还是显式 API？」——候选驱动的自动编排用 `agent.start()`；需要路线诊断或过程流式输出时用 `agent.create_execution()`。如果应用必须强制走 Skills 或 Dynamic Task，使用显式 `agent.run_skills_task(...)` 或 `Agently.create_dynamic_task(...)`。
-- 「AgentTask 还是 TriggerFlow？」——当模型拥有单个业务任务的计划、验证和 replan loop 时，用 `agent.create_task(...)`；当应用掌握明确阶段、分支和暂停恢复拓扑时，直接用 TriggerFlow。
+- 「AgentTask 还是 TriggerFlow？」——当模型拥有单个业务任务的计划、验证和 replan loop 时，用 `agent.create_task(...)`；它返回 task-strategy `AgentExecution`，因此通过 AgentExecution result facade 读取 result/meta/stream/task refs。当应用掌握明确阶段、分支和暂停恢复拓扑时，直接用 TriggerFlow。
 - 「Executor 还是 Execution Environment？」——Executor 负责一次调用；Execution Environment 在调用前准备可复用或受 policy 约束的依赖；见 [Execution Environment](../actions/execution-environment.md)。
 - 「Core API 还是语法糖？」——应用开发者应优先使用 built-in actions 和 Agent Component helpers。Core manager 与 provider 面向框架、action、plugin 开发者；见 [扩展边界](../architecture/extension-boundaries.md)。
 - 「Observation event 还是 TriggerFlow event？」——observation event 归 [Event Center](../observability/event-center.md)；`emit` / `when` 与 runtime stream 归 [TriggerFlow 事件与流](../triggerflow/events-and-streams.md)。

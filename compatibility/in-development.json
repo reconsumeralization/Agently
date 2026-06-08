@@ -215,6 +215,38 @@
       "contract": "get_result() is the recommended reusable facade for text, data, metadata, and streaming readers. Agent quick prompt chains return AgentExecutionResult; direct ModelRequest calls return ModelResponseResult. get_response() remains a compatibility alias. ModelResponseResult.result points to itself so older response.result reader chains continue to work.",
       "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); data = result.get_data(). Code that already calls get_response() and then reader methods or response.result reader chains remains supported. Direct ModelResponse construction is deprecated and will be removed in Agently 4.2."
     },
+    "agent_execution_task_loop": {
+      "status": "in-development",
+      "surface": [
+        "Agent.create_task",
+        "Agent.create_task_loop",
+        "AgentExecution.strategy(\"task\")",
+        "AgentExecution.strategy(\"task_loop\")",
+        "AgentExecutionResult.task_refs",
+        "AgentExecutionResult.get_async_generator",
+        "AgentExecutionResult.async_get_meta",
+        "AgentExecutionResult.async_resume"
+      ],
+      "contract": "The 4.1.3.6 task-loop contract is a narrow single-task, single-Agent-owner slice carried by AgentExecution. agent.create_task(...) and agent.create_task_loop(...) return task-strategy AgentExecution drafts, not a separate recommended AgentTask execution owner. Consumers read final data, text, streams, metadata, and task refs through AgentExecutionResult or the execution stream/meta facade. Completion acceptance requires model-owned verification plus conservative host guards; completed means accepted=true and artifact_status=accepted, while max_iterations can return accepted=false and artifact_status=partial. AgentExecutionResult resume is reserved and reports supported=false until a resumable strategy lands.",
+      "scope": {
+        "current_slice": [
+          "one Agent-owned business task",
+          "bounded 2-5 iteration task-loop guidance",
+          "explicitly enabled Actions, Skills, or Dynamic Task candidates as step capabilities",
+          "model-owned planning, verification, and replan decisions",
+          "host guards for missing criteria, risky action evidence, approval-required actions, and missing final deliverables",
+          "structured task refs, diagnostics, progress/snapshot stream items, and result facade consumption"
+        ],
+        "deferred": [
+          "multi-task scheduling",
+          "background autonomous scheduler",
+          "distributed lease or cross-worker ownership",
+          "durable pause/resume beyond the reserved result surface",
+          "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging"
+        ]
+      },
+      "compatibility_policy": "New documentation and examples should keep AgentExecutionResult as the common consumption surface. Task-style compatibility readers may remain callable, but they should not be promoted as a second recommended public lifecycle. Future 4.1.3.7 AgentTaskLoop hardening must strengthen the task strategy behind AgentExecution without changing this public ownership boundary."
+    },
     "image": {
       "status": "in-development",
       "surface": [

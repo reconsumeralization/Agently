@@ -65,6 +65,13 @@ plugin 的内部实现。
 bounded step、写入 Workspace 证据、验证、必要时 replan，最后以 complete 或
 blocked 结束。
 
+在 4.1.3.6 development line 里，这是一个有明确边界的公开 task-loop slice，
+不是完整未来版 AgentTask 系统。`agent.create_task_loop(...)` 是同一个长任务
+strategy 的显式写法，适合代码需要把 strategy 选择说清楚的场景。两个 API 仍然
+返回 `AgentExecution`；新代码应通过 `execution.get_result()` 或 execution 的
+stream/meta facade 消费 data、text、stream、metadata、status 和 task refs，而不是
+把 `AgentTask` 当成第二套 public lifecycle。
+
 ```python
 execution = agent.create_task(
     goal="将旧版 Agently 脚本迁移到当前 4.1.x API，并确保它可以运行。",
@@ -88,14 +95,17 @@ execution = agent.create_task(
     },
 )
 
-async for item in execution.get_async_generator():
+result = execution.get_result()
+
+async for item in result.get_async_generator():
     if (item.meta or {}).get("stream_kind") == "progress":
         print("[PROGRESS]", item.value["message"])
     elif (item.meta or {}).get("stream_kind") == "snapshot":
         print("[SNAPSHOT]", item.path, item.value["snapshot"])
 
-result = await execution.async_start()
-meta = await execution.async_get_meta()
+data = await result.async_get_data()
+meta = await result.async_get_meta()
+task_refs = result.task_refs
 ```
 
 每轮会把 planning decision、execution observation、verification evidence 和
@@ -129,7 +139,8 @@ progress model 只接收 operator-safe snapshot；底层 Workspace/SQLite fallba
 第一版公开 slice 有明确边界：单任务、单 Agent owner、约 2-5 次迭代，并通过
 `AgentExecution` 执行 bounded step。这些 step 可以使用调用方已经在 Agent 上启用的
 Actions、Skills 或 Dynamic Task 候选。AgentTask 不提供多任务协同、后台自治、分布式
-租约或长期记忆管理。
+租约、完整 durable pause/resume 或长期记忆管理。`AgentExecutionResult.resume()` 是为
+未来 resumable strategy 保留的接口；在当前 slice 中会返回 `supported=False`。
 
 当示例需要验证模型生成内容的语义质量时，应组合 deterministic smoke check 和第二个
 Agently model-judge request。文件存在、问题数量、source label 可见等结构检查只能作为
