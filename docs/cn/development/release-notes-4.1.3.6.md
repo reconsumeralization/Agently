@@ -102,7 +102,7 @@ Task/TaskDAG、ActionRuntime、ExecutionEnvironment 和 provider protocols。仅
 
 - Package version: `4.1.3.6`。
 - Release manifest: `compatibility/releases/4.1.3.6.json`。
-- 推荐 `agently-devtools`: `>=0.1.7,<0.2.0`。
+- 推荐 `agently-devtools`: `>=0.1.8,<0.2.0`。
 - `AgentTurn`、`create_turn(...)`、`set_turn_prompt(...)` 和
   `set_request_prompt(...)` 保留为兼容迁移表面。
 - DevTools 显示问题 #288 和 #289 属于 DevTools-side 工作，不由本次 Agently
