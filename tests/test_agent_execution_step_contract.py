@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import warnings
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -98,6 +97,14 @@ class MockAgentExecutionActionRequester(MockAgentExecutionRequester):
 
 class MockAgentTurnIsolationRequester(MockAgentExecutionRequester):
     name = "MockAgentTurnIsolationRequester"
+    active_requests = 0
+    max_active_requests = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockAgentTurnIsolationRequester.active_requests = 0
+        MockAgentTurnIsolationRequester.max_active_requests = 0
 
     def generate_request_data(self):
         return AgentlyRequestData(
@@ -113,18 +120,26 @@ class MockAgentTurnIsolationRequester(MockAgentExecutionRequester):
         )
 
     async def request_model(self, request_data: AgentlyRequestData):
-        await asyncio.sleep(0.1)
-        payload = DataFormatter.sanitize(request_data.data)
-        prompt_input = payload.get("input")
-        persistent_system = payload.get("system")
-        MockAgentExecutionRequester.requests.append(json.dumps(payload, ensure_ascii=False))
-        yield "message", json.dumps(
-            {
-                "answer": prompt_input,
-                "system": persistent_system,
-            },
-            ensure_ascii=False,
+        MockAgentTurnIsolationRequester.active_requests += 1
+        MockAgentTurnIsolationRequester.max_active_requests = max(
+            MockAgentTurnIsolationRequester.max_active_requests,
+            MockAgentTurnIsolationRequester.active_requests,
         )
+        try:
+            await asyncio.sleep(0.1)
+            payload = DataFormatter.sanitize(request_data.data)
+            prompt_input = payload.get("input")
+            persistent_system = payload.get("system")
+            MockAgentExecutionRequester.requests.append(json.dumps(payload, ensure_ascii=False))
+            yield "message", json.dumps(
+                {
+                    "answer": prompt_input,
+                    "system": persistent_system,
+                },
+                ensure_ascii=False,
+            )
+        finally:
+            MockAgentTurnIsolationRequester.active_requests -= 1
 
 
 def _create_agent(name: str = "agent-execution-step-test"):
@@ -259,17 +274,15 @@ async def test_same_agent_quick_prompt_turns_are_request_scoped():
     agent = _create_turn_isolation_agent("same-agent-turn-isolation")
     agent.system("shared policy", always=True)
 
-    start = time.monotonic()
     results = await asyncio.gather(
         agent.input("request-A").output({"answer": (str, "answer", True)}, format="json").async_start(),
         agent.input("request-B").output({"answer": (str, "answer", True)}, format="json").async_start(),
         agent.input("request-C").output({"answer": (str, "answer", True)}, format="json").async_start(),
     )
-    elapsed = time.monotonic() - start
 
     assert [result["answer"] for result in results] == ["request-A", "request-B", "request-C"]
     assert [result["system"] for result in results] == ["shared policy", "shared policy", "shared policy"]
-    assert elapsed < 0.25
+    assert MockAgentTurnIsolationRequester.max_active_requests == 3
     assert agent.request.prompt.get(inherit=False) == {}
     request_payloads = [json.loads(item) for item in MockAgentExecutionRequester.requests]
     assert [payload["input"] for payload in request_payloads] == ["request-A", "request-B", "request-C"]

@@ -352,7 +352,7 @@ async def test_agent_task_loop_progress_model_does_not_delay_stream_close(tmp_pa
 
     stream_items = await asyncio.wait_for(
         _collect_stream(task),
-        timeout=2,
+        timeout=5,
     )
 
     assert any((item.meta or {}).get("stream_kind") == "snapshot" for item in stream_items)

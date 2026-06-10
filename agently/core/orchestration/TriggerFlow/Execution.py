@@ -167,6 +167,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._task_origins: dict[asyncio.Task[Any], str] = {}
         self._accepted_signal_ids: set[str] = set()
+        self._active_runtime_operation_count = 0
         self._active_handler_count = 0
         self._auto_close_task: asyncio.Task[Any] | None = None
         self._close_started = False
@@ -699,8 +700,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED
 
     def is_idle(self):
-        return self._active_handler_count == 0 and not any(
-            task is not self._auto_close_task and not task.done() for task in self._pending_tasks
+        return (
+            self._active_runtime_operation_count == 0
+            and self._active_handler_count == 0
+            and not any(task is not self._auto_close_task and not task.done() for task in self._pending_tasks)
         )
 
     def _warn_runtime_data_api(self, method_name: str):
@@ -1738,6 +1741,15 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return await self._interrupts.async_resume_for_signal(signal)
 
     async def _async_dispatch_signal(self, signal: TriggerFlowSignal):
+        self._active_runtime_operation_count += 1
+        self._mark_activity()
+        try:
+            return await self._async_dispatch_signal_inner(signal)
+        finally:
+            self._active_runtime_operation_count -= 1
+            self._mark_activity()
+
+    async def _async_dispatch_signal_inner(self, signal: TriggerFlowSignal):
         signal_preaccepted = signal.id in self._accepted_signal_ids
         if not self._accepts_signal_in_current_lifecycle(signal, preaccepted=signal_preaccepted):
             await self._reject_signal(signal)
@@ -2030,6 +2042,15 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         )
 
     async def _async_run_start(self, initial_value: InputT | None = None):
+        self._active_runtime_operation_count += 1
+        self._mark_activity()
+        try:
+            return await self._async_run_start_inner(initial_value)
+        finally:
+            self._active_runtime_operation_count -= 1
+            self._mark_activity()
+
+    async def _async_run_start_inner(self, initial_value: InputT | None = None):
         if self._lifecycle_state != TRIGGER_FLOW_LIFECYCLE_OPEN:
             signal = self._build_signal("START", initial_value, trigger_type="event", source="start")
             await self._reject_signal(signal)

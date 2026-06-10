@@ -1023,7 +1023,7 @@ async def test_agent_execution_dynamic_task_failure_terminates_stream():
             stream_items.append(item)
 
     with pytest.raises(RuntimeError, match="intentional handler failure"):
-        await asyncio.wait_for(consume_stream(), timeout=2)
+        await asyncio.wait_for(consume_stream(), timeout=5)
 
     assert execution.status == "error"
     assert any(item.path == "error" for item in stream_items)

@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 from typing import Any, Callable, cast
@@ -34,6 +35,34 @@ async def test_trigger_flow_runtime_data_namespaces_and_flow_resources():
         "shared_flag": True,
         "logger": "flow-logger",
     }
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_auto_close_waits_for_in_flight_start(monkeypatch):
+    flow = TriggerFlow()
+
+    async def prepare(data: TriggerFlowRuntimeData):
+        data.state.set("draft", {"topic": data.value})
+
+    flow.to(prepare)
+    execution = flow.create_execution(auto_close=True, auto_close_timeout=0.0)
+    original_emit_runtime_event = execution._emit_runtime_event
+    observed_idle_states = []
+
+    async def slow_start_event(event_type, *args, **kwargs):
+        if event_type in {"triggerflow.execution_started", "triggerflow.signal"}:
+            observed_idle_states.append(execution.is_idle())
+            await asyncio.sleep(0.08)
+        return await original_emit_runtime_event(event_type, *args, **kwargs)
+
+    monkeypatch.setattr(execution, "_emit_runtime_event", slow_start_event)
+
+    await execution._async_run_start("pricing")
+    result = await execution.async_close(timeout=1)
+
+    assert observed_idle_states
+    assert not any(observed_idle_states)
+    assert result == {"draft": {"topic": "pricing"}}
 
 
 @pytest.mark.asyncio
