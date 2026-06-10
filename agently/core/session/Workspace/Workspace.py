@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, cast
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
@@ -37,12 +37,35 @@ if TYPE_CHECKING:
 class Workspace:
     """Workspace API bound to one backend."""
 
-    def __init__(self, backend: WorkspaceBackend, manager: "WorkspaceManager"):
-        self.backend = backend
+    def __init__(
+        self,
+        backend: WorkspaceBackend | str | Path | None = None,
+        manager: "WorkspaceManager | None" = None,
+        *,
+        create: bool = True,
+        mode: str = "read_write",
+        provider: str | None = None,
+        provider_options: dict[str, Any] | None = None,
+    ):
+        if manager is None:
+            from .Manager import WorkspaceManager
+
+            workspace = WorkspaceManager().create(
+                backend,
+                create=create,
+                mode=mode,
+                provider=provider,
+                provider_options=provider_options,
+            )
+            self.__dict__.update(workspace.__dict__)
+            return
+        if backend is None:
+            raise ValueError("Workspace backend is required when manager is provided.")
+        self.backend = cast(WorkspaceBackend, backend)
         self.manager = manager
-        self.root = Path(str(getattr(backend, "root")))
-        self.content_root = Path(str(getattr(backend, "content_root")))
-        self.files_root = Path(str(getattr(backend, "files_root", self.content_root)))
+        self.root = Path(str(getattr(self.backend, "root")))
+        self.content_root = Path(str(getattr(self.backend, "content_root")))
+        self.files_root = Path(str(getattr(self.backend, "files_root", self.content_root)))
 
     async def put(
         self,

@@ -32,6 +32,7 @@ from agently.types.data.workspace import (
     WorkspaceRetentionAnchor,
     WorkspaceRuntimeEventRecord,
 )
+from agently.utils import DataFormatter
 
 from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
 from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
@@ -409,8 +410,13 @@ class LocalWorkspaceBackend:
     @staticmethod
     def _normalize_runtime_event(event: RuntimeEvent | RuntimeEventDict | dict[str, Any]) -> dict[str, Any]:
         if hasattr(event, "model_dump"):
-            return event.model_dump(mode="json")  # type: ignore[union-attr]
-        return dict(event)
+            try:
+                return event.model_dump(mode="json")  # type: ignore[union-attr]
+            except Exception:
+                sanitized = DataFormatter.sanitize(event.model_dump(mode="python"))  # type: ignore[union-attr]
+                return sanitized if isinstance(sanitized, dict) else {"value": sanitized}
+        sanitized = DataFormatter.sanitize(dict(event))
+        return sanitized if isinstance(sanitized, dict) else {"value": sanitized}
 
     def _row_to_runtime_event_record(self, row: sqlite3.Row) -> WorkspaceRuntimeEventRecord:
         checkpoint_ref = json_loads(row["checkpoint_ref_json"], None)

@@ -65,6 +65,61 @@ async def test_trigger_flow_auto_close_waits_for_in_flight_start(monkeypatch):
     assert result == {"draft": {"topic": "pricing"}}
 
 
+def test_trigger_flow_execution_binds_lazy_default_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-workspace-default")
+
+    execution = flow.create_execution()
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    state = execution.save()
+
+    assert getattr(workspace, "is_materialized") is False
+    assert workspace.root.parent == (tmp_path / ".agently" / "workspaces").resolve()
+    assert workspace.root.name.startswith("execution-workspace-default-")
+    assert not workspace.root.exists()
+    assert "workspace" in state["resource_keys"]
+
+
+def test_trigger_flow_execution_can_disable_default_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-workspace-disabled")
+
+    execution = flow.create_execution(
+        runtime_resources={
+            "workspace": object(),
+            "tool": "kept",
+        },
+        workspace=False,
+    )
+    state = execution.save()
+
+    assert execution.require_runtime_resource("tool") == "kept"
+    assert "workspace" not in execution.get_runtime_resources()
+    assert "workspace" not in state["resource_keys"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_execution_workspace_argument_uses_shared_provider(tmp_path):
+    shared_workspace = Agently.create_workspace(tmp_path / "shared-execution-workspace")
+    flow = TriggerFlow(name="execution-workspace-shared")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(workspace=shared_workspace)
+
+    snapshot = await execution.async_start("hello")
+    checkpoint_ref = await execution.async_save_checkpoint(step_id="shared-bound")
+    runtime_events = await shared_workspace.query_runtime_events(execution.id)
+
+    assert execution.require_runtime_resource("workspace") is shared_workspace
+    assert snapshot["value"] == "hello"
+    assert checkpoint_ref["collection"] == "checkpoints"
+    assert checkpoint_ref["scope"]["step_id"] == "shared-bound"
+    assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
+
+
 @pytest.mark.asyncio
 async def test_trigger_flow_execution_resources_override_flow_defaults():
     flow = TriggerFlow()
@@ -119,7 +174,7 @@ async def test_trigger_flow_execution_save_records_resource_keys_only():
     await execution.async_start("ok", wait_for_result=False)
     state = execution.save()
 
-    assert sorted(state["resource_keys"]) == ["execution_logger", "flow_tool"]
+    assert sorted(state["resource_keys"]) == ["execution_logger", "flow_tool", "workspace"]
     assert state["checkpoint"]["kind"] == TRIGGER_FLOW_CHECKPOINT_KIND
     requirements = {
         requirement["key"]: requirement
@@ -169,6 +224,7 @@ async def test_trigger_flow_execution_load_requires_reinjecting_runtime_resource
     legacy_state = copy.deepcopy(saved_state)
     legacy_state["checkpoint"].pop("resource_requirements", None)
     legacy_state["resource_keys"] = ["resume_service"]
+    legacy_state["checkpoint"]["resource_keys"] = ["resume_service"]
     legacy_report = flow.create_execution().inspect_rehydration(legacy_state)
     assert legacy_report["ready"] is False
     assert legacy_report["missing_resource_keys"] == ["resume_service"]

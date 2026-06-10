@@ -1305,7 +1305,13 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self
 
     def _bind_durable_provider_resource(self, key: str, value: Any):
-        if key in {"workspace", "durable_provider"}:
+        if key == "workspace":
+            if self._checkpoint_store is None and hasattr(value, "put_checkpoint"):
+                self.set_checkpoint_store(value)
+            if self._runtime_event_store is None and hasattr(value, "append_runtime_event"):
+                self.set_runtime_event_store(value)
+            return
+        if key == "durable_provider":
             if hasattr(value, "put_checkpoint"):
                 self.set_checkpoint_store(value)
             if hasattr(value, "append_runtime_event"):

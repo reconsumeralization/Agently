@@ -142,6 +142,44 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             return None
         return intervention_mode
 
+    def _default_execution_workspace_root(self, execution_id: str) -> Path:
+        from agently.core.session.Workspace._utils import slug
+
+        workspace_slug = slug(str(self.name), "triggerflow")
+        return Path(".agently") / "workspaces" / f"{workspace_slug}-{execution_id[:8]}"
+
+    def _create_execution_workspace_resource(self, execution_id: str):
+        from agently.base import workspace as global_workspace
+        from agently.core.session.Workspace import LazyWorkspace
+
+        return LazyWorkspace(
+            global_workspace,
+            self._default_execution_workspace_root(execution_id),
+        )
+
+    def _coerce_execution_workspace_resource(self, workspace: Any):
+        from agently.base import workspace as global_workspace
+        from agently.core.session.Workspace import LazyWorkspace, Workspace
+
+        if isinstance(workspace, (Workspace, LazyWorkspace)):
+            return workspace
+        return global_workspace.create(workspace)
+
+    def _resolve_execution_runtime_resources(
+        self,
+        execution_id: str,
+        runtime_resources: dict[str, Any] | None,
+        workspace: Any,
+    ) -> dict[str, Any]:
+        resolved = dict(runtime_resources or {})
+        if workspace is False:
+            resolved.pop("workspace", None)
+        elif workspace is None:
+            resolved.setdefault("workspace", self._create_execution_workspace_resource(execution_id))
+        else:
+            resolved["workspace"] = self._coerce_execution_workspace_resource(workspace)
+        return resolved
+
     @overload
     def chunk(self, handler_or_name: "TriggerFlowHandler") -> TriggerFlowChunk: ...
 
@@ -175,6 +213,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         skip_exceptions: bool | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
@@ -219,8 +258,13 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             intervention_policy=intervention_policy,
             resume_handle_exposed=resume_handle_exposed,
         )
-        if runtime_resources:
-            execution.update_runtime_resources(runtime_resources)
+        execution_runtime_resources = self._resolve_execution_runtime_resources(
+            execution_id,
+            runtime_resources,
+            workspace,
+        )
+        if execution_runtime_resources:
+            execution.update_runtime_resources(execution_runtime_resources)
         self._executions[execution_id] = execution
         return cast("TriggerFlowExecution[InputT, StreamT, ResultT]", execution)
 
@@ -460,6 +504,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
@@ -482,6 +527,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         execution = self.create_execution(
             concurrency=concurrency,
             runtime_resources=runtime_resources,
+            workspace=workspace,
             run_context=run_context,
             parent_run_context=parent_run_context,
             auto_close=auto_close,
@@ -576,6 +622,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
@@ -594,6 +641,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
@@ -611,6 +659,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
@@ -625,6 +674,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             timeout=timeout,
             concurrency=concurrency,
             runtime_resources=runtime_resources,
+            workspace=workspace,
             execution_environments=execution_environments,
             run_context=run_context,
             parent_run_context=parent_run_context,
@@ -643,6 +693,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
@@ -661,6 +712,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
@@ -678,6 +730,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = None,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
@@ -706,6 +759,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             timeout=effective_auto_close_timeout,
             concurrency=concurrency,
             runtime_resources=runtime_resources,
+            workspace=workspace,
             execution_environments=execution_environments,
             run_context=run_context,
             parent_run_context=parent_run_context,
@@ -724,12 +778,14 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = 10.0,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
     ) -> AsyncGenerator[StreamT | TriggerFlowInterruptEvent | TriggerFlowInterventionEvent, None]:
         execution = self.create_execution(
             concurrency=concurrency,
             runtime_resources=runtime_resources,
+            workspace=workspace,
             run_context=run_context,
             parent_run_context=parent_run_context,
             auto_close_timeout=0.0,
@@ -747,12 +803,14 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         timeout: float | None = 10.0,
         concurrency: int | None = None,
         runtime_resources: dict[str, Any] | None = None,
+        workspace: Any = None,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
     ) -> Generator[StreamT | TriggerFlowInterruptEvent | TriggerFlowInterventionEvent, None, None]:
         execution = self.create_execution(
             concurrency=concurrency,
             runtime_resources=runtime_resources,
+            workspace=workspace,
             run_context=run_context,
             parent_run_context=parent_run_context,
             auto_close_timeout=0.0,

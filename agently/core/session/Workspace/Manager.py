@@ -83,7 +83,7 @@ class WorkspaceManager:
             backend = cast(WorkspaceBackend, path_or_backend)
         else:
             if path_or_backend is None:
-                raise ValueError("Workspace create() requires path_or_backend unless provider=... is set.")
+                path_or_backend = Path(".agently") / "workspaces" / "default"
             backend = LocalWorkspaceBackend(path_or_backend, create=create, mode=mode)  # type: ignore[arg-type]
         return Workspace(backend, self)
 

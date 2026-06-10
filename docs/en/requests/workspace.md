@@ -12,8 +12,9 @@ Session history, or compact execution state.
 
 Workspace V1 is a foundation API. It stores and indexes records; it does not
 decide what the model should remember or what step to run next. Default Agents
-include a lazy Workspace binding, so `agent.workspace` is always available on
-the standard Agent facade. The default local backend is materialized only when
+and TriggerFlow executions include lazy Workspace bindings, so `agent.workspace`
+and `flow.create_execution().require_runtime_resource("workspace")` are
+available without setup. The default local backend is materialized only when
 code first writes, reads, checkpoints, records evidence, or exposes the
 Workspace file area.
 
@@ -49,6 +50,15 @@ root, read-only mode, or a registered backend provider:
 agent.use_workspace("./.agently/runs/issue-123")
 ```
 
+Standalone Workspaces can be created directly or through the Agently factory:
+
+```python
+from agently import Agently, Workspace
+
+shared_workspace = Workspace("./.agently/projects/issue-123")
+factory_workspace = Agently.create_workspace("./.agently/projects/issue-124")
+```
+
 When several Agents, TriggerFlow executions, or service workers must share task
 information, create and manage a shared Workspace explicitly and bind each
 consumer to that same Workspace. This is the preferred shape for application
@@ -59,10 +69,12 @@ instead of an implicit global singleton:
 shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
 
 agent = Agently.create_agent("repo-worker").use_workspace(shared_workspace)
-execution = flow.create_execution(
-    runtime_resources={"workspace": shared_workspace},
-)
+execution = flow.create_execution(workspace=shared_workspace)
 ```
+
+`flow.create_execution()` creates an execution-scoped lazy Workspace by default.
+Pass `workspace=False` to opt out, or pass a Workspace instance, path, or backend
+when the execution should use an application-owned shared Workspace.
 
 Do not rely on separate default Workspaces to communicate with each other. If a
 TriggerFlow execution needs to move information between isolated Workspaces,
@@ -118,7 +130,7 @@ application execution wants restart diagnostics without using DevTools as the
 source of truth:
 
 ```python
-execution = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+execution = flow.create_execution(workspace=agent.workspace)
 checkpoint_ref = await execution.async_save_checkpoint(step_id="review")
 
 event_record = await agent.workspace.append_runtime_event(

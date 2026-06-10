@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import pytest
 import yaml
-from agently import Agent, Agently, TriggerFlow
+from agently import Agent, Agently, TriggerFlow, Workspace
 from agently.compatibility import (
     get_current_release_manifest,
     get_devtools_compatibility_manifest,
@@ -37,13 +37,18 @@ _RUNTIME_LOG_KEYS = (
 )
 
 
-def test_public_core_instance_creation_styles(tmp_path):
+def test_public_core_instance_creation_styles(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     anonymous_agent = Agent()
     direct_agent = Agent("direct-agent")
     factory_agent = Agently.create_agent("factory-agent")
     direct_flow = TriggerFlow(name="direct-flow")
     factory_flow = Agently.create_trigger_flow("factory-flow")
     workspace = Agently.create_workspace(tmp_path / "public-workspace")
+    direct_workspace = Workspace(tmp_path / "direct-public-workspace")
+    default_workspace = Workspace()
+    factory_default_workspace = Agently.create_workspace()
+    direct_flow_execution = direct_flow.create_execution(workspace=False)
 
     assert isinstance(anonymous_agent.name, str)
     assert anonymous_agent.name
@@ -55,6 +60,10 @@ def test_public_core_instance_creation_styles(tmp_path):
     assert direct_flow.name == "direct-flow"
     assert factory_flow.name == "factory-flow"
     assert workspace.root == (tmp_path / "public-workspace").resolve()
+    assert direct_workspace.root == (tmp_path / "direct-public-workspace").resolve()
+    assert default_workspace.root == (tmp_path / ".agently" / "workspaces" / "default").resolve()
+    assert factory_default_workspace.root == default_workspace.root
+    assert "workspace" not in direct_flow_execution.get_runtime_resources()
 
 
 def _snapshot_runtime_log_settings():

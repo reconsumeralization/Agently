@@ -107,7 +107,7 @@ async def main():
             flow = build_flow(agent)
             execution = flow.create_execution(
                 auto_close=False,
-                runtime_resources={"workspace": workspace},
+                workspace=workspace,
             )
             await execution.async_start({"task_id": "issue-123"})
             state = await execution.async_close()

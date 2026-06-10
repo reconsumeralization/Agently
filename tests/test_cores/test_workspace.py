@@ -415,6 +415,27 @@ async def test_workspace_runtime_event_store_is_idempotent_and_bounded(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_workspace_runtime_event_store_sanitizes_runtime_objects(tmp_path):
+    class RuntimeOnlyObject:
+        pass
+
+    workspace = Agently.create_workspace(tmp_path / "runtime-event-sanitize")
+    runtime_object = RuntimeOnlyObject()
+    event = RuntimeEvent(
+        event_type="triggerflow.signal",
+        payload={"value": runtime_object},
+        meta={"runtime_object": runtime_object},
+    )
+
+    record = await workspace.append_runtime_event("exec-sanitize", event)
+    queried = await workspace.query_runtime_events("exec-sanitize")
+
+    assert "RuntimeOnlyObject" in record["event"]["payload"]["value"]
+    assert "RuntimeOnlyObject" in record["event"]["meta"]["runtime_object"]
+    assert queried[0]["event"] == record["event"]
+
+
+@pytest.mark.asyncio
 async def test_workspace_file_policy_evidence_links_retention_and_capabilities(tmp_path):
     agent = Agently.create_agent("workspace-provider-policy").use_workspace(tmp_path / "run")
     workspace = agent.workspace

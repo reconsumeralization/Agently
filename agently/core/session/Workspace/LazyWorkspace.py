@@ -81,6 +81,15 @@ class LazyWorkspace:
     def materialize(self) -> Workspace:
         return self._materialize()
 
+    def capabilities(self):
+        return self._materialize().capabilities()
+
+    async def put_checkpoint(self, *args: Any, **kwargs: Any):
+        return await self._materialize().put_checkpoint(*args, **kwargs)
+
+    async def append_runtime_event(self, *args: Any, **kwargs: Any):
+        return await self._materialize().append_runtime_event(*args, **kwargs)
+
     def _materialize(self) -> Workspace:
         if self._workspace is None:
             self._workspace = self.manager.create(

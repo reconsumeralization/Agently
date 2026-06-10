@@ -208,7 +208,7 @@ External checkpoint stores can persist the same snapshot by exposing
 directly because it implements the same checkpoint-store port:
 
 ```python
-execution = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+execution = flow.create_execution(workspace=agent.workspace)
 checkpoint_ref = await execution.async_save_checkpoint(step_id="after-approval")
 ```
 
@@ -217,17 +217,22 @@ creates and owns explicitly:
 
 ```python
 shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
-execution = flow.create_execution(runtime_resources={"workspace": shared_workspace})
+execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-That `runtime_resources["workspace"]` entry is the execution-local Workspace
-binding available to TriggerFlow chunks. It is a live resource, not serialized
-state. If a chunk needs an Agent to use the same information scope, bind that
-Agent or the single AgentExecution to the same Workspace in application code.
-If a flow needs to move data between two isolated Workspaces, do it explicitly
-in the flow's business logic with Workspace `search(...)`, `get(...)`,
-`get_data(...)`, `put(...)`, `ingest(...)`, and `link(...)`. Workspace itself
-does not provide a cross-space communication or replication protocol.
+`flow.create_execution()` creates an execution-scoped lazy Workspace by default.
+Pass `workspace=False` to opt out, or pass a Workspace instance, path, or backend
+when the execution should use an application-owned shared Workspace. The
+resolved execution-local Workspace is available to TriggerFlow chunks as
+`runtime_resources["workspace"]` / `data.require_resource("workspace")`.
+
+It is a live resource, not serialized state. If a chunk needs an Agent to use
+the same information scope, bind that Agent or the single AgentExecution to the
+same Workspace in application code. If a flow needs to move data between two
+isolated Workspaces, do it explicitly in the flow's business logic with
+Workspace `search(...)`, `get(...)`, `get_data(...)`, `put(...)`, `ingest(...)`,
+and `link(...)`. Workspace itself does not provide a cross-space communication
+or replication protocol.
 
 You can also configure the stores explicitly:
 
@@ -243,7 +248,7 @@ back to TriggerFlow's rehydration API:
 checkpoint = await agent.workspace.latest_checkpoint(execution.run_context.run_id)
 saved_state = await agent.workspace.get_data(checkpoint)
 
-restored = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+restored = flow.create_execution(workspace=agent.workspace)
 await restored.async_rehydrate(saved_state, runtime_resources={"workspace": agent.workspace})
 ```
 
@@ -275,7 +280,7 @@ of implying cross-worker recovery guarantees.
 For durable diagnostics, configure a RuntimeEvent store on the execution:
 
 ```python
-execution = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+execution = flow.create_execution(workspace=agent.workspace)
 
 # Or bind the RuntimeEvent store explicitly.
 execution.set_runtime_event_store(agent.workspace)
