@@ -84,6 +84,11 @@ snapshot = await execution.async_close()
 
 Sync `start()` 仅支持 `auto_close=True`。需要手动 close 时用 `await execution.async_start(...)`。
 
+传给 `execution.async_start(value)` 的值是 execution 的 start input，
+不会 emit 一个名为该值的自定义事件。应从 start boundary 开始运行的 chunk
+用 `flow.to(handler, name=...)` 挂接。如果确实需要 `"start"` 这类自定义事件，
+先启动 execution，再调用 `await execution.async_emit("start", payload)`。
+
 ### `execution.seal()` —— 停新输入，让在途完成
 
 ```python
@@ -127,7 +132,82 @@ close 上的 `timeout=` 是 **drain timeout** —— 在途 task 的最大等待
 
 `close()` / `async_close()` 默认拒绝关闭仍有 pending interrupt 的 execution。应先恢复这些 interrupt；如果关闭时就是要放弃等待，必须显式传 `pending_interrupts="cancel"`。
 
+close 还会释放 execution-local 的 transient aggregation state，例如未完成的
+`when(mode="and")`、`batch`、`collect`、`for_each` 和 `match` bookkeeping。
+这些 scratch key 不属于 durable close snapshot。
+
 `auto_close_timeout=None` 关掉 auto-close —— execution 一直存活直到显式 `close()`。**不要把 `auto_close_timeout=None` 与隐式糖一起用** —— `flow.start()` 会永远不返回。
+
+## checkpoint 与 rehydration
+
+`execution.save()` 返回可序列化的 execution snapshot。为了支撑可重启和
+分布式恢复路径，这个 snapshot 包含一个带版本的 `checkpoint` 分区：
+
+```python
+saved = execution.save()
+checkpoint = saved["checkpoint"]
+```
+
+checkpoint 分区记录：
+
+- `schema_version`、`kind`、`snapshot_id`、`state_version`。
+- execution identity、flow name、run context、lifecycle/status、owner、
+  heartbeat 与 lease 字段。
+- runtime state、flow data、pending interrupts、intervention ledger、
+  sub-flow frames、last signal 与兼容 result state。
+- `durable_system_state`：TriggerFlow 自身需要跨 open/waiting execution
+  rehydration 保存的进度，例如未完成的 `when(mode="and")` 聚合状态。
+- `resource_requirements`：恢复后继续执行前必须满足的 live resource key 与
+  execution-environment requirement。
+- `resume_ledger`：已接受的 `continue_with(..., resume_request_id=...)`
+  请求，避免外部 resume 重试重复 dispatch 图。
+
+live resource 对象不会被序列化。`runtime_resources`、受管
+execution-environment handle、client、callback 以及其他 live object 都不进入
+saved state。
+
+未来恢复后才会用到的资源需要显式声明。TriggerFlow 能记录已经挂载的资源，但
+无法从未执行到的分支里推断出未来会调用哪个 resource：
+
+```python
+flow.declare_resource_requirement("resume_service")
+```
+
+恢复前用 `inspect_rehydration(...)` 或严格的 `async_rehydrate(...)` 检查：
+
+```python
+saved = execution.save()
+
+report = restored.inspect_rehydration(saved)
+assert report["missing_resource_keys"] == ["resume_service"]
+
+await restored.async_rehydrate(
+    saved,
+    runtime_resources={"resume_service": service},
+)
+await restored.async_continue_with(
+    interrupt_id,
+    {"approved": True},
+    resume_request_id="webhook-42",
+    actor="approval-service",
+)
+```
+
+`async_rehydrate(...)` 会 load snapshot、恢复声明的 execution environment
+requirements、重新 ensure 受管 execution environments，并在图继续前对缺失资源
+fail fast。普通 `load(...)` 仍是兼容路径；如果只想做同步 fail-fast 检查，可传
+`validate_rehydration=True`。
+
+外部 checkpoint store 只要暴露 `put_checkpoint(run_id, state, step_id=...)`
+即可持久化同一个 snapshot：
+
+```python
+await execution.async_save_checkpoint(workspace.checkpoint_store)
+```
+
+TriggerFlow 会在 snapshot 中携带 owner/lease 字段，并提供
+`claim_lease(...)` / `heartbeat_lease(...)` 供 store 索引和投影分布式所有权。
+跨 worker 原子写入、lease enforcement、访问控制和冲突处理仍由 store 负责。
 
 ## 选哪个入口
 

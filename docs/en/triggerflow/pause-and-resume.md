@@ -36,6 +36,7 @@ What `pause_for` does:
 | `resume_to=` | optional target for `continue_with`: `"next"`, `"self"`, or `{"event": "EventName"}`. |
 | `resume_event=` | compatibility shortcut. If set without `resume_to`, `continue_with` and matching `emit(...)` route to that event. |
 | `interrupt_id=` | optional. Specify the id yourself; otherwise the framework generates one. |
+| `max_resumes=` | optional guard for `resume_to="self"`. Defaults to `1`, so a resumed chunk must handle `data.is_resume` instead of pausing itself forever. Pass a higher integer for bounded self-retry loops, or `None` only for an intentionally unbounded loop with its own exit guard. |
 
 ## Resume with continue_with
 
@@ -58,6 +59,12 @@ async def gate(data: TriggerFlowRuntimeData):
         resume_to="self",
     )
 ```
+
+`resume_to="self"` carries a `resume_count` in the interrupt ledger and signal
+metadata. By default the same signal may be replayed once; if the resumed chunk
+calls `pause_for(..., resume_to="self")` again without handling
+`data.is_resume`, TriggerFlow fails with a self-resume limit error instead of
+building an unbounded interrupt loop.
 
 With `resume_to={"event": "ApprovalGiven"}`, TriggerFlow emits that event with the resume payload. `resume_event="ApprovalGiven"` keeps the older event-based behavior.
 
@@ -107,9 +114,11 @@ same gate re-enters with `data.is_resume` and `data.resume` after human review.
 
 ## Pause across process restarts
 
-`pause_for(...)` integrates cleanly with `save` / `load`:
+`pause_for(...)` integrates cleanly with checkpoint rehydration:
 
 ```python
+flow.declare_resource_requirement("approval_service")
+
 execution = flow.create_execution(auto_close=False)
 await execution.async_start("topic")
 # at this point pause_for has been hit; an interrupt is pending
@@ -118,17 +127,23 @@ saved = execution.save()
 # persist saved somewhere
 
 # later, in a different process / worker:
-restored = flow.create_execution(
-    auto_close=False,
-    runtime_resources={...},   # re-inject whatever the chunk needs
+restored = flow.create_execution(auto_close=False)
+await restored.async_rehydrate(
+    saved,
+    runtime_resources={"approval_service": approval_service},
 )
-restored.load(saved)
 interrupt_id = next(iter(restored.get_pending_interrupts()))
-await restored.async_continue_with(interrupt_id, {"approved": True})
+await restored.async_continue_with(
+    interrupt_id,
+    {"approved": True},
+    resume_request_id="approval-webhook-42",
+)
 snapshot = await restored.async_close()
 ```
 
-The interrupt is part of the saved state, so the new process knows what's pending. See [Persistence and Blueprint](persistence-and-blueprint.md).
+The interrupt and accepted resume request ids are part of the saved state, so
+the new process knows what's pending and can ignore duplicate resume retries.
+See [Persistence and Blueprint](persistence-and-blueprint.md).
 
 ## Multiple concurrent pauses
 

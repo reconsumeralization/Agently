@@ -84,6 +84,12 @@ snapshot = await execution.async_close()
 
 Sync `start()` only supports `auto_close=True`. If your execution must be manually closed, use `await execution.async_start(...)` instead.
 
+The value passed to `execution.async_start(value)` is the execution's start
+input. It does not emit a custom event named by that value. Attach chunks that
+should run from the start boundary with `flow.to(handler, name=...)`. If you
+want a custom event such as `"start"`, start the execution and then call
+`await execution.async_emit("start", payload)`.
+
 ### `execution.seal()` — stop new input, let in-flight finish
 
 ```python
@@ -127,7 +133,87 @@ What close does, in order:
 
 `close()` / `async_close()` reject pending interrupts by default. Resume them first, or explicitly cancel them with `pending_interrupts="cancel"` when shutdown should abandon the wait.
 
+Close also releases execution-local transient aggregation state such as partial
+`when(mode="and")`, `batch`, `collect`, `for_each`, and `match` bookkeeping.
+These scratch keys are not part of the durable close snapshot.
+
 `auto_close_timeout=None` disables auto-close — the execution stays alive until you call `close()` explicitly. **Don't combine `auto_close_timeout=None` with hidden sugar** — `flow.start()` would never return.
+
+## Checkpoint and rehydration
+
+`execution.save()` returns a serializable execution snapshot. For restart-safe
+and distributed recovery paths, that snapshot includes a versioned `checkpoint`
+section:
+
+```python
+saved = execution.save()
+checkpoint = saved["checkpoint"]
+```
+
+The checkpoint section records:
+
+- `schema_version`, `kind`, `snapshot_id`, and `state_version`.
+- execution identity, flow name, run context, lifecycle/status, owner, heartbeat,
+  and lease fields.
+- runtime state, flow data, pending interrupts, intervention ledger,
+  sub-flow frames, last signal, and compatible result state.
+- `durable_system_state`: TriggerFlow-owned progress that must survive
+  open/waiting execution rehydration, such as partial `when(mode="and")`
+  aggregation state.
+- `resource_requirements`: live resource keys and execution-environment
+  requirements needed before the restored graph can safely continue.
+- `resume_ledger`: accepted `continue_with(..., resume_request_id=...)` requests
+  so an external resume retry does not dispatch the graph twice.
+
+Live resource objects are not serialized. `runtime_resources`, managed
+execution-environment handles, clients, callbacks, and other live objects remain
+outside the saved state.
+
+Declare resources that a future resumed chunk will need. TriggerFlow can record
+resources that are already mounted, but it cannot infer a resource used only by a
+later branch unless you declare it:
+
+```python
+flow.declare_resource_requirement("resume_service")
+```
+
+Use `inspect_rehydration(...)` or strict `async_rehydrate(...)` before resuming:
+
+```python
+saved = execution.save()
+
+report = restored.inspect_rehydration(saved)
+assert report["missing_resource_keys"] == ["resume_service"]
+
+await restored.async_rehydrate(
+    saved,
+    runtime_resources={"resume_service": service},
+)
+await restored.async_continue_with(
+    interrupt_id,
+    {"approved": True},
+    resume_request_id="webhook-42",
+    actor="approval-service",
+)
+```
+
+`async_rehydrate(...)` loads the snapshot, restores declared execution
+environment requirements, re-ensures managed execution environments, and fails
+before graph continuation if required resources are still missing. Plain
+`load(...)` remains the compatibility path; pass `validate_rehydration=True` if
+you want the same fail-fast resource check without ensuring async environments.
+
+External checkpoint stores can persist the same snapshot by exposing
+`put_checkpoint(run_id, state, step_id=...)`:
+
+```python
+await execution.async_save_checkpoint(workspace.checkpoint_store)
+```
+
+TriggerFlow carries owner/lease fields in the snapshot and exposes
+`claim_lease(...)` / `heartbeat_lease(...)` so a store can index and project
+distributed ownership. The store still owns cross-worker atomic writes, lease
+enforcement, access control, and conflict handling.
 
 ## Picking the right entry
 

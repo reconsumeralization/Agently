@@ -18,6 +18,8 @@ import uuid
 import warnings
 from typing import Any, TYPE_CHECKING
 
+from agently.types.trigger_flow.runtime_keys import SELF_RESUME_COUNT_META_KEY, SELF_RESUME_MAX_META_KEY
+
 from .Control import (
     TRIGGER_FLOW_LIFECYCLE_OPEN,
     TRIGGER_FLOW_STATUS_CANCELLED,
@@ -193,8 +195,11 @@ class TriggerFlowExecutionInterrupts:
         resume_event: str | None = None,
         interrupt_id: str | None = None,
         resume_to: Any = None,
+        max_resumes: int | None = 1,
     ):
         execution = self._execution
+        if max_resumes is not None and (not isinstance(max_resumes, int) or max_resumes < 0):
+            raise ValueError("max_resumes must be a non-negative integer or None.")
         if not execution._resume_handle_exposed:
             await execution._emit_runtime_event(
                 "triggerflow.interrupt_unhandled",
@@ -230,6 +235,29 @@ class TriggerFlowExecutionInterrupts:
         normalized_resume_to = resume_to
         if normalized_resume_to is None:
             normalized_resume_to = {"event": resume_event} if resume_event else "next"
+        current_signal_meta = current_signal.meta if current_signal is not None else {}
+        self_resume_count = current_signal_meta.get(SELF_RESUME_COUNT_META_KEY, 0)
+        if not isinstance(self_resume_count, int) or self_resume_count < 0:
+            self_resume_count = 0
+        if normalized_resume_to == "self" and max_resumes is not None and self_resume_count >= max_resumes:
+            await execution._emit_runtime_event(
+                "triggerflow.self_resume_limit_reached",
+                level="ERROR",
+                message=(
+                    f"TriggerFlow execution '{ execution.id }' reached the self resume limit "
+                    f"for interrupt '{ interrupt_id }'."
+                ),
+                payload={
+                    "interrupt_id": interrupt_id,
+                    "resume_count": self_resume_count,
+                    "max_resumes": max_resumes,
+                    "source_signal": execution._serialize_signal(current_signal),
+                },
+            )
+            raise RuntimeError(
+                f"TriggerFlow self resume limit reached for interrupt '{ interrupt_id }': "
+                f"resume_count={ self_resume_count }, max_resumes={ max_resumes }."
+            )
         interrupt = {
             "id": interrupt_id,
             "type": type,
@@ -242,6 +270,8 @@ class TriggerFlowExecutionInterrupts:
             "source_operator_id": source_operator_id,
             "source_signal": execution._serialize_signal(current_signal),
             "continuation_event": continuation_event,
+            "resume_count": self_resume_count if normalized_resume_to == "self" else 0,
+            "max_resumes": max_resumes if normalized_resume_to == "self" else None,
             "created_at": time.time(),
             "resumed_at": None,
             "resume_value": None,
@@ -269,10 +299,31 @@ class TriggerFlowExecutionInterrupts:
         )
         return TriggerFlowPauseSignal(interrupt)
 
+    def _resume_request_record(
+        self,
+        *,
+        resume_request_id: str,
+        value: Any,
+        actor: str | None,
+    ):
+        return {
+            "request_id": resume_request_id,
+            "status": "accepted",
+            "value": self._execution._to_serializable_value(value),
+            "actor": actor,
+            "accepted_at": time.time(),
+        }
+
+    def _same_resume_request_value(self, record: dict[str, Any], value: Any):
+        return record.get("value") == self._execution._to_serializable_value(value)
+
     async def async_continue_with(
         self,
         interrupt_id: str,
         value: Any = None,
+        *,
+        resume_request_id: str | None = None,
+        actor: str | None = None,
     ):
         execution = self._execution
         if execution._lifecycle_state != TRIGGER_FLOW_LIFECYCLE_OPEN:
@@ -299,14 +350,64 @@ class TriggerFlowExecutionInterrupts:
         if interrupt_id not in interrupts:
             raise KeyError(f"Can not continue execution { execution.id }, interrupt '{ interrupt_id }' not found.")
         interrupt = dict(interrupts[interrupt_id])
+        resume_requests = interrupt.get("resume_requests", {})
+        if not isinstance(resume_requests, dict):
+            resume_requests = {}
+        if resume_request_id is not None:
+            resume_request_id = str(resume_request_id)
+            existing_request = resume_requests.get(resume_request_id)
+            if isinstance(existing_request, dict):
+                if not self._same_resume_request_value(existing_request, value):
+                    raise ValueError(
+                        f"Can not continue execution { execution.id }, interrupt '{ interrupt_id }' with "
+                        f"conflicting resume_request_id '{ resume_request_id }'."
+                    )
+                return interrupt
         if interrupt.get("status") != "waiting":
             raise ValueError(
                 f"Can not continue execution { execution.id }, interrupt '{ interrupt_id }' is not waiting."
             )
+        if resume_request_id is not None:
+            resume_requests[resume_request_id] = self._resume_request_record(
+                resume_request_id=resume_request_id,
+                value=value,
+                actor=actor,
+            )
+            interrupt["resume_requests"] = resume_requests
+            interrupt["resume_request_id"] = resume_request_id
+            interrupt["resumed_by"] = actor
         interrupt["status"] = "resumed"
         interrupt["response"] = value
         interrupt["resume_value"] = value
         interrupt["resumed_at"] = time.time()
+        resume_to = interrupt.get("resume_to")
+        if resume_to == "self":
+            resume_count = interrupt.get("resume_count", 0)
+            if not isinstance(resume_count, int) or resume_count < 0:
+                resume_count = 0
+            max_resumes = interrupt.get("max_resumes")
+            if not isinstance(max_resumes, int):
+                max_resumes = None
+            resume_count += 1
+            if max_resumes is not None and resume_count > max_resumes:
+                await execution._emit_runtime_event(
+                    "triggerflow.self_resume_limit_reached",
+                    level="ERROR",
+                    message=(
+                        f"TriggerFlow execution '{ execution.id }' rejected continue_with() because "
+                        f"interrupt '{ interrupt_id }' exceeded its self resume limit."
+                    ),
+                    payload={
+                        "interrupt_id": interrupt_id,
+                        "resume_count": resume_count,
+                        "max_resumes": max_resumes,
+                    },
+                )
+                raise RuntimeError(
+                    f"TriggerFlow self resume limit reached for interrupt '{ interrupt_id }': "
+                    f"resume_count={ resume_count }, max_resumes={ max_resumes }."
+                )
+            interrupt["resume_count"] = resume_count
         interrupts[interrupt_id] = interrupt
         execution._system_runtime_data.set("interrupts", interrupts)
         execution._set_status(TRIGGER_FLOW_STATUS_RUNNING)
@@ -340,7 +441,6 @@ class TriggerFlowExecutionInterrupts:
                 value,
             )
 
-        resume_to = interrupt.get("resume_to")
         if isinstance(resume_to, dict) and resume_to.get("event"):
             await execution._async_dispatch_signal(
                 execution._build_signal(
@@ -370,6 +470,12 @@ class TriggerFlowExecutionInterrupts:
                     source="interrupt",
                     meta={
                         **source_signal.meta,
+                        SELF_RESUME_COUNT_META_KEY: interrupt.get("resume_count", 0),
+                        **(
+                            {SELF_RESUME_MAX_META_KEY: interrupt["max_resumes"]}
+                            if isinstance(interrupt.get("max_resumes"), int)
+                            else {}
+                        ),
                         "interrupt_id": interrupt_id,
                         "resume": self.build_resume_context(interrupt_id, interrupt, value),
                     },

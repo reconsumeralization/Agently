@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from .TriggerFlow import TriggerFlow
 
 from agently.types.data import EMPTY
+from agently.types.trigger_flow.runtime_keys import AGGREGATION_SCOPE_META_KEY
 from agently.utils import StateDataNamespace
 from .Chunk import TriggerFlowChunk
 from .Execution import TriggerFlowExecution
@@ -630,7 +631,12 @@ class TriggerFlowBlueprint:
 
     @staticmethod
     def _layer_key(data):
-        return ".".join(data._layer_marks) if data._layer_marks else "__root__"
+        if data._layer_marks:
+            return ".".join(data._layer_marks)
+        signal_scope = data.signal_meta.get(AGGREGATION_SCOPE_META_KEY)
+        if signal_scope is not None:
+            return f"signal:{ signal_scope }"
+        return "__root__"
 
     def _compile_chunk_operator(self, operator: dict[str, Any]):
         handler = self._resolve_callable("chunk", operator.get("handler_ref"))
@@ -1100,6 +1106,16 @@ class TriggerFlowBlueprint:
             validate_serializable=validate_serializable,
             name=name if name is not None else self.name,
         )
+
+    def _get_definition_fingerprint(self):
+        config = self.definition.to_dict(
+            validate_serializable=False,
+            name=self.name,
+        )
+        config = copy.deepcopy(config)
+        config.pop("name", None)
+        digest = hashlib.sha256(_stable_definition_json(config).encode("utf-8")).hexdigest()
+        return f"sha256:{ digest }"
 
     def get_json_flow(
         self,

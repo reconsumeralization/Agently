@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 from ..Chunk import TriggerFlowChunk
 from agently.types.data import EMPTY
+from agently.types.trigger_flow.runtime_keys import AGGREGATION_SCOPE_META_KEY
 from agently.types.trigger_flow import TriggerFlowBlockData
 from agently.utils import DeprecationWarnings
 from .._async_utils import gather_cancel_on_error
@@ -104,7 +105,12 @@ class TriggerFlowBaseProcess:
         )
 
     def _layer_key(self, data: "TriggerFlowRuntimeData"):
-        return ".".join(data._layer_marks) if data._layer_marks else "__root__"
+        if data._layer_marks:
+            return ".".join(data._layer_marks)
+        signal_scope = data.signal_meta.get(AGGREGATION_SCOPE_META_KEY)
+        if signal_scope is not None:
+            return f"signal:{ signal_scope }"
+        return "__root__"
 
     def _root_block_data(self):
         current = self._block_data
@@ -147,6 +153,14 @@ class TriggerFlowBaseProcess:
     @overload
     def when(
         self,
+        trigger_or_triggers: list[str | TriggerFlowChunk] | tuple[str | TriggerFlowChunk, ...],
+        *,
+        mode: Literal["and", "or", "simple_or"] = "and",
+    ) -> Self: ...
+
+    @overload
+    def when(
+        self,
         trigger_or_triggers: dict[
             Literal["event"],
             str | TriggerFlowChunk | list[str | TriggerFlowChunk],
@@ -171,6 +185,8 @@ class TriggerFlowBaseProcess:
         trigger_or_triggers: (
             str
             | TriggerFlowChunk
+            | list[str | TriggerFlowChunk]
+            | tuple[str | TriggerFlowChunk, ...]
             | dict[
                 Literal["event"],
                 str | TriggerFlowChunk | list[str | TriggerFlowChunk],
@@ -201,6 +217,8 @@ class TriggerFlowBaseProcess:
                 definition_group_id=None,
                 definition_group_kind=None,
             )
+        if isinstance(trigger_or_triggers, (list, tuple)):
+            trigger_or_triggers = {"event": list(trigger_or_triggers)}
         values: dict[Literal["event", "runtime_data", "flow_data", "collect"], dict[str, Any]] = {}
         definition_signals: list[dict[str, Any]] = []
         trigger_count = 0
