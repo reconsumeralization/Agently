@@ -108,9 +108,11 @@ meta = await result.async_get_meta()
 task_refs = result.task_refs
 ```
 
-每轮会把 planning decision、execution observation、verification evidence 和
-checkpoint 写入 Workspace。下一轮通过 `workspace.build_context(...)` 取得
-ContextPack，因此 loop 可以把证据带入下一轮，但 Workspace 不会变成自主规划器。
+每轮会把 planning decision、execution observation、verification evidence、
+evidence links 和 checkpoint 写入 Workspace。checkpoint 通过 Workspace
+checkpoint-store port 写入，task evidence 关系通过 `workspace.link_evidence(...)`
+记录。下一轮通过 `workspace.build_context(...)` 取得 ContextPack，因此 loop
+可以把证据带入下一轮，但 Workspace 不会变成自主规划器。
 
 AgentTask 的验证仍由模型判断拥有，但最终验收采用保守 guard。loop 会规范化
 verifier 输出；当仍有 missing criteria、必需 action evidence 失败或被 blocked、
@@ -276,9 +278,9 @@ item.meta["execution_mode"]
 item.meta["lineage"]["task_id"]
 ```
 
-如果在 `create_execution()` 前配置了 `agent.use_workspace(...)`，execution 会拿到
-这个 Workspace binding。AgentExecution 仍然不会自动决定什么应该进入记忆；调用方应从
-execution 侧显式持久化：
+默认 Agent 带有 lazy Workspace binding；也可以在 `create_execution()` 之前用
+`agent.use_workspace(...)` 覆盖为显式 root 或 provider。AgentExecution 仍然不会自动
+决定什么应该进入记忆；调用方应从 execution 侧显式持久化：
 
 ```python
 workspace_record = await execution.async_record_workspace(
@@ -289,9 +291,11 @@ workspace_record = await execution.async_record_workspace(
 )
 ```
 
-这个 helper 仍然通过已有的通用 Workspace API 写入，并把 record/checkpoint id 更新到
-`meta["workspace_refs"]`。Workspace 保持 durable substrate，不需要理解
-AgentExecution 语义。下一步再由调用方调用 `workspace.build_context(...)`。
+这个 helper 会通过 execution 绑定的 Workspace provider surface 写入。请求
+checkpoint 时，它会使用 checkpoint-store port，并在 AgentExecution record 与
+checkpoint 之间写入 evidence link。record id、checkpoint id 和 evidence link id
+都可以从 `meta["workspace_refs"]` 读取。Workspace 保持 durable substrate，不需要
+理解 AgentExecution 策略语义。下一步再由调用方调用 `workspace.build_context(...)`。
 
 开发排障时，可以挂 EventCenter observation hook，或临时打开控制台明细：
 

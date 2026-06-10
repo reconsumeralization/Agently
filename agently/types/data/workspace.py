@@ -51,6 +51,74 @@ class WorkspaceBackendCapabilities(TypedDict):
     features: dict[str, bool]
 
 
+class WorkspaceReferenceEnvelope(TypedDict):
+    workspace_id: str
+    kind: str
+    collection: str
+    record_id: str
+    version: str | None
+    content_ref: str | None
+    digest: str | None
+    size: int
+    created_at: str
+    policy_labels: list[str]
+    backend_capabilities: dict[str, bool]
+
+
+class WorkspaceContentSegment(TypedDict):
+    ref: WorkspaceReferenceEnvelope
+    content: str
+    offset: int
+    size: int
+    total_size: int
+    eof: bool
+    digest: str | None
+    content_type: str | None
+
+
+class WorkspaceRuntimeEventRecord(TypedDict):
+    id: str
+    execution_id: str
+    sequence: int
+    event_id: str
+    event_type: str
+    idempotency_key: str | None
+    parent_id: str | None
+    causation_id: str | None
+    node_id: str | None
+    aggregation_scope: str | None
+    checkpoint_ref: WorkspaceReferenceEnvelope | None
+    exchange_id: str | None
+    artifact_refs: list[WorkspaceReferenceEnvelope]
+    event: dict[str, Any]
+    created_at: str
+
+
+class WorkspaceFilePolicyMetadata(TypedDict):
+    content_root: str
+    files_root: str
+    action_file_root: str | None
+    allowed_roots: list[str]
+    root_source: str
+    path_normalization: str
+    symlink_policy: str
+    case_policy: str
+    policy_labels: list[str]
+    links: dict[str, str]
+
+
+class WorkspaceRetentionAnchor(TypedDict):
+    id: str
+    execution_id: str
+    anchor_type: str
+    sequence: int | None
+    record_ref: WorkspaceReferenceEnvelope | None
+    summary_ref: WorkspaceReferenceEnvelope | None
+    preserved_event_ids: list[str]
+    created_at: str
+    meta: dict[str, Any]
+
+
 class WorkspaceSearchResult(TypedDict, total=False):
     ref: WorkspaceRecordRef
     score: float | None

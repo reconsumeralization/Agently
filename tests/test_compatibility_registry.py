@@ -146,9 +146,10 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "multi-task scheduling" in task_loop_contract["scope"]["deferred"]
     assert "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging" in task_loop_contract["scope"]["deferred"]
     assert "AgentExecutionResult as the common consumption surface" in task_loop_contract["compatibility_policy"]
-    assert in_development["companions"]["skills"]["legacy_generations"] == [
+    assert in_development["companions"]["skills"]["archived_catalog_generations"] == [
         {
             "generation": "v1",
+            "branch": "update/archive-legacy-v1-catalog",
             "last_supported_framework_version": "4.1.1",
             "status": "frozen",
         }

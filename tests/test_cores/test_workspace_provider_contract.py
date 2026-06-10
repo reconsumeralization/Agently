@@ -1,0 +1,777 @@
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import Any, cast
+
+import pytest
+
+from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
+from agently.core import PluginManager
+from agently.types.data import (
+    AgentlyRequestData,
+    WorkspaceBackendCapabilities,
+    WorkspaceContentSegment,
+    WorkspaceFilePolicyMetadata,
+    WorkspaceLinkRef,
+    WorkspaceRecordRef,
+    WorkspaceReferenceEnvelope,
+    WorkspaceRetentionAnchor,
+    WorkspaceRuntimeEventRecord,
+)
+from agently.utils import DataFormatter, Settings
+
+
+class ProviderProofRequester:
+    name = "ProviderProofRequester"
+    DEFAULT_SETTINGS: dict[str, object] = {}
+
+    def __init__(self, prompt, settings):
+        self.prompt = prompt
+        self.settings = settings
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    def generate_request_data(self):
+        return AgentlyRequestData(
+            client_options={},
+            headers={},
+            data={"messages": self.prompt.to_messages(), "output": self.prompt.get("output")},
+            request_options={"stream": True},
+            request_url="mock://workspace-provider-proof",
+        )
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        yield "message", json.dumps({"answer": "remote-provider-proof", "status": "ready"})
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, object], None],
+    ):
+        response_text = ""
+        async for event, data in response_generator:
+            if event == "message":
+                response_text += str(data)
+                yield "delta", str(data)
+        yield "done", response_text
+
+
+def _create_agent(name: str):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", ProviderProofRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+class RemoteAuditWorkspaceBackend:
+    """Protocol-level non-local provider proof used only by tests."""
+
+    def __init__(self, tenant_id: str = "tenant-alpha"):
+        self.workspace_id = f"remote_audit_{ tenant_id }"
+        self.root = f"remote-audit://{ tenant_id }"
+        self.content_root = f"{ self.root }/content"
+        self.files_root = f"{ self.root }/files"
+        self.content = self
+        self.metadata = self
+        self.checkpoint_store = self
+        self.runtime_event_store = self
+        self.ref_resolver = self
+        self.retention_policy = self
+        self.evidence_linker = self
+        self.text_index = self
+        self.policy = self
+        self.vector_index = None
+        self.operations: list[str] = []
+        self._records: dict[str, WorkspaceRecordRef] = {}
+        self._record_data: dict[str, Any] = {}
+        self._record_text: dict[str, str] = {}
+        self._content_blobs: dict[str, str] = {}
+        self._path_to_id: dict[str, str] = {}
+        self._links: list[WorkspaceLinkRef] = []
+        self._checkpoints: dict[str, list[WorkspaceRecordRef]] = {}
+        self._runtime_events: dict[str, list[WorkspaceRuntimeEventRecord]] = {}
+        self._runtime_event_idempotency: dict[tuple[str, str], WorkspaceRuntimeEventRecord] = {}
+        self._retention_anchors: list[WorkspaceRetentionAnchor] = []
+        self._file_policy: WorkspaceFilePolicyMetadata = {
+            "content_root": self.content_root,
+            "files_root": self.files_root,
+            "action_file_root": None,
+            "allowed_roots": [self.files_root],
+            "root_source": "remote_provider",
+            "path_normalization": "provider_private",
+            "symlink_policy": "provider_private",
+            "case_policy": "provider_private",
+            "policy_labels": [],
+            "links": {},
+        }
+
+    def _now(self) -> str:
+        return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _next_id(self, prefix: str, collection: str | None = None) -> str:
+        if prefix == "rec":
+            return f"remote_rec_{ len(self._records) + 1 }"
+        if prefix == "link":
+            return f"remote_link_{ len(self._links) + 1 }"
+        if prefix == "anchor":
+            return f"remote_anchor_{ len(self._retention_anchors) + 1 }"
+        events = self._runtime_events.get(str(collection or "default"), [])
+        return f"remote_event_{ len(events) + 1 }"
+
+    def _serialize(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(DataFormatter.sanitize(value), sort_keys=True)
+
+    def _record_id(self, value: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str) -> str:
+        if isinstance(value, dict):
+            if "id" in value:
+                return str(value["id"])
+            if "record_id" in value:
+                return str(value["record_id"])
+        if value in self._records:
+            return str(value)
+        if value in self._path_to_id:
+            return self._path_to_id[value]
+        raise FileNotFoundError(f"Remote audit record not found: { value }")
+
+    def _optional_envelope(
+        self,
+        value: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None,
+    ) -> WorkspaceReferenceEnvelope | None:
+        if value is None:
+            return None
+        if isinstance(value, dict) and "record_id" in value:
+            return value
+        return self._envelope(self._record_id(value))
+
+    def _envelope(self, record_id: str) -> WorkspaceReferenceEnvelope:
+        ref = self._records[record_id]
+        return {
+            "workspace_id": self.workspace_id,
+            "kind": str(ref.get("kind") or ref["collection"]),
+            "collection": ref["collection"],
+            "record_id": record_id,
+            "version": None,
+            "content_ref": ref["path"],
+            "digest": ref["sha256"],
+            "size": ref["size"],
+            "created_at": ref["created_at"],
+            "policy_labels": list(ref.get("meta", {}).get("policy_labels", [])),
+            "backend_capabilities": self.capabilities()["features"],
+        }
+
+    async def put(
+        self,
+        content: Any,
+        *,
+        collection: str,
+        kind: str | None = None,
+        summary: str | None = None,
+        scope: dict[str, Any] | None = None,
+        source: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef:
+        self.operations.append("put")
+        record_id = self._next_id("rec")
+        text = self._serialize(content)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        path = f"{ self.root }/{ collection }/{ record_id }"
+        ref: WorkspaceRecordRef = {
+            "id": record_id,
+            "collection": collection,
+            "kind": kind,
+            "path": path,
+            "sha256": digest,
+            "size": len(text.encode("utf-8")),
+            "summary": summary or f"{ collection } { record_id }",
+            "scope": DataFormatter.sanitize(scope or {}),
+            "source": DataFormatter.sanitize(source or {"type": "remote_audit_provider"}),
+            "created_at": self._now(),
+            "meta": DataFormatter.sanitize(meta or {}),
+        }
+        self._records[record_id] = ref
+        self._record_data[record_id] = DataFormatter.sanitize(content)
+        self._record_text[record_id] = text
+        self._path_to_id[path] = record_id
+        return ref
+
+    async def put_record(self, ref: WorkspaceRecordRef) -> WorkspaceRecordRef:
+        self._records[ref["id"]] = ref
+        self._record_data[ref["id"]] = ref
+        self._record_text[ref["id"]] = self._serialize(ref)
+        return ref
+
+    async def get_record(self, record_id: str) -> WorkspaceRecordRef | None:
+        return self._records.get(record_id)
+
+    async def index_record(self, ref: WorkspaceRecordRef, content: str) -> None:
+        self._record_text[ref["id"]] = content
+
+    async def get(self, ref_or_path: WorkspaceRecordRef | str) -> Any:
+        return self._record_text[self._record_id(ref_or_path)]
+
+    async def get_data(self, ref_or_path: WorkspaceRecordRef | str) -> Any:
+        return self._record_data[self._record_id(ref_or_path)]
+
+    async def write_content(self, relative_path: str, content: bytes) -> str:
+        path = f"{ self.content_root }/{ relative_path.lstrip('/') }"
+        self._content_blobs[path] = content.decode("utf-8")
+        return path
+
+    async def read_content(self, path: str) -> Any:
+        if path in self._path_to_id:
+            return await self.get(path)
+        return self._content_blobs[path]
+
+    async def read_content_segment(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> WorkspaceContentSegment:
+        if path in self._path_to_id:
+            return await self.read_bounded(path, offset=offset, limit=limit)
+        content = self._content_blobs[path]
+        end = None if limit is None else offset + limit
+        segment = content[offset:end]
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        return {
+            "ref": {
+                "workspace_id": self.workspace_id,
+                "kind": "content",
+                "collection": "content",
+                "record_id": path,
+                "version": None,
+                "content_ref": path,
+                "digest": digest,
+                "size": len(content),
+                "created_at": self._now(),
+                "policy_labels": [],
+                "backend_capabilities": self.capabilities()["features"],
+            },
+            "content": segment,
+            "offset": offset,
+            "size": len(segment),
+            "total_size": len(content),
+            "eof": offset + len(segment) >= len(content),
+            "digest": digest,
+            "content_type": "text/plain",
+        }
+
+    async def stream_content(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[WorkspaceContentSegment]:
+        consumed = 0
+        while limit is None or consumed < limit:
+            current_limit = chunk_size if limit is None else min(chunk_size, limit - consumed)
+            if current_limit <= 0:
+                break
+            segment = await self.read_content_segment(path, offset=offset + consumed, limit=current_limit)
+            if not segment["content"]:
+                break
+            consumed += segment["size"]
+            yield segment
+            if segment["eof"]:
+                break
+
+    async def ref_envelope(self, ref_or_id: WorkspaceRecordRef | str) -> WorkspaceReferenceEnvelope:
+        return self._envelope(self._record_id(ref_or_id))
+
+    async def read_bounded(
+        self,
+        ref_or_path: WorkspaceRecordRef | str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> WorkspaceContentSegment:
+        record_id = self._record_id(ref_or_path)
+        content = self._record_text[record_id]
+        end = None if limit is None else offset + limit
+        segment = content[offset:end]
+        return {
+            "ref": self._envelope(record_id),
+            "content": segment,
+            "offset": offset,
+            "size": len(segment),
+            "total_size": len(content),
+            "eof": offset + len(segment) >= len(content),
+            "digest": self._records[record_id]["sha256"],
+            "content_type": "application/json",
+        }
+
+    async def stream_read(
+        self,
+        ref_or_path: WorkspaceRecordRef | str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[WorkspaceContentSegment]:
+        consumed = 0
+        while limit is None or consumed < limit:
+            current_limit = chunk_size if limit is None else min(chunk_size, limit - consumed)
+            if current_limit <= 0:
+                break
+            segment = await self.read_bounded(ref_or_path, offset=offset + consumed, limit=current_limit)
+            if not segment["content"]:
+                break
+            consumed += segment["size"]
+            yield segment
+            if segment["eof"]:
+                break
+
+    async def search(
+        self,
+        query: str | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> list[WorkspaceRecordRef]:
+        results = []
+        for record_id, ref in self._records.items():
+            if filters and any(ref.get(key) != value for key, value in filters.items()):
+                continue
+            text = self._record_text[record_id]
+            if query is None or query in text or query in ref["summary"]:
+                results.append(ref)
+        return results
+
+    async def link(
+        self,
+        source: WorkspaceRecordRef | str,
+        target: WorkspaceRecordRef | str,
+        relation: str,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceLinkRef:
+        self.operations.append("link")
+        link: WorkspaceLinkRef = {
+            "id": self._next_id("link"),
+            "source_id": self._record_id(source),
+            "target_id": self._record_id(target),
+            "relation": relation,
+            "created_at": self._now(),
+            "meta": DataFormatter.sanitize(meta or {}),
+        }
+        self._links.append(link)
+        return link
+
+    async def links(
+        self,
+        ref_or_id: WorkspaceRecordRef | str | None = None,
+        *,
+        source: WorkspaceRecordRef | str | None = None,
+        target: WorkspaceRecordRef | str | None = None,
+        relation: str | None = None,
+    ) -> list[WorkspaceLinkRef]:
+        ref_id = self._record_id(ref_or_id) if ref_or_id is not None else None
+        source_id = self._record_id(source) if source is not None else None
+        target_id = self._record_id(target) if target is not None else None
+        links = []
+        for link in self._links:
+            if ref_id is not None and ref_id not in {link["source_id"], link["target_id"]}:
+                continue
+            if source_id is not None and link["source_id"] != source_id:
+                continue
+            if target_id is not None and link["target_id"] != target_id:
+                continue
+            if relation is not None and link["relation"] != relation:
+                continue
+            links.append(link)
+        return links
+
+    async def link_evidence(
+        self,
+        source: WorkspaceRecordRef | str,
+        target: WorkspaceRecordRef | str,
+        relation: str,
+        *,
+        execution_id: str | None = None,
+        operation_id: str | None = None,
+        runtime_event_id: str | None = None,
+        checkpoint_id: str | None = None,
+        exchange_id: str | None = None,
+        artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceLinkRef:
+        self.operations.append("link_evidence")
+        evidence = {
+            "execution_id": execution_id,
+            "operation_id": operation_id,
+            "runtime_event_id": runtime_event_id,
+            "checkpoint_id": checkpoint_id,
+            "exchange_id": exchange_id,
+            "artifact_refs": [self._optional_envelope(item) for item in artifact_refs or []],
+        }
+        link_meta = DataFormatter.sanitize(meta or {})
+        link_meta["evidence"] = evidence
+        return await self.link(source, target, relation, meta=link_meta)
+
+    async def checkpoint(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+    ) -> WorkspaceRecordRef:
+        ref = await self.put(
+            state,
+            collection="checkpoints",
+            kind="checkpoint",
+            summary=f"Remote checkpoint for { run_id }",
+            scope={"run_id": run_id, **({"step_id": step_id} if step_id else {})},
+            source={"type": "remote_audit_provider", "name": "checkpoint"},
+            meta={"checkpoint": True},
+        )
+        self._checkpoints.setdefault(run_id, []).append(ref)
+        return ref
+
+    async def put_checkpoint(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+    ) -> WorkspaceRecordRef:
+        self.operations.append("put_checkpoint")
+        return await self.checkpoint(run_id, state, step_id=step_id)
+
+    async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
+        items = self._checkpoints.get(run_id, [])
+        return items[-1] if items else None
+
+    async def checkpoint_history(
+        self,
+        run_id: str,
+        *,
+        step_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[WorkspaceRecordRef]:
+        items = [
+            item for item in reversed(self._checkpoints.get(run_id, []))
+            if step_id is None or item["scope"].get("step_id") == step_id
+        ]
+        return items[:limit] if limit is not None else items
+
+    async def append_runtime_event(
+        self,
+        execution_id: str,
+        event: Any,
+        *,
+        sequence: int | None = None,
+        idempotency_key: str | None = None,
+        checkpoint_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
+        exchange_id: str | None = None,
+        node_id: str | None = None,
+        aggregation_scope: str | None = None,
+    ) -> WorkspaceRuntimeEventRecord:
+        self.operations.append("append_runtime_event")
+        if idempotency_key is not None and (execution_id, idempotency_key) in self._runtime_event_idempotency:
+            return self._runtime_event_idempotency[(execution_id, idempotency_key)]
+        event_data = event.model_dump(mode="json") if hasattr(event, "model_dump") else dict(event)
+        event_data = DataFormatter.sanitize(event_data)
+        meta = event_data.get("meta") if isinstance(event_data.get("meta"), dict) else {}
+        records = self._runtime_events.setdefault(execution_id, [])
+        resolved_sequence = sequence if sequence is not None else len(records) + 1
+        artifact_ref_envelopes = [
+            envelope
+            for item in artifact_refs or []
+            if (envelope := self._optional_envelope(item)) is not None
+        ]
+        record: WorkspaceRuntimeEventRecord = {
+            "id": self._next_id("event", execution_id),
+            "execution_id": execution_id,
+            "sequence": resolved_sequence,
+            "event_id": str(event_data.get("event_id") or self._next_id("event", execution_id)),
+            "event_type": str(event_data.get("event_type") or "runtime.event"),
+            "idempotency_key": idempotency_key,
+            "parent_id": meta.get("parent_event_id"),
+            "causation_id": meta.get("causation_id"),
+            "node_id": node_id or meta.get("node_id"),
+            "aggregation_scope": aggregation_scope or meta.get("aggregation_scope"),
+            "checkpoint_ref": self._optional_envelope(checkpoint_ref),
+            "exchange_id": exchange_id,
+            "artifact_refs": artifact_ref_envelopes,
+            "event": event_data,
+            "created_at": self._now(),
+        }
+        records.append(record)
+        if idempotency_key is not None:
+            self._runtime_event_idempotency[(execution_id, idempotency_key)] = record
+        return record
+
+    async def query_runtime_events(
+        self,
+        execution_id: str,
+        *,
+        sequence_from: int | None = None,
+        sequence_to: int | None = None,
+        event_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[WorkspaceRuntimeEventRecord]:
+        records = list(self._runtime_events.get(execution_id, []))
+        if sequence_from is not None:
+            records = [item for item in records if item["sequence"] >= sequence_from]
+        if sequence_to is not None:
+            records = [item for item in records if item["sequence"] <= sequence_to]
+        if event_id is not None:
+            records = [item for item in records if item["event_id"] == event_id]
+        return records[:limit] if limit is not None else records
+
+    async def record_file_policy(
+        self,
+        *,
+        action_file_root: str | None = None,
+        allowed_roots: list[str] | None = None,
+        root_source: str = "workspace",
+        path_normalization: str = "resolve",
+        symlink_policy: str = "resolved_within_root",
+        case_policy: str = "platform_default",
+        policy_labels: list[str] | None = None,
+        links: dict[str, str] | None = None,
+    ) -> WorkspaceFilePolicyMetadata:
+        self._file_policy = {
+            "content_root": self.content_root,
+            "files_root": self.files_root,
+            "action_file_root": action_file_root,
+            "allowed_roots": allowed_roots or [self.files_root],
+            "root_source": root_source,
+            "path_normalization": path_normalization,
+            "symlink_policy": symlink_policy,
+            "case_policy": case_policy,
+            "policy_labels": policy_labels or [],
+            "links": links or {},
+        }
+        return self._file_policy
+
+    async def get_file_policy(self) -> WorkspaceFilePolicyMetadata:
+        return self._file_policy
+
+    def ensure_writable(self) -> None:
+        return None
+
+    def resolve_content_path(self, path: str) -> Any:
+        return path
+
+    async def filter_records(
+        self,
+        records: list[WorkspaceRecordRef],
+        *,
+        purpose: str = "prompt",
+    ) -> list[WorkspaceRecordRef]:
+        return records
+
+    async def add_retention_anchor(
+        self,
+        execution_id: str,
+        *,
+        anchor_type: str,
+        sequence: int | None = None,
+        record_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        summary_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        preserved_event_ids: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceRetentionAnchor:
+        anchor: WorkspaceRetentionAnchor = {
+            "id": self._next_id("anchor"),
+            "execution_id": execution_id,
+            "anchor_type": anchor_type,
+            "sequence": sequence,
+            "record_ref": self._optional_envelope(record_ref),
+            "summary_ref": self._optional_envelope(summary_ref),
+            "preserved_event_ids": preserved_event_ids or [],
+            "created_at": self._now(),
+            "meta": DataFormatter.sanitize(meta or {}),
+        }
+        self._retention_anchors.append(anchor)
+        return anchor
+
+    async def retention_anchors(
+        self,
+        execution_id: str,
+        *,
+        anchor_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[WorkspaceRetentionAnchor]:
+        anchors = [
+            item for item in self._retention_anchors
+            if item["execution_id"] == execution_id and (anchor_type is None or item["anchor_type"] == anchor_type)
+        ]
+        return anchors[:limit] if limit is not None else anchors
+
+    def capabilities(self) -> WorkspaceBackendCapabilities:
+        component = type(self).__name__
+        return {
+            "backend": component,
+            "root": self.root,
+            "content_root": self.content_root,
+            "files_root": self.files_root,
+            "read_only": False,
+            "components": {
+                "content": component,
+                "metadata": component,
+                "checkpoint_store": component,
+                "runtime_event_store": component,
+                "ref_resolver": component,
+                "retention_policy": component,
+                "evidence_linker": component,
+                "text_index": component,
+                "vector_index": None,
+            },
+            "features": {
+                "structured_records": True,
+                "checkpoint_lookup": True,
+                "links": True,
+                "file_policy_metadata": True,
+                "evidence_links": True,
+                "supports_cas": True,
+                "supports_lease": True,
+                "supports_event_sequence": True,
+                "supports_range_read": True,
+                "supports_stream_read": True,
+                "supports_retention": True,
+                "supports_compaction_anchor": True,
+                "supports_remote_backend": True,
+            },
+        }
+
+
+@pytest.mark.asyncio
+async def test_remote_audit_workspace_backend_proves_provider_contract_across_consumers():
+    provider = RemoteAuditWorkspaceBackend()
+    agent = _create_agent("remote-provider-proof").use_workspace(provider)
+    workspace = agent.workspace
+    assert workspace is not None
+    assert workspace.backend is provider
+    assert workspace.capabilities()["features"]["supports_remote_backend"] is True
+
+    flow = TriggerFlow(name="remote-provider-proof")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(runtime_resources={"durable_provider": workspace})
+
+    snapshot = await execution.async_start("remote-value")
+    checkpoint_ref = await execution.async_save_checkpoint(
+        step_id="distributed-proof",
+        require_distributed_provider=True,
+    )
+    runtime_events = await workspace.query_runtime_events(execution.id)
+
+    assert snapshot["value"] == "remote-value"
+    assert checkpoint_ref["collection"] == "checkpoints"
+    assert checkpoint_ref["source"]["type"] == "remote_audit_provider"
+    assert runtime_events
+    assert runtime_events[0]["event_type"] == "triggerflow.definition_declared"
+    assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
+    assert "append_runtime_event" in provider.operations
+    assert "put_checkpoint" in provider.operations
+
+    agent_execution = (
+        agent
+        .input("prove provider")
+        .output({"answer": (str, "answer", True)}, format="json")
+        .create_execution(
+            mode="task_step",
+            lineage={"task_id": "remote-provider-task", "step_id": "record"},
+            limits={"max_model_requests": 1},
+        )
+    )
+    data = await agent_execution.async_get_data()
+    workspace_record = await agent_execution.async_record_workspace(
+        content={"answer": data["answer"]},
+        checkpoint=True,
+    )
+    meta = await agent_execution.async_get_meta()
+    evidence_links = await workspace.links(workspace_record["record"], relation="checkpointed_by")
+
+    assert data["answer"] == "remote-provider-proof"
+    assert workspace_record["checkpoint"] is not None
+    assert workspace_record["checkpoint"]["source"]["type"] == "remote_audit_provider"
+    assert [item["id"] for item in evidence_links] == meta["workspace_refs"]["verification_evidence"]
+    assert evidence_links[0]["target_id"] == workspace_record["checkpoint"]["id"]
+    assert evidence_links[0]["meta"]["evidence"]["execution_id"] == meta["execution_id"]
+    assert "link_evidence" in provider.operations
+
+
+@pytest.mark.asyncio
+async def test_workspace_backend_provider_registration_resolves_custom_backend():
+    provider_name = "remote-audit-provider-registration-test"
+    factory_calls: list[dict[str, Any]] = []
+
+    def provider_factory(
+        *,
+        root: Any | None = None,
+        create: bool = True,
+        mode: str = "read_write",
+        tenant_id: str = "tenant-alpha",
+        **options: Any,
+    ) -> RemoteAuditWorkspaceBackend:
+        factory_calls.append(
+            {
+                "root": root,
+                "create": create,
+                "mode": mode,
+                "tenant_id": tenant_id,
+                "options": options,
+            }
+        )
+        return RemoteAuditWorkspaceBackend(tenant_id=tenant_id)
+
+    Agently.workspace.register_backend_provider(provider_name, provider_factory)
+    try:
+        agent = _create_agent("registered-provider-proof").use_workspace(
+            "logical-root",
+            provider=provider_name,
+            provider_options={"tenant_id": "tenant-registered"},
+        )
+        workspace = agent.workspace
+        assert workspace is not None
+        assert provider_name in Agently.workspace.list_backend_providers()
+        assert factory_calls == [
+            {
+                "root": "logical-root",
+                "create": True,
+                "mode": "read_write",
+                "tenant_id": "tenant-registered",
+                "options": {},
+            }
+        ]
+        assert cast(RemoteAuditWorkspaceBackend, workspace.backend).workspace_id == "remote_audit_tenant-registered"
+        assert agent.settings.get("workspace.provider") == provider_name
+
+        flow = TriggerFlow(name="registered-provider-proof")
+
+        async def remember(data: TriggerFlowRuntimeData):
+            await data.async_set_state("value", data.value)
+
+        flow.to(remember)
+        execution = flow.create_execution(runtime_resources={"workspace": workspace})
+        snapshot = await execution.async_start("registered-value")
+        checkpoint_ref = await execution.async_save_checkpoint(
+            step_id="registered-provider",
+            require_distributed_provider=True,
+        )
+        runtime_events = await workspace.query_runtime_events(execution.id)
+
+        assert snapshot["value"] == "registered-value"
+        assert checkpoint_ref["source"]["type"] == "remote_audit_provider"
+        assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
+    finally:
+        Agently.workspace.unregister_backend_provider(provider_name)
+    assert provider_name not in Agently.workspace.list_backend_providers()

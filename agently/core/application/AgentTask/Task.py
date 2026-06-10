@@ -79,7 +79,11 @@ class AgentTask:
         if workspace is not None:
             agent_with_workspace.use_workspace(workspace)
         if getattr(agent, "workspace", None) is None:
-            raise RuntimeError("AgentTask requires a Workspace. Pass workspace=... or call agent.use_workspace(...).")
+            raise RuntimeError(
+                "AgentTask requires a Workspace binding. Standard Agents include a lazy Workspace; "
+                "pass workspace=... or call agent.use_workspace(...) only when you need an explicit "
+                "root, mode, or provider."
+            )
         self.workspace = agent_with_workspace.workspace
         self.status: AgentTaskStatus = "created"
         self.result: Any = None
@@ -90,6 +94,7 @@ class AgentTask:
             "decisions": [],
             "verification": [],
             "checkpoints": [],
+            "evidence_links": [],
         }
         self.created_at = time.time()
         self.started_at: float | None = None
@@ -686,7 +691,7 @@ class AgentTask:
             source={"type": "agent_task", "phase": "execute", "execution_id": execution_meta.get("execution_id")},
             meta={"task_id": self.id, "iteration": iteration_index},
         )
-        checkpoint_ref = await self.workspace.checkpoint(
+        checkpoint_ref = await self.workspace.put_checkpoint(
             self.id,
             {
                 "task_id": self.id,
@@ -697,9 +702,26 @@ class AgentTask:
             },
             step_id=f"iteration-{iteration_index}",
         )
-        await self.workspace.link(record_ref, decision_ref, relation="implements_decision")
+        decision_link = await self.workspace.link_evidence(
+            record_ref,
+            decision_ref,
+            relation="implements_decision",
+            execution_id=str(execution_meta.get("execution_id") or "") or None,
+            checkpoint_id=checkpoint_ref.get("id"),
+            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
+        )
+        checkpoint_link = await self.workspace.link_evidence(
+            record_ref,
+            checkpoint_ref,
+            relation="checkpointed_by",
+            execution_id=str(execution_meta.get("execution_id") or "") or None,
+            checkpoint_id=checkpoint_ref.get("id"),
+            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
+        )
         self._append_workspace_ref("observations", record_ref)
         self._append_workspace_ref("checkpoints", checkpoint_ref)
+        self._append_workspace_ref("evidence_links", decision_link)
+        self._append_workspace_ref("evidence_links", checkpoint_link)
         await self._emit(
             "agent_task.checkpoint",
             {"iteration": iteration_index, "checkpoint": checkpoint_ref},
@@ -725,8 +747,14 @@ class AgentTask:
             source={"type": "agent_task", "phase": "verify"},
             meta={"task_id": self.id, "iteration": iteration_index},
         )
-        await self.workspace.link(record_ref, observation_ref, relation="verifies_observation")
+        evidence_link = await self.workspace.link_evidence(
+            record_ref,
+            observation_ref,
+            relation="verifies_observation",
+            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
+        )
         self._append_workspace_ref("verification", record_ref)
+        self._append_workspace_ref("evidence_links", evidence_link)
         return record_ref
 
     def _append_workspace_ref(self, collection: str, ref: dict[str, Any] | None):

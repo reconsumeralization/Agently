@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from agently.types.data.workspace import WorkspaceContextPack
-from agently.types.plugins import ContextBuilder, IngestionProfile, RecallPlanner, Retriever, WorkspaceBackend
+from agently.types.plugins import (
+    ContextBuilder,
+    IngestionProfile,
+    RecallPlanner,
+    Retriever,
+    WorkspaceBackend,
+    WorkspaceBackendProvider,
+)
 
 from ..Recall import DefaultContextBuilder, RecallProfile, RuleRecallPlanner, WorkspaceRetriever
 from .Errors import WorkspaceConfigurationError
@@ -33,6 +40,7 @@ class WorkspaceManager:
     def __init__(self):
         self._profiles: dict[str, IngestionProfile] = {}
         self._recall_profiles: dict[str, RecallProfile] = {}
+        self._backend_providers: dict[str, WorkspaceBackendProvider] = {}
         self.register_profile("fast", FastIngestionProfile())
         self.register_profile("checkpoint", CheckpointIngestionProfile())
         self.register_recall_profile(
@@ -56,16 +64,82 @@ class WorkspaceManager:
 
     def create(
         self,
-        path_or_backend: str | Path | WorkspaceBackend,
+        path_or_backend: str | Path | WorkspaceBackend | None = None,
         *,
         create: bool = True,
         mode: str = "read_write",
+        provider: str | None = None,
+        provider_options: dict[str, Any] | None = None,
     ) -> Workspace:
-        if hasattr(path_or_backend, "put") and hasattr(path_or_backend, "search"):
+        if provider is not None:
+            backend = self._create_backend_from_provider(
+                provider,
+                root=path_or_backend,
+                create=create,
+                mode=mode,
+                provider_options=provider_options,
+            )
+        elif hasattr(path_or_backend, "put") and hasattr(path_or_backend, "search"):
             backend = cast(WorkspaceBackend, path_or_backend)
         else:
+            if path_or_backend is None:
+                raise ValueError("Workspace create() requires path_or_backend unless provider=... is set.")
             backend = LocalWorkspaceBackend(path_or_backend, create=create, mode=mode)  # type: ignore[arg-type]
         return Workspace(backend, self)
+
+    def _validate_backend(self, backend: Any, *, provider: str | None = None) -> WorkspaceBackend:
+        required = ("put", "search", "get_data", "capabilities")
+        missing = [name for name in required if not hasattr(backend, name)]
+        if missing:
+            detail = f" from provider '{provider}'" if provider else ""
+            raise TypeError(
+                f"Workspace backend{detail} must implement WorkspaceBackend; "
+                f"missing: {', '.join(missing)}."
+            )
+        return cast(WorkspaceBackend, backend)
+
+    def _create_backend_from_provider(
+        self,
+        provider: str,
+        *,
+        root: str | Path | WorkspaceBackend | None = None,
+        create: bool = True,
+        mode: str = "read_write",
+        provider_options: dict[str, Any] | None = None,
+    ) -> WorkspaceBackend:
+        normalized = str(provider).strip()
+        if not normalized:
+            raise ValueError("Workspace backend provider name must be non-empty.")
+        if normalized not in self._backend_providers:
+            raise WorkspaceConfigurationError(f"Workspace backend provider is not registered: { normalized }")
+        options = dict(provider_options or {})
+        if root is not None:
+            options.setdefault("root", root)
+        backend = self._backend_providers[normalized](
+            create=create,
+            mode=mode,
+            **options,
+        )
+        return self._validate_backend(backend, provider=normalized)
+
+    def register_backend_provider(self, name: str, provider: WorkspaceBackendProvider):
+        normalized = str(name).strip()
+        if not normalized:
+            raise ValueError("Workspace backend provider name must be non-empty.")
+        if not callable(provider):
+            raise TypeError("Workspace backend provider must be callable.")
+        self._backend_providers[normalized] = provider
+        return self
+
+    def unregister_backend_provider(self, name: str):
+        normalized = str(name).strip()
+        if not normalized:
+            raise ValueError("Workspace backend provider name must be non-empty.")
+        self._backend_providers.pop(normalized, None)
+        return self
+
+    def list_backend_providers(self) -> list[str]:
+        return sorted(self._backend_providers.keys())
 
     def register_profile(self, name: str, handler: IngestionProfile | Callable[..., Any]):
         normalized = str(name).strip()

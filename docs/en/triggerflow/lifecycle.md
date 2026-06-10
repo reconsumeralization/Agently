@@ -204,16 +204,88 @@ before graph continuation if required resources are still missing. Plain
 you want the same fail-fast resource check without ensuring async environments.
 
 External checkpoint stores can persist the same snapshot by exposing
-`put_checkpoint(run_id, state, step_id=...)`:
+`put_checkpoint(run_id, state, step_id=...)`. A Workspace can be configured
+directly because it implements the same checkpoint-store port:
 
 ```python
-await execution.async_save_checkpoint(workspace.checkpoint_store)
+execution = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+checkpoint_ref = await execution.async_save_checkpoint(step_id="after-approval")
 ```
+
+For shared task information, prefer a Workspace instance that the application
+creates and owns explicitly:
+
+```python
+shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
+execution = flow.create_execution(runtime_resources={"workspace": shared_workspace})
+```
+
+That `runtime_resources["workspace"]` entry is the execution-local Workspace
+binding available to TriggerFlow chunks. It is a live resource, not serialized
+state. If a chunk needs an Agent to use the same information scope, bind that
+Agent or the single AgentExecution to the same Workspace in application code.
+If a flow needs to move data between two isolated Workspaces, do it explicitly
+in the flow's business logic with Workspace `search(...)`, `get(...)`,
+`get_data(...)`, `put(...)`, `ingest(...)`, and `link(...)`. Workspace itself
+does not provide a cross-space communication or replication protocol.
+
+You can also configure the stores explicitly:
+
+```python
+execution.set_checkpoint_store(agent.workspace)
+checkpoint_ref = await execution.async_save_checkpoint(step_id="after-approval")
+```
+
+To resume from a Workspace-backed checkpoint, read the stored snapshot and pass it
+back to TriggerFlow's rehydration API:
+
+```python
+checkpoint = await agent.workspace.latest_checkpoint(execution.run_context.run_id)
+saved_state = await agent.workspace.get_data(checkpoint)
+
+restored = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+await restored.async_rehydrate(saved_state, runtime_resources={"workspace": agent.workspace})
+```
+
+This path preserves TriggerFlow-owned pause/resume ledgers, policy-approval
+waits, and `when(..., mode="and")` join progress while keeping Workspace as the
+checkpoint provider.
 
 TriggerFlow carries owner/lease fields in the snapshot and exposes
 `claim_lease(...)` / `heartbeat_lease(...)` so a store can index and project
 distributed ownership. The store still owns cross-worker atomic writes, lease
 enforcement, access control, and conflict handling.
+
+When a service wants to use a checkpoint for distributed recovery, request a
+fail-closed provider check:
+
+```python
+await execution.async_save_checkpoint(
+    step_id="after-approval",
+    require_distributed_provider=True,
+)
+```
+
+The selected checkpoint provider must report CAS, lease, range-read, and
+retention capabilities, and the execution must also have a RuntimeEvent store
+that reports event sequencing. The local Workspace backend is a single-node
+development provider, so it intentionally fails this distributed check instead
+of implying cross-worker recovery guarantees.
+
+For durable diagnostics, configure a RuntimeEvent store on the execution:
+
+```python
+execution = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+
+# Or bind the RuntimeEvent store explicitly.
+execution.set_runtime_event_store(agent.workspace)
+await execution.async_start(request)
+events = await agent.workspace.query_runtime_events(execution.id)
+```
+
+TriggerFlow still owns event identity, pause/resume semantics, DAG readiness,
+and replay validation. Workspace stores the canonical RuntimeEvent records and
+checkpoint refs; it does not become a workflow control plane.
 
 ## Picking the right entry
 

@@ -400,9 +400,9 @@ class ActionExtension(BaseAgent):
         elif root is _WORKSPACE_ROOT_UNSET:
             DeprecationWarnings.warn_deprecated_once(
                 "ActionExtension.enable_workspace.default_root_without_foundation_workspace",
-                "`agent.enable_workspace_file_actions()` without `agent.use_workspace(...)` "
-                "defaults to the current directory. "
-                "Configure `agent.use_workspace(...)` or pass an explicit `root=`.",
+                "`agent.enable_workspace_file_actions()` without an Agent Workspace binding "
+                "defaults to the current directory. Standard Agents include a lazy Workspace; "
+                "pass an explicit `root=` or call `agent.use_workspace(...)` to override it.",
                 stacklevel=2,
             )
             root = "."
@@ -630,9 +630,10 @@ class ActionExtension(BaseAgent):
         DeprecationWarnings.warn_deprecated_once(
             "ActionExtension.enable_workspace.renamed_to_enable_workspace_file_actions",
             "`agent.enable_workspace(...)` is kept as a compatibility alias for "
-            "`agent.enable_workspace_file_actions(...)`. `agent.use_workspace(...)` "
-            "configures the Workspace; use `enable_workspace_file_actions(...)` "
-            "when you want to expose Workspace file list/search/read/write actions.",
+            "`agent.enable_workspace_file_actions(...)`. Standard Agents include a lazy "
+            "Workspace binding, and `agent.use_workspace(...)` overrides its root, mode, "
+            "or provider. Use `enable_workspace_file_actions(...)` when you want to expose "
+            "Workspace file list/search/read/write actions.",
             stacklevel=2,
         )
         return self.enable_workspace_file_actions(

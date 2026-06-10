@@ -344,16 +344,17 @@ def test_action_extension_enable_workspace_file_actions_inherits_foundation_work
     assert listed.get("data") == ["notes/todo.txt"]
 
 
-def test_action_extension_enable_workspace_file_actions_without_foundation_warns(tmp_path, monkeypatch):
+def test_action_extension_enable_workspace_file_actions_uses_lazy_workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     agent = Agently.create_agent()
+    workspace = agent.workspace
 
-    with pytest.warns(DeprecationWarning, match="agent.enable_workspace_file_actions"):
-        agent.enable_workspace_file_actions()
+    agent.enable_workspace_file_actions()
 
     spec = agent.action.action_registry.get_spec("read_file")
     assert spec is not None
-    assert spec.get("meta", {}).get("root") == str(tmp_path.resolve())
+    assert spec.get("meta", {}).get("root") == str(workspace.files_root)
+    assert not workspace.root.exists()
 
 
 def test_action_extension_enable_workspace_compat_alias_warns(tmp_path):

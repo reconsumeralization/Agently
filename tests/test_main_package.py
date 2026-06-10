@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import pytest
 import yaml
-from agently import Agently
+from agently import Agent, Agently, TriggerFlow
 from agently.compatibility import (
     get_current_release_manifest,
     get_devtools_compatibility_manifest,
@@ -35,6 +35,26 @@ _RUNTIME_LOG_KEYS = (
     "runtime.show_runtime_logs",
     "runtime.httpx_log_level",
 )
+
+
+def test_public_core_instance_creation_styles(tmp_path):
+    anonymous_agent = Agent()
+    direct_agent = Agent("direct-agent")
+    factory_agent = Agently.create_agent("factory-agent")
+    direct_flow = TriggerFlow(name="direct-flow")
+    factory_flow = Agently.create_trigger_flow("factory-flow")
+    workspace = Agently.create_workspace(tmp_path / "public-workspace")
+
+    assert isinstance(anonymous_agent.name, str)
+    assert anonymous_agent.name
+    assert direct_agent.name == "direct-agent"
+    assert factory_agent.name == "factory-agent"
+    assert getattr(anonymous_agent.workspace, "is_materialized") is False
+    assert getattr(direct_agent.workspace, "is_materialized") is False
+    assert getattr(factory_agent.workspace, "is_materialized") is False
+    assert direct_flow.name == "direct-flow"
+    assert factory_flow.name == "factory-flow"
+    assert workspace.root == (tmp_path / "public-workspace").resolve()
 
 
 def _snapshot_runtime_log_settings():

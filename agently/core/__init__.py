@@ -70,6 +70,7 @@ from .runtime import (
 )
 from .session import (
     DefaultContextBuilder,
+    LazyWorkspace,
     LocalWorkspaceBackend,
     RecallProfile,
     RuleRecallPlanner,
@@ -106,6 +107,7 @@ __all__ = [
     "ExecutionEnvironmentError",
     "ExecutionEnvironmentManager",
     "ExtensionHandlers",
+    "LazyWorkspace",
     "LocalWorkspaceBackend",
     "ModelRequest",
     "ModelResponse",

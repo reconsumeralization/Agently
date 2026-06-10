@@ -620,15 +620,24 @@ async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace
     assert workspace_record["checkpoint"] is not None
     assert meta["workspace_refs"]["observations"] == [workspace_record["record"]["id"]]
     assert meta["workspace_refs"]["checkpoints"] == [workspace_record["checkpoint"]["id"]]
+    evidence_link_id = meta["workspace_refs"]["verification_evidence"][0]
     assert agent.workspace is not None
     assert await agent.workspace.get_data(workspace_record["record"]) == {"answer": data["answer"]}
     history = await agent.workspace.checkpoint_history("workspace-task", step_id="record")
     assert [item["id"] for item in history] == [workspace_record["checkpoint"]["id"]]
+    evidence_links = await agent.workspace.links(workspace_record["record"], relation="checkpointed_by")
+    assert [item["id"] for item in evidence_links] == [evidence_link_id]
+    assert evidence_links[0]["target_id"] == workspace_record["checkpoint"]["id"]
+    assert evidence_links[0]["meta"]["evidence"]["execution_id"] == meta["execution_id"]
+    assert evidence_links[0]["meta"]["owner"] == "AgentExecution"
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_record_requires_bound_workspace():
+async def test_agent_execution_workspace_record_uses_lazy_default_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     agent = _create_agent("task-step-workspace-missing")
+    workspace = agent.workspace
+    assert getattr(workspace, "is_materialized") is False
     execution = (
         agent
         .input("missing workspace")
@@ -636,8 +645,11 @@ async def test_agent_execution_workspace_record_requires_bound_workspace():
         .create_execution(mode="task_step", limits={"max_model_requests": 1})
     )
 
-    with pytest.raises(RuntimeError, match="agent.use_workspace"):
-        await execution.async_record_workspace()
+    workspace_record = await execution.async_record_workspace()
+
+    assert getattr(workspace, "is_materialized") is True
+    assert workspace_record["record"]["collection"] == "observations"
+    assert workspace.root.exists()
 
 
 def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp_path):
@@ -660,3 +672,4 @@ def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp
     assert workspace_record["checkpoint"] is not None
     assert meta["workspace_refs"]["observations"] == [workspace_record["record"]["id"]]
     assert meta["workspace_refs"]["checkpoints"] == [workspace_record["checkpoint"]["id"]]
+    assert meta["workspace_refs"]["verification_evidence"]
