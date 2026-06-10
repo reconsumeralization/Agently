@@ -199,15 +199,84 @@ fail fast。普通 `load(...)` 仍是兼容路径；如果只想做同步 fail-f
 `validate_rehydration=True`。
 
 外部 checkpoint store 只要暴露 `put_checkpoint(run_id, state, step_id=...)`
-即可持久化同一个 snapshot：
+即可持久化同一个 snapshot。Workspace 已实现同一个 checkpoint-store port，
+因此可以直接配置：
 
 ```python
-await execution.async_save_checkpoint(workspace.checkpoint_store)
+execution = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+checkpoint_ref = await execution.async_save_checkpoint(step_id="after-approval")
 ```
+
+如果需要共享任务信息，优先使用由应用显式创建并管理的 Workspace 实例：
+
+```python
+shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
+execution = flow.create_execution(runtime_resources={"workspace": shared_workspace})
+```
+
+`runtime_resources["workspace"]` 是当前 TriggerFlow execution 的 execution-local
+Workspace binding，会暴露给 chunks 使用。它是 live resource，不会被序列化进
+execution state。如果某个 chunk 需要 Agent 使用同一个信息范围，应在业务代码里把
+该 Agent 或单次 AgentExecution 绑定到同一个 Workspace。如果 flow 需要在两个隔离
+Workspace 之间移动数据，应在业务逻辑里显式用 Workspace `search(...)`、`get(...)`、
+`get_data(...)`、`put(...)`、`ingest(...)` 和 `link(...)` 完成。Workspace 本身不提供
+跨空间 communication 或 replication 协议。
+
+也可以显式配置 store：
+
+```python
+execution.set_checkpoint_store(agent.workspace)
+checkpoint_ref = await execution.async_save_checkpoint(step_id="after-approval")
+```
+
+如果要从 Workspace-backed checkpoint 恢复，先读出保存的 snapshot，再交回
+TriggerFlow 的 rehydration API：
+
+```python
+checkpoint = await agent.workspace.latest_checkpoint(execution.run_context.run_id)
+saved_state = await agent.workspace.get_data(checkpoint)
+
+restored = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+await restored.async_rehydrate(saved_state, runtime_resources={"workspace": agent.workspace})
+```
+
+这条路径会保留 TriggerFlow 自己拥有的 pause/resume ledger、policy approval
+waits 与 `when(..., mode="and")` join progress；Workspace 仍只是 checkpoint
+provider。
 
 TriggerFlow 会在 snapshot 中携带 owner/lease 字段，并提供
 `claim_lease(...)` / `heartbeat_lease(...)` 供 store 索引和投影分布式所有权。
 跨 worker 原子写入、lease enforcement、访问控制和冲突处理仍由 store 负责。
+
+服务如果要把 checkpoint 用于分布式恢复，应显式要求 fail-closed provider
+检查：
+
+```python
+await execution.async_save_checkpoint(
+    step_id="after-approval",
+    require_distributed_provider=True,
+)
+```
+
+被选中的 checkpoint provider 必须报告 CAS、lease、range-read 和 retention
+能力，execution 也必须配置一个报告 event sequencing 的 RuntimeEvent store。
+local Workspace backend 是单节点开发 provider，因此会故意拒绝这个分布式检查，
+避免暗示跨 worker recovery guarantees。
+
+如果需要持久诊断，可以在 execution 上配置 RuntimeEvent store：
+
+```python
+execution = flow.create_execution(runtime_resources={"workspace": agent.workspace})
+
+# 或显式绑定 RuntimeEvent store。
+execution.set_runtime_event_store(agent.workspace)
+await execution.async_start(request)
+events = await agent.workspace.query_runtime_events(execution.id)
+```
+
+TriggerFlow 仍然拥有 event identity、pause/resume 语义、DAG readiness 和
+replay validation。Workspace 只存 canonical RuntimeEvent records 与
+checkpoint refs，不会变成 workflow control plane。
 
 ## 选哪个入口
 

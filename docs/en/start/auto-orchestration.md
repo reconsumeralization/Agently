@@ -117,9 +117,11 @@ task_refs = result.task_refs
 ```
 
 Each iteration writes planning decisions, execution observations, verification
-evidence, and checkpoints to Workspace. The next iteration receives a
-ContextPack from `workspace.build_context(...)`, so the loop can carry evidence
-forward without turning Workspace into an autonomous planner.
+evidence, evidence links, and checkpoints to Workspace. Checkpoints use the
+Workspace checkpoint-store port, and task evidence relationships use
+`workspace.link_evidence(...)`. The next iteration receives a ContextPack from
+`workspace.build_context(...)`, so the loop can carry evidence forward without
+turning Workspace into an autonomous planner.
 
 AgentTask verification remains model-owned, but completion acceptance is
 conservative. The loop normalizes verifier output and will not accept a task as
@@ -307,9 +309,10 @@ item.meta["execution_mode"]
 item.meta["lineage"]["task_id"]
 ```
 
-When `agent.use_workspace(...)` is configured before `create_execution()`, the
-execution receives that Workspace binding. AgentExecution still does not decide
-what becomes memory automatically; persist explicitly from the execution side:
+Default Agents carry a lazy Workspace binding, and `agent.use_workspace(...)`
+can override it with an explicit root or provider before `create_execution()`.
+AgentExecution still does not decide what becomes memory automatically; persist
+explicitly from the execution side:
 
 ```python
 workspace_record = await execution.async_record_workspace(
@@ -320,10 +323,13 @@ workspace_record = await execution.async_record_workspace(
 )
 ```
 
-This writes through the existing generic Workspace APIs and updates
-`meta["workspace_refs"]` with the record and checkpoint ids. Workspace remains
-the durable substrate and does not need to know AgentExecution semantics. Call
-`workspace.build_context(...)` for the next step.
+This writes through the execution's bound Workspace provider surface. When a
+checkpoint is requested, the helper uses the checkpoint-store port and records
+an evidence link between the AgentExecution record and the checkpoint. The
+record id, checkpoint id, and evidence link id are visible under
+`meta["workspace_refs"]`. Workspace remains the durable substrate and does not
+need to know AgentExecution strategy semantics. Call `workspace.build_context(...)`
+for the next step.
 
 For development diagnostics, attach an EventCenter observation hook or
 temporarily enable console details:

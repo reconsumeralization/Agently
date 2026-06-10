@@ -40,7 +40,8 @@ async def record_workspace(
     if owner.workspace is None:
         raise RuntimeError(
             "AgentExecution has no Workspace binding. "
-            "Call agent.use_workspace(...) before create_execution(...)."
+            "Standard Agents include a lazy Workspace; call agent.use_workspace(...) "
+            "only when you need an explicit root, mode, or provider."
         )
     if not owner._completed:
         await owner.async_get_data()
@@ -72,12 +73,25 @@ async def record_workspace(
     checkpoint_ref = None
     if checkpoint:
         checkpoint_run_id = str(record_scope.get("task_id") or owner.lineage.get("task_id") or owner.id)
-        checkpoint_ref = await owner.workspace.checkpoint(
+        checkpoint_ref = await owner.workspace.put_checkpoint(
             checkpoint_run_id,
             checkpoint_state or default_checkpoint_state(owner, record_ref),
             step_id=checkpoint_step_id or owner.lineage.get("step_id"),
         )
         append_workspace_ref(owner, "checkpoints", checkpoint_ref)
+        evidence_link = await owner.workspace.link_evidence(
+            record_ref,
+            checkpoint_ref,
+            relation="checkpointed_by",
+            execution_id=owner.id,
+            checkpoint_id=checkpoint_ref.get("id"),
+            meta={
+                "owner": "AgentExecution",
+                "execution_mode": owner.mode,
+                "lineage": DataFormatter.sanitize(owner.lineage),
+            },
+        )
+        append_workspace_ref(owner, "verification_evidence", evidence_link)
 
     return DataFormatter.sanitize(
         {

@@ -4,8 +4,10 @@ from typing import Any, Callable, cast
 
 import pytest
 
-from agently import TriggerFlow, TriggerFlowEventData, TriggerFlowRuntimeData
+from agently import Agently, TriggerFlow, TriggerFlowEventData, TriggerFlowRuntimeData
 from agently.base import execution_environment
+from agently.types.plugins import CheckpointStore, RuntimeEventStore
+from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY
 from agently.types.trigger_flow import TRIGGER_FLOW_CHECKPOINT_KIND
 
 
@@ -340,3 +342,239 @@ async def test_trigger_flow_execution_async_save_checkpoint_uses_checkpoint_stor
     }
     assert store.calls[0]["state"]["checkpoint"]["kind"] == TRIGGER_FLOW_CHECKPOINT_KIND
     assert store.calls[0]["state"]["checkpoint"]["execution_id"] == execution.id
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_runtime_workspace_resource_binds_durable_provider_ports(tmp_path):
+    agent = Agently.create_agent("runtime-workspace-provider").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+
+    flow = TriggerFlow(name="runtime-workspace-provider")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(runtime_resources={"workspace": workspace})
+
+    snapshot = await execution.async_start("hello")
+    checkpoint_ref = await execution.async_save_checkpoint(step_id="auto-bound")
+    runtime_events = await workspace.query_runtime_events(execution.id)
+
+    assert snapshot["value"] == "hello"
+    assert checkpoint_ref["collection"] == "checkpoints"
+    assert checkpoint_ref["scope"]["step_id"] == "auto-bound"
+    assert runtime_events
+    assert runtime_events[0]["event_type"] == "triggerflow.definition_declared"
+    assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_runtime_workspace_resource_materializes_lazy_provider(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = Agently.create_agent("runtime-lazy-workspace-provider")
+    workspace = agent.workspace
+    assert getattr(workspace, "is_materialized") is False
+
+    flow = TriggerFlow(name="runtime-lazy-workspace-provider")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(runtime_resources={"workspace": workspace})
+
+    snapshot = await execution.async_start("hello")
+    checkpoint_ref = await execution.async_save_checkpoint(step_id="lazy-bound")
+    runtime_events = await workspace.query_runtime_events(execution.id)
+
+    assert snapshot["value"] == "hello"
+    assert getattr(workspace, "is_materialized") is True
+    assert checkpoint_ref["collection"] == "checkpoints"
+    assert checkpoint_ref["scope"]["step_id"] == "lazy-bound"
+    assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_workspace_checkpoint_restores_pause_continue_provider_path(tmp_path):
+    agent = Agently.create_agent("runtime-workspace-provider-pause").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+
+    flow = TriggerFlow(name="runtime-workspace-provider-pause")
+
+    async def ask_for_approval(data: TriggerFlowRuntimeData):
+        await data.async_set_state("draft", {"topic": data.value}, emit=False)
+        return await data.async_pause_for(
+            type="approval",
+            payload={"question": "approve?"},
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finalize(data: TriggerFlowRuntimeData):
+        await data.async_set_state(
+            "final",
+            {
+                "draft": data.get_state("draft"),
+                "approval": data.value,
+            },
+            emit=False,
+        )
+
+    flow.to(ask_for_approval).to(finalize)
+    execution = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    await execution.async_start("pricing")
+    assert "approval" in execution.get_pending_interrupts()
+
+    checkpoint_ref = await execution.async_save_checkpoint(step_id="waiting-approval")
+    latest_ref = await workspace.latest_checkpoint(execution.run_context.run_id)
+    assert latest_ref is not None
+    assert latest_ref["id"] == checkpoint_ref["id"]
+    checkpoint_state = await workspace.get_data(latest_ref)
+    assert checkpoint_state["checkpoint"]["interrupts"]["approval"]["status"] == "waiting"
+
+    restored = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    rehydration = await restored.async_rehydrate(
+        checkpoint_state,
+        runtime_resources={"workspace": workspace},
+    )
+    assert rehydration["ready"] is True
+    assert restored.id == execution.id
+
+    await restored.async_continue_with(
+        "approval",
+        {"approved": True},
+        resume_request_id="approval-webhook-1",
+        actor="reviewer",
+    )
+    snapshot = await restored.async_close()
+    resumed_ref = await restored.async_save_checkpoint(step_id="after-approval")
+    resumed_state = await workspace.get_data(resumed_ref)
+    runtime_events = await workspace.query_runtime_events(restored.id)
+    event_types = [event["event_type"] for event in runtime_events]
+
+    assert snapshot["final"] == {
+        "draft": {"topic": "pricing"},
+        "approval": {"approved": True},
+    }
+    assert (
+        resumed_state["checkpoint"]["resume_ledger"]["approval"]["approval-webhook-1"]["status"]
+        == "accepted"
+    )
+    assert "triggerflow.interrupt_raised" in event_types
+    assert "triggerflow.execution_resumed" in event_types
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_workspace_checkpoint_restores_when_join_provider_path(tmp_path):
+    agent = Agently.create_agent("runtime-workspace-provider-join").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+
+    flow = TriggerFlow(name="runtime-workspace-provider-join")
+
+    async def emit_left(data: TriggerFlowRuntimeData):
+        await data.async_emit("A", {"left": data.value})
+
+    async def joined(data: TriggerFlowRuntimeData):
+        await data.async_set_state("joined", data.value, emit=False)
+
+    flow.when("Run").to(emit_left)
+    flow.when(["A", "B"], mode="and").to(joined)
+
+    execution = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    await execution.async_emit("Run", "task-1")
+    checkpoint_ref = await execution.async_save_checkpoint(step_id="after-left")
+    checkpoint_state = await workspace.get_data(checkpoint_ref)
+    durable_when_states = checkpoint_state["checkpoint"]["durable_system_state"]["when_states"]
+    signal_scope_keys = [
+        scope_key
+        for when_state in durable_when_states.values()
+        for scope_key in when_state.keys()
+        if str(scope_key).startswith("signal:")
+    ]
+    assert len(signal_scope_keys) == 1
+    aggregation_scope = signal_scope_keys[0].removeprefix("signal:")
+
+    restored = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    rehydration = await restored.async_rehydrate(
+        checkpoint_state,
+        runtime_resources={"workspace": workspace},
+    )
+    assert rehydration["ready"] is True
+    await restored.async_emit(
+        "B",
+        {"right": "task-1"},
+        _meta={AGGREGATION_SCOPE_META_KEY: aggregation_scope},
+    )
+    joined_ref = await restored.async_save_checkpoint(step_id="after-join")
+    joined_state = await workspace.get_data(joined_ref)
+    runtime_events = await workspace.query_runtime_events(restored.id)
+
+    assert restored.get_state("joined") == {
+        "event": {
+            "A": {"left": "task-1"},
+            "B": {"right": "task-1"},
+        }
+    }
+    assert joined_state["checkpoint"]["runtime_data"]["joined"] == restored.get_state("joined")
+    assert any(
+        (
+            event["event"].get("payload", {}).get("META", {}).get(AGGREGATION_SCOPE_META_KEY)
+            == aggregation_scope
+        )
+        for event in runtime_events
+    )
+    assert any(event["event_type"] == "triggerflow.signal" for event in runtime_events)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_distributed_checkpoint_fails_closed_for_local_workspace(tmp_path):
+    agent = Agently.create_agent("distributed-workspace-provider").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+
+    flow = TriggerFlow(name="distributed-provider-check")
+    execution = flow.create_execution()
+    execution.set_checkpoint_store(cast(CheckpointStore, workspace))
+    execution.set_runtime_event_store(cast(RuntimeEventStore, workspace))
+
+    with pytest.raises(RuntimeError, match="missing capabilities: supports_cas, supports_lease"):
+        await execution.async_save_checkpoint(require_distributed_provider=True)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_distributed_checkpoint_accepts_capable_provider():
+    class DistributedStore:
+        def __init__(self):
+            self.calls: list[dict[str, Any]] = []
+
+        def capabilities(self):
+            return {
+                "features": {
+                    "supports_cas": True,
+                    "supports_lease": True,
+                    "supports_event_sequence": True,
+                    "supports_range_read": True,
+                    "supports_retention": True,
+                }
+            }
+
+        async def put_checkpoint(self, run_id: str, state: dict[str, Any], *, step_id: str | None = None):
+            self.calls.append({"run_id": run_id, "state": state, "step_id": step_id})
+            return {"id": "checkpoint-1", "run_id": run_id, "step_id": step_id}
+
+        async def append_runtime_event(self, *args: Any, **kwargs: Any):
+            return {"id": "event-1"}
+
+    store = DistributedStore()
+    flow = TriggerFlow(name="distributed-capable-provider")
+    execution = flow.create_execution()
+    execution.set_runtime_event_store(cast(Any, store))
+
+    ref = await execution.async_save_checkpoint(store, require_distributed_provider=True)
+
+    assert ref["id"] == "checkpoint-1"
+    assert store.calls[0]["state"]["checkpoint"]["kind"] == TRIGGER_FLOW_CHECKPOINT_KIND

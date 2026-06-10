@@ -189,13 +189,17 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert len(meta["workspace_refs"]["decisions"]) == 2
     assert len(meta["workspace_refs"]["verification"]) == 2
     assert len(meta["workspace_refs"]["checkpoints"]) == 2
+    assert len(meta["workspace_refs"]["evidence_links"]) == 6
     workspace = agent.workspace
     assert workspace is not None
     assert len(await workspace.checkpoint_history("legacy-script-upgrade")) == 2
     verifies_links = await workspace.links(relation="verifies_observation")
     decision_links = await workspace.links(relation="implements_decision")
+    checkpoint_links = await workspace.links(relation="checkpointed_by")
     assert len(verifies_links) == 2
     assert len(decision_links) == 2
+    assert len(checkpoint_links) == 2
+    assert all(link["meta"]["evidence"] for link in [*verifies_links, *decision_links, *checkpoint_links])
 
 
 @pytest.mark.asyncio

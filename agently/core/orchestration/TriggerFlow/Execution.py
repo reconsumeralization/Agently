@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         RunContext,
         SerializableValue,
     )
+    from agently.types.plugins import CheckpointStore, RuntimeEventStore
 
 from agently.utils import DeprecationWarnings, StateData, FunctionShifter, GeneratorConsumer, Settings
 from agently.core.runtime.RuntimeContext import bind_runtime_context, get_current_chunk_run_context
@@ -44,7 +45,7 @@ from agently.types.trigger_flow import (
     TriggerFlowRuntimeData,
 )
 from agently.types.trigger_flow.runtime_keys import TRANSIENT_AGGREGATION_STATE_KEYS
-from agently.types.data import EMPTY, RunContext
+from agently.types.data import EMPTY, RunContext, RuntimeEvent
 from agently.types.data import ExecutionEnvironmentRequirement
 from .Control import (
     TriggerFlowPauseSignal,
@@ -68,6 +69,15 @@ InputT = TypeVar("InputT")
 StreamT = TypeVar("StreamT")
 ResultT = TypeVar("ResultT")
 PendingInterruptClosePolicy = Literal["error", "cancel"]
+DISTRIBUTED_CHECKPOINT_PROVIDER_CAPABILITIES = (
+    "supports_cas",
+    "supports_lease",
+    "supports_range_read",
+    "supports_retention",
+)
+DISTRIBUTED_RUNTIME_EVENT_PROVIDER_CAPABILITIES = (
+    "supports_event_sequence",
+)
 
 
 class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
@@ -134,6 +144,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._runtime_failed_emitted = False
         self._runtime_result_set_emitted = False
         self._runtime_definition_emitted = False
+        self._checkpoint_store = None
+        self._runtime_event_store = None
         self._auto_close = bool(auto_close)
         self._auto_close_timeout = auto_close_timeout
         self._resume_handle_exposed = bool(resume_handle_exposed)
@@ -1012,7 +1024,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     ):
         from agently.base import async_emit_runtime
 
-        await async_emit_runtime(
+        event = RuntimeEvent.model_validate(
             {
                 "event_type": event_type,
                 "source": "TriggerFlowExecution",
@@ -1024,6 +1036,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 "meta": {"execution_id": self.id},
             }
         )
+        await self._persist_runtime_event(event)
+        await async_emit_runtime(event)
 
     async def _emit_runtime_definition_event(self):
         if self._runtime_definition_emitted:
@@ -1145,7 +1159,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             base_payload.update(payload)
         elif payload is not None:
             base_payload["value"] = payload
-        await async_emit_runtime(
+        event = RuntimeEvent.model_validate(
             {
                 "event_type": event_type,
                 "source": "TriggerFlowExecution",
@@ -1156,6 +1170,45 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 "run": chunk_run_context,
                 "meta": {"execution_id": self.id},
             }
+        )
+        await self._persist_runtime_event(event)
+        await async_emit_runtime(event)
+
+    def _runtime_event_node_id(self, event: RuntimeEvent):
+        payload = event.payload
+        if isinstance(payload, dict):
+            for key in ("node_id", "chunk_id"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            origin_chunk = payload.get("origin_chunk")
+            if isinstance(origin_chunk, dict):
+                value = origin_chunk.get("chunk_id")
+                if isinstance(value, str) and value:
+                    return value
+        meta = event.meta or {}
+        value = meta.get("node_id")
+        return value if isinstance(value, str) and value else None
+
+    def _runtime_event_aggregation_scope(self, event: RuntimeEvent):
+        meta = event.meta or {}
+        value = meta.get("aggregation_scope")
+        if isinstance(value, str) and value:
+            return value
+        if event.run is None:
+            return None
+        return event.run.root_run_id or event.run.run_id
+
+    async def _persist_runtime_event(self, event: RuntimeEvent):
+        runtime_event_store = self._runtime_event_store
+        if runtime_event_store is None:
+            return None
+        return await runtime_event_store.append_runtime_event(
+            self.id,
+            event,
+            idempotency_key=event.event_id,
+            node_id=self._runtime_event_node_id(event),
+            aggregation_scope=self._runtime_event_aggregation_scope(event),
         )
 
     def get_status(self):
@@ -1214,7 +1267,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self._interrupts.build_resume_context(interrupt_id, interrupt, value)
 
     def _set_runtime_resource(self, key: str, value: Any):
-        self._runtime_resources.set(str(key), value)
+        normalized_key = str(key)
+        self._runtime_resources.set(normalized_key, value)
+        self._bind_durable_provider_resource(normalized_key, value)
         return self
 
     def _get_runtime_resource(self, key: str, default: Any = None):
@@ -1245,6 +1300,19 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         for key, value in kwargs.items():
             self._set_runtime_resource(str(key), value)
         return self
+
+    def _bind_durable_provider_resource(self, key: str, value: Any):
+        if key in {"workspace", "durable_provider"}:
+            if hasattr(value, "put_checkpoint"):
+                self.set_checkpoint_store(value)
+            if hasattr(value, "append_runtime_event"):
+                self.set_runtime_event_store(value)
+            return
+        if key == "checkpoint_store":
+            self.set_checkpoint_store(value)
+            return
+        if key == "runtime_event_store":
+            self.set_runtime_event_store(value)
 
     def _clear_runtime_resources(self):
         self._runtime_resources.clear()
@@ -1370,6 +1438,68 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             validate_rehydration=validate_rehydration,
         )
 
+    def set_checkpoint_store(self, checkpoint_store: "CheckpointStore | None"):
+        if checkpoint_store is not None and not hasattr(checkpoint_store, "put_checkpoint"):
+            raise TypeError(
+                "TriggerFlow checkpoint_store must expose async put_checkpoint(run_id, state, step_id=...)."
+            )
+        self._checkpoint_store = checkpoint_store
+        return self
+
+    def set_runtime_event_store(self, runtime_event_store: "RuntimeEventStore | None"):
+        if runtime_event_store is not None and not hasattr(runtime_event_store, "append_runtime_event"):
+            raise TypeError(
+                "TriggerFlow runtime_event_store must expose async append_runtime_event(execution_id, event, ...)."
+            )
+        self._runtime_event_store = runtime_event_store
+        return self
+
+    def _provider_features(self, provider: Any):
+        capabilities_getter = getattr(provider, "capabilities", None)
+        if not callable(capabilities_getter):
+            return {}
+        capabilities = capabilities_getter()
+        if not isinstance(capabilities, dict):
+            return {}
+        raw_features = capabilities.get("features", capabilities)
+        if not isinstance(raw_features, dict):
+            return {}
+        return {str(key): bool(value) for key, value in raw_features.items()}
+
+    def _require_provider_capabilities(
+        self,
+        provider: Any,
+        *,
+        required: tuple[str, ...],
+        usage: str,
+    ):
+        features = self._provider_features(provider)
+        missing = [name for name in required if features.get(name) is not True]
+        if missing:
+            raise RuntimeError(
+                f"TriggerFlow durable provider can not be used for { usage }; "
+                f"missing capabilities: { ', '.join(missing) }. "
+                "The provider must report them from capabilities()['features']."
+            )
+        return features
+
+    def _require_distributed_durable_provider(self, checkpoint_store: Any):
+        self._require_provider_capabilities(
+            checkpoint_store,
+            required=DISTRIBUTED_CHECKPOINT_PROVIDER_CAPABILITIES,
+            usage="distributed checkpoint recovery",
+        )
+        if self._runtime_event_store is None:
+            raise RuntimeError(
+                "TriggerFlow distributed recovery requires a runtime event store. "
+                "Configure one with set_runtime_event_store(...)."
+            )
+        self._require_provider_capabilities(
+            self._runtime_event_store,
+            required=DISTRIBUTED_RUNTIME_EVENT_PROVIDER_CAPABILITIES,
+            usage="distributed runtime event recovery",
+        )
+
     def inspect_rehydration(
         self,
         state: dict[str, Any] | str | Path,
@@ -1418,20 +1548,26 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
     async def async_save_checkpoint(
         self,
-        checkpoint_store: Any,
+        checkpoint_store: Any | None = None,
         *,
         run_id: str | None = None,
         step_id: str | None = None,
         require_idle: bool = False,
+        require_distributed_provider: bool = False,
     ):
-        if not hasattr(checkpoint_store, "put_checkpoint"):
+        resolved_checkpoint_store = checkpoint_store if checkpoint_store is not None else self._checkpoint_store
+        if resolved_checkpoint_store is None or not hasattr(resolved_checkpoint_store, "put_checkpoint"):
             raise TypeError(
-                "TriggerFlow checkpoint_store must expose async put_checkpoint(run_id, state, step_id=...)."
+                "TriggerFlow checkpoint_store must expose async put_checkpoint(run_id, state, step_id=...). "
+                "Pass checkpoint_store or configure one with set_checkpoint_store(...)."
             )
+        resolved_checkpoint_store = cast(Any, resolved_checkpoint_store)
+        if require_distributed_provider:
+            self._require_distributed_durable_provider(resolved_checkpoint_store)
         state = self.save(require_idle=require_idle)
         resolved_run_id = run_id or self.run_context.run_id or self.id
         resolved_step_id = step_id or f"state:{ self._state_version }"
-        return await checkpoint_store.put_checkpoint(
+        return await resolved_checkpoint_store.put_checkpoint(
             resolved_run_id,
             state,
             step_id=resolved_step_id,
@@ -1602,8 +1738,6 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return await self._interrupts.async_resume_for_signal(signal)
 
     async def _async_dispatch_signal(self, signal: TriggerFlowSignal):
-        from agently.base import async_emit_runtime
-
         signal_preaccepted = signal.id in self._accepted_signal_ids
         if not self._accepts_signal_in_current_lifecycle(signal, preaccepted=signal_preaccepted):
             await self._reject_signal(signal)
@@ -1613,18 +1747,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._mark_activity()
         await self._resume_interrupts_for_signal(signal)
         self._remember_signal(signal)
-        await async_emit_runtime(
-            {
-                "event_type": "triggerflow.signal",
-                "source": "TriggerFlowExecution",
-                "level": "DEBUG",
-                "message": f"Dispatch signal '{ signal.trigger_event }'.",
-                "payload": signal.to_debug_dict(),
-                "run": self.run_context,
-                "meta": {
-                    "execution_id": self.id,
-                },
-            }
+        await self._emit_runtime_event(
+            "triggerflow.signal",
+            level="DEBUG",
+            message=f"Dispatch signal '{ signal.trigger_event }'.",
+            payload=signal.to_debug_dict(),
         )
         tasks = []
         handlers = self._handlers[signal.trigger_type]
@@ -1633,23 +1760,17 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             for handler_id, handler in handlers[signal.trigger_event].items():
                 operator = self._get_handler_operator(handler_id)
                 chunk_run_context = self._create_chunk_run_context(operator, signal) if operator is not None else None
-                await async_emit_runtime(
-                    {
-                        "event_type": "triggerflow.handler_dispatch",
-                        "source": "TriggerFlowExecution",
-                        "level": "DEBUG",
-                        "message": f"Dispatch handler '{ handler_id }' for signal '{ signal.trigger_event }'.",
-                        "payload": {
-                            "event": signal.trigger_event,
-                            "type": signal.trigger_type,
-                            "handler": handler_id,
-                            "signal_id": signal.id,
-                        },
-                        "run": self.run_context,
-                        "meta": {
-                            "execution_id": self.id,
-                        },
-                    }
+                await self._emit_runtime_event(
+                    "triggerflow.handler_dispatch",
+                    level="DEBUG",
+                    message=f"Dispatch handler '{ handler_id }' for signal '{ signal.trigger_event }'.",
+                    payload={
+                        "event": signal.trigger_event,
+                        "type": signal.trigger_type,
+                        "handler": handler_id,
+                        "signal_id": signal.id,
+                        "node_id": operator.get("id") if operator is not None else None,
+                    },
                 )
                 await self._async_apply_auto_interventions(operator, signal)
 

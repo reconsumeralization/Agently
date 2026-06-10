@@ -17,26 +17,72 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agently.core import BaseAgent, Workspace
+from agently.core import BaseAgent, LazyWorkspace, Workspace
+from agently.core.session.Workspace._utils import slug
 
 
 class WorkspaceExtension(BaseAgent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.workspace: Workspace | None = None
+        self.workspace: Workspace | LazyWorkspace = self._create_lazy_workspace()
+        self._sync_workspace_settings(self.workspace, mode="read_write", lazy=True)
+
+    def _default_workspace_root(self) -> str | Path:
+        configured = self.settings.get("workspace.default_root", None)
+        if configured is not None:
+            return str(configured)
+        workspace_slug = slug(str(self.name), "agent")
+        return Path(".agently") / "workspaces" / f"{workspace_slug}-{self.id[:8]}"
+
+    def _create_lazy_workspace(self) -> LazyWorkspace:
+        from agently.base import workspace as global_workspace
+
+        return LazyWorkspace(
+            global_workspace,
+            self._default_workspace_root(),
+            on_materialize=lambda workspace: self._sync_workspace_settings(workspace, lazy=False),
+        )
+
+    def _sync_workspace_settings(
+        self,
+        workspace: Workspace | LazyWorkspace,
+        *,
+        mode: str | None = None,
+        provider: str | None = None,
+        lazy: bool | None = None,
+    ) -> None:
+        self.settings.set("workspace.root", str(workspace.root))
+        self.settings.set("workspace.content_root", str(workspace.content_root))
+        self.settings.set("workspace.files_root", str(workspace.files_root))
+        if mode is not None:
+            self.settings.set("workspace.mode", mode)
+        if provider is not None:
+            self.settings.set("workspace.provider", provider)
+        if lazy is not None:
+            self.settings.set("workspace.lazy", lazy)
 
     def use_workspace(
         self,
-        path_or_backend: str | Path | Any,
+        path_or_backend: str | Path | Any = None,
         *,
         create: bool = True,
         mode: str = "read_write",
+        provider: str | None = None,
+        provider_options: dict[str, Any] | None = None,
     ):
         from agently.base import workspace as global_workspace
 
-        self.workspace = global_workspace.create(path_or_backend, create=create, mode=mode)
-        self.settings.set("workspace.root", str(self.workspace.root))
-        self.settings.set("workspace.content_root", str(self.workspace.content_root))
-        self.settings.set("workspace.files_root", str(self.workspace.files_root))
-        self.settings.set("workspace.mode", mode)
+        self.workspace = global_workspace.create(
+            path_or_backend,
+            create=create,
+            mode=mode,
+            provider=provider,
+            provider_options=provider_options,
+        )
+        self._sync_workspace_settings(
+            self.workspace,
+            mode=mode,
+            provider=provider,
+            lazy=False,
+        )
         return self

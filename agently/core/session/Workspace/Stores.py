@@ -15,9 +15,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
-from agently.types.data.workspace import WorkspaceRecordRef
+from agently.types.data.workspace import WorkspaceContentSegment, WorkspaceRecordRef, WorkspaceReferenceEnvelope
 
 from .Errors import WorkspacePolicyError
 
@@ -74,6 +74,74 @@ class LocalContentStore:
         if not target.is_file():
             raise FileNotFoundError(f"Workspace content not found: { path }")
         return target.read_text(encoding="utf-8", errors="replace")
+
+    async def read_content_segment(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> WorkspaceContentSegment:
+        target = self.policy.resolve_content_path(path)
+        if not target.is_file():
+            raise FileNotFoundError(f"Workspace content not found: { path }")
+        if offset < 0:
+            raise ValueError("offset must be greater than or equal to 0.")
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be greater than or equal to 0.")
+        total_size = target.stat().st_size
+        read_size = max(0, total_size - offset) if limit is None else limit
+        with target.open("rb") as file:
+            file.seek(offset)
+            raw = file.read(read_size)
+        placeholder_ref: WorkspaceReferenceEnvelope = {
+            "workspace_id": "",
+            "kind": "content",
+            "collection": "",
+            "record_id": "",
+            "version": None,
+            "content_ref": path,
+            "digest": None,
+            "size": total_size,
+            "created_at": "",
+            "policy_labels": [],
+            "backend_capabilities": {},
+        }
+        segment: WorkspaceContentSegment = {
+            "ref": placeholder_ref,
+            "content": raw.decode("utf-8", errors="replace"),
+            "offset": offset,
+            "size": len(raw),
+            "total_size": total_size,
+            "eof": offset + len(raw) >= total_size,
+            "digest": None,
+            "content_type": "text/plain",
+        }
+        return segment
+
+    async def stream_content(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[WorkspaceContentSegment]:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than 0.")
+        remaining = limit
+        current_offset = offset
+        while remaining is None or remaining > 0:
+            next_limit = chunk_size if remaining is None else min(chunk_size, remaining)
+            segment = await self.read_content_segment(path, offset=current_offset, limit=next_limit)
+            if segment["size"] == 0:
+                break
+            yield segment
+            current_offset += segment["size"]
+            if remaining is not None:
+                remaining -= segment["size"]
+            if segment["eof"]:
+                break
 
 
 class NoopVectorIndex:

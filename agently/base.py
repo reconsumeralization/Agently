@@ -14,6 +14,7 @@
 
 import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
@@ -26,6 +27,7 @@ from agently.core import (
     PluginManager,
     EventCenter,
     Tool,
+    TriggerFlow,
     Prompt,
     ModelRequest,
     BaseAgent,
@@ -42,6 +44,8 @@ from agently._default_init import (
 if TYPE_CHECKING:
     from agently.types.data import RuntimeEventLevel, SerializableValue, TaskDAG
     from agently.builtins.hookers.RuntimeConsoleSinkHooker import RuntimeLogProfile
+    from agently.core import Workspace
+    from agently.types.plugins import WorkspaceBackend
 
 # Basic Initialize
 
@@ -202,7 +206,29 @@ class Agent(
     AutoFuncExtension,
     ConfigurePromptExtension,
     BaseAgent,
-): ...
+):
+    def __init__(
+        self,
+        *args: Any,
+        plugin_manager_: PluginManager | None = None,
+        parent_settings: Settings | None = None,
+        name: str | None = None,
+    ):
+        if len(args) > 1:
+            raise TypeError("Agent(...) accepts at most one positional argument: name or plugin manager.")
+        if args:
+            first = args[0]
+            if isinstance(first, str) or first is None:
+                name = first
+            elif plugin_manager_ is None:
+                plugin_manager_ = cast(PluginManager, first)
+            else:
+                raise TypeError("Agent(...) received both positional and keyword plugin managers.")
+        super().__init__(
+            plugin_manager_ or plugin_manager,
+            parent_settings=parent_settings if parent_settings is not None else settings,
+            name=name,
+        )
 
 
 A = TypeVar("A", bound=Agent)
@@ -354,6 +380,31 @@ class AgentlyMain(Generic[A]):
             self.plugin_manager,
             parent_settings=self.settings,
             name=name,
+        )
+
+    def create_trigger_flow(
+        self,
+        name: str | None = None,
+        *,
+        skip_exceptions: bool = False,
+    ) -> TriggerFlow:
+        return TriggerFlow(name=name, skip_exceptions=skip_exceptions)
+
+    def create_workspace(
+        self,
+        path_or_backend: "str | Path | WorkspaceBackend | None" = None,
+        *,
+        create: bool = True,
+        mode: str = "read_write",
+        provider: str | None = None,
+        provider_options: dict[str, Any] | None = None,
+    ) -> "Workspace":
+        return self.workspace.create(
+            path_or_backend,
+            create=create,
+            mode=mode,
+            provider=provider,
+            provider_options=provider_options,
         )
 
     def create_observation_bridge(self, *watch_targets: Any, **bridge_options: Any):

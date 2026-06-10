@@ -168,12 +168,17 @@ from .skill import (
 
 from .workspace import (
     WorkspaceBackendCapabilities,
+    WorkspaceContentSegment,
     WorkspaceContextItem,
     WorkspaceContextOmission,
     WorkspaceContextPack,
+    WorkspaceFilePolicyMetadata,
     WorkspaceLinkRef,
     WorkspaceRecallPlan,
     WorkspaceRecordRef,
+    WorkspaceReferenceEnvelope,
+    WorkspaceRetentionAnchor,
+    WorkspaceRuntimeEventRecord,
     WorkspaceSearchResult,
 )
 
