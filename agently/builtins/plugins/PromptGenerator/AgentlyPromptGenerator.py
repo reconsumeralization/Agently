@@ -1283,8 +1283,9 @@ class AgentlyPromptGenerator(PromptGenerator):
                         if output_prompt_part[1]:
                             result["$desc"] = output_prompt_part[1]
                         third_value = output_prompt_part[2]
-                        if self._is_ensure_marker(third_value):
-                            result["$ensure"] = True
+                        ensure_marker = DataPathBuilder.normalize_ensure_marker(third_value)
+                        if ensure_marker is not None:
+                            result["$ensure"] = ensure_marker
                         return result
             else:
                 return list(output_prompt_part)

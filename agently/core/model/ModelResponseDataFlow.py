@@ -34,11 +34,13 @@ class ModelResponseDataFlow:
     def __init__(self, result: "ModelResponseResult"):
         self._result = result
 
-    def get_auto_ensure_keys(self, *, key_style: Literal["dot", "slash"] = "dot") -> list[str]:
+    def get_auto_ensure_policies(
+        self, *, key_style: Literal["dot", "slash"] = "dot"
+    ) -> dict[str, Literal["presence", "not_null"]]:
         result = self._result
         cache_key = key_style
-        if cache_key in result._auto_ensure_keys_cache:
-            return result._auto_ensure_keys_cache[cache_key]
+        if cache_key in result._auto_ensure_policies_cache:
+            return cast(dict[str, Literal["presence", "not_null"]], result._auto_ensure_policies_cache[cache_key])
 
         try:
             prompt_output = result.prompt.to_prompt_object().output
@@ -46,16 +48,25 @@ class ModelResponseDataFlow:
             prompt_output = None
 
         if not isinstance(prompt_output, (Mapping, Sequence)) or isinstance(prompt_output, str):
+            result._auto_ensure_policies_cache[cache_key] = {}
             result._auto_ensure_keys_cache[cache_key] = []
-            return []
+            return {}
 
         try:
-            ensure_keys = DataPathBuilder.extract_ensure_paths(prompt_output, style=key_style)
+            ensure_policies = DataPathBuilder.extract_ensure_path_policies(prompt_output, style=key_style)
         except Exception:
-            ensure_keys = []
+            ensure_policies = {}
 
-        result._auto_ensure_keys_cache[cache_key] = ensure_keys
-        return ensure_keys
+        result._auto_ensure_policies_cache[cache_key] = ensure_policies
+        result._auto_ensure_keys_cache[cache_key] = list(ensure_policies.keys())
+        return ensure_policies
+
+    def get_auto_ensure_keys(self, *, key_style: Literal["dot", "slash"] = "dot") -> list[str]:
+        result = self._result
+        cache_key = key_style
+        if cache_key in result._auto_ensure_keys_cache:
+            return result._auto_ensure_keys_cache[cache_key]
+        return list(self.get_auto_ensure_policies(key_style=key_style).keys())
 
     @staticmethod
     def merge_ensure_keys(auto_keys: list[str], explicit_keys: list[str]) -> list[str]:
@@ -66,6 +77,13 @@ class ModelResponseDataFlow:
                 seen.add(key)
                 merged.append(key)
         return merged
+
+    @staticmethod
+    def resolve_ensure_policies(
+        active_ensure_keys: list[str],
+        auto_ensure_policies: dict[str, Literal["presence", "not_null"]],
+    ) -> dict[str, Literal["presence", "not_null"]]:
+        return {key: auto_ensure_policies.get(key, "presence") for key in active_ensure_keys}
 
     @staticmethod
     def ensure_value_is_present(value: Any) -> bool:
@@ -608,7 +626,8 @@ class ModelResponseDataFlow:
         retry_count: int = 0,
     ) -> Any:
         result = self._result
-        auto_ensure_keys = self.get_auto_ensure_keys(key_style=key_style)
+        auto_ensure_policies = self.get_auto_ensure_policies(key_style=key_style)
+        auto_ensure_keys = list(auto_ensure_policies.keys())
         strict_output = self.is_strict_output_enabled()
         active_validate_handlers = self.resolve_validate_handlers(validate_handler)
         if ensure_keys is None:
@@ -617,6 +636,7 @@ class ModelResponseDataFlow:
             active_ensure_keys = []
         else:
             active_ensure_keys = self.merge_ensure_keys(auto_ensure_keys, ensure_keys)
+        active_ensure_policies = self.resolve_ensure_policies(active_ensure_keys, auto_ensure_policies)
         should_validate = bool(active_validate_handlers) or result._validate_outcome is not None
         needs_constraint_flow = (type in ("parsed", "all") and (active_ensure_keys or strict_output)) or should_validate
         if not needs_constraint_flow:
@@ -687,7 +707,12 @@ class ModelResponseDataFlow:
                             key_style,
                             default=empty,
                         )
-                        if located_value is empty or not self.ensure_value_is_present(located_value):
+                        if located_value is empty:
+                            raise ValueError(f"Missing ensure key: { ensure_key }")
+                        if (
+                            active_ensure_policies.get(ensure_key, "presence") == "not_null"
+                            and not self.ensure_value_is_present(located_value)
+                        ):
                             raise ValueError(f"Missing ensure key: { ensure_key }")
             except Exception:
                 await self.emit_retrying_event(

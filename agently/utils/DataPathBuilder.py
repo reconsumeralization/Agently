@@ -18,8 +18,25 @@ from collections import OrderedDict
 
 class DataPathBuilder:
     @staticmethod
+    def get_ensure_policy(value: Any) -> Literal["presence", "not_null"] | None:
+        if value is True or value == 1:
+            return "presence"
+        if value == "not_null":
+            return "not_null"
+        return None
+
+    @staticmethod
+    def normalize_ensure_marker(value: Any) -> bool | str | None:
+        policy = DataPathBuilder.get_ensure_policy(value)
+        if policy == "presence":
+            return True
+        if policy == "not_null":
+            return "not_null"
+        return None
+
+    @staticmethod
     def is_ensure_marker(value: Any) -> bool:
-        return value is True or value == 1
+        return DataPathBuilder.get_ensure_policy(value) is not None
 
     @staticmethod
     def build_dot_path(keys: list[str | int]) -> str:
@@ -219,22 +236,33 @@ class DataPathBuilder:
         """
         Traverse the schema and return paths marked as required via the third leaf tuple slot.
         """
-        if not isinstance(agently_output_dict, (Mapping, Sequence)) or isinstance(agently_output_dict, str):
-            raise TypeError("extract_ensure_paths expects a mapping or sequence as input")
+        return list(DataPathBuilder.extract_ensure_path_policies(agently_output_dict, style=style).keys())
 
-        ordered_paths: OrderedDict[str, None] = OrderedDict()
+    @staticmethod
+    def extract_ensure_path_policies(
+        agently_output_dict: Mapping[str, Any] | Sequence[Any], *, style: Literal["dot", "slash"] = "dot"
+    ) -> dict[str, Literal["presence", "not_null"]]:
+        """
+        Traverse the schema and return ensure-marked paths with their validation policy.
+        """
+        if not isinstance(agently_output_dict, (Mapping, Sequence)) or isinstance(agently_output_dict, str):
+            raise TypeError("extract_ensure_path_policies expects a mapping or sequence as input")
+
+        ordered_paths: OrderedDict[str, Literal["presence", "not_null"]] = OrderedDict()
 
         def traverse(value: Any, path_keys: list[str | int]):
             if isinstance(value, tuple):
                 ensure_marker = value[2] if len(value) > 2 else None
-                if DataPathBuilder.is_ensure_marker(ensure_marker):
+                ensure_policy = DataPathBuilder.get_ensure_policy(ensure_marker)
+                if ensure_policy is not None:
                     current_path = (
                         DataPathBuilder.build_dot_path(path_keys)
                         if style == "dot"
                         else DataPathBuilder.build_slash_path(path_keys)
                     )
                     if current_path:
-                        ordered_paths[current_path] = None
+                        if ensure_policy == "not_null" or current_path not in ordered_paths:
+                            ordered_paths[current_path] = ensure_policy
                 if value:
                     traverse(value[0], path_keys)
                 return
@@ -257,7 +285,7 @@ class DataPathBuilder:
                 return
 
         traverse(agently_output_dict, [])
-        return list(ordered_paths.keys())
+        return dict(ordered_paths)
 
     @staticmethod
     def get_value_by_path(

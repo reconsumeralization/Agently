@@ -105,6 +105,7 @@ class ModelResponseResult:
         )
         self.prompt = prompt
         self._auto_ensure_keys_cache: dict[str, list[str]] = {}
+        self._auto_ensure_policies_cache: dict[str, dict[str, Literal["presence", "not_null"]]] = {}
         self._validate_outcome: dict[str, Any] | None = None
         self._validate_lock = asyncio.Lock()
         self._validate_handler_signature: tuple[int, ...] | None = None

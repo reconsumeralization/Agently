@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.3.6",
-  "release_train": "2026-06-4.1.3.6-dev",
-  "notes": "Current public development-line manifest for the 4.1.3.6 compatibility work batch after the 4.1.3.5 release-line hardening slice, continuing preparation for the 4.1.4 AgentTask target.",
+  "target_version": "4.1.3.7",
+  "release_train": "2026-06-4.1.3.7-dev",
+  "notes": "Current public development-line manifest for the 4.1.3.7 patch work after the 4.1.3.6 release-line AgentExecution slice, continuing preparation for the 4.1.4 AgentTask target.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
@@ -134,7 +134,8 @@
     "configuration": {
       "settings_contract": "dict-compatible typed helpers under agently.types.settings",
       "default_output_format": "Omitted .output(..., format=...) reads prompt.default_output_format from the current settings chain; the global default is json, while explicit format=\"auto\" and per-agent/request prompt.default_output_format=\"auto\" remain available for schema-driven selection.",
-      "tuple_ensure_value_contract": "Tuple ensure flags and ensure_keys require paths to resolve to meaningful values: missing keys, None, blank strings, empty wildcard matches, and wildcard matches containing blank required values fail and share the normal retry budget; False and 0 remain valid typed values.",
+      "tuple_ensure_value_contract": "Tuple ensure=True flags and runtime ensure_keys require path/key presence only: missing paths fail and share the normal retry budget, while None, blank strings, False, 0, empty lists, and other intentionally empty values remain valid when the path exists.",
+      "tuple_not_null_value_contract": "Tuple ensure marker \"not_null\" requires the path/key to exist and resolve to a meaningful value: None, blank strings, empty lists or wildcard matches, and lists containing missing required values fail and share the normal retry budget; False and 0 remain valid typed values.",
       "options_contract": "dict-compatible typed helpers under agently.types.options",
       "plugin_schema_registration": [
         "SETTINGS_SCHEMAS",
@@ -248,7 +249,7 @@
           "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging"
         ]
       },
-      "compatibility_policy": "New documentation and examples should keep AgentExecutionResult as the common consumption surface. Task-style compatibility readers may remain callable, but they should not be promoted as a second recommended public lifecycle. Future 4.1.3.7 AgentTaskLoop hardening must strengthen the task strategy behind AgentExecution without changing this public ownership boundary."
+      "compatibility_policy": "New documentation and examples should keep AgentExecutionResult as the common consumption surface. Task-style compatibility readers may remain callable, but they should not be promoted as a second recommended public lifecycle. Future AgentTaskLoop hardening must strengthen the task strategy behind AgentExecution without changing this public ownership boundary."
     },
     "image": {
       "status": "in-development",

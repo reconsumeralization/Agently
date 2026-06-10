@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 import pytest
 
 from agently.core import Prompt
@@ -333,6 +335,29 @@ def test_output_model():
     assert hasattr(output_from_raw_list, "root") and getattr(output_from_raw_list, "root") == [456]
     assert list(output_from_raw_list) == [456]
     assert list(output_from_raw_list)[0] == 456
+
+
+def test_serializable_output_prompt_preserves_not_null_ensure_marker():
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.set(
+        "output",
+        {
+            "ready": (bool, "whether the plan can proceed", True),
+            "questions": (list, "clarification questions if needed", "not_null"),
+        },
+    )
+
+    serialized = prompt.to_serializable_prompt_data()
+    output = serialized["output"]
+    assert isinstance(output, Mapping)
+    ready = output["ready"]
+    questions = output["questions"]
+    assert isinstance(ready, Mapping)
+    assert isinstance(questions, Mapping)
+
+    assert ready["$ensure"] is True
+    assert questions["$ensure"] == "not_null"
 
 
 def test_output_model_supports_enum():

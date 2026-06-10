@@ -57,3 +57,29 @@ def test_root_list_dot_path_locate():
 def test_root_list_slash_path_locate():
     assert DataLocator.locate_path_in_dict(sample_root_list, "/0/id", style="slash") == "news-1"
     assert DataLocator.locate_path_in_dict(sample_root_list, "/[*]/id", style="slash") == ["news-1", "news-2"]
+
+
+def test_extract_ensure_path_policies_preserves_not_null_marker():
+    schema = {
+        "ready": (bool, "whether the plan can proceed", True),
+        "questions": (list, "clarification questions if needed", "not_null"),
+        "items": [
+            {
+                "name": (str, "item name", True),
+                "command": (str, "required command", "not_null"),
+            }
+        ],
+    }
+
+    assert DataPathBuilder.extract_ensure_paths(schema) == [
+        "ready",
+        "questions",
+        "items[*].name",
+        "items[*].command",
+    ]
+    assert DataPathBuilder.extract_ensure_path_policies(schema) == {
+        "ready": "presence",
+        "questions": "not_null",
+        "items[*].name": "presence",
+        "items[*].command": "not_null",
+    }

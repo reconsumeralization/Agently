@@ -110,7 +110,7 @@ When adding a framework deprecation, route the warning through `agently.utils.De
 When you audit or author guidance for Agently `4.1+`, these are the defaults coding agents should prefer:
 
 - API shape: apply Occam's razor. Do not add a new entity, method, facade, or compatibility patch when an existing surface already expresses the concept. If a name is unclear, prefer a narrow alias or documentation clarification over another overlapping method.
-- Structured output: for fixed required leaves, mark `(TypeExpr, "description", True)` directly in `.output(...)`. Use manual `ensure_keys=` only for conditional or runtime-dependent paths.
+- Structured output: for fixed required leaves, mark `(TypeExpr, "description", True)` directly in `.output(...)`. Use `(TypeExpr, "description", "not_null")` only when empty values must retry. Use manual `ensure_keys=` only for conditional or runtime-dependent paths.
 - Actions: new code should start from `@agent.action_func` and `agent.use_actions(...)`. `tool_func`, `use_tool`, and `use_tools` are compatibility aliases, not the primary recommendation.
 - TriggerFlow lifecycle: treat `close()` / `async_close()` and the close snapshot as the canonical completion path. Do not recommend `.end()`, `set_result()`, `get_result()`, or `wait_for_result=` as the normal starting point.
 - TriggerFlow state: use `get_state(...)` / `set_state(...)` for per-execution data. Treat `flow_data` as an intentionally risky shared scope, not a normal state store.

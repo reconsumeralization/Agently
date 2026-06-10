@@ -405,7 +405,7 @@ async def test_ensure_keys_runs_before_validate_handlers():
 
 
 @pytest.mark.asyncio
-async def test_tuple_ensure_retries_blank_string_in_wildcard_path():
+async def test_tuple_not_null_retries_blank_string_in_wildcard_path():
     MockValidateJSONRequester.reset(
         [
             {
@@ -429,7 +429,7 @@ async def test_tuple_ensure_retries_blank_string_in_wildcard_path():
                 {
                     "item": (str, "check item", True),
                     "why": (str, "check reason", True),
-                    "command": (str, "bash command", True),
+                    "command": (str, "bash command", "not_null"),
                 }
             ],
             "final_confirmation": (str, "confirmation", True),
@@ -440,6 +440,89 @@ async def test_tuple_ensure_retries_blank_string_in_wildcard_path():
 
     assert MockValidateJSONRequester.attempts == 2
     assert data["environment_checklist"][0]["command"] == "python --version"
+
+
+@pytest.mark.asyncio
+async def test_tuple_ensure_presence_accepts_empty_values():
+    MockValidateJSONRequester.reset(
+        [
+            {
+                "ready": True,
+                "reason": "",
+                "questions": [],
+            },
+        ]
+    )
+    request = _create_request(MockValidateJSONRequester, "ensure-presence-empty-values")
+    request.output(
+        {
+            "ready": (bool, "whether the plan can proceed", True),
+            "reason": (str, "why the planner made this decision", True),
+            "questions": (list, "clarification questions if needed", True),
+        }
+    )
+
+    data = await request.async_start(max_retries=0)
+
+    assert MockValidateJSONRequester.attempts == 1
+    assert data == {"ready": True, "reason": "", "questions": []}
+
+
+@pytest.mark.asyncio
+async def test_runtime_ensure_keys_presence_accepts_empty_values():
+    MockValidateJSONRequester.reset(
+        [
+            {
+                "ready": True,
+                "reason": "",
+                "questions": [],
+            },
+        ]
+    )
+    request = _create_request(MockValidateJSONRequester, "runtime-ensure-presence-empty-values")
+    request.output(
+        {
+            "ready": (bool, "whether the plan can proceed"),
+            "reason": (str, "why the planner made this decision"),
+            "questions": (list, "clarification questions if needed"),
+        }
+    )
+
+    data = await request.async_start(
+        ensure_keys=["ready", "reason", "questions"],
+        max_retries=0,
+    )
+
+    assert MockValidateJSONRequester.attempts == 1
+    assert data == {"ready": True, "reason": "", "questions": []}
+
+
+@pytest.mark.asyncio
+async def test_tuple_not_null_retries_empty_list_value():
+    MockValidateJSONRequester.reset(
+        [
+            {
+                "ready": True,
+                "questions": [],
+            },
+            {
+                "ready": True,
+                "questions": ["确认预算上限"],
+            },
+        ]
+    )
+    request = _create_request(MockValidateJSONRequester, "ensure-not-null-list")
+    request.output(
+        {
+            "ready": (bool, "whether the plan can proceed", True),
+            "questions": (list, "clarification questions if needed", "not_null"),
+        }
+    )
+
+    data = await request.async_start(max_retries=1)
+
+    assert MockValidateJSONRequester.attempts == 2
+    assert data == {"ready": True, "questions": ["确认预算上限"]}
 
 
 @pytest.mark.asyncio
