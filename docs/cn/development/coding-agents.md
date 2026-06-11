@@ -73,8 +73,10 @@ do
 done
 ```
 
-只有迁移项目才额外安装 `agently-migration`。冻结的 V1 12-skill catalog 位于
-`Agently-Skills/legacy/v1/`，最后支持 Agently `4.1.1`；不要把它作为新项目推荐路径。
+只有迁移项目才额外安装 `agently-migration`。历史 catalog 通过冻结归档分支保留，
+而不是放在默认分支文件树里；V1 12-skill catalog 归档在
+`update/archive-legacy-v1-catalog`，最后支持 Agently `4.1.1`。新项目不要把归档
+catalog 加入 coding agent 的常规搜索路径。
 
 ## 为什么是 skill 不是单纯文档
 

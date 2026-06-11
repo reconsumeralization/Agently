@@ -175,4 +175,4 @@ Schema as Prompt 是单次模型请求的 **authoring** 层，不是：
 
 - [输出控制](output-control.md) —— 解析之后的事
 - [Prompt 管理](prompt-management.md) —— 槽位与 YAML/JSON 加载
-- [术语表：ensure](../reference/glossary.md#ensure第三槽)
+- [术语表：ensure](../reference/glossary.md#ensure-third-tuple-slot)

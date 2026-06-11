@@ -350,4 +350,4 @@ def policy_check(result, ctx):
 
 - [Schema as Prompt](schema-as-prompt.md) —— `.output(...)` authoring 与 `ensure` 标记
 - [模型响应](model-response.md) —— 缓存与重跑的实际差别
-- [术语表：ensure](../reference/glossary.md#ensure第三槽)
+- [术语表：ensure](../reference/glossary.md#ensure-third-tuple-slot)
