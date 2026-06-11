@@ -21,6 +21,7 @@ from agently.types.data.workspace import (
     WorkspaceBackendCapabilities,
     WorkspaceContentSegment,
     WorkspaceFilePolicyMetadata,
+    WorkspaceLeaseRef,
     WorkspaceLinkRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
@@ -72,6 +73,67 @@ class CheckpointStore(Protocol):
 
 
 @runtime_checkable
+class DurableCheckpointStore(CheckpointStore, Protocol):
+    async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None: ...
+
+    async def put_checkpoint(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+    async def claim_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        ttl: float,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def release_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def put_artifact_ref(
+        self,
+        run_id: str,
+        artifact: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+    def capabilities(self) -> WorkspaceBackendCapabilities: ...
+
+
+@runtime_checkable
+class ExecutionSnapshotStore(Protocol):
+    async def get_snapshot(self, run_id: str) -> dict[str, Any] | None: ...
+
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+
+@runtime_checkable
 class RuntimeEventStore(Protocol):
     async def append_runtime_event(
         self,
@@ -79,11 +141,21 @@ class RuntimeEventStore(Protocol):
         event: RuntimeEvent | RuntimeEventDict | dict[str, Any],
         *,
         sequence: int | None = None,
+        expected_sequence: int | None = None,
         idempotency_key: str | None = None,
-        checkpoint_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        snapshot_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
         artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
         exchange_id: str | None = None,
+        state_version: int | None = None,
+        parent_id: str | None = None,
+        causation_id: str | None = None,
+        parent_signal_id: str | None = None,
         node_id: str | None = None,
+        operator_id: str | None = None,
+        interrupt_id: str | None = None,
+        resume_request_id: str | None = None,
+        actor_id: str | None = None,
+        lease_owner_id: str | None = None,
         aggregation_scope: str | None = None,
     ) -> WorkspaceRuntimeEventRecord: ...
 
@@ -345,7 +417,23 @@ class WorkspaceBackend(Protocol):
         state: dict[str, Any],
         *,
         step_id: str | None = None,
+        expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef: ...
+
+    async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None: ...
+
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+    async def get_snapshot(self, run_id: str) -> dict[str, Any] | None: ...
+
+    async def latest_snapshot(self, run_id: str) -> WorkspaceRecordRef | None: ...
 
     async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None: ...
 
@@ -357,17 +445,58 @@ class WorkspaceBackend(Protocol):
         limit: int | None = None,
     ) -> list[WorkspaceRecordRef]: ...
 
+    async def claim_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        ttl: float,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def release_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def put_artifact_ref(
+        self,
+        run_id: str,
+        artifact: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef: ...
+
     async def append_runtime_event(
         self,
         execution_id: str,
         event: RuntimeEvent | RuntimeEventDict | dict[str, Any],
         *,
         sequence: int | None = None,
+        expected_sequence: int | None = None,
         idempotency_key: str | None = None,
-        checkpoint_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        snapshot_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
         artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
         exchange_id: str | None = None,
+        state_version: int | None = None,
+        parent_id: str | None = None,
+        causation_id: str | None = None,
+        parent_signal_id: str | None = None,
         node_id: str | None = None,
+        operator_id: str | None = None,
+        interrupt_id: str | None = None,
+        resume_request_id: str | None = None,
+        actor_id: str | None = None,
+        lease_owner_id: str | None = None,
         aggregation_scope: str | None = None,
     ) -> WorkspaceRuntimeEventRecord: ...
 

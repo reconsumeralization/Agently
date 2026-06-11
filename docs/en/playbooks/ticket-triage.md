@@ -122,7 +122,8 @@ For high-stakes categories (refunds, account closures), pause the flow and wait 
 async def maybe_request_approval(data):
     if data.input["category"] == "refund" and data.input["amount"] > 1000:
         return await data.async_pause_for(
-            type="approval",
+            type="exchange",
+            exchange_kind="approval",
             payload={"ticket_id": data.input["id"], "amount": data.input["amount"]},
             resume_to="next",
         )

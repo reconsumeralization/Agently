@@ -48,7 +48,7 @@ Flow scope 的共享数据。调用 `get_flow_data(...)` / `set_flow_data(...)` 
 
 ## Runtime resources
 
-Execution-local 的活对象存储——数据库 client、回调、socket、函数指针、cache 句柄。Runtime resources **不**可序列化、**不**进 close snapshot，也**不**进 save/load checkpoint；只记录 `resource_keys`。`load()` 后调用方必须重新注入。
+Execution-local 的活对象存储——数据库 client、回调、socket、函数指针、cache 句柄。Runtime resources **不**可序列化、**不**进 close snapshot，也**不**进 save/load execution snapshot；只记录 `resource_keys`。`load()` 后调用方必须重新注入。
 
 这是和 `state`、`flow_data` 不同的第三类概念。详见 [State 与 Resources](../triggerflow/state-and-resources.md)。
 

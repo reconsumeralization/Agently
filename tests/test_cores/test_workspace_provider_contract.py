@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, cast
 
@@ -15,6 +16,7 @@ from agently.types.data import (
     WorkspaceBackendCapabilities,
     WorkspaceContentSegment,
     WorkspaceFilePolicyMetadata,
+    WorkspaceLeaseRef,
     WorkspaceLinkRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
@@ -97,6 +99,8 @@ class RemoteAuditWorkspaceBackend:
         self._path_to_id: dict[str, str] = {}
         self._links: list[WorkspaceLinkRef] = []
         self._checkpoints: dict[str, list[WorkspaceRecordRef]] = {}
+        self._checkpoint_states: dict[str, list[dict[str, Any]]] = {}
+        self._leases: dict[str, WorkspaceLeaseRef] = {}
         self._runtime_events: dict[str, list[WorkspaceRuntimeEventRecord]] = {}
         self._runtime_event_idempotency: dict[tuple[str, str], WorkspaceRuntimeEventRecord] = {}
         self._retention_anchors: list[WorkspaceRetentionAnchor] = []
@@ -152,6 +156,49 @@ class RemoteAuditWorkspaceBackend:
         if isinstance(value, dict) and "record_id" in value:
             return value
         return self._envelope(self._record_id(value))
+
+    @staticmethod
+    def _checkpoint_state_version(state: Any) -> int | None:
+        if not isinstance(state, dict):
+            return None
+        value = state.get("state_version")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def _latest_checkpoint_state_version(self, run_id: str) -> int | None:
+        states = self._checkpoint_states.get(run_id, [])
+        if not states:
+            return 0
+        return self._checkpoint_state_version(states[-1])
+
+    def _ensure_expected_checkpoint_state_version(
+        self,
+        run_id: str,
+        expected_state_version: int | None,
+    ):
+        if expected_state_version is None:
+            return
+        current_state_version = self._latest_checkpoint_state_version(run_id)
+        if current_state_version != expected_state_version:
+            raise RuntimeError(
+                f"Workspace checkpoint state version conflict for run '{ run_id }': "
+                f"expected { expected_state_version }, current state version is { current_state_version }."
+            )
+
+    def _require_active_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef:
+        lease = self._leases.get(run_id)
+        now = time.time()
+        if lease is None or lease.get("released_at") is not None:
+            raise RuntimeError(f"Workspace lease for run '{ run_id }' is not active.")
+        if float(lease.get("lease_until") or 0) <= now:
+            raise RuntimeError(f"Workspace lease for run '{ run_id }' has expired.")
+        if lease.get("owner_id") != owner_id or lease.get("lease_token") != lease_token:
+            raise RuntimeError(f"Workspace lease conflict for run '{ run_id }'.")
+        return lease
 
     def _envelope(self, record_id: str) -> WorkspaceReferenceEnvelope:
         ref = self._records[record_id]
@@ -425,7 +472,9 @@ class RemoteAuditWorkspaceBackend:
         state: dict[str, Any],
         *,
         step_id: str | None = None,
+        expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef:
+        self._ensure_expected_checkpoint_state_version(run_id, expected_state_version)
         ref = await self.put(
             state,
             collection="checkpoints",
@@ -436,6 +485,7 @@ class RemoteAuditWorkspaceBackend:
             meta={"checkpoint": True},
         )
         self._checkpoints.setdefault(run_id, []).append(ref)
+        self._checkpoint_states.setdefault(run_id, []).append(state)
         return ref
 
     async def put_checkpoint(
@@ -444,9 +494,41 @@ class RemoteAuditWorkspaceBackend:
         state: dict[str, Any],
         *,
         step_id: str | None = None,
+        expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef:
         self.operations.append("put_checkpoint")
-        return await self.checkpoint(run_id, state, step_id=step_id)
+        return await self.checkpoint(
+            run_id,
+            state,
+            step_id=step_id,
+            expected_state_version=expected_state_version,
+        )
+
+    async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
+        return await self.latest_checkpoint(run_id)
+
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef:
+        self.operations.append("put_snapshot")
+        return await self.put_checkpoint(
+            run_id,
+            state,
+            step_id=step_id,
+            expected_state_version=expected_state_version,
+        )
+
+    async def get_snapshot(self, run_id: str) -> dict[str, Any] | None:
+        items = self._checkpoint_states.get(run_id, [])
+        return items[-1] if items else None
+
+    async def latest_snapshot(self, run_id: str) -> WorkspaceRecordRef | None:
+        return await self.latest_checkpoint(run_id)
 
     async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
         items = self._checkpoints.get(run_id, [])
@@ -465,17 +547,104 @@ class RemoteAuditWorkspaceBackend:
         ]
         return items[:limit] if limit is not None else items
 
+    async def put_artifact_ref(
+        self,
+        run_id: str,
+        artifact: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef:
+        metadata = dict(metadata or {})
+        scope = metadata.pop("scope", {})
+        if not isinstance(scope, dict):
+            scope = {}
+        return await self.put(
+            artifact,
+            collection="artifacts",
+            kind=str(metadata.pop("kind", "runtime_artifact")),
+            summary=str(metadata.pop("summary", f"Artifact for { run_id }")),
+            scope={"run_id": run_id, **scope},
+            source={"type": "remote_audit_provider", "name": "artifact_ref"},
+            meta={"artifact_ref": True, **metadata},
+        )
+
+    async def claim_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        ttl: float,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceLeaseRef:
+        self._ensure_expected_checkpoint_state_version(run_id, expected_state_version)
+        now = time.time()
+        current = self._leases.get(run_id)
+        if (
+            current is not None
+            and current.get("released_at") is None
+            and float(current.get("lease_until") or 0) > now
+            and current.get("owner_id") != owner_id
+        ):
+            raise RuntimeError(f"Workspace lease conflict for run '{ run_id }'.")
+        lease: WorkspaceLeaseRef = {
+            "run_id": run_id,
+            "owner_id": owner_id,
+            "lease_token": self._next_id("lease", run_id),
+            "lease_ttl": float(ttl),
+            "lease_until": now + float(ttl),
+            "claimed_at": self._now(),
+            "heartbeat_at": self._now(),
+            "released_at": None,
+            "state_version": self._latest_checkpoint_state_version(run_id),
+        }
+        self._leases[run_id] = lease
+        return lease
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef:
+        lease = cast(WorkspaceLeaseRef, dict(self._require_active_lease(run_id, owner_id, lease_token)))
+        lease["heartbeat_at"] = self._now()
+        lease["lease_until"] = time.time() + float(lease.get("lease_ttl") or 0)
+        self._leases[run_id] = lease
+        return lease
+
+    async def release_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef:
+        lease = cast(WorkspaceLeaseRef, dict(self._require_active_lease(run_id, owner_id, lease_token)))
+        lease["released_at"] = self._now()
+        lease["lease_until"] = time.time()
+        self._leases[run_id] = lease
+        return lease
+
     async def append_runtime_event(
         self,
         execution_id: str,
         event: Any,
         *,
         sequence: int | None = None,
+        expected_sequence: int | None = None,
         idempotency_key: str | None = None,
-        checkpoint_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        snapshot_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
         artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
         exchange_id: str | None = None,
+        state_version: int | None = None,
+        parent_id: str | None = None,
+        causation_id: str | None = None,
+        parent_signal_id: str | None = None,
         node_id: str | None = None,
+        operator_id: str | None = None,
+        interrupt_id: str | None = None,
+        resume_request_id: str | None = None,
+        actor_id: str | None = None,
+        lease_owner_id: str | None = None,
         aggregation_scope: str | None = None,
     ) -> WorkspaceRuntimeEventRecord:
         self.operations.append("append_runtime_event")
@@ -485,6 +654,11 @@ class RemoteAuditWorkspaceBackend:
         event_data = DataFormatter.sanitize(event_data)
         meta = event_data.get("meta") if isinstance(event_data.get("meta"), dict) else {}
         records = self._runtime_events.setdefault(execution_id, [])
+        if expected_sequence is not None and int(expected_sequence) != len(records) + 1:
+            raise RuntimeError(
+                f"Workspace runtime event sequence conflict for execution '{ execution_id }': "
+                f"expected { expected_sequence }, next sequence is { len(records) + 1 }."
+            )
         resolved_sequence = sequence if sequence is not None else len(records) + 1
         artifact_ref_envelopes = [
             envelope
@@ -497,16 +671,24 @@ class RemoteAuditWorkspaceBackend:
             "sequence": resolved_sequence,
             "event_id": str(event_data.get("event_id") or self._next_id("event", execution_id)),
             "event_type": str(event_data.get("event_type") or "runtime.event"),
+            "state_version": state_version,
             "idempotency_key": idempotency_key,
-            "parent_id": meta.get("parent_event_id"),
-            "causation_id": meta.get("causation_id"),
+            "parent_id": parent_id or meta.get("parent_event_id") or meta.get("parent_id"),
+            "causation_id": causation_id or meta.get("causation_id"),
+            "parent_signal_id": parent_signal_id or meta.get("parent_signal_id"),
             "node_id": node_id or meta.get("node_id"),
+            "operator_id": operator_id or meta.get("operator_id"),
+            "interrupt_id": interrupt_id or meta.get("interrupt_id"),
+            "resume_request_id": resume_request_id or meta.get("resume_request_id"),
+            "actor_id": actor_id or meta.get("actor_id"),
+            "lease_owner_id": lease_owner_id or meta.get("lease_owner_id"),
             "aggregation_scope": aggregation_scope or meta.get("aggregation_scope"),
-            "checkpoint_ref": self._optional_envelope(checkpoint_ref),
+            "snapshot_ref": self._optional_envelope(snapshot_ref),
             "exchange_id": exchange_id,
             "artifact_refs": artifact_ref_envelopes,
             "event": event_data,
             "created_at": self._now(),
+            "persisted_at": self._now(),
         }
         records.append(record)
         if idempotency_key is not None:
@@ -639,6 +821,7 @@ class RemoteAuditWorkspaceBackend:
                 "evidence_links": True,
                 "supports_cas": True,
                 "supports_lease": True,
+                "supports_artifact_refs": True,
                 "supports_event_sequence": True,
                 "supports_range_read": True,
                 "supports_stream_read": True,
@@ -667,19 +850,20 @@ async def test_remote_audit_workspace_backend_proves_provider_contract_across_co
     execution = flow.create_execution(runtime_resources={"durable_provider": workspace})
 
     snapshot = await execution.async_start("remote-value")
-    checkpoint_ref = await execution.async_save_checkpoint(
+    snapshot_ref = await execution.async_save(
         step_id="distributed-proof",
         require_distributed_provider=True,
     )
     runtime_events = await workspace.query_runtime_events(execution.id)
 
     assert snapshot["value"] == "remote-value"
-    assert checkpoint_ref["collection"] == "checkpoints"
-    assert checkpoint_ref["source"]["type"] == "remote_audit_provider"
+    assert snapshot_ref["collection"] == "checkpoints"
+    assert snapshot_ref["source"]["type"] == "remote_audit_provider"
     assert runtime_events
     assert runtime_events[0]["event_type"] == "triggerflow.definition_declared"
     assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
     assert "append_runtime_event" in provider.operations
+    assert "put_snapshot" in provider.operations
     assert "put_checkpoint" in provider.operations
 
     agent_execution = (
@@ -763,14 +947,14 @@ async def test_workspace_backend_provider_registration_resolves_custom_backend()
         flow.to(remember)
         execution = flow.create_execution(runtime_resources={"workspace": workspace})
         snapshot = await execution.async_start("registered-value")
-        checkpoint_ref = await execution.async_save_checkpoint(
+        snapshot_ref = await execution.async_save(
             step_id="registered-provider",
             require_distributed_provider=True,
         )
         runtime_events = await workspace.query_runtime_events(execution.id)
 
         assert snapshot["value"] == "registered-value"
-        assert checkpoint_ref["source"]["type"] == "remote_audit_provider"
+        assert snapshot_ref["source"]["type"] == "remote_audit_provider"
         assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
     finally:
         Agently.workspace.unregister_backend_provider(provider_name)

@@ -54,7 +54,7 @@ async def gate(data: TriggerFlowRuntimeData):
     if data.is_resume:
         return {"decision": data.resume.value}
     return await data.async_pause_for(
-        type="approval",
+        type="exchange", exchange_kind="approval",
         payload={"question": "Approve?"},
         resume_to="self",
     )
@@ -80,7 +80,7 @@ async def main():
 
     async def ask(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(
-            type="approval",
+            type="exchange", exchange_kind="approval",
             payload={"question": f"Approve refund for ticket {data.input}?"},
             resume_to="next",
         )
@@ -114,7 +114,7 @@ same gate re-enters with `data.is_resume` and `data.resume` after human review.
 
 ## Pause across process restarts
 
-`pause_for(...)` integrates cleanly with checkpoint rehydration:
+`pause_for(...)` integrates cleanly with execution snapshot load:
 
 ```python
 flow.declare_resource_requirement("approval_service")
@@ -128,7 +128,7 @@ saved = execution.save()
 
 # later, in a different process / worker:
 restored = flow.create_execution(auto_close=False)
-await restored.async_rehydrate(
+await restored.async_load(
     saved,
     runtime_resources={"approval_service": approval_service},
 )
@@ -143,7 +143,9 @@ snapshot = await restored.async_close()
 
 The interrupt and accepted resume request ids are part of the saved state, so
 the new process knows what's pending and can ignore duplicate resume retries.
-See [Persistence and Blueprint](persistence-and-blueprint.md).
+See [Persistence and Blueprint](persistence-and-blueprint.md). For production
+worker handoff, callback transport, outbox ordering, and live object restore,
+see [Distributed Pause and Resume Boundaries](distributed-pause-resume.md).
 
 ## Multiple concurrent pauses
 
@@ -178,3 +180,4 @@ snapshot = await execution.async_close(pending_interrupts="cancel")
 - [Lifecycle](lifecycle.md) — when seal/close run after a resume
 - [Persistence and Blueprint](persistence-and-blueprint.md) — saving across pauses
 - [State and Resources](state-and-resources.md) — re-inject `runtime_resources` after `load()`
+- [Distributed Pause and Resume Boundaries](distributed-pause-resume.md) — host-managed recovery and live object ownership

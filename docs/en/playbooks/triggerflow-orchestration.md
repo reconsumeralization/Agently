@@ -129,7 +129,8 @@ Add a `pause_for` step. The execution must be created with `auto_close=False`; r
 ```python
 async def ask(data):
     return await data.async_pause_for(
-        type="approval",
+        type="exchange",
+        exchange_kind="approval",
         payload={"summary": data.input["summary"]},
         resume_to="next",
     )

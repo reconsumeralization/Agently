@@ -22,6 +22,7 @@ from agently.types.data.workspace import (
     WorkspaceBackendCapabilities,
     WorkspaceContentSegment,
     WorkspaceFilePolicyMetadata,
+    WorkspaceLeaseRef,
     WorkspaceLinkRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
@@ -169,8 +170,38 @@ class Workspace:
         state: dict[str, Any],
         *,
         step_id: str | None = None,
+        expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef:
-        return await self.backend.put_checkpoint(run_id, state, step_id=step_id)
+        return await self.backend.put_checkpoint(
+            run_id,
+            state,
+            step_id=step_id,
+            expected_state_version=expected_state_version,
+        )
+
+    async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
+        return await self.backend.get_checkpoint(run_id)
+
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef:
+        return await self.backend.put_snapshot(
+            run_id,
+            state,
+            step_id=step_id,
+            expected_state_version=expected_state_version,
+        )
+
+    async def get_snapshot(self, run_id: str) -> dict[str, Any] | None:
+        return await self.backend.get_snapshot(run_id)
+
+    async def latest_snapshot(self, run_id: str) -> WorkspaceRecordRef | None:
+        return await self.backend.latest_snapshot(run_id)
 
     async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
         return await self.backend.latest_checkpoint(run_id)
@@ -184,28 +215,88 @@ class Workspace:
     ) -> list[WorkspaceRecordRef]:
         return await self.backend.checkpoint_history(run_id, step_id=step_id, limit=limit)
 
+    async def claim_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        ttl: float,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceLeaseRef:
+        return await self.backend.claim_lease(
+            run_id,
+            owner_id,
+            ttl=ttl,
+            expected_state_version=expected_state_version,
+        )
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef:
+        return await self.backend.heartbeat_lease(run_id, owner_id, lease_token)
+
+    async def release_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef:
+        return await self.backend.release_lease(run_id, owner_id, lease_token)
+
+    async def put_artifact_ref(
+        self,
+        run_id: str,
+        artifact: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef:
+        return await self.backend.put_artifact_ref(run_id, artifact, metadata=metadata)
+
     async def append_runtime_event(
         self,
         execution_id: str,
         event: RuntimeEvent | RuntimeEventDict | dict[str, Any],
         *,
         sequence: int | None = None,
+        expected_sequence: int | None = None,
         idempotency_key: str | None = None,
-        checkpoint_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        snapshot_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
         artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
         exchange_id: str | None = None,
+        state_version: int | None = None,
+        parent_id: str | None = None,
+        causation_id: str | None = None,
+        parent_signal_id: str | None = None,
         node_id: str | None = None,
+        operator_id: str | None = None,
+        interrupt_id: str | None = None,
+        resume_request_id: str | None = None,
+        actor_id: str | None = None,
+        lease_owner_id: str | None = None,
         aggregation_scope: str | None = None,
     ) -> WorkspaceRuntimeEventRecord:
         return await self.backend.append_runtime_event(
             execution_id,
             event,
             sequence=sequence,
+            expected_sequence=expected_sequence,
             idempotency_key=idempotency_key,
-            checkpoint_ref=checkpoint_ref,
+            snapshot_ref=snapshot_ref,
             artifact_refs=artifact_refs,
             exchange_id=exchange_id,
+            state_version=state_version,
+            parent_id=parent_id,
+            causation_id=causation_id,
+            parent_signal_id=parent_signal_id,
             node_id=node_id,
+            operator_id=operator_id,
+            interrupt_id=interrupt_id,
+            resume_request_id=resume_request_id,
+            actor_id=actor_id,
+            lease_owner_id=lease_owner_id,
             aggregation_scope=aggregation_scope,
         )
 

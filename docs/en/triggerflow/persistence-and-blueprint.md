@@ -22,10 +22,10 @@ Two distinct serialization paths exist. Don't confuse them.
 - the execution's `state`
 - lifecycle metadata (status, timestamps, run ids)
 - pending interrupt state (if `pause_for(...)` was hit)
-- a versioned `checkpoint` envelope with TriggerFlow system progress, interrupt
-  ledger, resume ledger, resource requirements, and a flow definition
+- a versioned top-level execution snapshot with TriggerFlow system progress,
+  interrupt ledger, resume ledger, resource requirements, and a flow definition
   fingerprint
-- `resource_keys` and `checkpoint.resource_requirements` — the resources
+- `resource_keys` and `resource_requirements` — the resources
   expected on resume, but not their live values
 
 What it does **not** capture:
@@ -34,6 +34,8 @@ What it does **not** capture:
 - in-flight chunks (no execution mid-coroutine; save during a settled state)
 - distributed-store ownership. TriggerFlow records lease metadata, while the
   durable store still owns atomic claim / compare-and-set behavior.
+- live object state. Stateful sessions, browser pages, process handles, remote
+  tasks, and caches need external state refs and provider restore validation.
 
 ```python
 flow.declare_resource_requirement("approval_service")
@@ -48,7 +50,7 @@ saved_state = execution.save()
 Restore later (possibly in a different process):
 
 ```python
-report = flow.create_execution(auto_close=False).inspect_rehydration(
+report = flow.create_execution(auto_close=False).inspect_load(
     saved_state,
     runtime_resources={"approval_service": new_approval_service},
 )
@@ -56,7 +58,7 @@ if not report["ready"]:
     raise RuntimeError(report["diagnostics"])
 
 restored = flow.create_execution(auto_close=False)
-await restored.async_rehydrate(
+await restored.async_load(
     saved_state,
     runtime_resources={"approval_service": new_approval_service},
 )
@@ -67,17 +69,18 @@ snapshot = await restored.async_close()
 ```
 
 The flow definition must be the **same flow** (or compatible) on both sides.
-`save()` records `checkpoint.flow_definition_fingerprint`; `inspect_rehydration(...)`
-reports `status="invalid_snapshot"` when the checkpoint fingerprint is missing
+`save()` records `flow_definition_fingerprint`; `inspect_load(...)`
+reports `status="invalid_snapshot"` when the snapshot fingerprint is missing
 or does not match the current flow definition, and `load(...)` rejects that
 snapshot.
 `load()` doesn't reconstruct the chunk graph from `saved_state`; it expects the
 flow to already exist.
 
-`load(saved_state)` remains available as a low-level compatibility API.
-`async_rehydrate(...)` is the recommended recovery boundary for restart or
-worker-handoff paths because it validates missing resources and can rebuild
-managed execution environments before the execution is resumed.
+`load(saved_state)` is the synchronous load boundary for snapshots whose
+resources are already available in the current process. `async_load(...)` is
+the recovery boundary for restart or worker-handoff paths because it validates
+missing resources and can rebuild managed execution environments before the
+execution is resumed.
 
 ### Resuming around a pause_for
 
@@ -92,7 +95,7 @@ saved = execution.save()
 
 # ... days later, in a different worker ...
 restored = flow.create_execution(auto_close=False)
-await restored.async_rehydrate(
+await restored.async_load(
     saved,
     runtime_resources={"approval_service": new_approval_service},
 )
@@ -110,26 +113,29 @@ snapshot = await restored.async_close()
 Use a stable `resume_request_id` for webhook, queue, or approval callbacks so a
 duplicate delivery can be replayed without dispatching the same resume twice.
 
-### Checkpoint stores
+### Snapshot stores
 
-`execution.async_save_checkpoint(store, ...)` writes the current snapshot to any
-store that exposes `put_checkpoint(run_id, state, *, step_id=None)`.
-TriggerFlow supplies the snapshot contract; the production store owns durable
-retention, atomic claim, lease enforcement, and conflict handling.
+`execution.async_save(store, ...)` writes the current snapshot to any
+store that exposes `put_snapshot(run_id, state, *, step_id=None)`.
+A durable snapshot store can also expose `get_snapshot(run_id)` that returns
+the snapshot state to pass into `load(...)` / `async_load(...)`. TriggerFlow
+supplies the snapshot contract; the production store owns durable retention,
+atomic claim, lease enforcement, and conflict handling.
 
 ```python
 execution.claim_lease("worker-a", lease_ttl=30)
-await execution.async_save_checkpoint(store, run_id=execution.id)
+await execution.async_save(store, run_id=execution.id)
 
-saved = await store.get_checkpoint(execution.id)
+saved = await store.get_snapshot(execution.id)
+assert saved is not None
 restored = flow.create_execution(auto_close=False)
-await restored.async_rehydrate(
+await restored.async_load(
     saved,
     runtime_resources={"approval_service": approval_service},
 )
 ```
 
-The checkpoint envelope is intentionally resource-key based. Serializable
+The execution snapshot is intentionally resource-key based. Serializable
 resource requirements can be persisted and inspected, but clients, callbacks,
 tasks, semaphores, and coroutine frames must be recreated by the recovery host.
 
@@ -167,19 +173,29 @@ Key constraint: any chunk used in the blueprint must be **registered by the same
 
 For service code, prefer this packaging shape:
 
-1. Put chunks and conditions in module-level named functions.
-2. Treat the ordinary `TriggerFlow(...)` object as the flow definition surface.
-3. Inject stable live dependencies with `flow.update_runtime_resources(...)`.
-4. Inject request- or tenant-specific dependencies with per-execution
-   `runtime_resources={...}`.
+1. Put the full flow definition in an importable module: a module-level
+   `TriggerFlow(...)`, module-level chunks, and module-level `.to(...)` /
+   `.when(...)` wiring.
+2. Import that flow object from the service layer and start executions from it.
+3. Create live dependencies in host-owned factories or importable resolvers.
+4. Mount already-created live objects through flow or execution
+   `runtime_resources` only as the final process-local attachment step.
 5. Store per-request business data in execution `state`, not in `flow_data`.
 
 ```python
+# my_app/policy_flow.py
+from agently import TriggerFlow
+
+
+policy_flow = TriggerFlow(name="policy")
+
+
+@policy_flow.chunk
 async def analyze(data):
     agent_factory = data.require_resource("agent_factory")
     prompts_path = data.require_resource("prompts_path")
     question = data.input
-    data.set_state("question", question)
+    await data.async_set_state("question", question, emit=False)
     agent = agent_factory()
     return agent.load_yaml_prompt(
         prompts_path,
@@ -188,40 +204,56 @@ async def analyze(data):
     ).start()
 
 
+@policy_flow.chunk
 async def answer(data):
     policy_doc = data.require_resource("policy_doc")
     question = data.get_state("question")
-    return f"{policy_doc}\n\nQ: {question}"
+    response = f"{policy_doc}\n\nQ: {question}"
+    await data.async_set_state("answer", response, emit=False)
+    await data.async_emit("POLICY_ANSWERED", {"question": question})
+    return response
 
 
-def build_policy_flow() -> TriggerFlow:
-    flow = TriggerFlow(name="policy")
-    flow.update_runtime_resources(
-        agent_factory=make_agent,
-        prompts_path=PROMPTS_DIR / "policy.yaml",
+@policy_flow.chunk
+async def audit_answer(data):
+    await data.async_set_state(
+        "audit",
+        {"event": data.event, "question": data.value["question"]},
+        emit=False,
     )
-    flow.to(analyze).to(answer)
-    return flow
 
 
-flow = build_policy_flow()
-snapshot = flow.start(
+policy_flow.to(analyze).to(answer)
+policy_flow.when("POLICY_ANSWERED").to(audit_answer)
+```
+
+```python
+# my_app/api.py
+from my_app.policy_flow import policy_flow
+
+
+snapshot = await policy_flow.async_start(
     "travel subsidy?",
-    runtime_resources={"policy_doc": tenant_policy_doc},
+    runtime_resources={
+        "agent_factory": make_agent,
+        "prompts_path": PROMPTS_DIR / "policy.yaml",
+        "policy_doc": tenant_policy_doc,
+    },
 )
 ```
 
-This keeps business modules light while preserving config/blueprint
-compatibility. Closures are fine for short scripts, but named top-level handlers
-are the recommended service shape because they are easier to test, register,
-export, and reload.
+This keeps the complete workflow visible in one module. Normal Python imports
+execute that module body once per process for the same module name, so repeated
+`from my_app.policy_flow import policy_flow` calls do not repeat the `.to(...)`
+or `.when(...)` wiring. TriggerFlow's duplicate-definition protection is a
+second line of defense for cases where application code explicitly runs the
+same wiring again on the same flow object. If the same function is used as two
+logical stages, disambiguate the stages with `name=...`.
 
-Current behavior: TriggerFlow's module-safe definition assembly treats
-`TriggerFlow(...)` itself as the planning surface and `create_execution(...)` /
-`start_execution(...)` as the boundary into one run. There is no separate
-`TriggerFlow.define(...)` mode. Service modules can replay the same definition
-assembly safely: named functions keep stable stage identities, and the same
-function used as two logical stages should be disambiguated with `name=...`.
+Use `async_start(...)` for finite request/response workflows. If the flow can
+pause, wait for an external callback, or be saved and loaded later, create an
+explicit execution with `flow.create_execution(auto_close=False)` so the service
+can save the snapshot and resume through the execution handle.
 
 For model applications that generate a To-Do List or dependency graph at runtime,
 keep that graph per plan or per request. Reusable templates such as extract /
@@ -271,7 +303,7 @@ redis.set(f"flow:{exec_id}", json.dumps(saved))
 # later
 saved = json.loads(redis.get(f"flow:{exec_id}"))
 restored = flow.create_execution(auto_close=False)
-await restored.async_rehydrate(
+await restored.async_load(
     saved,
     runtime_resources={"approval_service": approval_service},
 )
@@ -279,31 +311,40 @@ await restored.async_rehydrate(
 
 **Distributed worker pickup**
 
-Pair a blueprint (stored once) with an execution checkpoint (stored per
+Pair a blueprint (stored once) with an execution snapshot (stored per
 execution). The durable store should atomically assign ownership before a worker
-rehydrates and continues the execution:
+loads and continues the execution:
 
 ```python
 blueprint = source_flow.save_blueprint()
 db.save("flow_blueprints", blueprint_id, blueprint)
 
 # in worker
-saved = await checkpoint_store.claim(run_id, owner_id=worker_id)
+saved = await snapshot_store.claim(run_id, owner_id=worker_id)
+# claim(...) is application/provider-defined; it should return the claimed
+# snapshot state or a ref that the worker resolves before async_load(...).
 
 flow = TriggerFlow(name="loaded")
 register_all_handlers(flow)            # whatever your registration entry is
 flow.load_blueprint(db.load("flow_blueprints", blueprint_id))
 
 execution = flow.create_execution(auto_close=False)
-await execution.async_rehydrate(
+await execution.async_load(
     saved,
     runtime_resources=runtime_resources_for(saved),
 )
 execution.claim_lease(worker_id, lease_ttl=30)
 ```
 
+The snapshot gives TriggerFlow the graph state. The blueprint or imported module
+gives the target process the same graph definition. `runtime_resources_for(...)`
+must only mount live objects that the host has already created, restored, and
+validated. Leases, store-level compare-and-set, external wait outbox ordering,
+and stateful live-object restore are provider or host concerns.
+
 ## See also
 
 - [Lifecycle](lifecycle.md) — what counts as a "settled" execution to save
 - [Pause and Resume](pause-and-resume.md) — `pause_for` / `continue_with`, the most common reason to save
+- [Distributed Pause and Resume Boundaries](distributed-pause-resume.md) — host-managed recovery and live object ownership
 - [State and Resources](state-and-resources.md) — what survives, what must be re-injected

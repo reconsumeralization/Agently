@@ -1,7 +1,11 @@
+import asyncio
+from numbers import Real
+
 import pytest
 
 from agently import Agently
 from agently.core import LazyWorkspace, WorkspaceConfigurationError, WorkspacePolicyError
+from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
 from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPack, WorkspaceRecallPlan, WorkspaceRecordRef
 
 
@@ -103,6 +107,74 @@ async def test_workspace_checkpoint_is_compact_and_searchable(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_workspace_checkpoint_cas_lease_and_artifact_refs(tmp_path):
+    agent = Agently.create_agent("workspace-durable-provider").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+
+    first = await workspace.put_checkpoint(
+        "run-cas",
+        {"state_version": 1, "value": "first"},
+        step_id="first",
+        expected_state_version=0,
+    )
+    latest = await workspace.get_checkpoint("run-cas")
+    assert latest is not None
+    assert latest["id"] == first["id"]
+
+    with pytest.raises(RuntimeError, match="state version conflict"):
+        await workspace.put_checkpoint(
+            "run-cas",
+            {"state_version": 2, "value": "stale"},
+            step_id="stale",
+            expected_state_version=0,
+        )
+
+    second = await workspace.put_checkpoint(
+        "run-cas",
+        {"state_version": 2, "value": "second"},
+        step_id="second",
+        expected_state_version=1,
+    )
+    artifact_ref = await workspace.put_artifact_ref(
+        "run-cas",
+        {"large": "payload"},
+        metadata={"kind": "checkpoint_payload", "summary": "large Workspace record payload"},
+    )
+    lease = await workspace.claim_lease("run-cas", "worker-1", ttl=0.02, expected_state_version=2)
+
+    assert second["id"] != first["id"]
+    assert artifact_ref["collection"] == "artifacts"
+    assert artifact_ref["scope"]["run_id"] == "run-cas"
+    assert lease.get("owner_id") == "worker-1"
+    assert lease.get("state_version") == 2
+    with pytest.raises(RuntimeError, match="lease conflict"):
+        await workspace.claim_lease("run-cas", "worker-2", ttl=0.2, expected_state_version=2)
+
+    lease_token = lease.get("lease_token")
+    lease_until = lease.get("lease_until")
+    assert isinstance(lease_token, str)
+    assert isinstance(lease_until, Real)
+    refreshed = await workspace.heartbeat_lease("run-cas", "worker-1", lease_token)
+    refreshed_until = refreshed.get("lease_until")
+    refreshed_token = refreshed.get("lease_token")
+    assert isinstance(refreshed_until, Real)
+    assert isinstance(refreshed_token, str)
+    assert refreshed_until >= lease_until
+    released = await workspace.release_lease("run-cas", "worker-1", refreshed_token)
+    assert released.get("released_at") is not None
+
+    expired = await workspace.claim_lease("run-cas", "worker-1", ttl=0.01, expected_state_version=2)
+    expired_token = expired.get("lease_token")
+    assert isinstance(expired_token, str)
+    await asyncio.sleep(0.02)
+    stolen = await workspace.claim_lease("run-cas", "worker-2", ttl=0.2, expected_state_version=2)
+    assert stolen.get("owner_id") == "worker-2"
+    with pytest.raises(RuntimeError, match="lease conflict|expired"):
+        await workspace.heartbeat_lease("run-cas", "worker-1", expired_token)
+
+
+@pytest.mark.asyncio
 async def test_workspace_rejects_path_traversal_and_read_only_writes(tmp_path):
     agent = Agently.create_agent("workspace-policy").use_workspace(tmp_path / "run")
     workspace = agent.workspace
@@ -191,6 +263,9 @@ async def test_workspace_structured_data_links_and_capabilities(tmp_path):
     assert capabilities["features"]["workspace_reference_envelopes"] is True
     assert capabilities["features"]["supports_range_read"] is True
     assert capabilities["features"]["supports_stream_read"] is True
+    assert capabilities["features"]["supports_cas"] is True
+    assert capabilities["features"]["supports_lease"] is True
+    assert capabilities["features"]["supports_artifact_refs"] is True
     assert capabilities["features"]["supports_event_sequence"] is True
     assert capabilities["features"]["supports_remote_backend"] is False
 
@@ -353,7 +428,7 @@ async def test_workspace_runtime_event_store_is_idempotent_and_bounded(tmp_path)
     workspace = agent.workspace
     assert workspace is not None
 
-    checkpoint_ref = await workspace.checkpoint("exec-1", {"phase": "waiting"}, step_id="approval")
+    snapshot_ref = await workspace.checkpoint("exec-1", {"phase": "waiting"}, step_id="approval")
     artifact_ref = await workspace.put(
         {"decision": "needs approval"},
         collection="artifacts",
@@ -378,33 +453,63 @@ async def test_workspace_runtime_event_store_is_idempotent_and_bounded(tmp_path)
     first = await workspace.append_runtime_event(
         "exec-1",
         event,
+        expected_sequence=1,
         idempotency_key="approval-request-1",
-        checkpoint_ref=checkpoint_ref,
+        snapshot_ref=snapshot_ref,
         artifact_refs=[artifact_ref],
         exchange_id="exchange-1",
+        state_version=7,
+        parent_signal_id="signal-parent",
+        operator_id="approval-operator",
+        interrupt_id="approval-1",
+        resume_request_id="resume-1",
+        actor_id="reviewer",
+        lease_owner_id="worker-1",
     )
     duplicate = await workspace.append_runtime_event(
         "exec-1",
         event,
+        expected_sequence=1,
         idempotency_key="approval-request-1",
-        checkpoint_ref=checkpoint_ref,
+        snapshot_ref=snapshot_ref,
         artifact_refs=[artifact_ref],
         exchange_id="exchange-1",
     )
     second = await workspace.append_runtime_event(
         "exec-1",
         {"event_type": "triggerflow.execution_resumed", "event_id": "evt-resume", "meta": {"node_id": "resume-node"}},
+        expected_sequence=2,
     )
+    with pytest.raises(RuntimeError, match="sequence conflict"):
+        await workspace.append_runtime_event(
+            "exec-1",
+            {"event_type": "triggerflow.execution_closed", "event_id": "evt-closed"},
+            expected_sequence=2,
+        )
+    with pytest.raises(RuntimeError, match="sequence conflict"):
+        await workspace.append_runtime_event(
+            "exec-1",
+            {"event_type": "triggerflow.future_event", "event_id": "evt-future"},
+            expected_sequence=4,
+        )
 
     assert duplicate["id"] == first["id"]
     assert first["sequence"] == 1
+    assert first["state_version"] == 7
     assert first["parent_id"] == "evt-parent"
     assert first["causation_id"] == "evt-cause"
+    assert first["parent_signal_id"] == "signal-parent"
     assert first["node_id"] == "approval-node"
+    assert first["operator_id"] == "approval-operator"
+    assert first["interrupt_id"] == "approval-1"
+    assert first["resume_request_id"] == "resume-1"
+    assert first["actor_id"] == "reviewer"
+    assert first["lease_owner_id"] == "worker-1"
     assert first["aggregation_scope"] == "approval-scope"
-    first_checkpoint_ref = first["checkpoint_ref"]
-    assert first_checkpoint_ref is not None
-    assert first_checkpoint_ref["record_id"] == checkpoint_ref["id"]
+    assert first["persisted_at"]
+    first_snapshot_ref = first["snapshot_ref"]
+    assert first_snapshot_ref is not None
+    assert first_snapshot_ref["record_id"] == snapshot_ref["id"]
     assert first["artifact_refs"][0]["record_id"] == artifact_ref["id"]
     assert second["sequence"] == 2
 
@@ -412,6 +517,52 @@ async def test_workspace_runtime_event_store_is_idempotent_and_bounded(tmp_path)
     assert [item["event_id"] for item in queried] == ["evt-resume"]
     by_event_id = await workspace.query_runtime_events("exec-1", event_id=first["event_id"])
     assert [item["id"] for item in by_event_id] == [first["id"]]
+
+
+def test_trigger_flow_runtime_event_recovery_diagnostics_and_projection_shape():
+    records = [
+        {
+            "execution_id": "exec-cycle",
+            "sequence": 1,
+            "event_id": "evt-a",
+            "event_type": "triggerflow.signal",
+            "state_version": 1,
+            "parent_id": None,
+            "causation_id": None,
+            "parent_signal_id": "sig-b",
+            "aggregation_scope": "scope-1",
+            "operator_id": "operator-a",
+            "interrupt_id": "approval",
+            "resume_request_id": "resume-1",
+            "actor_id": "reviewer",
+            "lease_owner_id": "worker-1",
+            "snapshot_ref": None,
+            "artifact_refs": [],
+            "event": {"payload": {"SIGNAL_ID": "sig-a"}},
+        },
+        {
+            "execution_id": "exec-cycle",
+            "sequence": 3,
+            "event_id": "evt-b",
+            "event_type": "triggerflow.signal",
+            "parent_signal_id": "sig-a",
+            "event": {"payload": {"SIGNAL_ID": "sig-b"}},
+        },
+    ]
+
+    diagnostics = diagnose_runtime_event_records(records)
+    codes = {diagnostic["code"] for diagnostic in diagnostics}
+    projection = project_runtime_event_record(records[0])
+
+    assert "triggerflow.runtime_event.missing_sequence" in codes
+    assert "triggerflow.runtime_event.parent_signal_cycle" in codes
+    assert projection["parent_signal_id"] == "sig-b"
+    assert projection["aggregation_scope"] == "scope-1"
+    assert projection["operator_id"] == "operator-a"
+    assert projection["interrupt_id"] == "approval"
+    assert projection["resume_request_id"] == "resume-1"
+    assert projection["actor_id"] == "reviewer"
+    assert projection["lease_owner_id"] == "worker-1"
 
 
 @pytest.mark.asyncio

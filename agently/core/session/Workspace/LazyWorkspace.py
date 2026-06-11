@@ -87,6 +87,12 @@ class LazyWorkspace:
     async def put_checkpoint(self, *args: Any, **kwargs: Any):
         return await self._materialize().put_checkpoint(*args, **kwargs)
 
+    async def put_snapshot(self, *args: Any, **kwargs: Any):
+        return await self._materialize().put_snapshot(*args, **kwargs)
+
+    async def get_snapshot(self, *args: Any, **kwargs: Any):
+        return await self._materialize().get_snapshot(*args, **kwargs)
+
     async def append_runtime_event(self, *args: Any, **kwargs: Any):
         return await self._materialize().append_runtime_event(*args, **kwargs)
 

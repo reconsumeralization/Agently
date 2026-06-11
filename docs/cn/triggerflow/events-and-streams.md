@@ -53,8 +53,10 @@ asyncio.run(main())
 
 ### Definition 安全 vs runtime signal
 
-TriggerFlow 的 module-safe definition 工作解决的是服务模块被 import、reload 或重复组装时，不要把同一条图边或同一个生成的 `when(...)` gate 声明两遍。
-它不是 runtime signal 去重。
+正常 Python import 会按相同模块名在每个进程里执行一次 flow module。TriggerFlow
+的重复定义保护是第二层防线：当应用代码显式把同一段 `.to(...)` / `.when(...)`
+装配再次执行到同一个 flow 对象上时，避免同一条图边或同一个生成的 `when(...)`
+gate 被声明两遍。它不是 runtime signal 去重。
 
 在一次 execution 中，每一次 `emit` / `emit_nowait` 调用仍然是一次业务事件。
 如果某个 chunk 发三次 `Tick`，`when("Tick")` 就应该响应三次。这正是

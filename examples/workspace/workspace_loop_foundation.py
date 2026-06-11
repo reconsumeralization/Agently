@@ -111,7 +111,7 @@ async def main():
             )
             await execution.async_start({"task_id": "issue-123"})
             state = await execution.async_close()
-            checkpoint_ref = await execution.async_save_checkpoint(step_id="closed")
+            checkpoint_ref = await execution.async_save(step_id="closed")
             runtime_events = await workspace.query_runtime_events(execution.id)
             summary = {
                 **state["workspace_summary"],

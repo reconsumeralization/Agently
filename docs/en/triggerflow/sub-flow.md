@@ -131,7 +131,7 @@ root_interrupt_id = next(iter(execution.get_pending_interrupts()))
 saved = execution.save()
 
 restored = parent_flow.create_execution(auto_close=False)
-await restored.async_rehydrate(saved, runtime_resources={...})
+await restored.async_load(saved, runtime_resources={...})
 await restored.async_continue_with(
     root_interrupt_id,
     {"approved": True},

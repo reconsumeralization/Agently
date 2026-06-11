@@ -327,7 +327,7 @@ async def test_pause_resume_to_self_has_default_replay_guard():
 
     async def always_pause(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(
-            type="approval",
+            type="exchange", exchange_kind="approval",
             interrupt_id="approval",
             resume_to="self",
         )

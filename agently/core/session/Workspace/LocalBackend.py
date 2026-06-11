@@ -17,15 +17,17 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
     WorkspaceBackendCapabilities,
     WorkspaceContentSegment,
     WorkspaceFilePolicyMetadata,
+    WorkspaceLeaseRef,
     WorkspaceLinkRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
@@ -178,19 +180,28 @@ class LocalWorkspaceBackend:
                 sequence INTEGER NOT NULL,
                 event_id TEXT NOT NULL,
                 event_type TEXT NOT NULL,
+                state_version INTEGER,
                 idempotency_key TEXT,
                 parent_id TEXT,
                 causation_id TEXT,
+                parent_signal_id TEXT,
                 node_id TEXT,
+                operator_id TEXT,
+                interrupt_id TEXT,
+                resume_request_id TEXT,
+                actor_id TEXT,
+                lease_owner_id TEXT,
                 aggregation_scope TEXT,
-                checkpoint_ref_json TEXT,
+                snapshot_ref_json TEXT,
                 exchange_id TEXT,
                 artifact_refs_json TEXT NOT NULL DEFAULT '[]',
                 event_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                persisted_at TEXT
             )
             """
         )
+        self._ensure_runtime_event_schema(conn)
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS runtime_events_execution_sequence_idx
@@ -220,6 +231,25 @@ class LocalWorkspaceBackend:
             """
         )
         conn.commit()
+
+    def _ensure_runtime_event_schema(self, conn: sqlite3.Connection):
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(runtime_events)").fetchall()
+        }
+        for column, column_type in {
+            "state_version": "INTEGER",
+            "parent_signal_id": "TEXT",
+            "operator_id": "TEXT",
+            "interrupt_id": "TEXT",
+            "resume_request_id": "TEXT",
+            "actor_id": "TEXT",
+            "lease_owner_id": "TEXT",
+            "snapshot_ref_json": "TEXT",
+            "persisted_at": "TEXT",
+        }.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE runtime_events ADD COLUMN { column } { column_type }")
 
     def _ensure_writable(self):
         self.policy.ensure_writable()
@@ -300,11 +330,13 @@ class LocalWorkspaceBackend:
             "stream_read": True,
             "runtime_event_store": True,
             "runtime_event_idempotency": True,
+            "snapshot_store": True,
             "evidence_links": True,
             "file_policy_metadata": True,
             "retention_anchors": True,
-            "supports_cas": False,
-            "supports_lease": False,
+            "supports_cas": True,
+            "supports_lease": True,
+            "supports_artifact_refs": True,
             "supports_event_sequence": True,
             "supports_range_read": True,
             "supports_stream_read": True,
@@ -419,23 +451,31 @@ class LocalWorkspaceBackend:
         return sanitized if isinstance(sanitized, dict) else {"value": sanitized}
 
     def _row_to_runtime_event_record(self, row: sqlite3.Row) -> WorkspaceRuntimeEventRecord:
-        checkpoint_ref = json_loads(row["checkpoint_ref_json"], None)
+        snapshot_ref = json_loads(row["snapshot_ref_json"], None)
         return {
             "id": str(row["id"]),
             "execution_id": str(row["execution_id"]),
             "sequence": int(row["sequence"]),
             "event_id": str(row["event_id"]),
             "event_type": str(row["event_type"]),
+            "state_version": row["state_version"],
             "idempotency_key": row["idempotency_key"],
             "parent_id": row["parent_id"],
             "causation_id": row["causation_id"],
+            "parent_signal_id": row["parent_signal_id"],
             "node_id": row["node_id"],
+            "operator_id": row["operator_id"],
+            "interrupt_id": row["interrupt_id"],
+            "resume_request_id": row["resume_request_id"],
+            "actor_id": row["actor_id"],
+            "lease_owner_id": row["lease_owner_id"],
             "aggregation_scope": row["aggregation_scope"],
-            "checkpoint_ref": checkpoint_ref,
+            "snapshot_ref": snapshot_ref,
             "exchange_id": row["exchange_id"],
             "artifact_refs": json_loads(row["artifact_refs_json"], []),
             "event": json_loads(row["event_json"], {}),
             "created_at": str(row["created_at"]),
+            "persisted_at": row["persisted_at"],
         }
 
     def _row_to_retention_anchor(self, row: sqlite3.Row) -> WorkspaceRetentionAnchor:
@@ -458,14 +498,92 @@ class LocalWorkspaceBackend:
             return default
         return json_loads(row["value_json"], default)
 
+    @staticmethod
+    def _manifest_from_conn(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
+        row = conn.execute("SELECT value_json FROM manifests WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return default
+        return json_loads(row["value_json"], default)
+
+    @staticmethod
+    def _set_manifest_on_conn(conn: sqlite3.Connection, key: str, value: Any) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO manifests(key, value_json) VALUES (?, ?)",
+            (key, json_dumps(value)),
+        )
+
     def _set_manifest(self, key: str, value: Any) -> None:
         self._ensure_writable()
         with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO manifests(key, value_json) VALUES (?, ?)",
-                (key, json_dumps(value)),
-            )
+            self._set_manifest_on_conn(conn, key, value)
             conn.commit()
+
+    @staticmethod
+    def _checkpoint_state_version(state: Any) -> int | None:
+        if not isinstance(state, dict):
+            return None
+        value = state.get("state_version")
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        return None
+
+    def _latest_checkpoint_state_version(self, conn: sqlite3.Connection, run_id: str) -> int | None:
+        row = conn.execute(
+            """
+            SELECT state_json FROM checkpoints
+            WHERE run_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return 0
+        return self._checkpoint_state_version(json_loads(row["state_json"], {}))
+
+    def _ensure_expected_checkpoint_state_version(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        expected_state_version: int | None,
+    ) -> None:
+        if expected_state_version is None:
+            return
+        current_state_version = self._latest_checkpoint_state_version(conn, run_id)
+        if current_state_version != expected_state_version:
+            raise RuntimeError(
+                f"Workspace checkpoint state version conflict for run '{ run_id }': "
+                f"expected { expected_state_version }, current state version is { current_state_version }."
+            )
+
+    @staticmethod
+    def _lease_manifest_key(run_id: str) -> str:
+        return f"lease.{ run_id }"
+
+    def _require_active_lease(
+        self,
+        lease: Any,
+        *,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+        now: float,
+    ) -> WorkspaceLeaseRef:
+        if not isinstance(lease, dict) or lease.get("released_at") is not None:
+            raise RuntimeError(f"Workspace lease for run '{ run_id }' is not active.")
+        if float(lease.get("lease_until") or 0) <= now:
+            raise RuntimeError(f"Workspace lease for run '{ run_id }' has expired.")
+        if lease.get("owner_id") != owner_id or lease.get("lease_token") != lease_token:
+            raise RuntimeError(f"Workspace lease conflict for run '{ run_id }'.")
+        return cast(WorkspaceLeaseRef, lease)
 
     async def put(
         self,
@@ -820,7 +938,15 @@ class LocalWorkspaceBackend:
         state: dict[str, Any],
         *,
         step_id: str | None = None,
+        expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef:
+        self._ensure_writable()
+        with self._connect() as conn:
+            self._ensure_expected_checkpoint_state_version(
+                conn,
+                run_id=run_id,
+                expected_state_version=expected_state_version,
+            )
         ref = await self.put(
             state,
             collection="checkpoints",
@@ -848,8 +974,42 @@ class LocalWorkspaceBackend:
         state: dict[str, Any],
         *,
         step_id: str | None = None,
+        expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef:
-        return await self.checkpoint(run_id, state, step_id=step_id)
+        return await self.checkpoint(
+            run_id,
+            state,
+            step_id=step_id,
+            expected_state_version=expected_state_version,
+        )
+
+    async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
+        return await self.latest_checkpoint(run_id)
+
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef:
+        return await self.put_checkpoint(
+            run_id,
+            state,
+            step_id=step_id,
+            expected_state_version=expected_state_version,
+        )
+
+    async def get_snapshot(self, run_id: str) -> dict[str, Any] | None:
+        ref = await self.latest_snapshot(run_id)
+        if ref is None:
+            return None
+        state = await self.get_data(ref)
+        return state if isinstance(state, dict) else None
+
+    async def latest_snapshot(self, run_id: str) -> WorkspaceRecordRef | None:
+        return await self.latest_checkpoint(run_id)
 
     async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
         with self._connect() as conn:
@@ -866,6 +1026,127 @@ class LocalWorkspaceBackend:
         if row is None:
             return None
         return self._row_to_ref(row)
+
+    async def put_artifact_ref(
+        self,
+        run_id: str,
+        artifact: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef:
+        metadata = dict(metadata or {})
+        kind = str(metadata.pop("kind", "runtime_artifact"))
+        summary = metadata.pop("summary", f"Artifact for { run_id }")
+        scope = metadata.pop("scope", {})
+        if not isinstance(scope, dict):
+            scope = {}
+        source = metadata.pop("source", {})
+        if not isinstance(source, dict):
+            source = {}
+        source = {"type": "workspace", "name": "artifact_ref", **source}
+        return await self.put(
+            artifact,
+            collection="artifacts",
+            kind=kind,
+            summary=str(summary),
+            scope={"run_id": run_id, **scope},
+            source=source,
+            meta={"artifact_ref": True, **metadata},
+        )
+
+    async def claim_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        ttl: float,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceLeaseRef:
+        self._ensure_writable()
+        if not owner_id:
+            raise ValueError("owner_id must be non-empty.")
+        if ttl <= 0:
+            raise ValueError("ttl must be greater than 0.")
+        now = time.time()
+        lease_key = self._lease_manifest_key(run_id)
+        with self._connect() as conn:
+            self._ensure_expected_checkpoint_state_version(
+                conn,
+                run_id=run_id,
+                expected_state_version=expected_state_version,
+            )
+            current = self._manifest_from_conn(conn, lease_key, None)
+            if (
+                isinstance(current, dict)
+                and current.get("released_at") is None
+                and float(current.get("lease_until") or 0) > now
+                and current.get("owner_id") != owner_id
+            ):
+                raise RuntimeError(f"Workspace lease conflict for run '{ run_id }'.")
+            timestamp = utc_now()
+            lease: WorkspaceLeaseRef = {
+                "run_id": run_id,
+                "owner_id": owner_id,
+                "lease_token": uuid.uuid4().hex,
+                "lease_ttl": float(ttl),
+                "lease_until": now + float(ttl),
+                "claimed_at": timestamp,
+                "heartbeat_at": timestamp,
+                "released_at": None,
+                "state_version": self._latest_checkpoint_state_version(conn, run_id),
+            }
+            self._set_manifest_on_conn(conn, lease_key, lease)
+            conn.commit()
+        return lease
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef:
+        self._ensure_writable()
+        now = time.time()
+        lease_key = self._lease_manifest_key(run_id)
+        with self._connect() as conn:
+            active_lease = self._require_active_lease(
+                self._manifest_from_conn(conn, lease_key, None),
+                run_id=run_id,
+                owner_id=owner_id,
+                lease_token=lease_token,
+                now=now,
+            )
+            lease: dict[str, Any] = dict(active_lease)
+            lease["heartbeat_at"] = utc_now()
+            lease_ttl = lease.get("lease_ttl")
+            lease["lease_until"] = now + float(lease_ttl if isinstance(lease_ttl, (int, float, str)) else 0)
+            self._set_manifest_on_conn(conn, lease_key, lease)
+            conn.commit()
+        return cast(WorkspaceLeaseRef, lease)
+
+    async def release_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef:
+        self._ensure_writable()
+        now = time.time()
+        lease_key = self._lease_manifest_key(run_id)
+        with self._connect() as conn:
+            active_lease = self._require_active_lease(
+                self._manifest_from_conn(conn, lease_key, None),
+                run_id=run_id,
+                owner_id=owner_id,
+                lease_token=lease_token,
+                now=now,
+            )
+            lease: dict[str, Any] = dict(active_lease)
+            lease["released_at"] = utc_now()
+            lease["lease_until"] = now
+            self._set_manifest_on_conn(conn, lease_key, lease)
+            conn.commit()
+        return cast(WorkspaceLeaseRef, lease)
 
     async def checkpoint_history(
         self,
@@ -904,11 +1185,21 @@ class LocalWorkspaceBackend:
         event: RuntimeEvent | RuntimeEventDict | dict[str, Any],
         *,
         sequence: int | None = None,
+        expected_sequence: int | None = None,
         idempotency_key: str | None = None,
-        checkpoint_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        snapshot_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
         artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
         exchange_id: str | None = None,
+        state_version: int | None = None,
+        parent_id: str | None = None,
+        causation_id: str | None = None,
+        parent_signal_id: str | None = None,
         node_id: str | None = None,
+        operator_id: str | None = None,
+        interrupt_id: str | None = None,
+        resume_request_id: str | None = None,
+        actor_id: str | None = None,
+        lease_owner_id: str | None = None,
         aggregation_scope: str | None = None,
     ) -> WorkspaceRuntimeEventRecord:
         self._ensure_writable()
@@ -920,9 +1211,9 @@ class LocalWorkspaceBackend:
         event_type = str(event_dict.get("event_type") or "runtime.event")
         raw_meta = event_dict.get("meta")
         meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
-        parent_id = meta.get("parent_event_id") or meta.get("parent_id")
-        causation_id = meta.get("causation_id")
-        resolved_checkpoint_ref = await self._coerce_ref_envelope(checkpoint_ref)
+        resolved_parent_id = parent_id or meta.get("parent_event_id") or meta.get("parent_id")
+        resolved_causation_id = causation_id or meta.get("causation_id")
+        resolved_snapshot_ref = await self._coerce_ref_envelope(snapshot_ref)
         resolved_artifact_refs = [
             envelope
             for envelope in [
@@ -932,6 +1223,7 @@ class LocalWorkspaceBackend:
             if envelope is not None
         ]
         created_at = utc_now()
+        persisted_at = created_at
         with self._connect() as conn:
             if idempotency_key is not None:
                 existing = conn.execute(
@@ -943,20 +1235,28 @@ class LocalWorkspaceBackend:
                 ).fetchone()
                 if existing is not None:
                     return self._row_to_runtime_event_record(existing)
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) AS max_sequence FROM runtime_events WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+            next_sequence = int(row["max_sequence"] or 0) + 1
+            if expected_sequence is not None and int(expected_sequence) != next_sequence:
+                raise RuntimeError(
+                    f"Workspace runtime event sequence conflict for execution '{ execution_id }': "
+                    f"expected { expected_sequence }, next sequence is { next_sequence }."
+                )
             if sequence is None:
-                row = conn.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) AS max_sequence FROM runtime_events WHERE execution_id = ?",
-                    (execution_id,),
-                ).fetchone()
-                sequence = int(row["max_sequence"] or 0) + 1
+                sequence = next_sequence
             record_id = f"rtevt_{ uuid.uuid4().hex }"
             conn.execute(
                 """
                 INSERT INTO runtime_events (
                     id, execution_id, sequence, event_id, event_type, idempotency_key,
-                    parent_id, causation_id, node_id, aggregation_scope, checkpoint_ref_json,
-                    exchange_id, artifact_refs_json, event_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    parent_id, causation_id, parent_signal_id, node_id, operator_id,
+                    interrupt_id, resume_request_id, actor_id, lease_owner_id, state_version,
+                    aggregation_scope, snapshot_ref_json,
+                    exchange_id, artifact_refs_json, event_json, created_at, persisted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
@@ -965,15 +1265,23 @@ class LocalWorkspaceBackend:
                     event_id,
                     event_type,
                     idempotency_key,
-                    parent_id,
-                    causation_id,
+                    resolved_parent_id,
+                    resolved_causation_id,
+                    parent_signal_id or meta.get("parent_signal_id"),
                     node_id or meta.get("node_id"),
+                    operator_id or meta.get("operator_id"),
+                    interrupt_id or meta.get("interrupt_id"),
+                    resume_request_id or meta.get("resume_request_id"),
+                    actor_id or meta.get("actor_id"),
+                    lease_owner_id or meta.get("lease_owner_id"),
+                    state_version,
                     aggregation_scope or meta.get("aggregation_scope"),
-                    json_dumps(resolved_checkpoint_ref) if resolved_checkpoint_ref is not None else None,
+                    json_dumps(resolved_snapshot_ref) if resolved_snapshot_ref is not None else None,
                     exchange_id or meta.get("exchange_id"),
                     json_dumps(resolved_artifact_refs),
                     json_dumps(event_dict),
                     created_at,
+                    persisted_at,
                 ),
             )
             row = conn.execute("SELECT * FROM runtime_events WHERE id = ?", (record_id,)).fetchone()

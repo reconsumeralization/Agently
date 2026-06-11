@@ -1,3 +1,8 @@
+import importlib
+import sys
+import textwrap
+from typing import Any, cast
+
 import pytest
 
 from agently import TriggerFlow, TriggerFlowRuntimeData
@@ -9,6 +14,83 @@ def _operators(flow: TriggerFlow):
 
 def _operators_by_kind(flow: TriggerFlow, kind: str):
     return [operator for operator in _operators(flow) if operator["kind"] == kind]
+
+
+@pytest.mark.asyncio
+async def test_module_level_flow_import_cache_service_shape(tmp_path, monkeypatch):
+    (tmp_path / "action_flow.py").write_text(
+        textwrap.dedent(
+            """
+            from agently import TriggerFlow
+
+            action_flow = TriggerFlow(name="module-level-service-shape")
+
+            @action_flow.chunk
+            async def action_1(data):
+                count = data.get_state("action_1_count", 0) or 0
+                await data.async_set_state("action_1_count", count + 1, emit=False)
+                await data.async_emit("ACTION_DONE", {"request": data.input["request"]})
+                return data.input
+
+            @action_flow.chunk
+            async def on_done(data):
+                count = data.get_state("on_done_count", 0) or 0
+                await data.async_set_state("on_done_count", count + 1, emit=False)
+                await data.async_set_state("last_done", data.value, emit=False)
+
+            action_flow.to(action_1)
+            action_flow.when("ACTION_DONE").to(on_done)
+            """
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "api.py").write_text(
+        textwrap.dedent(
+            """
+            from action_flow import action_flow
+
+
+            async def test(payload):
+                return await action_flow.async_start(payload, auto_close_timeout=0.01)
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    sys.modules.pop("action_flow", None)
+    sys.modules.pop("api", None)
+    try:
+        action_module = importlib.import_module("action_flow")
+        api_module = importlib.import_module("api")
+        action_flow = cast(Any, getattr(action_module, "action_flow"))
+        action_1 = cast(Any, getattr(action_module, "action_1"))
+        on_done = cast(Any, getattr(action_module, "on_done"))
+        api_action_flow = cast(Any, getattr(api_module, "action_flow"))
+        api_test = cast(Any, getattr(api_module, "test"))
+        imported_ids = [
+            id(cast(Any, getattr(importlib.import_module("action_flow"), "action_flow")))
+            for _ in range(3)
+        ]
+
+        assert len(set(imported_ids)) == 1
+        assert api_action_flow is action_flow
+
+        for index in range(3):
+            result = await api_test({"request": index})
+            assert result["action_1_count"] == 1
+            assert result["on_done_count"] == 1
+            assert result["last_done"] == {"request": index}
+
+        action_flow.to(action_1)
+        action_flow.when("ACTION_DONE").to(on_done)
+        replayed_result = await api_test({"request": "replayed"})
+
+        assert replayed_result["action_1_count"] == 1
+        assert replayed_result["on_done_count"] == 1
+        assert replayed_result["last_done"] == {"request": "replayed"}
+    finally:
+        sys.modules.pop("action_flow", None)
+        sys.modules.pop("api", None)
 
 
 @pytest.mark.asyncio

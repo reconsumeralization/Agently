@@ -54,7 +54,7 @@ async def gate(data: TriggerFlowRuntimeData):
     if data.is_resume:
         return {"decision": data.resume.value}
     return await data.async_pause_for(
-        type="approval",
+        type="exchange", exchange_kind="approval",
         payload={"question": "批准？"},
         resume_to="self",
     )
@@ -79,7 +79,7 @@ async def main():
 
     async def ask(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(
-            type="approval",
+            type="exchange", exchange_kind="approval",
             payload={"question": f"批准工单 {data.input} 退款？"},
             resume_to="next",
         )
@@ -110,7 +110,7 @@ asyncio.run(main())
 
 ## 跨进程重启的 pause
 
-`pause_for(...)` 可以和 checkpoint rehydration 配合：
+`pause_for(...)` 可以和 execution snapshot load 配合：
 
 ```python
 flow.declare_resource_requirement("approval_service")
@@ -124,7 +124,7 @@ saved = execution.save()
 
 # 后续在另一进程 / worker：
 restored = flow.create_execution(auto_close=False)
-await restored.async_rehydrate(
+await restored.async_load(
     saved,
     runtime_resources={"approval_service": approval_service},
 )
@@ -137,7 +137,7 @@ await restored.async_continue_with(
 snapshot = await restored.async_close()
 ```
 
-interrupt 和已接受的 resume request id 都是 saved state 的一部分，新进程知道有什么待处理，也能忽略重复 resume。详见 [持久化与 Blueprint](persistence-and-blueprint.md)。
+interrupt 和已接受的 resume request id 都是 saved state 的一部分，新进程知道有什么待处理，也能忽略重复 resume。详见 [持久化与 Blueprint](persistence-and-blueprint.md)。生产级 worker handoff、callback transport、outbox 顺序和 live object 恢复见 [分布式 Pause 与 Resume 边界](distributed-pause-resume.md)。
 
 ## 多个并发 pause
 
@@ -172,3 +172,4 @@ snapshot = await execution.async_close(pending_interrupts="cancel")
 - [Lifecycle](lifecycle.md) —— 恢复后何时 seal/close
 - [持久化与 Blueprint](persistence-and-blueprint.md) —— 跨 pause 保存
 - [State 与 Resources](state-and-resources.md) —— `load()` 后重新注入 `runtime_resources`
+- [分布式 Pause 与 Resume 边界](distributed-pause-resume.md) —— 宿主管理恢复和 live object ownership

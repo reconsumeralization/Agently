@@ -53,9 +53,11 @@ Mechanics:
 
 ### Definition safety vs runtime signals
 
-Module-safe TriggerFlow definition work is about not declaring the same graph
-edge or generated `when(...)` gate twice when service modules are imported,
-reloaded, or assembled repeatedly. It is not runtime signal deduplication.
+Normal Python imports execute a flow module once per process for the same module
+name. TriggerFlow's duplicate-definition protection is the second line of
+defense: it avoids declaring the same graph edge or generated `when(...)` gate
+twice when application code explicitly runs the same `.to(...)` / `.when(...)`
+wiring again on the same flow object. It is not runtime signal deduplication.
 
 During one execution, every `emit` / `emit_nowait` call is still a business
 event. If a chunk emits `Tick` three times, `when("Tick")` should react three

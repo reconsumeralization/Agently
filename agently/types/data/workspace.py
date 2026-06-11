@@ -82,16 +82,36 @@ class WorkspaceRuntimeEventRecord(TypedDict):
     sequence: int
     event_id: str
     event_type: str
+    state_version: int | None
     idempotency_key: str | None
     parent_id: str | None
     causation_id: str | None
+    parent_signal_id: str | None
     node_id: str | None
+    operator_id: str | None
+    interrupt_id: str | None
+    resume_request_id: str | None
+    actor_id: str | None
+    lease_owner_id: str | None
     aggregation_scope: str | None
-    checkpoint_ref: WorkspaceReferenceEnvelope | None
+    snapshot_ref: WorkspaceReferenceEnvelope | None
     exchange_id: str | None
     artifact_refs: list[WorkspaceReferenceEnvelope]
     event: dict[str, Any]
     created_at: str
+    persisted_at: str | None
+
+
+class WorkspaceLeaseRef(TypedDict, total=False):
+    run_id: str
+    owner_id: str
+    lease_token: str
+    lease_ttl: float
+    lease_until: float
+    claimed_at: str
+    heartbeat_at: str
+    released_at: str | None
+    state_version: int | None
 
 
 class WorkspaceFilePolicyMetadata(TypedDict):

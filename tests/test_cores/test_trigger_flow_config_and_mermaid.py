@@ -3,7 +3,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently.types.plugins import CheckpointStore, RuntimeEventStore
+from agently.types.plugins import ExecutionSnapshotStore, RuntimeEventStore
 from agently.types.data.event import normalize_triggerflow_event_type
 
 
@@ -762,7 +762,7 @@ async def test_trigger_flow_chunk_runtime_events_include_input_output_and_origin
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_persists_runtime_events_and_checkpoints_to_workspace_provider(tmp_path):
+async def test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_provider(tmp_path):
     agent = Agently.create_agent("triggerflow-workspace-provider").use_workspace(tmp_path / "run")
     workspace = agent.workspace
     assert workspace is not None
@@ -774,9 +774,12 @@ async def test_trigger_flow_persists_runtime_events_and_checkpoints_to_workspace
         return data.value + 1
 
     flow.to(compute).end()
-    execution = flow.create_execution()
-    execution.set_checkpoint_store(cast(CheckpointStore, workspace))
-    execution.set_runtime_event_store(cast(RuntimeEventStore, workspace))
+    execution = flow.create_execution(
+        runtime_resources={
+            "snapshot_store": cast(ExecutionSnapshotStore, workspace),
+            "runtime_event_store": cast(RuntimeEventStore, workspace),
+        }
+    )
 
     captured = []
 
@@ -784,7 +787,7 @@ async def test_trigger_flow_persists_runtime_events_and_checkpoints_to_workspace
         if event.meta.get("execution_id") == execution.id:
             captured.append(event)
 
-    hook_name = "test_trigger_flow_persists_runtime_events_and_checkpoints_to_workspace_provider.capture"
+    hook_name = "test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_provider.capture"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     try:
         result = await execution.async_start(7)
@@ -793,12 +796,11 @@ async def test_trigger_flow_persists_runtime_events_and_checkpoints_to_workspace
 
     assert _compat_result(result) == 8
 
-    checkpoint_ref = await execution.async_save_checkpoint(step_id="closed")
-    assert checkpoint_ref["collection"] == "checkpoints"
-    assert checkpoint_ref["scope"]["step_id"] == "closed"
-    checkpoint_state = await workspace.get_data(checkpoint_ref)
-    assert checkpoint_state["execution_id"] == execution.id
-    assert checkpoint_state["checkpoint"]["execution_id"] == execution.id
+    snapshot_ref = await execution.async_save(step_id="closed")
+    assert snapshot_ref["collection"] == "checkpoints"
+    assert snapshot_ref["scope"]["step_id"] == "closed"
+    snapshot_state = await workspace.get_data(snapshot_ref)
+    assert snapshot_state["execution_id"] == execution.id
 
     records = await workspace.query_runtime_events(execution.id)
     captured_event_ids = [event.event_id for event in captured]

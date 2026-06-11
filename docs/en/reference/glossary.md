@@ -46,7 +46,7 @@ The three protocol-level model request plugins: `OpenAICompatible`, `OpenAIRespo
 
 ## Runtime resources
 
-Execution-local storage for live objects — database clients, callbacks, sockets, function pointers, cache handles. Runtime resources are **not** serializable and **do not** enter close snapshots or save/load checkpoints; only their `resource_keys` are recorded. On resume after `load()`, the caller must re-inject them.
+Execution-local storage for live objects — database clients, callbacks, sockets, function pointers, cache handles. Runtime resources are **not** serializable and **do not** enter close snapshots or save/load execution snapshots; only their `resource_keys` are recorded. On resume after `load()`, the caller must re-inject them.
 
 This is a distinct concept from `state` and `flow_data`. See [State and Resources](../triggerflow/state-and-resources.md).
 

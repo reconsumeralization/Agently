@@ -12,16 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
 
-from .TriggerFlow import TriggerFlow
-from .BluePrint import TriggerFlowBlueprint
-from .Execution import TriggerFlowExecution
-from .ExecutionResult import TriggerFlowExecutionResult
-from .RecoveryDiagnostics import diagnose_runtime_event_records, project_runtime_event_record
-from .Chunk import TriggerFlowChunk
-from .Process import TriggerFlowProcess
-from .process import (
-    TriggerFlowBaseProcess,
-    TriggerFlowForEachProcess,
-    TriggerFlowMatchCaseProcess,
-)
+from typing import Any, Awaitable, Protocol, runtime_checkable
+
+from agently.types.data import ExecutionExchangeProviderResult, ExecutionExchangeRequest
+
+
+@runtime_checkable
+class ExecutionExchangeProvider(Protocol):
+    def publish_request(
+        self,
+        execution_id: str,
+        request: ExecutionExchangeRequest,
+        *,
+        interrupt: dict[str, Any],
+    ) -> ExecutionExchangeProviderResult | dict[str, Any] | None | Awaitable[ExecutionExchangeProviderResult | dict[str, Any] | None]: ...

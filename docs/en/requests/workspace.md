@@ -131,13 +131,13 @@ source of truth:
 
 ```python
 execution = flow.create_execution(workspace=agent.workspace)
-checkpoint_ref = await execution.async_save_checkpoint(step_id="review")
+snapshot_ref = await execution.async_save(step_id="review")
 
 event_record = await agent.workspace.append_runtime_event(
     "issue-123-execution",
     {"event_type": "triggerflow.interrupt_raised", "payload": {"id": "approval"}},
     idempotency_key="approval-request-1",
-    checkpoint_ref=checkpoint_ref,
+    snapshot_ref=snapshot_ref,
     artifact_refs=[ref],
 )
 
@@ -148,10 +148,48 @@ events = await agent.workspace.query_runtime_events(
 ```
 
 RuntimeEvent storage preserves per-execution sequence, idempotency key,
-checkpoint refs, artifact refs, exchange id, node id, and aggregation scope. It
-does not decide pause/resume, approval, retry, or DAG readiness; those semantics
-remain owned by TriggerFlow, PolicyApproval, ExecutionExchange, and
-AgentExecution.
+state version, parent event id, causation id, parent signal id, aggregation
+scope, operator id, interrupt id, resume request id, actor id, lease owner id,
+snapshot refs, artifact refs, and exchange id. Use `expected_sequence=...`
+when a distributed provider needs fail-closed append ordering, and use
+`idempotency_key=...` for callback or webhook retry safety. Workspace does not
+decide pause/resume, approval, retry, or DAG readiness; those semantics remain
+owned by TriggerFlow, PolicyApproval, ExecutionExchange, and AgentExecution.
+
+Workspace-backed durable providers also expose TriggerFlow-facing snapshot CAS,
+lease, and artifact-ref helpers:
+
+```python
+snapshot_ref = await agent.workspace.put_snapshot(
+    execution.run_context.run_id,
+    execution.save(),
+    expected_state_version=previous_state_version,
+)
+
+lease = await agent.workspace.claim_lease(
+    execution.run_context.run_id,
+    "worker-1",
+    ttl=30.0,
+    expected_state_version=snapshot_state_version,
+)
+await agent.workspace.heartbeat_lease(
+    execution.run_context.run_id,
+    "worker-1",
+    lease["lease_token"],
+)
+
+artifact_ref = await agent.workspace.put_artifact_ref(
+    execution.run_context.run_id,
+    large_payload,
+    metadata={"kind": "snapshot_payload"},
+)
+```
+
+`expected_state_version=...` fails closed when the latest checkpoint state
+version does not match the caller's read cursor. Lease methods enforce owner
+and token checks inside the selected provider. The local backend provides this
+single-node durable-provider seam for development and local restart recovery;
+production cross-worker guarantees still belong to the selected backend.
 
 ## Links And Diagnostics
 
@@ -201,8 +239,9 @@ checkpoint, RuntimeEvent storage, ref resolution, retention policy, text index,
 policy, and vector index. It also reports capability flags such as
 `supports_event_sequence`, `supports_range_read`, `supports_stream_read`,
 `supports_retention`, `supports_compaction_anchor`, `supports_cas`,
-`supports_lease`, and `supports_remote_backend`. Distributed recovery should
-fail closed when the selected provider lacks the required flags.
+`supports_lease`, `supports_artifact_refs`, and `supports_remote_backend`.
+Distributed recovery should fail closed when the selected provider lacks the
+required flags or the matching provider methods.
 
 ## Action Boundary
 
@@ -279,8 +318,8 @@ RuntimeEvent, evidence link, and capability paths as the local backend. That
 proof is not a public Redis, Postgres, or object-storage adapter; production
 providers must still report their real capabilities and fail closed when
 distributed recovery requirements are missing.
-TriggerFlow tests also read Workspace-backed checkpoints through the provider and
-rehydrate pause/continue, policy-approval waits, and `when(..., mode="and")`
+TriggerFlow tests also read Workspace-backed execution snapshots through the provider and
+load pause/continue, policy-approval waits, and `when(..., mode="and")`
 join progress through TriggerFlow, so Workspace remains storage rather than a
 workflow control plane.
 

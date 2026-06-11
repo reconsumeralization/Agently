@@ -141,6 +141,13 @@ from .execution_environment import (
     ExecutionEnvironmentStatus,
 )
 
+from .execution_exchange import (
+    ExecutionExchangeDispatchState,
+    ExecutionExchangeProviderResult,
+    ExecutionExchangeRequest,
+    ExecutionExchangeWaitMode,
+)
+
 from .policy_approval import (
     PolicyApprovalDecision,
     PolicyApprovalHandler,
@@ -173,6 +180,7 @@ from .workspace import (
     WorkspaceContextOmission,
     WorkspaceContextPack,
     WorkspaceFilePolicyMetadata,
+    WorkspaceLeaseRef,
     WorkspaceLinkRef,
     WorkspaceRecallPlan,
     WorkspaceRecordRef,

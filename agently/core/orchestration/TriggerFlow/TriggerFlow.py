@@ -401,6 +401,14 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         kind: str = "runtime_resource",
         required: bool = True,
         metadata: dict[str, Any] | None = None,
+        resolver: str | None = None,
+        provider_kind: str | None = None,
+        secret_ref: str | None = None,
+        config_ref: str | None = None,
+        resolver_version: str | None = None,
+        resolver_fingerprint: str | None = None,
+        health: str | None = None,
+        fail_policy: str | None = None,
     ):
         requirement = {
             "kind": str(kind),
@@ -409,6 +417,18 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             "source": "flow",
             "metadata": {"scope": "flow", **dict(metadata or {})},
         }
+        for field, value in (
+            ("resolver", resolver),
+            ("provider_kind", provider_kind),
+            ("secret_ref", secret_ref),
+            ("config_ref", config_ref),
+            ("resolver_version", resolver_version),
+            ("resolver_fingerprint", resolver_fingerprint),
+            ("health", health),
+            ("fail_policy", fail_policy),
+        ):
+            if value is not None:
+                requirement[field] = str(value)
         self._resource_requirements = [
             item
             for item in self._resource_requirements

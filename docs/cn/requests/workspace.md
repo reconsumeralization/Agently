@@ -121,13 +121,13 @@ refs，恢复逻辑只读取需要的部分。
 
 ```python
 execution = flow.create_execution(workspace=agent.workspace)
-checkpoint_ref = await execution.async_save_checkpoint(step_id="review")
+snapshot_ref = await execution.async_save(step_id="review")
 
 event_record = await agent.workspace.append_runtime_event(
     "issue-123-execution",
     {"event_type": "triggerflow.interrupt_raised", "payload": {"id": "approval"}},
     idempotency_key="approval-request-1",
-    checkpoint_ref=checkpoint_ref,
+    snapshot_ref=snapshot_ref,
     artifact_refs=[ref],
 )
 
@@ -138,9 +138,47 @@ events = await agent.workspace.query_runtime_events(
 ```
 
 RuntimeEvent 存储会保留每个 execution 内的 sequence、idempotency key、
-checkpoint refs、artifact refs、exchange id、node id 和 aggregation scope。它不决定
-pause/resume、approval、retry 或 DAG readiness；这些语义仍由 TriggerFlow、
-PolicyApproval、ExecutionExchange 和 AgentExecution 所有。
+state version、parent event id、causation id、parent signal id、aggregation
+scope、operator id、interrupt id、resume request id、actor id、lease owner id、
+snapshot refs、artifact refs 和 exchange id。分布式 provider 需要 fail-closed
+append 顺序时使用 `expected_sequence=...`；callback 或 webhook 重试安全使用
+`idempotency_key=...`。Workspace 不决定 pause/resume、approval、retry 或 DAG
+readiness；这些语义仍由 TriggerFlow、PolicyApproval、ExecutionExchange 和
+AgentExecution 所有。
+
+Workspace-backed durable provider 也提供 TriggerFlow-facing snapshot CAS、lease
+和 artifact-ref helpers：
+
+```python
+snapshot_ref = await agent.workspace.put_snapshot(
+    execution.run_context.run_id,
+    execution.save(),
+    expected_state_version=previous_state_version,
+)
+
+lease = await agent.workspace.claim_lease(
+    execution.run_context.run_id,
+    "worker-1",
+    ttl=30.0,
+    expected_state_version=snapshot_state_version,
+)
+await agent.workspace.heartbeat_lease(
+    execution.run_context.run_id,
+    "worker-1",
+    lease["lease_token"],
+)
+
+artifact_ref = await agent.workspace.put_artifact_ref(
+    execution.run_context.run_id,
+    large_payload,
+    metadata={"kind": "snapshot_payload"},
+)
+```
+
+`expected_state_version=...` 会在最新 checkpoint state version 与调用方读到的
+cursor 不一致时 fail closed。Lease methods 在所选 provider 内检查 owner 和 token。
+local backend 提供这个单节点 durable-provider seam，用于开发和本地重启恢复；生产级
+跨 worker 保证仍属于所选 backend。
 
 ## Links 与诊断
 
@@ -188,8 +226,9 @@ await agent.workspace.add_retention_anchor(
 RuntimeEvent storage、ref resolution、retention policy、text index、policy 和 vector
 index 组件。它也会报告 `supports_event_sequence`、`supports_range_read`、
 `supports_stream_read`、`supports_retention`、`supports_compaction_anchor`、
-`supports_cas`、`supports_lease` 和 `supports_remote_backend` 等 capability flags。
-分布式恢复应在所选 provider 缺少必要 flags 时 fail closed。
+`supports_cas`、`supports_lease`、`supports_artifact_refs` 和
+`supports_remote_backend` 等 capability flags。分布式恢复应在所选 provider
+缺少必要 flags 或对应 provider methods 时 fail closed。
 
 ## Action 边界
 
@@ -257,8 +296,8 @@ local backend。没有显式选择 provider 时，Agent 的 lazy default Workspa
 evidence link 和 capability 路径。这个 proof 不等于公开 Redis、Postgres 或
 object-storage adapter；生产 provider 仍必须报告真实能力，并在缺少分布式恢复要求时
 fail closed。
-TriggerFlow 测试也会通过 provider 读回 Workspace-backed checkpoint，并由
-TriggerFlow 自己 rehydrate pause/continue、policy approval waits 与
+TriggerFlow 测试也会通过 provider 读回 Workspace-backed execution snapshot，并由
+TriggerFlow 自己 load pause/continue、policy approval waits 与
 `when(..., mode="and")` join progress，因此 Workspace 仍是 storage，不是
 workflow control plane。
 
