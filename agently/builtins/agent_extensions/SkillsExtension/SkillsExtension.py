@@ -133,6 +133,9 @@ class SkillsExtension(BaseAgent):
         mcp_config: Any = None,
         python: dict[str, Any] | None = None,
         search: dict[str, Any] | None = None,
+        http_request: dict[str, Any] | None = None,
+        capability_scope: Literal["agent", "execution"] | None = None,
+        min_auto_mount_confidence: float | None = None,
     ):
         policy = _ensure_dict(self.settings.get("skills.capability_policy", {}))
         if auto_load is not None:
@@ -149,6 +152,14 @@ class SkillsExtension(BaseAgent):
             policy["python"] = dict(python)
         if search is not None:
             policy["web_search"] = dict(search)
+        if http_request is not None:
+            policy["http_request"] = dict(http_request)
+        if capability_scope is not None:
+            if capability_scope not in {"agent", "execution"}:
+                raise ValueError("capability_scope must be one of: 'agent', 'execution'.")
+            policy["capability_scope"] = capability_scope
+        if min_auto_mount_confidence is not None:
+            policy["min_auto_mount_confidence"] = float(min_auto_mount_confidence)
         self.settings.set("skills.capability_policy", policy)
         return self
 

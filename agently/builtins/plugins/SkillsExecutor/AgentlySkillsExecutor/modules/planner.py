@@ -325,6 +325,10 @@ class SkillPlanner:
             key = (str(options.get("source") or ""), str(options.get("subpath") or ""), str(options.get("ref") or ""))
             if key not in installed_sources:
                 try:
+                    # Planning installs a not-yet-installed source-selected Skill so
+                    # it can be used, but must not silently replace/upgrade Skills
+                    # the host already installed (reproducibility). update=False
+                    # installs the missing target and leaves installed Skills as-is.
                     report = self.registry.install_skills_pack(
                         options["source"],
                         name=options.get("name"),
@@ -334,7 +338,7 @@ class SkillPlanner:
                         subpath=options.get("subpath"),
                         source_type=options.get("source_type"),
                         trust_level=options.get("trust_level"),
-                        update=True,
+                        update=False,
                     )
                     diagnostics.append({
                         "level": "info",

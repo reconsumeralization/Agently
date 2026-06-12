@@ -387,6 +387,20 @@ class Action:
         self.action_registry.tag(action_ids, tags)
         return self
 
+    def unregister_action(self, action_ids: str | list[str]) -> list[str]:
+        """Unregister one or more actions, returning the ids actually removed.
+
+        Reverses scoped registrations (e.g. capability mounts) so a one-time
+        registration does not persist on the host.
+        """
+        ids = self._normalize_registered_action_ids(action_ids)
+        removed: list[str] = []
+        for action_id in ids:
+            if self.action_registry.unregister(action_id):
+                self.action_funcs.pop(action_id, None)
+                removed.append(action_id)
+        return removed
+
     def action_func(self, func: Callable[P, R]) -> Callable[P, R]:
         action_id = func.__name__
         desc = inspect.getdoc(func) or func.__name__

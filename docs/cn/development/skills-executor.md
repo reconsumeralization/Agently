@@ -405,15 +405,14 @@ agent.configure_skill_capabilities(
     workspace_root="./.agently/tasks/research",
     search={
         "backend": "auto",
-        "refresh_ddgs": "allow",
     },
 )
 agent.configure_policy_approval(handler="input_timeout_fail")
 ```
 
 面向搜索的 Skills，Agently 会装载由 `ddgs` Python package 支撑的框架 Search
-能力。真实搜索前建议保持 `ddgs` 最新：
-`python -m pip install --upgrade ddgs`。backend 策略不能被固定成某一个 provider；
+能力。请在宿主环境中预先保持 `ddgs` 最新（`python -m pip install --upgrade ddgs`）；
+Agently 运行时不会改动宿主环境。backend 策略不能被固定成某一个 provider；
 默认使用 `backend="auto"`，也可以由宿主 policy 配置任何 ddgs 支持的 backend。
 Search 会把 backend 层面的“无结果”视为成功空结果，并在选定 backend 没有解析到
 可用结果时继续尝试配置或默认的 ddgs fallback backends。如果一个或多个 backend

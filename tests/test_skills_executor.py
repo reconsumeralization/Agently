@@ -687,14 +687,47 @@ and write the final Markdown deliverable to a workspace file.
     assert agent.action.action_registry.has("run_python")
     mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
     assert {item["need"] for item in mounted} >= {"web_search", "web_browse", "workspace_write", "python"}
-    search_spec = agent.action.action_registry.get_spec("search")
-    assert search_spec is not None
-    assert search_spec.get("meta", {}).get("provider") == "ddgs"
-    assert search_spec.get("meta", {}).get("backend") == "auto"
 
 
 @pytest.mark.asyncio
-async def test_skill_web_search_can_refresh_ddgs_without_forcing_backend(monkeypatch, tmp_path):
+async def test_execution_scoped_capabilities_are_released_after_run(tmp_path):
+    """ISSUE-002: capability_scope='execution' reverses mounts after the run."""
+    source = tmp_path / "research-writer-scoped"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Research Writer Scoped
+description: Research public context and write a report.
+---
+
+# Research Writer Scoped
+
+Search public sources and write the final Markdown deliverable to a file.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(
+        auto_load={"web_search": "allow", "workspace_write": "allow"},
+        workspace_root=str(tmp_path / "workspace"),
+        capability_scope="execution",
+    )
+
+    execution = await agent.async_run_skills_task(
+        "prepare a research report",
+        skills=["research-writer-scoped"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
+    assert mounted  # capabilities were mounted during the run
+    # ...but execution-scoped capabilities must not persist on the agent afterward.
+    assert not agent.action.action_registry.has("search")
+    assert not agent.action.action_registry.has("write_file")
+
+
+@pytest.mark.asyncio
+async def test_skill_web_search_mounts_without_environment_mutation(monkeypatch, tmp_path):
     source = tmp_path / "search-skill"
     _write(
         source / "SKILL.md",
@@ -711,21 +744,11 @@ Search public sources before answering.
     Agently.skills_executor.install_skills(source)
     agent = _create_agent().configure_skill_capabilities(
         auto_load={"web_search": "allow"},
-        search={"refresh_ddgs": "allow"},
     )
-    refresh_calls: list[dict[str, Any]] = []
+    shell_calls: list[dict[str, Any]] = []
 
     def fake_enable_shell(**kwargs):
-        refresh_calls.append(dict(kwargs))
-        agent.action.register_action(
-            action_id=kwargs["action_id"],
-            desc="Refresh ddgs.",
-            kwargs={"cmd": (list, "Command.")},
-            func=lambda cmd: {"stdout": "Requirement already satisfied: ddgs", "cmd": cmd},
-            tags=[f"agent-{ agent.name }"],
-            expose_to_model=bool(kwargs.get("expose_to_model", True)),
-            side_effect_level="exec",
-        )
+        shell_calls.append(dict(kwargs))
         return agent
 
     monkeypatch.setattr(agent, "enable_shell", fake_enable_shell)
@@ -737,15 +760,12 @@ Search public sources before answering.
     )
 
     assert execution.status == "success"
-    assert refresh_calls
-    assert refresh_calls[0]["commands"] == ["python -m pip install --upgrade ddgs"]
-    assert refresh_calls[0]["expose_to_model"] is False
+    # Mounting web_search must never shell out to mutate the host environment.
+    assert shell_calls == []
     search_spec = agent.action.action_registry.get_spec("search")
     assert search_spec is not None
     assert search_spec.get("meta", {}).get("provider") == "ddgs"
     assert search_spec.get("meta", {}).get("backend") == "auto"
-    mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
-    assert any("refresh_ddgs_dependency" in item.get("action_ids", []) for item in mounted)
 
 
 @pytest.mark.asyncio
@@ -1765,6 +1785,32 @@ async def test_orchestrator_stream_bridge_maps_prompt_only_skill_model_fields():
     assert stream.items[0].source == "model_request"
     assert stream.items[0].event_type == "delta"
     assert stream.items[0].is_complete is False
+
+
+def test_http_capability_blocks_private_hosts_by_default():
+    """ISSUE-015: the built-in HTTP capability must default-deny SSRF targets."""
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecutor
+
+    assert SkillExecutor._http_host_allowed("127.0.0.1", {}) is False
+    assert SkillExecutor._http_host_allowed("169.254.169.254", {}) is False  # cloud metadata
+    assert SkillExecutor._http_host_allowed("10.0.0.5", {}) is False
+    assert SkillExecutor._http_host_allowed("8.8.8.8", {}) is True  # public IP literal, no DNS
+    # Explicit host allowlist opens an internal host.
+    assert SkillExecutor._http_host_allowed("127.0.0.1", {"allow_hosts": ["127.0.0.1"]}) is True
+    assert SkillExecutor._http_host_allowed("10.0.0.5", {"allow_private": True}) is True
+    # Denylist overrides allowance for a public host.
+    assert SkillExecutor._http_host_allowed("8.8.8.8", {"deny_hosts": ["8.8.8.8"]}) is False
+
+
+def test_skill_script_commands_exclude_package_runners():
+    """ISSUE-015: npx/npm must not be in the default script allowlist."""
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecutor
+
+    executor = SkillExecutor(registry=Agently.skills_executor.registry)
+    commands = executor._script_commands({"resource_index": {"resources": []}}, {})
+    assert "npx" not in commands
+    assert "npm" not in commands
+    assert "python" in commands
 
 
 def test_no_matching_skill_returns_no_match(tmp_path):

@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 import uuid
 from inspect import isawaitable
 from pathlib import Path
@@ -137,7 +139,11 @@ class SkillExecutor:
 
         capability_result = await self._prepare_capabilities(context=context, plan=plan)
         runtime_stream.extend(capability_result["runtime_stream"])
+        capability_policy = self._capability_policy(context=context, plan=plan)
+        capability_scope = str(capability_policy.get("capability_scope") or "agent").strip().lower()
+        mounted_action_ids = list(capability_result.get("mounted_action_ids", []) or [])
         if capability_result["status"] in {"blocked", "approval_required"}:
+            self._release_scoped_capabilities(context, capability_scope, mounted_action_ids)
             return self._build_execution(
                 execution_id=execution_id,
                 status="blocked",
@@ -155,6 +161,7 @@ class SkillExecutor:
         strategy_name = self._resolve_strategy_name(plan=plan, effort=effort, effort_config=effort_config)
         strategy_handler = self._strategy_handlers().get(strategy_name)
         if strategy_handler is None:
+            self._release_scoped_capabilities(context, capability_scope, mounted_action_ids)
             return self._build_execution(
                 execution_id=execution_id,
                 status="error",
@@ -168,18 +175,38 @@ class SkillExecutor:
                 effort=effort,
                 execution_mode=strategy_name,
             )
-        return await strategy_handler(
-            context=context,
-            task=task,
-            plan=plan,
-            execution_id=execution_id,
-            runtime_stream=runtime_stream,
-            skill_logs=skill_logs,
-            output_format=output_format,
-            effort_config=effort_config,
-            effort=effort,
-            strategy_name=strategy_name,
-        )
+        try:
+            return await strategy_handler(
+                context=context,
+                task=task,
+                plan=plan,
+                execution_id=execution_id,
+                runtime_stream=runtime_stream,
+                skill_logs=skill_logs,
+                output_format=output_format,
+                effort_config=effort_config,
+                effort=effort,
+                strategy_name=strategy_name,
+            )
+        finally:
+            # capability_scope="execution" reverses one-time capability mounts so
+            # they do not persist on the host past this Skills execution. The
+            # default "agent" scope keeps mounts on the agent (current contract).
+            self._release_scoped_capabilities(context, capability_scope, mounted_action_ids)
+
+    @staticmethod
+    def _release_scoped_capabilities(
+        context: SkillsExecutionContext,
+        capability_scope: str,
+        mounted_action_ids: list[str],
+    ) -> None:
+        if capability_scope != "execution" or not mounted_action_ids:
+            return
+        agent = getattr(context, "agent", None)
+        action = getattr(agent, "action", None)
+        unregister = getattr(action, "unregister_action", None)
+        if callable(unregister):
+            unregister(mounted_action_ids)
 
     def _resolve_effort(
         self,
@@ -420,13 +447,31 @@ class SkillExecutor:
             if isinstance(item, dict)
         }
         policy = self._capability_policy(context=context, plan=plan)
+        min_confidence = self._min_auto_mount_confidence(policy)
         approval_required = False
         blocked = False
         mounted_keys: set[tuple[str, str]] = set()
+        mounted_action_ids: list[str] = []
 
         for need in needs:
             need_name = str(need.get("need") or "")
             skill_id = str(need.get("skill_id") or "")
+            # Low-confidence needs inferred only from SKILL.md prose are advisory
+            # when the host configured a min_auto_mount_confidence floor: they are
+            # reported but not auto-mounted, to avoid over-granting on false
+            # positives. Structured declarations (frontmatter, resources) are not
+            # affected unless they too fall below the floor.
+            if (
+                min_confidence is not None
+                and str(need.get("source") or "") in {"body", "metadata"}
+                and float(need.get("confidence") or 0.0) < min_confidence
+            ):
+                diagnostics.append({
+                    **self._capability_diagnostic("capability_low_confidence_advisory", need, mode="advisory"),
+                    "min_auto_mount_confidence": min_confidence,
+                })
+                runtime_stream.append(self._capability_event("skills.capability.advisory", need, mode="advisory"))
+                continue
             mode = self._policy_mode(policy, need_name)
             event_policy_mode = mode
             if mode == "off":
@@ -484,6 +529,9 @@ class SkillExecutor:
                 })
                 blocked = True
                 continue
+            for action_id in action_ids:
+                if action_id and action_id not in mounted_action_ids:
+                    mounted_action_ids.append(action_id)
             diagnostics.append({
                 **self._capability_diagnostic("capability_mounted", need, mode=event_policy_mode),
                 "action_ids": action_ids,
@@ -494,10 +542,10 @@ class SkillExecutor:
             })
 
         if blocked:
-            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
+            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
         if approval_required:
-            return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
-        return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
+            return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
+        return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
 
     def _capability_policy(
         self,
@@ -519,6 +567,16 @@ class SkillExecutor:
                     merged[key] = value
             policy = merged
         return policy
+
+    @staticmethod
+    def _min_auto_mount_confidence(policy: dict[str, Any]) -> float | None:
+        raw = policy.get("min_auto_mount_confidence")
+        if raw is None:
+            return None
+        try:
+            return max(0.0, min(float(raw), 1.0))
+        except (TypeError, ValueError):
+            return None
 
     def _policy_mode(self, policy: dict[str, Any], need_name: str) -> str:
         auto_load = _ensure_dict(policy.get("auto_load"))
@@ -597,9 +655,7 @@ class SkillExecutor:
         need_name = str(need.get("need") or "")
         if need_name == "web_search":
             from agently.builtins.actions import Search
-            before = self._agent_action_ids(agent)
             options = self._web_search_options(policy)
-            refresh_actions = self._refresh_ddgs_if_allowed(agent, options)
             before = self._agent_action_ids(agent)
             agent.use_actions(Search(
                 backend=cast(Any, options.get("backend", "auto")),
@@ -610,8 +666,6 @@ class SkillExecutor:
                 region=cast(Any, options.get("region", "us-en")),
                 options=cast(Any, options.get("options", None)),
             ))
-            action_ids = self._new_action_ids(agent, before)
-            return [*refresh_actions, *action_ids]
             return self._new_action_ids(agent, before)
         if need_name == "web_browse":
             from agently.builtins.actions import Browse
@@ -659,7 +713,7 @@ class SkillExecutor:
             agent.enable_shell(root=root, commands=commands or None, action_id=action_id)
             return self._new_action_ids(agent, before) or [action_id]
         if need_name == "http_request":
-            return self._mount_http_request(agent)
+            return self._mount_http_request(agent, _ensure_dict(policy.get("http_request")))
         if need_name == "mcp":
             mcp_config = _ensure_dict(policy.get("mcp")).get("config")
             if not mcp_config:
@@ -674,27 +728,6 @@ class SkillExecutor:
         merged = {**search_options, **options}
         merged.setdefault("backend", "auto")
         return merged
-
-    def _refresh_ddgs_if_allowed(self, agent: Any, options: dict[str, Any]) -> list[str]:
-        refresh_mode = str(
-            options.get("refresh_ddgs")
-            or options.get("ensure_latest_ddgs")
-            or "off"
-        ).strip().lower()
-        if refresh_mode not in {"allow", "allowed", "true", "yes", "auto"}:
-            return []
-        action_id = str(options.get("refresh_action_id") or "refresh_ddgs_dependency")
-        command = ["python", "-m", "pip", "install", "--upgrade", "ddgs"]
-        agent.enable_shell(
-            commands=["python -m pip install --upgrade ddgs"],
-            action_id=action_id,
-            expose_to_model=False,
-            timeout=int(options.get("refresh_timeout", 60)),
-        )
-        result = agent.action.execute_action(action_id, {"cmd": command})
-        if result.get("status") != "success":
-            raise RuntimeError(f"ddgs dependency refresh failed: { result.get('error') or result.get('data') }")
-        return [action_id]
 
     def _agent_action_ids(self, agent: Any) -> set[str]:
         action = getattr(agent, "action", None)
@@ -719,7 +752,11 @@ class SkillExecutor:
         return Path(".").resolve()
 
     def _script_commands(self, selection: dict[str, Any], need: dict[str, Any]) -> list[str]:
-        commands = ["bash", "sh", "python", "python3", "node", "npx", "npm"]
+        # Local interpreters plus the Skill's declared script paths. Package
+        # runners (npx/npm exec) are deliberately excluded from the default
+        # allowlist: they fetch and execute arbitrary remote code, defeating the
+        # allowlist. Hosts that need them must add them through capability policy.
+        commands = ["bash", "sh", "python", "python3", "node"]
         resource_path = str(need.get("resource_path") or "")
         if resource_path:
             name = Path(resource_path).name
@@ -744,13 +781,68 @@ class SkillExecutor:
         base = skill_id.replace(".", "_").replace("-", "_")
         return f"run_{ base }_script"
 
-    def _mount_http_request(self, agent: Any) -> list[str]:
+    @staticmethod
+    def _http_host_allowed(host: str, http_policy: dict[str, Any]) -> bool:
+        """Block private/loopback/link-local targets unless explicitly allowed.
+
+        Default-deny SSRF guard for the built-in read-only HTTP capability. A host
+        policy may allow internal hosts via `allow_private: true` or an explicit
+        `allow_hosts` list, and may extend the denylist via `deny_hosts`.
+        """
+        host = (host or "").strip().lower()
+        if not host:
+            return False
+        deny_hosts = {str(item).strip().lower() for item in _ensure_list(http_policy.get("deny_hosts"))}
+        if host in deny_hosts:
+            return False
+        allow_hosts = {str(item).strip().lower() for item in _ensure_list(http_policy.get("allow_hosts"))}
+        if host in allow_hosts:
+            return True
+        if bool(http_policy.get("allow_private")):
+            return True
+
+        def is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+            return (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or ip.is_unspecified
+            )
+
+        # A literal IP is checked directly; a hostname is resolved and every
+        # resolved address must be public (fail closed on resolution failure).
+        try:
+            return not is_blocked(ipaddress.ip_address(host))
+        except ValueError:
+            pass
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except Exception:
+            return False
+        for info in infos:
+            try:
+                ip = ipaddress.ip_address(info[4][0])
+            except ValueError:
+                return False
+            if is_blocked(ip):
+                return False
+        return True
+
+    def _mount_http_request(self, agent: Any, http_policy: dict[str, Any] | None = None) -> list[str]:
         before = self._agent_action_ids(agent)
+        host_policy = _ensure_dict(http_policy)
 
         def http_request(url: str, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None, timeout: int = 20):
             parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"}:
                 raise ValueError("Only http/https URLs are allowed.")
+            if not self._http_host_allowed(parsed.hostname or "", host_policy):
+                raise ValueError(
+                    "The built-in Skills HTTP capability blocks private, loopback, and link-local hosts. "
+                    "Allow an internal host through skills.capability_policy.http_request.allow_hosts."
+                )
             resolved_method = method.upper()
             if resolved_method not in {"GET", "HEAD"}:
                 raise ValueError("The built-in Skills HTTP capability is read-only and supports GET/HEAD only.")

@@ -436,15 +436,15 @@ agent.configure_skill_capabilities(
     workspace_root="./.agently/tasks/research",
     search={
         "backend": "auto",
-        "refresh_ddgs": "allow",
     },
 )
 agent.configure_policy_approval(handler="input_timeout_fail")
 ```
 
 For search-oriented Skills, Agently mounts the framework Search package backed
-by the `ddgs` Python package. Keep `ddgs` upgraded before real search runs:
-`python -m pip install --upgrade ddgs`. The backend strategy is not fixed to one
+by the `ddgs` Python package. Keep `ddgs` upgraded in the host environment
+before real search runs (`python -m pip install --upgrade ddgs`); Agently does
+not mutate the host environment at runtime. The backend strategy is not fixed to one
 provider; use `backend="auto"` by default, or configure any ddgs-supported
 backend through host policy. Search treats backend-level "no results" as an
 empty successful result and falls back through configured/default ddgs backends

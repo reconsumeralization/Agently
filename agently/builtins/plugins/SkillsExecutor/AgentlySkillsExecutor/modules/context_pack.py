@@ -562,7 +562,9 @@ class SkillContextPackBuilder:
         return "off"
 
     def _script_commands(self, resources: list[dict[str, Any]]) -> list[str]:
-        commands = ["bash", "sh", "python", "python3", "node", "npx", "npm"]
+        # Package runners (npx/npm exec) are excluded from the default allowlist:
+        # they fetch and execute arbitrary remote code. Hosts add them via policy.
+        commands = ["bash", "sh", "python", "python3", "node"]
         for resource in resources:
             path = str(resource.get("path") or "")
             if path:
