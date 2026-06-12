@@ -64,6 +64,7 @@ class ActionExtension(BaseAgent):
         self.__prepared_action_results: dict[str, Any] | None = None
         self.__action_planning_handler = None
         self.__action_execution_handler = None
+        self.__required_action_ids: list[str] = []
 
         self.extension_handlers.append("request_prefixes", self.__request_prefix)
         self.extension_handlers.append("broadcast_prefixes", self.__broadcast_prefix)
@@ -167,7 +168,7 @@ class ActionExtension(BaseAgent):
             return [str(item) for item in value if str(item)]
         return []
 
-    def use_actions(self, actions: Callable | str | list[str | Callable] | Any):
+    def _register_action_items(self, actions: Callable | str | list[str | Callable] | Any) -> list[str]:
         names: list[str] = []
         local_registry = getattr(self.action, "action_registry", None)
         agent_tag = f"agent-{ self.name }"
@@ -188,7 +189,24 @@ class ActionExtension(BaseAgent):
                 names.append(action_name)
         if names:
             self.action.tag(names, agent_tag)
+        return names
+
+    def use_actions(self, actions: Callable | str | list[str | Callable] | Any, *, always: bool = False):
+        if not always:
+            return self.create_execution().use_actions(actions)
+        self._register_action_items(actions)
         return self
+
+    def require_actions(self, actions: Callable | str | list[str | Callable] | Any, *, always: bool = False):
+        if not always:
+            return self.create_execution().require_actions(actions)
+        for name in self._register_action_items(actions):
+            if name not in self.__required_action_ids:
+                self.__required_action_ids.append(name)
+        return self
+
+    def _collect_required_action_ids(self) -> list[str]:
+        return list(self.__required_action_ids)
 
     def use_tools(self, tools: Callable | str | list[str | Callable] | Any):
         return self.use_actions(tools)
@@ -400,9 +418,9 @@ class ActionExtension(BaseAgent):
         elif root is _WORKSPACE_ROOT_UNSET:
             DeprecationWarnings.warn_deprecated_once(
                 "ActionExtension.enable_workspace.default_root_without_foundation_workspace",
-                "`agent.enable_workspace_file_actions()` without `agent.use_workspace(...)` "
-                "defaults to the current directory. "
-                "Configure `agent.use_workspace(...)` or pass an explicit `root=`.",
+                "`agent.enable_workspace_file_actions()` without an Agent Workspace binding "
+                "defaults to the current directory. Standard Agents include a lazy Workspace; "
+                "pass an explicit `root=` or call `agent.use_workspace(...)` to override it.",
                 stacklevel=2,
             )
             root = "."
@@ -630,9 +648,10 @@ class ActionExtension(BaseAgent):
         DeprecationWarnings.warn_deprecated_once(
             "ActionExtension.enable_workspace.renamed_to_enable_workspace_file_actions",
             "`agent.enable_workspace(...)` is kept as a compatibility alias for "
-            "`agent.enable_workspace_file_actions(...)`. `agent.use_workspace(...)` "
-            "configures the Workspace; use `enable_workspace_file_actions(...)` "
-            "when you want to expose Workspace file list/search/read/write actions.",
+            "`agent.enable_workspace_file_actions(...)`. Standard Agents include a lazy "
+            "Workspace binding, and `agent.use_workspace(...)` overrides its root, mode, "
+            "or provider. Use `enable_workspace_file_actions(...)` when you want to expose "
+            "Workspace file list/search/read/write actions.",
             stacklevel=2,
         )
         return self.enable_workspace_file_actions(
@@ -778,10 +797,11 @@ class ActionExtension(BaseAgent):
             timeout=timeout,
             planning_protocol=planning_protocol,
         )
-        if store_for_reply and len(records) > 0:
+        if store_for_reply:
             action_results = self.action.to_action_results(records)
             target_prompt.set("action_results", action_results)
-            target_prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
+            if len(records) > 0:
+                target_prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
             self.__action_logs = records
             self.__prepared_action_results = action_results
         return records
@@ -900,7 +920,8 @@ class ActionExtension(BaseAgent):
                 self.__prepared_action_results = None
             else:
                 self.__action_logs = []
-            if prompt.get("extra_instruction", default=missing) is missing:
+            has_action_results = bool(existing_action_results)
+            if has_action_results and prompt.get("extra_instruction", default=missing) is missing:
                 prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
             return
 

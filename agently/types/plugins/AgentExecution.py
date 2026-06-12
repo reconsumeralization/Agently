@@ -21,7 +21,6 @@ from agently.types.data import (
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
-    AgentExecutionMode,
     AgentExecutionStreamData,
     AgentExecutionWorkspaceRecord,
     OutputValidateHandler,
@@ -36,7 +35,6 @@ class AgentExecution(Protocol):
     """Response-style contract for one bounded Agent execution object."""
 
     id: str
-    mode: AgentExecutionMode
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
     options: Any
@@ -48,6 +46,7 @@ class AgentExecution(Protocol):
     prompt: Any
     stream: Any
     execution_context: Any
+    workspace: Any
 
     def __getattr__(self, name: str) -> Any: ...
 
@@ -57,11 +56,15 @@ class AgentExecution(Protocol):
 
     def instruct(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
 
-    def goal(self, goal: Any) -> "AgentExecution": ...
+    def set_execution_prompt(self, key: Any, value: Any, *, mappings: dict[str, Any] | None = None) -> "AgentExecution": ...
 
-    def goals(self, *goals: Any) -> "AgentExecution": ...
+    def remove_execution_prompt(self, key: Any) -> "AgentExecution": ...
 
-    def success_criteria(self, criteria: Any = None, *more: Any) -> "AgentExecution": ...
+    def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
+
+    def goals(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
+
+    def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution": ...
 
     def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution": ...
 

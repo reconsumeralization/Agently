@@ -61,7 +61,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.6"
+    assert in_development["target_version"] == "4.1.3.7"
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",
@@ -77,8 +77,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
             "agent_execution_stream_owner": "agently.core.application.AgentExecution.AgentExecutionStream",
         },
         "runtime_naming": {
-            "agent_turn": "run_kind for one Agent-facing turn",
-            "attempt_index": "model-request retry attempt metadata; not an agent turn counter",
+            "agent_execution": "run_kind for one AgentExecution-owned Agent run",
+            "attempt_index": "model-request retry attempt metadata; not an AgentExecution counter",
         },
         "agent_execution_limits": ["max_seconds", "max_no_progress_seconds"],
         "provider_stream_idle_timeout": [
@@ -128,16 +128,30 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     )
     assert in_development["companions"]["skills"]["catalog_generation"] == "v2"
     assert in_development["companions"]["skills"]["recommended_bundle"] == "app"
-    turn_contract = in_development["request_input"]["agent_turn_request_scope"]
-    assert "AgentExecution" in turn_contract["surface"]
-    assert "AgentExecutionResult" in turn_contract["surface"]
-    assert "AgentTurn" in turn_contract["surface"]
-    assert "isolated AgentExecution draft" in turn_contract["contract"]
-    assert "compatibility aliases" in turn_contract["contract"]
+    execution_contract = in_development["request_input"]["agent_execution_request_scope"]
+    assert "AgentExecution" in execution_contract["surface"]
+    assert "AgentExecutionResult" in execution_contract["surface"]
+    assert "AgentTurn" not in execution_contract["surface"]
+    assert "isolated AgentExecution draft" in execution_contract["contract"]
+    assert "are removed from the 4.1.3.7 development line" in execution_contract["contract"]
     task_loop_contract = in_development["request_input"]["agent_execution_task_loop"]
+    assert "Agent.goal" in task_loop_contract["surface"]
+    assert "Agent.goals" in task_loop_contract["surface"]
+    assert "AgentExecution.goal" in task_loop_contract["surface"]
+    assert "AgentExecution.goals" in task_loop_contract["surface"]
     assert "Agent.create_task" in task_loop_contract["surface"]
     assert "Agent.create_task_loop" in task_loop_contract["surface"]
+    assert "AgentExecution.use_dynamic_task" in task_loop_contract["surface"]
+    assert "AgentExecution.success_criteria" not in task_loop_contract["surface"]
     assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
+    assert "agent.goal(goal_or_goals, success_criteria=None)" in task_loop_contract["contract"]
+    assert "plural alias agent.goals(...)" in task_loop_contract["contract"]
+    assert "effort budget iteration_limit maps to task-loop max_iterations" in task_loop_contract["contract"]
+    assert "effort execution.step_plan" in task_loop_contract["contract"]
+    assert "TaskDAG / DAG-shaped bounded step" in task_loop_contract["contract"]
+    assert "compatibility/convenience facade over DAG" in task_loop_contract["contract"]
+    assert "execution-local DAG candidate" in task_loop_contract["contract"]
+    assert "not current public surfaces" in task_loop_contract["contract"]
     assert "task-strategy AgentExecution drafts" in task_loop_contract["contract"]
     assert "not a separate recommended AgentTask execution owner" in task_loop_contract["contract"]
     assert "accepted=true" in task_loop_contract["contract"]
@@ -146,9 +160,10 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "multi-task scheduling" in task_loop_contract["scope"]["deferred"]
     assert "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging" in task_loop_contract["scope"]["deferred"]
     assert "AgentExecutionResult as the common consumption surface" in task_loop_contract["compatibility_policy"]
-    assert in_development["companions"]["skills"]["legacy_generations"] == [
+    assert in_development["companions"]["skills"]["archived_catalog_generations"] == [
         {
             "generation": "v1",
+            "branch": "update/archive-legacy-v1-catalog",
             "last_supported_framework_version": "4.1.1",
             "status": "frozen",
         }

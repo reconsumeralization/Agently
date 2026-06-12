@@ -320,11 +320,11 @@ class Session:
         if key == "":
             return False, None
 
-        if key == ".request":
+        if key == ".execution":
             return True, prompt_data
 
-        if key.startswith(".request."):
-            return Session._extract_by_path(prompt_data, key[len(".request.") :])
+        if key.startswith(".execution."):
+            return Session._extract_by_path(prompt_data, key[len(".execution.") :])
 
         if key == ".agent":
             return True, agent_prompt_data

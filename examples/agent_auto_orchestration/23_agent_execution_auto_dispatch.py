@@ -327,9 +327,7 @@ async def run_auto_task_dispatch(agent: Any) -> tuple[dict[str, Any], dict[str, 
             "When producing the final summary, copy issue titles exactly from the fetched Action result; do not say "
             "titles are unavailable if they appear in the fetched evidence. "
             "Return the final result as readable Markdown with sections for overview, still-pending issues, and "
-            "recommended maintainer actions."
-        )
-        .success_criteria(
+            "recommended maintainer actions.",
             [
                 f"The execution evidence includes a fetch_github_open_issues Action call for {GITHUB_REPO}.",
                 "The final result summarizes the fetched open issue set from the GitHub page.",

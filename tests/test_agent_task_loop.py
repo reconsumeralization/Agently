@@ -115,8 +115,10 @@ async def test_agent_goal_success_criteria_uses_task_execution_path(tmp_path):
 
     execution = (
         agent
-        .goal("Repair a legacy Agently script so it runs on the current API.")
-        .success_criteria(["The script runs successfully."])
+        .goal(
+            "Repair a legacy Agently script so it runs on the current API.",
+            ["The script runs successfully."],
+        )
         .strategy("task", max_iterations=2)
     )
 
@@ -185,17 +187,32 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert any(value.get("stage") == "verification" for value in snapshot_values)
     assert any(item.path.endswith(".replan") for item in stream_items)
     assert any(item.path == "result" for item in stream_items)
+    phase_names = [item["phase"] for item in meta["diagnostics"]["phases"]]
+    assert "configured" in phase_names
+    assert "planned" in phase_names
+    assert "executing" in phase_names
+    assert "evidence_recorded" in phase_names
+    assert "verified" in phase_names
+    assert "guarded" in phase_names
+    assert "replanned" in phase_names
+    assert "terminal" in phase_names
+    assert any(item.path == "agent_task.phase.verified" for item in stream_items)
+    assert any((item.meta or {}).get("stream_kind") == "phase" for item in stream_items)
     assert len(meta["workspace_refs"]["observations"]) == 2
     assert len(meta["workspace_refs"]["decisions"]) == 2
     assert len(meta["workspace_refs"]["verification"]) == 2
     assert len(meta["workspace_refs"]["checkpoints"]) == 2
+    assert len(meta["workspace_refs"]["evidence_links"]) == 6
     workspace = agent.workspace
     assert workspace is not None
     assert len(await workspace.checkpoint_history("legacy-script-upgrade")) == 2
     verifies_links = await workspace.links(relation="verifies_observation")
     decision_links = await workspace.links(relation="implements_decision")
+    checkpoint_links = await workspace.links(relation="checkpointed_by")
     assert len(verifies_links) == 2
     assert len(decision_links) == 2
+    assert len(checkpoint_links) == 2
+    assert all(link["meta"]["evidence"] for link in [*verifies_links, *decision_links, *checkpoint_links])
 
 
 @pytest.mark.asyncio
@@ -348,11 +365,116 @@ async def test_agent_task_loop_progress_model_does_not_delay_stream_close(tmp_pa
 
     stream_items = await asyncio.wait_for(
         _collect_stream(task),
-        timeout=2,
+        timeout=5,
     )
 
     assert any((item.meta or {}).get("stream_kind") == "snapshot" for item in stream_items)
     assert not any((item.meta or {}).get("progress_source") == "model" for item in stream_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_dynamic_task_candidate_is_execution_local():
+    async def run_task(context):
+        return {"task_id": context.task.id, "value": context.graph_input["value"]}
+
+    agent = Agently.create_agent("execution-local-dynamic-task")
+    execution = (
+        agent
+        .create_execution()
+        .input("run a local dynamic task graph")
+        .use_dynamic_task(
+            mode="submitted",
+            plan={
+                "graph_id": "execution-local-dynamic-task",
+                "task_schema_version": "task_dag/v1",
+                "tasks": [{"id": "extract", "kind": "local", "binding": "local_handler"}],
+                "semantic_outputs": {"final": "extract"},
+            },
+            handlers={"local_handler": run_task},
+            graph_input={"value": "ok"},
+        )
+    )
+
+    data = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+
+    assert data["semantic_outputs"]["final"]["result"]["value"] == "ok"
+    assert meta["route_plan"]["selected_route"] == "dynamic_task"
+    assert execution.local_dynamic_task_candidates
+    assert getattr(agent, "_dynamic_task_candidates", []) == []
+
+
+@pytest.mark.asyncio
+async def test_agent_task_loop_executes_dag_shaped_step_without_global_candidate_leak(tmp_path):
+    class DagStepVerificationRequester(MockAgentTaskRequester):
+        name = "DagStepVerificationRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "the DAG step returned the required evidence",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result": "DAG step completed with value ok.",
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    async def run_task(context):
+        return {"task_id": context.task.id, "value": context.graph_input["value"]}
+
+    settings = Settings(name="agent-task-dag-step-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-dag-step-plugins")
+    plugin_manager.register("ModelRequester", DagStepVerificationRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-dag-step")
+    graph = {
+        "graph_id": "agent-task-loop-dag-step",
+        "task_schema_version": "task_dag/v1",
+        "tasks": [{"id": "extract", "kind": "local", "binding": "local_handler"}],
+        "semantic_outputs": {"final": "extract"},
+    }
+    task = agent.create_task(
+        task_id="dag-shaped-step",
+        goal="Return the final DAG result.",
+        success_criteria=["The final result includes value ok."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={"agent_task": {"effort": {"execution": {"step_plan": "dag"}}}},
+    )
+
+    async def request_plan(_iteration_index, _context_pack):
+        return {
+            "execution_shape": "dynamic_task",
+            "step_instruction": "Run the DAG-shaped extraction step.",
+            "expected_evidence": "TaskDAG semantic output includes value ok.",
+            "rationale": "The step has a clear bounded DAG contract.",
+            "dynamic_task": {
+                "mode": "submitted",
+                "plan": graph,
+                "handlers": {"local_handler": run_task},
+                "graph_input": {"value": "ok"},
+            },
+        }
+
+    task._request_plan = request_plan  # type: ignore[method-assign]
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+    first_iteration = meta["iterations"][0]
+
+    assert result["status"] == "completed"
+    assert first_iteration["plan"]["execution_shape"] == "dynamic_task"
+    assert first_iteration["plan"]["effective_execution_shape"] == "dynamic_task"
+    assert first_iteration["plan"]["step_execution"]["dynamic_task_candidate_added"] is True
+    assert first_iteration["execution_meta"]["route_plan"]["selected_route"] == "dynamic_task"
+    assert first_iteration["execution_meta"]["logs"]["route_logs"]["task_dag"]["semantic_outputs"]["final"]["result"][
+        "value"
+    ] == "ok"
+    assert getattr(agent, "_dynamic_task_candidates", []) == []
 
 
 @pytest.mark.asyncio
@@ -404,6 +526,66 @@ async def test_agent_task_loop_stops_at_max_iterations(tmp_path):
     assert len(meta["iterations"]) == 1
     assert len(meta["workspace_refs"]["decisions"]) == 1
     assert len(meta["workspace_refs"]["verification"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_task_loop_blocks_when_verifier_requires_block(tmp_path):
+    class BlockedRequester(MockAgentTaskRequester):
+        name = "BlockedRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                payload: dict[str, Any] = {
+                    "is_complete": True,
+                    "requires_block": True,
+                    "reason": "external approval is required before continuing",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result": "draft result should not be accepted",
+                }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {
+                    "step_instruction": "prepare the approval-bound change",
+                    "expected_evidence": "approval state",
+                    "rationale": "the task cannot safely continue without approval",
+                }
+            else:
+                payload = {
+                    "step_result": "approval is still pending",
+                    "evidence": ["approval_required"],
+                    "remaining_work": ["wait for approval"],
+                }
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-blocked-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-blocked-plugins")
+    plugin_manager.register("ModelRequester", BlockedRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-blocked")
+
+    task = agent.create_task(
+        task_id="blocked-approval",
+        goal="Produce the final remediation report after external approval.",
+        success_criteria=["The final report is returned only after approval is available."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=2,
+    )
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] == "blocked"
+    assert result["accepted"] is False
+    assert result["artifact_status"] == "blocked"
+    assert meta["status"] == "blocked"
+    assert len(meta["iterations"]) == 1
+    verification = meta["iterations"][0]["verification"]
+    assert verification["is_complete"] is False
+    assert verification["requires_block"] is True
+    assert "requires_block_true" in verification["guard_reasons"]
+    assert meta["diagnostics"]["verification_guards"][0]["guard_reasons"] == ["requires_block_true"]
+    assert meta["diagnostics"]["phases"][-1]["phase"] == "terminal"
+    assert meta["diagnostics"]["phases"][-1]["diagnostics"]["artifact_status"] == "blocked"
 
 
 @pytest.mark.asyncio
@@ -473,6 +655,80 @@ async def test_agent_task_loop_verification_guard_replans_when_missing_criteria_
     assert meta["iterations"][0]["verification"]["is_complete"] is False
     assert "missing_criteria_present" in meta["iterations"][0]["verification"]["guard_reasons"]
     assert meta["diagnostics"]["verification_guards"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_loop_verification_guard_replans_when_final_result_missing(tmp_path):
+    class CompleteWithoutFinalResultRequester(MockAgentTaskRequester):
+        name = "CompleteWithoutFinalResultRequester"
+        verification_calls = 0
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                CompleteWithoutFinalResultRequester.verification_calls += 1
+                if CompleteWithoutFinalResultRequester.verification_calls == 1:
+                    payload = {
+                        "is_complete": True,
+                        "requires_block": False,
+                        "reason": "all evidence is present but no final deliverable was returned",
+                        "missing_criteria": [],
+                        "replan_instruction": "",
+                        "final_result": "",
+                    }
+                else:
+                    payload = {
+                        "is_complete": True,
+                        "requires_block": False,
+                        "reason": "final deliverable is now included",
+                        "missing_criteria": [],
+                        "replan_instruction": "",
+                        "final_result": "Final remediation report with verification evidence.",
+                    }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {
+                    "step_instruction": "produce the final report artifact",
+                    "expected_evidence": "final report text",
+                    "rationale": "the verifier requires the final deliverable before acceptance",
+                }
+            elif "Execute exactly one bounded step" in text:
+                payload = {
+                    "step_result": "prepared final report artifact",
+                    "evidence": ["final report content is present"],
+                    "remaining_work": [],
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-final-result-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-final-result-plugins")
+    plugin_manager.register("ModelRequester", CompleteWithoutFinalResultRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-final-result")
+
+    task = agent.create_task(
+        task_id="guard-final-result",
+        goal="Return the final remediation report.",
+        success_criteria=["The final report artifact is returned."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=2,
+    )
+
+    stream_items = [item async for item in task.stream()]
+    result = await task.run()
+    meta = await task.meta()
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["artifact_status"] == "accepted"
+    assert result["iterations"] == 2
+    assert any(item.path.endswith(".replan") for item in stream_items)
+    first_verification = meta["iterations"][0]["verification"]
+    assert first_verification["is_complete"] is False
+    assert "final_result_missing" in first_verification["guard_reasons"]
+    assert "Final result is missing." in first_verification["missing_criteria"]
+    assert first_verification["replan_instruction"]
+    assert meta["iterations"][1]["verification"]["final_result"] == "Final remediation report with verification evidence."
 
 
 @pytest.mark.asyncio

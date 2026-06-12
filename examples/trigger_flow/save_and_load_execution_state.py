@@ -33,7 +33,7 @@ flow.when("UserFeedback").to(resume_with_feedback)
 
 
 async def main():
-    state_file = Path(__file__).with_name("execution_state_checkpoint.json")
+    state_file = Path(__file__).with_name("execution_state_snapshot.json")
     execution = flow.create_execution(auto_close=False)
     await execution.async_start("refund order #A1001")
     execution.save(state_file)
@@ -65,7 +65,7 @@ asyncio.run(main())
 # file.  restored_execution.load(path) reconstructs the snapshot on a fresh execution
 # object.  Emitting "UserFeedback" on the restored execution drives the when() handler
 # exactly as if it had been emitted on the original.
-# state_file.unlink() cleans up the checkpoint file after the test.
+# state_file.unlink() cleans up the snapshot file after the test.
 #
 # Flow:
 # async_start("refund order #A1001")

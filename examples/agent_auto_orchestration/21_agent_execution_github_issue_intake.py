@@ -24,7 +24,7 @@ Expected key output from one real DeepSeek run on 2026-06-01 after closing
     issue_agent_used_bash_action=True
     selected_repo=AgentEra/Agently
     fetched_open_issue_count=5
-    intake_execution_mode=task_step
+    intake_lineage_task_id=agently-public-issue-intake
     workspace_issue_ref_recorded=True
     workspace_context_item_count=1
     all_items_are_open_issues=True
@@ -67,8 +67,6 @@ async def collect_lineage_flags(execution) -> dict[str, bool | int]:
         if item.source == "action":
             flags["action_events"] = int(flags["action_events"]) + 1
         meta = item.meta or {}
-        if meta.get("execution_mode") != "task_step":
-            flags["lineage_ok"] = False
         if (meta.get("lineage") or {}).get("task_id") != TASK_ID:
             flags["lineage_ok"] = False
     return flags
@@ -194,7 +192,6 @@ async def main():
             format="json",
         )
         .create_execution(
-            mode="task_step",
             lineage={
                 "task_id": TASK_ID,
                 "iteration_id": "iter-1",
@@ -256,7 +253,6 @@ async def main():
             format="json",
         )
         .create_execution(
-            mode="task_step",
             lineage={
                 "task_id": TASK_ID,
                 "iteration_id": "iter-2",
@@ -330,7 +326,7 @@ async def main():
     print(f"issue_agent_used_bash_action={int(issue_stream['action_events']) > 0}")
     print(f"selected_repo={selected['selected_repo']}")
     print(f"fetched_open_issue_count={len(issues)}")
-    print(f"intake_execution_mode={intake_meta['execution_mode']}")
+    print(f"intake_lineage_task_id={intake_meta['lineage']['task_id']}")
     print(f"workspace_issue_ref_recorded={workspace_record['record']['id'] in workspace_refs.get('observations', [])}")
     print(f"workspace_context_item_count={len(context_items)}")
     print(f"all_items_are_open_issues={all_items_are_open_issues}")

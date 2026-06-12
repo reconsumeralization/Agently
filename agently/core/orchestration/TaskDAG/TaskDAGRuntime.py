@@ -36,6 +36,7 @@ from .TaskDAGHelpers import (
     _extract_artifact_refs,
     _failed_task_event,
     _fallback_action,
+    _graph_fingerprint,
     _graph_signature,
     _is_approval_task,
     _start_task_event,
@@ -187,6 +188,7 @@ def _make_kickoff_handler(
         await data.async_set_state("artifact_refs", {}, emit=False)
         await data.async_set_state("semantic_outputs", {}, emit=False)
         await data.async_set_state("task_dag", graph.to_dict(), emit=False)
+        await data.async_set_state("task_dag_graph_fingerprint", _graph_fingerprint(graph), emit=False)
         root_tasks = []
         for task_id in root_task_ids:
             task = data.emit_nowait(_start_task_event(task_id), {"task_id": task_id, "graph_id": graph.graph_id})
@@ -511,6 +513,21 @@ async def _put_task_event(
     action: Literal["start", "complete", "fail", "skipped", "approval_required"],
     **payload: Any,
 ) -> None:
+    artifact_refs = payload.get("artifact_refs")
+    output = payload.get("output")
+    if artifact_refs is None:
+        artifact_refs = _extract_artifact_refs(output)
+    event_payload = {
+        "graph_id": graph.graph_id,
+        "graph_fingerprint": _graph_fingerprint(graph),
+        "task_id": task.id,
+        "task_kind": task.kind,
+        "dependency_task_ids": list(task.depends_on),
+        "dependency_signal_ids": [data.signal_id] if data.signal_id is not None else [],
+        "node_result_status": action,
+        "artifact_refs": artifact_refs or [],
+        **payload,
+    }
     await data.execution.async_put_into_stream(
         {
             "type": "task_dag.task",
@@ -518,9 +535,14 @@ async def _put_task_event(
             "graph_id": graph.graph_id,
             "task_id": task.id,
             "task_kind": task.kind,
-            "payload": payload,
+            "payload": event_payload,
         },
         _skip_contract_validation=True,
+    )
+    await data.execution._emit_runtime_event(
+        "triggerflow.task_dag_node",
+        message=f"TaskDAG node '{ task.id }' { action }.",
+        payload=event_payload,
     )
 
 
@@ -530,14 +552,25 @@ async def _put_graph_event(
     action: Literal["complete"],
     **payload: Any,
 ) -> None:
+    event_payload = {
+        "graph_id": graph.graph_id,
+        "graph_fingerprint": _graph_fingerprint(graph),
+        "node_result_status": action,
+        **payload,
+    }
     await data.execution.async_put_into_stream(
         {
             "type": "task_dag.graph",
             "action": action,
             "graph_id": graph.graph_id,
-            "payload": payload,
+            "payload": event_payload,
         },
         _skip_contract_validation=True,
+    )
+    await data.execution._emit_runtime_event(
+        "triggerflow.task_dag_graph",
+        message=f"TaskDAG graph '{ graph.graph_id }' { action }.",
+        payload=event_payload,
     )
 
 

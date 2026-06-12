@@ -39,6 +39,8 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from agently.types.data import (
     ModelStreamingHandler,
     SkillContract,
+    SkillContextPack,
+    SkillContextPackIncludeMode,
     SkillExecutionPlan,
     SkillMode,
     SkillsPackRecord,
@@ -185,6 +187,51 @@ class SkillsExecutor(Protocol):
     def inspect_skills_pack(self, skills_pack_id: str) -> SkillsPackRecord: ...
 
     def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 262144) -> str: ...
+
+    def build_context_pack(
+        self,
+        *,
+        context: SkillsPlanningContext | None = None,
+        task: str | None = None,
+        intent: str | None = None,
+        skill_ids: list[str] | tuple[str, ...] | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        include_guidance: bool = True,
+        include_examples: SkillContextPackIncludeMode = "auto",
+        include_references: SkillContextPackIncludeMode = "auto",
+        include_assets: SkillContextPackIncludeMode = False,
+        include_public_lookup: bool = False,
+        actionize_scripts: bool = False,
+        budget_chars: int = 12000,
+        max_resource_chars: int = 6000,
+    ) -> SkillContextPack: ...
+
+    async def async_build_context_pack(
+        self,
+        *,
+        context: SkillsPlanningContext | None = None,
+        task: str | None = None,
+        intent: str | None = None,
+        skill_ids: list[str] | tuple[str, ...] | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        include_guidance: bool = True,
+        include_examples: SkillContextPackIncludeMode = "auto",
+        include_references: SkillContextPackIncludeMode = "auto",
+        include_assets: SkillContextPackIncludeMode = False,
+        include_public_lookup: bool = False,
+        actionize_scripts: bool = False,
+        budget_chars: int = 12000,
+        max_resource_chars: int = 6000,
+    ) -> SkillContextPack: ...
+
+    def task_dag_resolver(
+        self,
+        *,
+        context: SkillsPlanningContext | None = None,
+        defaults: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
 
     def remove_skills(self, skill_id: str) -> dict[str, Any]: ...
 

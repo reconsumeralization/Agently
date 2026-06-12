@@ -1,8 +1,11 @@
-# Dynamic Task
+# TaskDAG 与 Dynamic Task
 
-Dynamic Task 是 Agently 的一等动态任务面，用简洁的应用层 API 执行模型或
-应用生成的 DAG。内部会校验 `TaskDAG`、解析任务 handler，并把图编译成普通
-TriggerFlow execution 作为实现基座。
+`TaskDAG` 是 Agently 的 DAG 基石能力，面向模型或应用生成的 task graph。它拥有图
+数据契约、planner、validator、resolver、executor、handler binding、dependency
+results、semantic outputs 和 runtime placeholders。TriggerFlow 是更底层的执行基座。
+
+`DynamicTask` 是当前覆盖这套 DAG substrate 的兼容与便利 facade。普通应用代码需要
+一个紧凑入口时可以使用它，但它不是 `AgentExecution` 之外的第二套推荐任务生命周期。
 
 ```python
 task = Agently.create_dynamic_task(target="review policy")
@@ -39,6 +42,31 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=10)
 ```
 
+高级调用方可以把同一条 DAG 路径拆成独立模块，按需定制，再回写到
+`AgentExecution`：
+
+```python
+from agently.builtins.plugins import AgentlyTaskDAGPlanner
+from agently.core import TaskDAGResolver, TaskDAGValidator
+
+handlers = {
+    "fetch_handler": fetch_handler,
+    "analyze_handler": analyze_handler,
+    "render_handler": render_handler,
+}
+resolver = TaskDAGResolver(handlers)
+validator = TaskDAGValidator(resolver)
+planner = AgentlyTaskDAGPlanner(validator=validator)
+
+graph = await planner.async_plan(planner_agent, {"target": goal})
+validator.validate(graph, strict_schema_version=True)
+
+execution = agent.create_execution()
+execution.input({"goal": goal})
+execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+result = await execution.async_start()
+```
+
 提交式 DAG 的 `inputs` 可以用占位符引用运行时数据。整个字符串就是占位符时会保留原始值类型；占位符嵌在普通字符串里时会渲染成字符串。Slot 名大小写不敏感，但文档推荐大写：
 
 ```python
@@ -73,6 +101,10 @@ payload（`data.value`），主要用于高级调试或 executor 层集成。运
 `input` slot。只有两者都不存在时，Agent route 才回退到
 `{"target": task_target}`。
 
+如果 DAG 候选只应属于当前 execution，在 `agent.create_execution()` 之后调用
+`execution.use_dynamic_task(...)`。它使用同一套 graph input 规则，但不会修改
+Agent 级 DAG 候选池。
+
 如果 `create_dynamic_task(..., output_schema=..., ensure_keys=...)` 为 semantic
 output 的 model 节点提供了前台结构契约，这个宿主契约优先于 planner 在节点上选择的
 不兼容格式。多字段结构化契约遇到 planner 写出的
@@ -97,7 +129,7 @@ snapshot = await task.async_run(graph_input={"doc": "policy"}, timeout=10)
 `from_json(...)` 都支持 `task_dag_key_path="plans.review"`，用于从较大的配置文件里选择
 某一个 DAG。使用 `graph.get_yaml(path)` 或 `graph.get_json(path)` 可以导出归一化后的图。
 
-Agent 实例也提供同名 facade：
+Agent 实例也提供同名兼容 facade：
 
 ```python
 task = agent.create_dynamic_task(target="review policy")
@@ -120,12 +152,12 @@ task = (
 )
 ```
 
-这份 prompt snapshot 会通过现有 Prompt generator 渲染成 Dynamic Task 的
+这份 prompt snapshot 会通过现有 Prompt generator 渲染成 DAG
 target。`output` slot 会成为 facade 级 `output_schema`，`output_format` 会成为
 默认 model-task format。`set_agent_prompt(...)` / `always=True` 写入的长期 prompt
 会被继承。quick prompt 链里的本轮 execution prompt 保存在 AgentExecution draft 上，
-并被冻结到新 task；直接 `set_turn_prompt(...)`、兼容别名 `set_request_prompt(...)` 和
-`agent.request` 仍是低层兼容路径。显式传入的
+并被冻结到新 task；只有明确使用低层 request-builder 时才直接使用
+`agent.create_request(...)` / `agent.request`。显式传入的
 `create_dynamic_task(target=..., output_schema=..., output_format=...)` 参数优先于
 prompt 推导值。
 
@@ -176,7 +208,7 @@ TriggerFlow trigger payload。在 DAG task `inputs` 里，整个字符串就是 
 
 ## 架构
 
-Dynamic Task 拆成四段：
+DAG 能力拆成四段：
 
 - `AgentlyTaskDAGPlanner` 用 Agently output schema、`ensure_keys` 和校验重试生成确定性的 `TaskDAG`。
 - `TaskDAGValidator` 校验 DAG 语法、依赖、schema version、semantic outputs、副作用策略和 resolver 可用性。
@@ -224,7 +256,7 @@ snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(graph)
 ```
 
 Executor 不依赖 Agent。模型和 Action 访问由 facade 或 resolver adapter 承接；
-TriggerFlow 是 Dynamic Task 之下的执行基座，不是 owner API。
+TriggerFlow 是更底层的执行基座，不是 DAG owner API。
 
 ## 示例
 
@@ -239,8 +271,8 @@ TriggerFlow 是 Dynamic Task 之下的执行基座，不是 owner API。
   `ContractRiskReviewService.review(contract)`，内部组合确定性 local handler、
   后台风险评分和模型生成的前台风险 memo。
 - `04_incident_briefing_auto_plan.py`：自动规划的事故简报示例，外层是
-  `IncidentBriefingService.brief(report)`。模型先生成 `TaskDAG`，Dynamic
-  Task 再校验并执行；前台简报结构由 Agently `output_schema` 保证。
+  `IncidentBriefingService.brief(report)`。模型先生成 `TaskDAG`，再由 DAG
+  validator 和 executor 校验并执行；前台简报结构由 Agently `output_schema` 保证。
 - `05_enterprise_renewal_complex_auto_plan.py`：复杂自动规划的企业续约示例。
   模型 planner 会生成多个独立分析 root、汇总 join 阶段，并产出结构化续约
   recovery package。

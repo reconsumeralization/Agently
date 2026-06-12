@@ -15,7 +15,6 @@
 from agently.types.data import TaskDAG, TaskDAGNode
 
 from .Agent import BaseAgent
-from .AgentTurn import AgentTurn
 from .application import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
@@ -70,6 +69,7 @@ from .runtime import (
 )
 from .session import (
     DefaultContextBuilder,
+    LazyWorkspace,
     LocalWorkspaceBackend,
     RecallProfile,
     RuleRecallPlanner,
@@ -91,7 +91,6 @@ __all__ = [
     "AgentExecutionResult",
     "AgentExecutionStream",
     "AgentTask",
-    "AgentTurn",
     "AttemptRunner",
     "BaseAgent",
     "CompiledTaskDAG",
@@ -106,6 +105,7 @@ __all__ = [
     "ExecutionEnvironmentError",
     "ExecutionEnvironmentManager",
     "ExtensionHandlers",
+    "LazyWorkspace",
     "LocalWorkspaceBackend",
     "ModelRequest",
     "ModelResponse",

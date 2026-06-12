@@ -15,6 +15,7 @@
 from .Recall import DefaultContextBuilder, RecallProfile, RuleRecallPlanner, WorkspaceRetriever
 from .Session import Session
 from .Workspace import (
+    LazyWorkspace,
     LocalWorkspaceBackend,
     Workspace,
     WorkspaceConfigurationError,
@@ -25,6 +26,7 @@ from .Workspace import (
 
 __all__ = [
     "DefaultContextBuilder",
+    "LazyWorkspace",
     "LocalWorkspaceBackend",
     "RecallProfile",
     "RuleRecallPlanner",

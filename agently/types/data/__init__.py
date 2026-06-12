@@ -141,6 +141,13 @@ from .execution_environment import (
     ExecutionEnvironmentStatus,
 )
 
+from .execution_exchange import (
+    ExecutionExchangeDispatchState,
+    ExecutionExchangeProviderResult,
+    ExecutionExchangeRequest,
+    ExecutionExchangeWaitMode,
+)
+
 from .policy_approval import (
     PolicyApprovalDecision,
     PolicyApprovalHandler,
@@ -151,6 +158,11 @@ from .policy_approval import (
 
 from .skill import (
     ExecutionStrategy,
+    SkillContextPack,
+    SkillContextPackIncludeMode,
+    SkillContextPackIntent,
+    SkillContextPackResource,
+    SkillContextPackSkill,
     SkillCapabilityNeed,
     SkillCard,
     SkillContract,
@@ -168,12 +180,18 @@ from .skill import (
 
 from .workspace import (
     WorkspaceBackendCapabilities,
+    WorkspaceContentSegment,
     WorkspaceContextItem,
     WorkspaceContextOmission,
     WorkspaceContextPack,
+    WorkspaceFilePolicyMetadata,
+    WorkspaceLeaseRef,
     WorkspaceLinkRef,
     WorkspaceRecallPlan,
     WorkspaceRecordRef,
+    WorkspaceReferenceEnvelope,
+    WorkspaceRetentionAnchor,
+    WorkspaceRuntimeEventRecord,
     WorkspaceSearchResult,
 )
 
@@ -182,7 +200,6 @@ from .agent_execution import (
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
-    AgentExecutionMode,
     AgentExecutionStatus,
     AgentExecutionStreamMeta,
     AgentExecutionWorkspaceRecord,

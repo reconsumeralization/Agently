@@ -78,6 +78,23 @@ print(result)
 
 Each leaf is `(type, description, ensure)`. The third slot is the **`ensure` flag** — set to `True` to guarantee the field is present in the parsed result, retrying the request if needed. See [Schema as Prompt](../requests/schema-as-prompt.md).
 
+## Core creation styles
+
+Agently supports both direct constructors and factory helpers for first-class
+core instances:
+
+```python
+from agently import Agent, Agently, TriggerFlow
+
+agent = Agent("repo-worker")
+factory_agent = Agently.create_agent("repo-worker")
+
+flow = TriggerFlow(name="review-flow")
+factory_flow = Agently.create_trigger_flow("review-flow")
+
+workspace = Agently.create_workspace("./.agently/runs/review-flow")
+```
+
 ## What to read next
 
 - Building a service, streaming UI, or workflow → [Async First](async-first.md)

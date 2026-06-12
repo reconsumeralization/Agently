@@ -151,7 +151,7 @@ def all_requirements_covered(result, ctx):
 
 ### 长 PRD 的保存恢复
 
-很长的 PRD（50+ 需求）运行可能足够长，值得 checkpoint。换 `flow.create_execution(auto_close=False)`，`list_requirements` 后保存，恢复继续 for_each。见 [持久化与 Blueprint](../triggerflow/persistence-and-blueprint.md)。
+很长的 PRD（50+ 需求）运行可能足够长，值得持久化 execution snapshot。换 `flow.create_execution(auto_close=False)`，`list_requirements` 后保存，恢复继续 for_each。见 [持久化与 Blueprint](../triggerflow/persistence-and-blueprint.md)。
 
 ## 交叉链接
 

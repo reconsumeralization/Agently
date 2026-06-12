@@ -14,9 +14,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
-from agently.types.data.workspace import WorkspaceBackendCapabilities, WorkspaceLinkRef, WorkspaceRecordRef
+from agently.types.data.event import RuntimeEvent, RuntimeEventDict
+from agently.types.data.workspace import (
+    WorkspaceBackendCapabilities,
+    WorkspaceContentSegment,
+    WorkspaceFilePolicyMetadata,
+    WorkspaceLeaseRef,
+    WorkspaceLinkRef,
+    WorkspaceRecordRef,
+    WorkspaceReferenceEnvelope,
+    WorkspaceRetentionAnchor,
+    WorkspaceRuntimeEventRecord,
+)
 
 
 @runtime_checkable
@@ -24,6 +35,23 @@ class ContentStore(Protocol):
     async def write_content(self, relative_path: str, content: bytes) -> str: ...
 
     async def read_content(self, path: str) -> Any: ...
+
+    async def read_content_segment(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> WorkspaceContentSegment: ...
+
+    def stream_content(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[WorkspaceContentSegment]: ...
 
 
 @runtime_checkable
@@ -42,6 +70,167 @@ class CheckpointStore(Protocol):
         *,
         step_id: str | None = None,
     ) -> WorkspaceRecordRef: ...
+
+
+@runtime_checkable
+class DurableCheckpointStore(CheckpointStore, Protocol):
+    async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None: ...
+
+    async def put_checkpoint(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+    async def claim_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        ttl: float,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def release_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def put_artifact_ref(
+        self,
+        run_id: str,
+        artifact: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+    def capabilities(self) -> WorkspaceBackendCapabilities: ...
+
+
+@runtime_checkable
+class ExecutionSnapshotStore(Protocol):
+    async def get_snapshot(self, run_id: str) -> dict[str, Any] | None: ...
+
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+
+@runtime_checkable
+class RuntimeEventStore(Protocol):
+    async def append_runtime_event(
+        self,
+        execution_id: str,
+        event: RuntimeEvent | RuntimeEventDict | dict[str, Any],
+        *,
+        sequence: int | None = None,
+        expected_sequence: int | None = None,
+        idempotency_key: str | None = None,
+        snapshot_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
+        exchange_id: str | None = None,
+        state_version: int | None = None,
+        parent_id: str | None = None,
+        causation_id: str | None = None,
+        parent_signal_id: str | None = None,
+        node_id: str | None = None,
+        operator_id: str | None = None,
+        interrupt_id: str | None = None,
+        resume_request_id: str | None = None,
+        actor_id: str | None = None,
+        lease_owner_id: str | None = None,
+        aggregation_scope: str | None = None,
+    ) -> WorkspaceRuntimeEventRecord: ...
+
+    async def query_runtime_events(
+        self,
+        execution_id: str,
+        *,
+        sequence_from: int | None = None,
+        sequence_to: int | None = None,
+        event_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[WorkspaceRuntimeEventRecord]: ...
+
+
+@runtime_checkable
+class RefResolver(Protocol):
+    async def ref_envelope(self, ref_or_id: WorkspaceRecordRef | str) -> WorkspaceReferenceEnvelope: ...
+
+    async def read_bounded(
+        self,
+        ref_or_path: WorkspaceRecordRef | str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> WorkspaceContentSegment: ...
+
+    def stream_read(
+        self,
+        ref_or_path: WorkspaceRecordRef | str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[WorkspaceContentSegment]: ...
+
+
+@runtime_checkable
+class RetentionPolicy(Protocol):
+    async def add_retention_anchor(
+        self,
+        execution_id: str,
+        *,
+        anchor_type: str,
+        sequence: int | None = None,
+        record_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        summary_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        preserved_event_ids: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceRetentionAnchor: ...
+
+    async def retention_anchors(
+        self,
+        execution_id: str,
+        *,
+        anchor_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[WorkspaceRetentionAnchor]: ...
+
+
+@runtime_checkable
+class EvidenceLinker(Protocol):
+    async def link_evidence(
+        self,
+        source: WorkspaceRecordRef | str,
+        target: WorkspaceRecordRef | str,
+        relation: str,
+        *,
+        execution_id: str | None = None,
+        operation_id: str | None = None,
+        runtime_event_id: str | None = None,
+        checkpoint_id: str | None = None,
+        exchange_id: str | None = None,
+        artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceLinkRef: ...
 
 
 @runtime_checkable
@@ -121,6 +310,18 @@ class WorkspaceBackend(Protocol):
     def checkpoint_store(self) -> CheckpointStore: ...
 
     @property
+    def runtime_event_store(self) -> RuntimeEventStore: ...
+
+    @property
+    def ref_resolver(self) -> RefResolver: ...
+
+    @property
+    def retention_policy(self) -> RetentionPolicy: ...
+
+    @property
+    def evidence_linker(self) -> EvidenceLinker: ...
+
+    @property
     def text_index(self) -> TextIndex: ...
 
     @property
@@ -145,6 +346,25 @@ class WorkspaceBackend(Protocol):
 
     async def get_data(self, ref_or_path: WorkspaceRecordRef | str) -> Any: ...
 
+    async def ref_envelope(self, ref_or_id: WorkspaceRecordRef | str) -> WorkspaceReferenceEnvelope: ...
+
+    async def read_bounded(
+        self,
+        ref_or_path: WorkspaceRecordRef | str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> WorkspaceContentSegment: ...
+
+    def stream_read(
+        self,
+        ref_or_path: WorkspaceRecordRef | str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[WorkspaceContentSegment]: ...
+
     async def search(
         self,
         query: str | None = None,
@@ -168,6 +388,21 @@ class WorkspaceBackend(Protocol):
         relation: str | None = None,
     ) -> list[WorkspaceLinkRef]: ...
 
+    async def link_evidence(
+        self,
+        source: WorkspaceRecordRef | str,
+        target: WorkspaceRecordRef | str,
+        relation: str,
+        *,
+        execution_id: str | None = None,
+        operation_id: str | None = None,
+        runtime_event_id: str | None = None,
+        checkpoint_id: str | None = None,
+        exchange_id: str | None = None,
+        artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceLinkRef: ...
+
     async def checkpoint(
         self,
         run_id: str,
@@ -176,6 +411,30 @@ class WorkspaceBackend(Protocol):
         step_id: str | None = None,
     ) -> WorkspaceRecordRef: ...
 
+    async def put_checkpoint(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+    async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None: ...
+
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+    async def get_snapshot(self, run_id: str) -> dict[str, Any] | None: ...
+
+    async def latest_snapshot(self, run_id: str) -> WorkspaceRecordRef | None: ...
+
     async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None: ...
 
     async def checkpoint_history(
@@ -183,6 +442,119 @@ class WorkspaceBackend(Protocol):
         run_id: str,
         *,
         step_id: str | None = None,
+        limit: int | None = None,
     ) -> list[WorkspaceRecordRef]: ...
 
+    async def claim_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        ttl: float,
+        expected_state_version: int | None = None,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def heartbeat_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def release_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        lease_token: str,
+    ) -> WorkspaceLeaseRef: ...
+
+    async def put_artifact_ref(
+        self,
+        run_id: str,
+        artifact: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef: ...
+
+    async def append_runtime_event(
+        self,
+        execution_id: str,
+        event: RuntimeEvent | RuntimeEventDict | dict[str, Any],
+        *,
+        sequence: int | None = None,
+        expected_sequence: int | None = None,
+        idempotency_key: str | None = None,
+        snapshot_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        artifact_refs: list[WorkspaceRecordRef | WorkspaceReferenceEnvelope | str] | None = None,
+        exchange_id: str | None = None,
+        state_version: int | None = None,
+        parent_id: str | None = None,
+        causation_id: str | None = None,
+        parent_signal_id: str | None = None,
+        node_id: str | None = None,
+        operator_id: str | None = None,
+        interrupt_id: str | None = None,
+        resume_request_id: str | None = None,
+        actor_id: str | None = None,
+        lease_owner_id: str | None = None,
+        aggregation_scope: str | None = None,
+    ) -> WorkspaceRuntimeEventRecord: ...
+
+    async def query_runtime_events(
+        self,
+        execution_id: str,
+        *,
+        sequence_from: int | None = None,
+        sequence_to: int | None = None,
+        event_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[WorkspaceRuntimeEventRecord]: ...
+
+    async def record_file_policy(
+        self,
+        *,
+        action_file_root: str | None = None,
+        allowed_roots: list[str] | None = None,
+        root_source: str = "workspace",
+        path_normalization: str = "resolve",
+        symlink_policy: str = "resolved_within_root",
+        case_policy: str = "platform_default",
+        policy_labels: list[str] | None = None,
+        links: dict[str, str] | None = None,
+    ) -> WorkspaceFilePolicyMetadata: ...
+
+    async def get_file_policy(self) -> WorkspaceFilePolicyMetadata: ...
+
+    async def add_retention_anchor(
+        self,
+        execution_id: str,
+        *,
+        anchor_type: str,
+        sequence: int | None = None,
+        record_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        summary_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
+        preserved_event_ids: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceRetentionAnchor: ...
+
+    async def retention_anchors(
+        self,
+        execution_id: str,
+        *,
+        anchor_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[WorkspaceRetentionAnchor]: ...
+
     def capabilities(self) -> WorkspaceBackendCapabilities: ...
+
+
+@runtime_checkable
+class WorkspaceBackendProvider(Protocol):
+    def __call__(
+        self,
+        *,
+        root: Any | None = None,
+        create: bool = True,
+        mode: str = "read_write",
+        **options: Any,
+    ) -> WorkspaceBackend: ...

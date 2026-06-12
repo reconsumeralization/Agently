@@ -1,7 +1,7 @@
 ---
 title: 能力地图
 description: 判断当前问题属于 Agently 的哪一层，并跳到对应章节。
-keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlow
+keywords: Agently, 能力地图, 学习路径, request, TaskDAG, Dynamic Task, TriggerFlow
 ---
 
 # 能力地图
@@ -20,9 +20,9 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 | 4. Action 与执行环境 | 模型是否需要调用函数、MCP server 或带托管执行依赖的沙箱命令？ | [Actions 概览](../actions/overview.md)、[Action Runtime](../actions/action-runtime.md)、[Execution Environment](../actions/execution-environment.md) |
 | 5. 知识与服务 | 是否需要检索、HTTP、SSE 或 WebSocket 暴露？ | [知识库](../knowledge/knowledge-base.md)、[FastAPI 服务封装](../services/fastapi.md) |
 | 6. 观测与开发 | 是否需要 observation event、DevTools 或 coding-agent 指引？ | [观测概览](../observability/overview.md)、[Coding Agents](../development/coding-agents.md) |
-| 7. Agent 自动编排 | 是否需要一次 Agent turn 在模型响应、Actions、Skills 或 Dynamic Task 候选中选择路线？ | [Agent 自动编排](../start/auto-orchestration.md) |
+| 7. Agent 自动编排 | 是否需要一次 Agent turn 在模型响应、Actions、Skills 或 DAG 候选中选择路线？ | [Agent 自动编排](../start/auto-orchestration.md) |
 | 8. AgentTask loop | 是否需要一个业务任务经过计划、有边界执行、Workspace 证据、验证和 replan？ | [Agent 自动编排](../start/auto-orchestration.md#agenttask-loop) |
-| 9. 动态任务图 | 是否需要让模型或应用提交 DAG，并在执行前校验它？ | [Dynamic Task](../dynamic-task/README.md) |
+| 9. TaskDAG / DAG substrate | 是否需要让模型或应用提交、校验、定制并执行 DAG？ | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | 10. 编排 | 分支、并发、暂停恢复、持久化 | [TriggerFlow 概览](../triggerflow/overview.md) |
 
 每一层都依赖前面的层。跳层是出问题最常见的原因——比如，单次请求没稳定就跳进 TriggerFlow。
@@ -37,7 +37,7 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 | 一次响应想多种方式复用 | [模型响应](../requests/model-response.md) |
 | 多轮对话且要控制窗口 | [会话记忆](../requests/session-memory.md) |
 | 多轮任务需要持久 observations、artifacts、decisions 或 checkpoints | [Workspace](../requests/workspace.md) |
-| 显式 workflow loop 需要持久结构化状态、record links、checkpoint 查询和 recall | [TriggerFlow 概览](../triggerflow/overview.md) + [Workspace](../requests/workspace.md)；见 `examples/workspace/workspace_loop_foundation.py` |
+| 显式 workflow loop 需要持久结构化状态、record links、execution snapshot 查询和 recall | [TriggerFlow 概览](../triggerflow/overview.md) + [Workspace](../requests/workspace.md)；见 `examples/workspace/workspace_loop_foundation.py` |
 | 模型要调工具 / MCP | [Action Runtime](../actions/action-runtime.md) |
 | 需要常见 Python / shell / workspace / Node.js / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)`、`agent.enable_nodejs(...)` 或 `agent.enable_sqlite(...)` 开始 |
 | 需要 web search 或页面 browse | [Action Runtime](../actions/action-runtime.md)，使用 `from agently.builtins.actions import Search, Browse` 和 `agent.use_actions(...)` |
@@ -45,9 +45,10 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 | 判断新扩展应该放在哪一层 | [扩展边界](../architecture/extension-boundaries.md) |
 | 把 agent 包成服务 | [FastAPI 服务封装](../services/fastapi.md) |
 | 需要查看观测事件 | [Event Center](../observability/event-center.md) → [DevTools](../observability/devtools.md) |
-| 需要一次 Agent turn 在模型响应、Actions、Skills 或 Dynamic Task 中选路线 | [Agent 自动编排](../start/auto-orchestration.md) |
+| 不确定该用 ModelRequest、AgentExecution、TaskDAG 还是 TriggerFlow | [执行层选择](execution-layer-selection.md) |
+| 需要一次 Agent turn 在模型响应、Actions、Skills 或 DAG-shaped route 中选路线 | [Agent 自动编排](../start/auto-orchestration.md) |
 | 单个业务任务需要计划 → 有边界执行 → 证据 → 验证 → replan | [Agent 自动编排](../start/auto-orchestration.md#agenttask-loop)，从 `agent.create_task(...)` 开始，并按 `AgentExecution` result 消费 |
-| 模型生成或应用提交的 DAG 需要先校验再执行 | [Dynamic Task](../dynamic-task/README.md) |
+| 模型生成或应用提交的 DAG 需要规划、校验、定制并执行 | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | 多阶段带分支的工作流 | [TriggerFlow 概览](../triggerflow/overview.md) → [模式](../triggerflow/patterns.md) |
 | 长跑流程带人工审批 / 中断 | [Pause 与 Resume](../triggerflow/pause-and-resume.md) |
 | 跨重启保存恢复 execution | [持久化与 Blueprint](../triggerflow/persistence-and-blueprint.md) |
@@ -56,10 +57,11 @@ keywords: Agently, 能力地图, 学习路径, request, Dynamic Task, TriggerFlo
 ## 决策捷径
 
 - 「我需要 TriggerFlow 吗？」——只在有明确的阶段、分支、并发或暂停恢复时才需要。带重试的单次请求不需要 TriggerFlow。
-- 「Dynamic Task 还是 TriggerFlow？」——当图本身是提交上来的数据，需要规划、校验、裁剪和执行时用 Dynamic Task；当你在代码里掌握稳定工作流拓扑时直接用 TriggerFlow。
+- 「应该介入哪一层？」——当问题是该从 ModelRequest、AgentExecution、TaskDAG、TriggerFlow 还是 Workspace 入手时，看 [执行层选择](execution-layer-selection.md)。
+- 「TaskDAG、Dynamic Task 还是 TriggerFlow？」——当图本身是提交上来的数据，需要规划、校验、裁剪、解析 handler、定制并执行时，用 TaskDAG 模块；普通应用代码想要紧凑兼容入口时，用 DynamicTask facade；当你在代码里掌握稳定工作流拓扑时，直接用 TriggerFlow。
 - 「Sync 还是 async？」——脚本和 demo 用 sync。服务、流式 UI 与 TriggerFlow 用 async。见 [Async First](../start/async-first.md)。
 - 「Action 还是 tool API？」——新代码：`Agently.action` / `agent.use_actions(...)`、来自 `agently.builtins.actions` 的内置 package，以及 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)` 等场景 helper。已有的 `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` 仍可用，但定位为兼容入口；见 [Action Runtime](../actions/action-runtime.md)。
-- 「Agent start 还是显式 API？」——候选驱动的自动编排用 `agent.start()`；需要路线诊断或过程流式输出时用 `agent.create_execution()`。如果应用必须强制走 Skills 或 Dynamic Task，使用显式 `agent.run_skills_task(...)` 或 `Agently.create_dynamic_task(...)`。
+- 「Agent start 还是显式 API？」——候选驱动的自动编排用 `agent.start()`；需要路线诊断、过程流式输出，或只给当前 execution 挂载提交式 DAG 候选时，用 `agent.create_execution()`。如果应用必须强制走 Skills 或 DAG route，使用显式 `agent.run_skills_task(...)` 或 TaskDAG / DynamicTask facade。
 - 「AgentTask 还是 TriggerFlow？」——当模型拥有单个业务任务的计划、验证和 replan loop 时，用 `agent.create_task(...)`；它返回 task-strategy `AgentExecution`，因此通过 AgentExecution result facade 读取 result/meta/stream/task refs。当应用掌握明确阶段、分支和暂停恢复拓扑时，直接用 TriggerFlow。
 - 「Executor 还是 Execution Environment？」——Executor 负责一次调用；Execution Environment 在调用前准备可复用或受 policy 约束的依赖；见 [Execution Environment](../actions/execution-environment.md)。
 - 「Core API 还是语法糖？」——应用开发者应优先使用 built-in actions 和 Agent Component helpers。Core manager 与 provider 面向框架、action、plugin 开发者；见 [扩展边界](../architecture/extension-boundaries.md)。

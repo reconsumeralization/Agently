@@ -151,7 +151,7 @@ This works at the per-chunk level — applying it across the consolidate output 
 
 ### Save and resume on long PRDs
 
-For very long PRDs (50+ requirements), the run can be long enough to want checkpointing. Switch to `flow.create_execution(auto_close=False)`, save after `list_requirements`, and resume to pick up the for_each. See [Persistence and Blueprint](../triggerflow/persistence-and-blueprint.md).
+For very long PRDs (50+ requirements), the run can be long enough to want execution snapshot persistence. Switch to `flow.create_execution(auto_close=False)`, save after `list_requirements`, and resume to pick up the for_each. See [Persistence and Blueprint](../triggerflow/persistence-and-blueprint.md).
 
 ## Cross-links
 

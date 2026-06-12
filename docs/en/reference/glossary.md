@@ -24,7 +24,7 @@ The dict returned by `execution.close()` / `execution.async_close()`. It capture
 
 ## ensure (third tuple slot)
 
-In `(TypeExpr, "description", True)` the third slot is the `ensure` flag — it marks a leaf as required. Ensure-marked leaves are compiled into `ensure_keys` (with array wildcards like `resources[*].url`). YAML / JSON form: `$ensure: true`.
+In `(TypeExpr, "description", True)` the third slot is the `ensure` flag — it marks a leaf path/key as required. Ensure-marked leaves are compiled into `ensure_keys` (with array wildcards like `resources[*].url`). YAML / JSON form: `$ensure: true`. Use `(TypeExpr, "description", "not_null")` or `$ensure: "not_null"` only when the path must also contain a meaningful value.
 
 This is **not** a default value. The older "default value as third slot" convention is no longer supported, and `$default` in YAML is gone. See [Schema as Prompt](../requests/schema-as-prompt.md).
 
@@ -46,7 +46,7 @@ The three protocol-level model request plugins: `OpenAICompatible`, `OpenAIRespo
 
 ## Runtime resources
 
-Execution-local storage for live objects — database clients, callbacks, sockets, function pointers, cache handles. Runtime resources are **not** serializable and **do not** enter close snapshots or save/load checkpoints; only their `resource_keys` are recorded. On resume after `load()`, the caller must re-inject them.
+Execution-local storage for live objects — database clients, callbacks, sockets, function pointers, cache handles. Runtime resources are **not** serializable and **do not** enter close snapshots or save/load execution snapshots; only their `resource_keys` are recorded. On resume after `load()`, the caller must re-inject them.
 
 This is a distinct concept from `state` and `flow_data`. See [State and Resources](../triggerflow/state-and-resources.md).
 

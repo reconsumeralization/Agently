@@ -107,7 +107,7 @@ async def test_trigger_flow_pause_resume_to_self_exposes_resume_context():
             )
             return "approved"
         return await data.async_pause_for(
-            type="approval",
+            type="exchange", exchange_kind="approval",
             payload={"value": data.value},
             interrupt_id="gate",
             resume_to="self",
@@ -167,7 +167,7 @@ async def test_trigger_flow_close_rejects_pending_interrupt_by_default_and_can_c
 
     async def ask_feedback(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(
-            type="approval",
+            type="exchange", exchange_kind="approval",
             payload={"question": "approve?"},
             interrupt_id="approval",
             resume_to="next",
@@ -194,6 +194,39 @@ async def test_trigger_flow_close_rejects_pending_interrupt_by_default_and_can_c
     assert isinstance(snapshot, dict)
 
 
+@pytest.mark.asyncio
+async def test_trigger_flow_close_cancel_persists_external_wait_cancel_state():
+    flow = TriggerFlow()
+
+    async def ask_feedback(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="exchange", exchange_kind="approval",
+            payload={"question": "approve?"},
+            interrupt_id="approval",
+            resume_to="next",
+            channel_id="ops",
+            provider_id="manual-approval",
+        )
+
+    flow.to(ask_feedback)
+
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("pricing", wait_for_result=False)
+    await execution.async_close(pending_interrupts="cancel")
+
+    saved_state = execution.save()
+    saved_interrupt = saved_state["interrupts"]["approval"]
+    assert saved_interrupt["status"] == "cancelled"
+    assert saved_interrupt["external_wait_request"]["dispatch_state"] == "cancelled"
+
+    restored = flow.create_execution(auto_close=False)
+    restored.load(saved_state)
+    restored_interrupt = restored.get_interrupt("approval")
+    assert isinstance(restored_interrupt, dict)
+    assert restored_interrupt["status"] == "cancelled"
+    assert restored_interrupt["external_wait_request"]["dispatch_state"] == "cancelled"
+
+
 def test_trigger_flow_public_interrupt_event_type_matches_runtime_stream_shape():
     flow = TriggerFlow()
 
@@ -215,6 +248,10 @@ def test_trigger_flow_public_interrupt_event_type_matches_runtime_stream_shape()
     assert validated_event["execution_id"]
     assert validated_event["interrupt"]["type"] == "human_input"
     assert validated_event["interrupt"].get("resume_event") == "UserFeedback"
+    assert validated_event["interrupt"].get("source_execution_id") == validated_event["execution_id"]
+    assert validated_event["interrupt"].get("source_operator_id")
+    assert validated_event["interrupt"].get("source_signal") == validated_event.get("signal")
+    assert "continuation_event" in validated_event["interrupt"]
 
 
 @pytest.mark.asyncio

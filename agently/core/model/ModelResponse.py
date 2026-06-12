@@ -54,7 +54,7 @@ class ModelResponse:
         *,
         run_context: "RunContext | None" = None,
         parent_run_context: "RunContext | None" = None,
-        agent_turn_run_context: "RunContext | None" = None,
+        agent_execution_run_context: "RunContext | None" = None,
         attempt_index: int = 1,
         warn_deprecated: bool = True,
     ):
@@ -84,7 +84,7 @@ class ModelResponse:
         if self.request_run_context.agent_name is None:
             self.request_run_context.agent_name = self.agent_name
         self.run_context = self.request_run_context
-        self.agent_turn_run_context = agent_turn_run_context
+        self.agent_execution_run_context = agent_execution_run_context
         self.model_run_context = self.request_run_context.create_child(
             run_kind="model_request",
             response_id=self.id,
@@ -490,7 +490,7 @@ class ModelResponse:
             parent_run_context=self.request_run_context,
             request_run_context=self.request_run_context,
             model_run_context=self.model_run_context,
-            agent_turn_run_context=self.agent_turn_run_context,
+            agent_execution_run_context=self.agent_execution_run_context,
             settings=self.settings,
         ):
             await async_emit_runtime(
@@ -697,19 +697,19 @@ class ModelResponse:
                         "run": self.request_run_context,
                     }
                 )
-                if self.agent_turn_run_context is not None:
+                if self.agent_execution_run_context is not None:
                     await async_emit_runtime(
                         {
-                            "event_type": "agent_turn.completed",
+                            "event_type": "agent_execution.completed",
                             "source": "ModelResponse",
-                            "message": f"Agent turn completed for '{ self.agent_name }'.",
+                            "message": f"AgentExecution completed for '{ self.agent_name }'.",
                             "payload": {
                                 "agent_name": self.agent_name,
                                 "response_id": self.id,
                                 "request_run_id": self.request_run_context.run_id,
                                 "attempt_count": self.attempt_index,
                             },
-                            "run": self.agent_turn_run_context,
+                            "run": self.agent_execution_run_context,
                         }
                     )
             except BaseException as error:
@@ -767,13 +767,13 @@ class ModelResponse:
                         "run": self.request_run_context,
                     }
                 )
-                if self.agent_turn_run_context is not None:
+                if self.agent_execution_run_context is not None:
                     await async_emit_runtime(
                         {
-                            "event_type": "agent_turn.failed",
+                            "event_type": "agent_execution.failed",
                             "source": "ModelResponse",
                             "level": "ERROR",
-                            "message": f"Agent turn failed for '{ self.agent_name }'.",
+                            "message": f"AgentExecution failed for '{ self.agent_name }'.",
                             "payload": {
                                 "agent_name": self.agent_name,
                                 "response_id": self.id,
@@ -781,7 +781,7 @@ class ModelResponse:
                                 "attempt_count": self.attempt_index,
                             },
                             "error": error,
-                            "run": self.agent_turn_run_context,
+                            "run": self.agent_execution_run_context,
                         }
                     )
                 raise

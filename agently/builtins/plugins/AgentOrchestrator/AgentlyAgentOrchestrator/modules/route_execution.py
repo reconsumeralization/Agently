@@ -106,7 +106,7 @@ async def start_execution(
                 stage="agent_execution",
                 status="started",
                 event_type="agent_execution.started",
-                meta={"execution_id": owner.id, "execution_mode": owner.mode},
+                meta={"execution_id": owner.id},
             )
             run_coro = owner._async_execute_route(
                 type=type,

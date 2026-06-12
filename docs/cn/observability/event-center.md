@@ -21,9 +21,9 @@ Event Center 是 Agently 的框架级运行时事件通道。它承载 **Runtime
 
 run 与 retry 命名：
 
-- `agent_turn` 是一次 Agent 面向用户/调用方回合的 run lineage 类型。
-- `attempt_index` 描述一次请求内部的模型重试 attempt；它不是 Agent turn 计数。
-- DevTools 应保持两者语义分离：从 `run.run_kind` 渲染 `agent_turn`，从 `model_request` run 的 `payload.attempt_index` 或 `run.meta.attempt_index` 读取模型重试 attempt。
+- `agent_execution` 是一次 AgentExecution-owned Agent run 的 run lineage 类型。
+- `attempt_index` 描述一次请求内部的模型重试 attempt；它不是 AgentExecution 计数。
+- DevTools 应保持两者语义分离：从 `run.run_kind` 渲染 `agent_execution`，从 `model_request` run 的 `payload.attempt_index` 或 `run.meta.attempt_index` 读取模型重试 attempt。
 
 ## 注册 hook
 
@@ -83,7 +83,7 @@ event loop 的兜底，不替代 CLI/script 退出前的显式 flush。
 ## 发送 runtime event
 
 `model.*`、`request.*`、`action.*`、`tool.*`、`session.*`、
-`agent_turn.*`、`triggerflow.*`、`execution_environment.*` 这类 Agently
+`agent_execution.*`、`triggerflow.*`、`execution_environment.*` 这类 Agently
 官方事件类型由 core 运行时协调器产出。自定义插件和应用可以向 Event Center
 发送自己的消息，但应该使用应用/插件自有命名空间，也不能依赖 Agently 官方模块
 消费这些自定义消息。

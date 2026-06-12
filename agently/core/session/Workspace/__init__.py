@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .Errors import WorkspaceConfigurationError, WorkspaceError, WorkspacePolicyError
+from .LazyWorkspace import LazyWorkspace
 from .Workspace import Workspace
 from .LocalBackend import LocalWorkspaceBackend
 from .Manager import WorkspaceManager
@@ -26,6 +27,7 @@ __all__ = [
     "FastIngestionProfile",
     "LocalContentStore",
     "LocalWorkspaceBackend",
+    "LazyWorkspace",
     "LocalWorkspacePolicyEngine",
     "NoopVectorIndex",
     "RecallProfile",

@@ -1,22 +1,21 @@
-"""AgentExecution task-step loop with explicit Workspace observations.
+"""AgentExecution lineage workspace loop with explicit Workspace observations.
 
 Run:
-    python examples/agent_auto_orchestration/20_agent_execution_task_step_workspace_loop.py
+    python examples/agent_auto_orchestration/20_agent_execution_lineage_workspace_loop.py
 
 Environment:
     DEEPSEEK_API_KEY in the shell or .env file.
     Set DYNAMIC_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
 
-This example demonstrates the 4.1.3.2 AgentExecution step contract. The host
-owns the two-step loop. Each Agent call is one bounded `mode="task_step"`
-execution with explicit lineage and model-request limits. AgentExecution
+This example demonstrates the 4.1.3.7 AgentExecution lineage/limits contract. The host
+owns the two-step loop. Each Agent call is one bounded AgentExecution with explicit lineage and model-request limits. AgentExecution
 receives the Agent's Workspace binding; the host explicitly asks the execution
 to store observations/checkpoints in Workspace, then calls
 `workspace.build_context(...)` before the next step.
 
 Expected key output from one real DeepSeek run on 2026-06-01:
     provider=deepseek
-    first_execution_mode=task_step
+    first_lineage_task_id=AG-4132-ROUTE
     first_budget_used=1
     first_result_has_root_cause=True
     context_item_count=1
@@ -44,7 +43,7 @@ from agently.utils import DataFormatter
 from examples.dynamic_task._shared import configure_model
 
 
-RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "task_step_workspace_loop"
+RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "lineage_workspace_loop"
 
 ISSUE = {
     "issue_id": "AG-4132-ROUTE",
@@ -68,8 +67,6 @@ async def collect_stream_flags(execution, *, task_id: str) -> dict[str, bool]:
         if item.path == "route.selected" and item.is_complete:
             flags["route_selected"] = True
         meta = item.meta or {}
-        if meta.get("execution_mode") != "task_step":
-            flags["lineage_ok"] = False
         if (meta.get("lineage") or {}).get("task_id") != task_id:
             flags["lineage_ok"] = False
     return flags
@@ -79,7 +76,7 @@ async def main():
     provider = configure_model(temperature=0.1)
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
-    agent = Agently.create_agent("task-step-workspace-loop").use_workspace(RUNTIME_ROOT)
+    agent = Agently.create_agent("lineage-workspace-loop").use_workspace(RUNTIME_ROOT)
     assert agent.workspace is not None
 
     task_id = ISSUE["issue_id"]
@@ -99,7 +96,6 @@ async def main():
             format="json",
         )
         .create_execution(
-            mode="task_step",
             lineage={"task_id": task_id, "iteration_id": "iter-1", "step_id": "analyze"},
             limits={"max_model_requests": 1},
         )
@@ -117,7 +113,7 @@ async def main():
         },
         collection="observations",
         kind="agent_execution_observation",
-        summary=f"{task_id} first task-step analysis",
+        summary=f"{task_id} first bounded execution analysis",
         scope={"task_id": task_id},
         source={"step": "analyze"},
         checkpoint=True,
@@ -155,7 +151,6 @@ async def main():
             format="json",
         )
         .create_execution(
-            mode="task_step",
             lineage={
                 "task_id": task_id,
                 "iteration_id": "iter-2",
@@ -178,7 +173,7 @@ async def main():
         },
         collection="decisions",
         kind="agent_execution_decision",
-        summary=f"{task_id} second task-step decision",
+        summary=f"{task_id} second bounded execution decision",
         scope={"task_id": task_id},
         source={"step": "choose-next-action"},
         checkpoint=True,
@@ -191,7 +186,7 @@ async def main():
     stream_lineage_ok = first_stream["lineage_ok"] and second_stream["lineage_ok"]
 
     print(f"provider={provider}")
-    print(f"first_execution_mode={first_meta['execution_mode']}")
+    print(f"first_lineage_task_id={first_meta['lineage']['task_id']}")
     print(f"first_budget_used={first_meta['diagnostics']['budget']['model_requests_used']}")
     print(f"first_result_has_root_cause={bool(first_result.get('root_cause'))}")
     print(f"context_item_count={len(context_items)}")

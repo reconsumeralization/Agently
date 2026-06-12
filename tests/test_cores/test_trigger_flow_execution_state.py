@@ -1,5 +1,6 @@
-import json
 import asyncio
+import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.types.data import RunContext
 from agently.types.data.event import normalize_triggerflow_event_type
+from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY
 
 
 def test_trigger_flow_sync_start_returns_close_snapshot():
@@ -77,12 +79,190 @@ async def test_trigger_flow_execution_save_and_load_then_continue():
     }
 
 
+def test_trigger_flow_snapshot_records_definition_fingerprint_and_rejects_mismatch():
+    flow = TriggerFlow(name="snapshot-fingerprint")
+
+    async def original_stage(data: TriggerFlowRuntimeData):
+        return data.value
+
+    flow.to(original_stage)
+    saved_state = flow.create_execution(auto_close=False).save()
+    fingerprint = saved_state["flow_definition_fingerprint"]
+
+    assert fingerprint.startswith("sha256:")
+    report = flow.create_execution(auto_close=False).inspect_load(saved_state)
+    assert report["ready"] is True
+    assert report["status"] == "ready"
+    assert report["current_flow_definition_fingerprint"] == fingerprint
+
+    incompatible_flow = TriggerFlow(name="snapshot-fingerprint")
+
+    async def incompatible_stage(data: TriggerFlowRuntimeData):
+        return {"changed": data.value}
+
+    incompatible_flow.to(incompatible_stage)
+    incompatible_report = incompatible_flow.create_execution(auto_close=False).inspect_load(saved_state)
+
+    assert incompatible_report["ready"] is False
+    assert incompatible_report["status"] == "invalid_snapshot"
+    assert {
+        diagnostic["code"]
+        for diagnostic in incompatible_report["diagnostics"]
+    } == {"triggerflow.snapshot.flow_definition_mismatch"}
+    with pytest.raises(ValueError, match="flow definition fingerprint mismatch"):
+        incompatible_flow.create_execution(auto_close=False).load(saved_state)
+
+
+def test_trigger_flow_snapshot_rejects_invalid_kind_and_schema_version():
+    flow = TriggerFlow(name="snapshot-contract")
+
+    async def stage(data: TriggerFlowRuntimeData):
+        return data.value
+
+    flow.to(stage)
+    saved_state = flow.create_execution(auto_close=False).save()
+
+    invalid_kind = copy.deepcopy(saved_state)
+    invalid_kind["kind"] = "unknown.snapshot"
+    kind_report = flow.create_execution(auto_close=False).inspect_load(invalid_kind)
+    assert kind_report["status"] == "invalid_snapshot"
+    assert any(
+        diagnostic["code"] == "triggerflow.snapshot.invalid_kind"
+        for diagnostic in kind_report["diagnostics"]
+    )
+    with pytest.raises(ValueError, match="execution snapshot kind"):
+        flow.create_execution(auto_close=False).load(invalid_kind)
+
+    invalid_schema = copy.deepcopy(saved_state)
+    invalid_schema["schema_version"] = 999
+    schema_report = flow.create_execution(auto_close=False).inspect_load(invalid_schema)
+    assert schema_report["status"] == "invalid_snapshot"
+    assert any(
+        diagnostic["code"] == "triggerflow.snapshot.invalid_schema_version"
+        for diagnostic in schema_report["diagnostics"]
+    )
+    with pytest.raises(ValueError, match="schema_version"):
+        flow.create_execution(auto_close=False).load(invalid_schema)
+
+    missing_fingerprint = copy.deepcopy(saved_state)
+    missing_fingerprint.pop("flow_definition_fingerprint")
+    fingerprint_report = flow.create_execution(auto_close=False).inspect_load(missing_fingerprint)
+    assert fingerprint_report["status"] == "invalid_snapshot"
+    assert any(
+        diagnostic["code"] == "triggerflow.snapshot.missing_flow_definition_fingerprint"
+        for diagnostic in fingerprint_report["diagnostics"]
+    )
+    with pytest.raises(ValueError, match="flow definition fingerprint"):
+        flow.create_execution(auto_close=False).load(missing_fingerprint)
+
+
+def test_trigger_flow_load_reports_lease_expiry_and_owner_conflict():
+    flow = TriggerFlow(name="snapshot-lease-diagnostics")
+    saved_state = flow.create_execution(
+        auto_close=False,
+        owner_id="worker-1",
+        lease_ttl=60.0,
+    ).save()
+
+    conflict_report = flow.create_execution(
+        auto_close=False,
+        owner_id="worker-2",
+    ).inspect_load(saved_state)
+    assert conflict_report["ready"] is False
+    assert conflict_report["status"] == "invalid_snapshot"
+    assert any(
+        diagnostic["code"] == "triggerflow.lease.owner_conflict"
+        for diagnostic in conflict_report["diagnostics"]
+    )
+
+    expired_state = copy.deepcopy(saved_state)
+    expired_state["lease_until"] = 1.0
+    expired_state["lease"]["lease_until"] = 1.0
+    expired_report = flow.create_execution(
+        auto_close=False,
+        owner_id="worker-2",
+    ).inspect_load(expired_state)
+    assert expired_report["ready"] is True
+    assert expired_report["status"] == "ready"
+    assert any(
+        diagnostic["code"] == "triggerflow.lease.expired"
+        and diagnostic["severity"] == "warning"
+        for diagnostic in expired_report["diagnostics"]
+    )
+    assert not any(
+        diagnostic["code"] == "triggerflow.lease.owner_conflict"
+        for diagnostic in expired_report["diagnostics"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_continue_with_fails_fast_after_lease_expiry_and_handoff():
+    flow = TriggerFlow(name="snapshot-lease-callback-handoff")
+
+    async def gate(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="exchange", exchange_kind="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finalize(data: TriggerFlowRuntimeData):
+        await data.async_set_state("approval", data.value, emit=False)
+
+    flow.to(gate).to(finalize)
+    execution = flow.create_execution(
+        auto_close=False,
+        owner_id="worker-1",
+        lease_ttl=30.0,
+    )
+    await execution.async_start(None)
+    execution.heartbeat_lease(owner_id="worker-1", lease_ttl=1.0, now=1.0)
+
+    with pytest.raises(RuntimeError, match="lease.*expired"):
+        await execution.async_continue_with(
+            "approval",
+            {"approved": True},
+            resume_request_id="late-callback",
+            actor="reviewer",
+        )
+
+    pending = execution.get_pending_interrupts()["approval"]
+    assert "late-callback" not in pending.get("resume_requests", {})
+
+    expired_state = execution.save()
+    handoff = flow.create_execution(auto_close=False, owner_id="worker-2")
+    report = handoff.inspect_load(expired_state)
+    assert report["ready"] is True
+    assert report["status"] == "ready"
+    assert any(
+        diagnostic["code"] == "triggerflow.lease.expired"
+        for diagnostic in report["diagnostics"]
+    )
+
+    await handoff.async_load(expired_state)
+    handoff.claim_lease("worker-2", lease_ttl=30.0)
+    await handoff.async_continue_with(
+        "approval",
+        {"approved": True},
+        resume_request_id="handoff-callback",
+        actor="reviewer",
+    )
+    snapshot = await handoff.async_close()
+    await execution.async_close(pending_interrupts="cancel")
+
+    assert snapshot["approval"] == {"approved": True}
+    assert (
+        handoff.save()["resume_ledger"]["approval"]["handoff-callback"]["status"]
+        == "completed"
+    )
+
+
 @pytest.mark.asyncio
 async def test_trigger_flow_execution_load_from_json_string():
     flow = TriggerFlow()
 
     async def setup(data: TriggerFlowRuntimeData):
-        data.set_runtime_data("checkpoint", {"step": 2})
+        data.set_runtime_data("progress_marker", {"step": 2})
         return data.value
 
     flow.to(setup).end()
@@ -92,11 +272,72 @@ async def test_trigger_flow_execution_load_from_json_string():
     restored_execution = flow.create_execution()
     restored_execution.load(json.dumps(saved_state))
 
-    assert restored_execution.get_runtime_data("checkpoint") == {"step": 2}
+    assert restored_execution.get_runtime_data("progress_marker") == {"step": 2}
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_execution_load_restore_ready_result():
+async def test_trigger_flow_execution_snapshot_restores_scoped_when_join_progress_after_load():
+    flow = TriggerFlow(name="snapshot-scoped-join")
+
+    async def emit_left(data: TriggerFlowRuntimeData):
+        await data.async_emit("A", {"left": data.value})
+
+    async def joined(data: TriggerFlowRuntimeData):
+        await data.async_set_state("joined", data.value, emit=False)
+
+    flow.when("Run").to(emit_left)
+    flow.when(["A", "B"], mode="and").to(joined)
+
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_emit("Run", "task-1")
+    saved_state = execution.save()
+
+    snapshot = saved_state
+    assert snapshot["schema_version"] == 1
+    durable_when_states = snapshot["durable_system_state"]["when_states"]
+    signal_scope_keys = [
+        scope_key
+        for when_state in durable_when_states.values()
+        for scope_key in when_state.keys()
+        if str(scope_key).startswith("signal:")
+    ]
+    assert len(signal_scope_keys) == 1
+    aggregation_scope = signal_scope_keys[0].removeprefix("signal:")
+
+    tampered_state = copy.deepcopy(saved_state)
+    tampered_when_states = tampered_state["durable_system_state"]["when_states"]
+    gate_state = next(iter(tampered_when_states.values()))
+    scope_state = gate_state[signal_scope_keys[0]]
+    scope_state["event"].pop("B")
+    tampered_report = flow.create_execution(auto_close=False).inspect_load(tampered_state)
+    assert tampered_report["ready"] is False
+    assert tampered_report["status"] == "invalid_snapshot"
+    assert any(
+        diagnostic["code"] == "triggerflow.when_join.missing_event"
+        for diagnostic in tampered_report["diagnostics"]
+    )
+    with pytest.raises(ValueError, match="join state"):
+        flow.create_execution(auto_close=False).load(tampered_state)
+
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.load(saved_state)
+    await restored_execution.async_emit(
+        "B",
+        {"right": "task-1"},
+        _meta={AGGREGATION_SCOPE_META_KEY: aggregation_scope},
+    )
+    await restored_execution.async_close()
+
+    assert restored_execution.get_state("joined") == {
+        "event": {
+            "A": {"left": "task-1"},
+            "B": {"right": "task-1"},
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_execution_load_keeps_ready_result():
     flow = TriggerFlow()
     flow.to(lambda data: data.value).end()
 
@@ -112,12 +353,233 @@ async def test_trigger_flow_execution_load_restore_ready_result():
 
 
 @pytest.mark.asyncio
+async def test_trigger_flow_execution_snapshot_preserves_self_resume_count_after_load():
+    flow = TriggerFlow(name="snapshot-self-resume")
+
+    async def always_pause(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="exchange", exchange_kind="approval",
+            interrupt_id="approval",
+            resume_to="self",
+            max_resumes=2,
+        )
+
+    flow.to(always_pause)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start(None)
+    await execution.async_continue_with("approval", {"round": 1})
+
+    pending = execution.get_pending_interrupts()
+    assert pending["approval"]["resume_count"] == 1
+    assert pending["approval"]["max_resumes"] == 2
+
+    saved_state = execution.save()
+    assert saved_state["interrupts"]["approval"]["resume_count"] == 1
+
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.load(saved_state)
+    restored_pending = restored_execution.get_pending_interrupts()
+    assert restored_pending["approval"]["resume_count"] == 1
+    assert restored_pending["approval"]["max_resumes"] == 2
+
+    with pytest.raises(RuntimeError, match="self resume limit"):
+        await restored_execution.async_continue_with("approval", {"round": 2})
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_continue_with_resume_request_id_is_idempotent_after_load():
+    flow = TriggerFlow(name="snapshot-resume-idempotency")
+
+    async def gate(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="exchange", exchange_kind="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finalize(data: TriggerFlowRuntimeData):
+        resumes = data.get_state("resumes", []) or []
+        resumes.append(data.value)
+        await data.async_set_state("resumes", resumes, emit=False)
+
+    flow.to(gate).to(finalize)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start(None)
+    await execution.async_continue_with(
+        "approval",
+        {"approved": True},
+        resume_request_id="resume-1",
+        actor="reviewer",
+    )
+    saved_state = execution.save()
+    assert saved_state["resume_ledger"]["approval"]["resume-1"]["status"] == "completed"
+
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.load(saved_state)
+    retry_result = await restored_execution.async_continue_with(
+        "approval",
+        {"approved": True},
+        resume_request_id="resume-1",
+        actor="reviewer",
+    )
+    with pytest.raises(ValueError, match="conflicting resume_request_id"):
+        await restored_execution.async_continue_with(
+            "approval",
+            {"approved": False},
+            resume_request_id="resume-1",
+            actor="reviewer",
+        )
+    await restored_execution.async_close()
+
+    assert retry_result is not None
+    assert retry_result["resume_request_id"] == "resume-1"
+    assert retry_result["resumed_by"] == "reviewer"
+    assert restored_execution.get_state("resumes") == [{"approved": True}]
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_dispatch_failed_resume_request_retries_after_load(monkeypatch):
+    flow = TriggerFlow(name="snapshot-resume-dispatch-failed")
+
+    async def gate(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="exchange", exchange_kind="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finalize(data: TriggerFlowRuntimeData):
+        await data.async_set_state("approval", data.value, emit=False)
+
+    flow.to(gate).to(finalize)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start(None)
+
+    original_dispatch = execution._async_dispatch_signal
+    dispatch_attempts = 0
+
+    async def fail_first_dispatch(*args, **kwargs):
+        nonlocal dispatch_attempts
+        dispatch_attempts += 1
+        if dispatch_attempts == 1:
+            raise RuntimeError("dispatch failed")
+        return await original_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "_async_dispatch_signal", fail_first_dispatch)
+
+    with pytest.raises(RuntimeError, match="dispatch failed"):
+        await execution.async_continue_with(
+            "approval",
+            {"approved": True},
+            resume_request_id="resume-dispatch-failed-1",
+            actor="reviewer",
+        )
+
+    pending = execution.get_pending_interrupts()
+    request = pending["approval"]["resume_requests"]["resume-dispatch-failed-1"]
+
+    assert pending["approval"]["status"] == "waiting"
+    assert pending["approval"]["external_wait_request"]["dispatch_state"] == "dispatch_failed"
+    assert request["status"] == "dispatch_failed"
+    assert execution.is_waiting()
+
+    failed_state = execution.save()
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.load(failed_state)
+    await restored_execution.async_continue_with(
+        "approval",
+        {"approved": True},
+        resume_request_id="resume-dispatch-failed-1",
+        actor="reviewer",
+    )
+    retried_state = restored_execution.save()
+
+    assert restored_execution.get_state("approval") == {"approved": True}
+    assert (
+        retried_state["resume_ledger"]["approval"]["resume-dispatch-failed-1"]["status"]
+        == "completed"
+    )
+    assert (
+        retried_state["resume_ledger"]["approval"]["resume-dispatch-failed-1"]["dispatch_attempts"]
+        == 2
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_status", "diagnostic_code"),
+    [
+        ("accepted", "triggerflow.resume.accepted_not_dispatched"),
+        ("dispatched", "triggerflow.resume.dispatched_not_completed"),
+    ],
+)
+async def test_trigger_flow_resume_request_replays_crash_window_from_ledger(
+    request_status: str,
+    diagnostic_code: str,
+):
+    flow = TriggerFlow(name=f"resume-crash-window-{request_status}")
+
+    async def gate(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="exchange", exchange_kind="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finalize(data: TriggerFlowRuntimeData):
+        await data.async_set_state("approval", data.value, emit=False)
+
+    flow.to(gate).to(finalize)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start(None)
+    saved_state = execution.save()
+    request = {
+        "request_id": "resume-window-1",
+        "status": request_status,
+        "value": {"approved": True},
+        "actor": "reviewer",
+        "accepted_at": 1.0,
+    }
+    if request_status == "dispatched":
+        request["dispatched_at"] = 2.0
+        request["dispatch_attempts"] = 1
+
+    crash_state = copy.deepcopy(saved_state)
+    crash_state["interrupts"]["approval"]["resume_requests"] = {"resume-window-1": request}
+    crash_state["interrupts"]["approval"]["resume_request_id"] = "resume-window-1"
+    crash_state["interrupts"]["approval"]["resumed_by"] = "reviewer"
+    crash_state["interrupts"] = copy.deepcopy(crash_state["interrupts"])
+    crash_state["resume_ledger"] = {"approval": {"resume-window-1": request}}
+
+    inspector = flow.create_execution(auto_close=False)
+    report = inspector.inspect_load(crash_state)
+    assert report["ready"] is True
+    assert diagnostic_code in {diagnostic["code"] for diagnostic in report["diagnostics"]}
+
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.load(crash_state)
+    await restored_execution.async_continue_with(
+        "approval",
+        {"approved": True},
+        resume_request_id="resume-window-1",
+        actor="reviewer",
+    )
+    resumed_state = restored_execution.save()
+
+    assert restored_execution.get_state("approval") == {"approved": True}
+    assert (
+        resumed_state["resume_ledger"]["approval"]["resume-window-1"]["status"]
+        == "completed"
+    )
+
+
+@pytest.mark.asyncio
 async def test_trigger_flow_execution_save_to_json_file_and_load_from_file(tmp_path: Path):
     flow = TriggerFlow()
     flow.to(lambda data: data.value).end()
 
     execution = flow.create_execution()
-    execution.set_runtime_data("checkpoint", {"step": 1})
+    execution.set_runtime_data("progress_marker", {"step": 1})
     json_path = tmp_path / "execution_state.json"
 
     saved_state = execution.save(json_path)
@@ -126,7 +588,7 @@ async def test_trigger_flow_execution_save_to_json_file_and_load_from_file(tmp_p
 
     restored_execution = flow.create_execution()
     restored_execution.load(json_path)
-    assert restored_execution.get_runtime_data("checkpoint") == {"step": 1}
+    assert restored_execution.get_runtime_data("progress_marker") == {"step": 1}
 
 
 @pytest.mark.asyncio
@@ -135,7 +597,7 @@ async def test_trigger_flow_execution_save_to_yaml_file_and_load_from_file(tmp_p
     flow.to(lambda data: data.value).end()
 
     execution = flow.create_execution()
-    execution.set_runtime_data("checkpoint", {"step": 2})
+    execution.set_runtime_data("progress_marker", {"step": 2})
     yaml_path = tmp_path / "execution_state.yaml"
 
     execution.save(yaml_path)
@@ -143,7 +605,7 @@ async def test_trigger_flow_execution_save_to_yaml_file_and_load_from_file(tmp_p
 
     restored_execution = flow.create_execution()
     restored_execution.load(yaml_path)
-    assert restored_execution.get_runtime_data("checkpoint") == {"step": 2}
+    assert restored_execution.get_runtime_data("progress_marker") == {"step": 2}
 
 
 def test_trigger_flow_execution_save_and_load_preserves_run_context():
@@ -180,10 +642,10 @@ async def test_trigger_flow_execution_close_returns_state_snapshot():
     flow = TriggerFlow()
     execution = flow.create_execution(auto_close=False)
 
-    await execution.async_set_state("checkpoint", {"step": 1})
+    await execution.async_set_state("progress_marker", {"step": 1})
     result = await execution.async_close()
 
-    assert result == {"checkpoint": {"step": 1}}
+    assert result == {"progress_marker": {"step": 1}}
     assert execution.is_closed()
     assert execution.get_lifecycle_state() == "closed"
 

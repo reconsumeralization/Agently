@@ -19,6 +19,9 @@ import warnings
 import json
 import time
 import copy
+import inspect
+import hashlib
+import importlib
 from pathlib import Path
 from contextvars import ContextVar
 
@@ -33,6 +36,8 @@ if TYPE_CHECKING:
         RunContext,
         SerializableValue,
     )
+    from agently.types.plugins import RuntimeEventStore
+    from agently.types.trigger_flow import TriggerFlowExecutionSnapshotStore
 
 from agently.utils import DeprecationWarnings, StateData, FunctionShifter, GeneratorConsumer, Settings
 from agently.core.runtime.RuntimeContext import bind_runtime_context, get_current_chunk_run_context
@@ -43,7 +48,12 @@ from agently.types.trigger_flow import (
     TriggerFlowInterruptEvent,
     TriggerFlowRuntimeData,
 )
-from agently.types.data import EMPTY, RunContext
+from agently.types.trigger_flow.runtime_keys import (
+    AGGREGATION_SCOPE_META_KEY,
+    PARENT_SIGNAL_ID_META_KEY,
+    TRANSIENT_AGGREGATION_STATE_KEYS,
+)
+from agently.types.data import EMPTY, RunContext, RuntimeEvent
 from agently.types.data import ExecutionEnvironmentRequirement
 from .Control import (
     TriggerFlowPauseSignal,
@@ -62,11 +72,29 @@ from .ExecutionResult import TriggerFlowExecutionResult
 from .ExecutionInterrupts import TriggerFlowExecutionInterrupts
 from .ExecutionPersistence import TriggerFlowExecutionPersistence
 from .ExecutionRuntimeIO import TriggerFlowExecutionRuntimeIO
+from .RecoveryDiagnostics import diagnose_runtime_event_records, project_runtime_event_record
 
 InputT = TypeVar("InputT")
 StreamT = TypeVar("StreamT")
 ResultT = TypeVar("ResultT")
 PendingInterruptClosePolicy = Literal["error", "cancel"]
+DISTRIBUTED_SNAPSHOT_PROVIDER_CAPABILITIES = (
+    "supports_cas",
+    "supports_lease",
+    "supports_range_read",
+    "supports_retention",
+)
+DISTRIBUTED_SNAPSHOT_PROVIDER_METHODS = (
+    "get_snapshot",
+    "put_snapshot",
+    "claim_lease",
+    "heartbeat_lease",
+    "release_lease",
+    "put_artifact_ref",
+)
+DISTRIBUTED_RUNTIME_EVENT_PROVIDER_CAPABILITIES = (
+    "supports_event_sequence",
+)
 
 
 class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
@@ -114,10 +142,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._system_runtime_data = StateData()
         self._skip_exceptions = skip_exceptions
         self._concurrency_semaphore = asyncio.Semaphore(concurrency) if concurrency and concurrency > 0 else None
-        self._concurrency_depth = ContextVar(
-            f"trigger_flow_execution_concurrency_depth_{ self.id }",
-            default=0,
+        self._concurrency_permit_held = ContextVar(
+            f"trigger_flow_execution_concurrency_permit_held_{ self.id }",
+            default=False,
         )
+        self._close_lock = asyncio.Lock()
         self.run_context = (
             run_context
             if run_context is not None
@@ -132,6 +161,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._runtime_failed_emitted = False
         self._runtime_result_set_emitted = False
         self._runtime_definition_emitted = False
+        self._snapshot_store = None
+        self._runtime_event_store = None
         self._auto_close = bool(auto_close)
         self._auto_close_timeout = auto_close_timeout
         self._resume_handle_exposed = bool(resume_handle_exposed)
@@ -147,11 +178,18 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._lease_ttl = lease_ttl
         self._execution_environment_requirements = execution_environments if execution_environments is not None else []
         self._managed_execution_environment_handles: list["ExecutionEnvironmentHandle"] = []
+        self._resource_requirements: list[dict[str, Any]] = []
+        self._compaction_segments: list[dict[str, Any]] = []
+        self._retained_lineage_anchors: list[dict[str, Any]] = []
+        self._snapshot_artifact_refs: list[dict[str, Any]] = []
+        self._compaction_policy: dict[str, Any] = {}
+        self._load_policy: dict[str, Any] = {}
         self._heartbeat_at: float | None = None
         self._lease_until: float | None = self._created_at + lease_ttl if lease_ttl is not None else None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._task_origins: dict[asyncio.Task[Any], str] = {}
         self._accepted_signal_ids: set[str] = set()
+        self._active_runtime_operation_count = 0
         self._active_handler_count = 0
         self._auto_close_task: asyncio.Task[Any] | None = None
         self._close_started = False
@@ -206,6 +244,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self.del_runtime_resource = self._del_runtime_resource
         self.update_runtime_resources = self._update_runtime_resources
         self.clear_runtime_resources = self._clear_runtime_resources
+        self.declare_resource_requirement = self._declare_resource_requirement
+        self.set_compaction_policy = self._set_compaction_policy
 
         # Runtime Stream
         self.put_into_stream = FunctionShifter.syncify(self.async_put_into_stream)
@@ -683,8 +723,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED
 
     def is_idle(self):
-        return self._active_handler_count == 0 and not any(
-            task is not self._auto_close_task and not task.done() for task in self._pending_tasks
+        return (
+            self._active_runtime_operation_count == 0
+            and self._active_handler_count == 0
+            and not any(task is not self._auto_close_task and not task.done() for task in self._pending_tasks)
         )
 
     def _warn_runtime_data_api(self, method_name: str):
@@ -726,6 +768,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
     def _build_close_snapshot(self):
         return self._runtime_io.build_close_snapshot()
+
+    def _clear_transient_aggregation_state(self):
+        for key in TRANSIENT_AGGREGATION_STATE_KEYS:
+            self._system_runtime_data.pop(key, None)
 
     async def _async_wait_for_compat_result_or_close(self, *, timeout: float | None = None):
         return await self._runtime_io.async_wait_for_compat_result_or_close(timeout=timeout)
@@ -925,70 +971,73 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     ):
         if self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED:
             return self._close_result
-        if self._close_started:
-            await self._closed_event.wait()
-            return self._close_result
-        self._validate_pending_interrupt_close_policy(pending_interrupts)
-        await self._handle_pending_interrupts_before_close(
-            pending_interrupts=pending_interrupts,
-            reason=reason,
-        )
+        async with self._close_lock:
+            if self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED:
+                return self._close_result
+            self._validate_pending_interrupt_close_policy(pending_interrupts)
 
-        self._close_started = True
-        self._close_reason = reason
-        sealed_for_close = False
-        try:
-            if seal:
-                await self.async_seal(reason=reason)
-                sealed_for_close = True
+            self._close_started = True
+            self._close_reason = reason
+            sealed_for_close = False
+            try:
+                await self._handle_pending_interrupts_before_close(
+                    pending_interrupts=pending_interrupts,
+                    reason=reason,
+                )
 
-            await self._drain_pending_tasks(timeout=timeout)
-            await self._handle_pending_interrupts_before_close(
-                pending_interrupts=pending_interrupts,
-                reason=reason,
-            )
-            await self._async_expire_pending_interventions()
+                if seal:
+                    await self.async_seal(reason=reason)
+                    sealed_for_close = True
 
-            result = self._build_close_snapshot()
-            if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
-                self._set_status(TRIGGER_FLOW_STATUS_COMPLETED)
-                if not self._runtime_completed_emitted:
-                    self._runtime_completed_emitted = True
-                    await self._emit_runtime_event(
-                        "triggerflow.execution_completed",
-                        message=f"TriggerFlow execution '{ self.id }' completed.",
-                        payload={
-                            "result": self._to_serializable_value(result),
-                            "origin_chunk": self._get_origin_chunk_payload(),
-                        },
-                    )
+                await self._drain_pending_tasks(timeout=timeout)
+                await self._handle_pending_interrupts_before_close(
+                    pending_interrupts=pending_interrupts,
+                    reason=reason,
+                )
+                await self._async_expire_pending_interventions()
+                self._clear_transient_aggregation_state()
 
-            await self.async_stop_stream()
-            await self._release_managed_execution_environments()
+                result = self._build_close_snapshot()
+                if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
+                    self._set_status(TRIGGER_FLOW_STATUS_COMPLETED)
+                    if not self._runtime_completed_emitted:
+                        self._runtime_completed_emitted = True
+                        await self._emit_runtime_event(
+                            "triggerflow.execution_completed",
+                            message=f"TriggerFlow execution '{ self.id }' completed.",
+                            payload={
+                                "result": self._to_serializable_value(result),
+                                "origin_chunk": self._get_origin_chunk_payload(),
+                            },
+                        )
 
-            self._closed_at = time.time()
-            self._close_result = result
-            self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_CLOSED)
-            await self._emit_runtime_event(
-                "triggerflow.execution_closed",
-                message=f"TriggerFlow execution '{ self.id }' closed.",
-                payload={
-                    "reason": reason,
-                    "closed_at": self._closed_at,
-                    "result": self._to_serializable_value(result),
-                },
-            )
-            self._closed_event.set()
+                await self.async_stop_stream()
+                await self._release_managed_execution_environments()
 
-            if self._auto_close_task is not None and self._auto_close_task is not asyncio.current_task():
-                self._auto_close_task.cancel()
-            return self._close_result
-        except BaseException:
-            self._close_started = False
-            self._close_reason = None
-            if sealed_for_close and self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_SEALED:
-                await self.async_unseal(reason="close_failed")
-            raise
+                self._closed_at = time.time()
+                self._close_result = result
+                self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_CLOSED)
+                await self._emit_runtime_event(
+                    "triggerflow.execution_closed",
+                    message=f"TriggerFlow execution '{ self.id }' closed.",
+                    payload={
+                        "reason": reason,
+                        "closed_at": self._closed_at,
+                        "result": self._to_serializable_value(result),
+                    },
+                )
+                self._closed_event.set()
+                self._trigger_flow.remove_execution(self)
+
+                if self._auto_close_task is not None and self._auto_close_task is not asyncio.current_task():
+                    self._auto_close_task.cancel()
+                return self._close_result
+            except BaseException:
+                self._close_started = False
+                self._close_reason = None
+                if sealed_for_close and self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_SEALED:
+                    await self.async_unseal(reason="close_failed")
+                raise
 
     async def _emit_runtime_event(
         self,
@@ -1001,7 +1050,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     ):
         from agently.base import async_emit_runtime
 
-        await async_emit_runtime(
+        event = RuntimeEvent.model_validate(
             {
                 "event_type": event_type,
                 "source": "TriggerFlowExecution",
@@ -1013,6 +1062,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 "meta": {"execution_id": self.id},
             }
         )
+        await self._persist_runtime_event(event)
+        await async_emit_runtime(event)
 
     async def _emit_runtime_definition_event(self):
         if self._runtime_definition_emitted:
@@ -1134,7 +1185,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             base_payload.update(payload)
         elif payload is not None:
             base_payload["value"] = payload
-        await async_emit_runtime(
+        event = RuntimeEvent.model_validate(
             {
                 "event_type": event_type,
                 "source": "TriggerFlowExecution",
@@ -1146,6 +1197,217 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 "meta": {"execution_id": self.id},
             }
         )
+        await self._persist_runtime_event(event)
+        await async_emit_runtime(event)
+
+    def _runtime_event_node_id(self, event: RuntimeEvent):
+        payload = event.payload
+        if isinstance(payload, dict):
+            for key in ("node_id", "chunk_id"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            origin_chunk = payload.get("origin_chunk")
+            if isinstance(origin_chunk, dict):
+                value = origin_chunk.get("chunk_id")
+                if isinstance(value, str) and value:
+                    return value
+        meta = event.meta or {}
+        value = meta.get("node_id")
+        return value if isinstance(value, str) and value else None
+
+    def _runtime_event_payload_meta(self, event: RuntimeEvent):
+        payload = event.payload
+        if not isinstance(payload, dict):
+            return {}
+        meta = payload.get("META")
+        if isinstance(meta, dict):
+            return meta
+        signal_meta = payload.get("signal_meta")
+        if isinstance(signal_meta, dict):
+            return signal_meta
+        return {}
+
+    def _runtime_event_aggregation_scope(self, event: RuntimeEvent):
+        meta = event.meta or {}
+        value = meta.get("aggregation_scope")
+        if isinstance(value, str) and value:
+            return value
+        payload_meta = self._runtime_event_payload_meta(event)
+        value = payload_meta.get(AGGREGATION_SCOPE_META_KEY) or payload_meta.get("aggregation_scope")
+        if isinstance(value, str) and value:
+            return value
+        if event.run is None:
+            return None
+        return event.run.root_run_id or event.run.run_id
+
+    def _runtime_event_parent_signal_id(self, event: RuntimeEvent):
+        meta = event.meta or {}
+        value = meta.get("parent_signal_id")
+        if isinstance(value, str) and value:
+            return value
+        payload = event.payload
+        if isinstance(payload, dict):
+            for key in ("parent_signal_id", "signal_id"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            payload_meta = self._runtime_event_payload_meta(event)
+            value = payload_meta.get(PARENT_SIGNAL_ID_META_KEY) or payload_meta.get("parent_signal_id")
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def _runtime_event_operator_id(self, event: RuntimeEvent):
+        payload = event.payload
+        if isinstance(payload, dict):
+            for key in ("operator_id", "chunk_id", "handler"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            payload_meta = self._runtime_event_payload_meta(event)
+            origin_chunk = payload_meta.get("origin_chunk")
+            if isinstance(origin_chunk, dict):
+                value = origin_chunk.get("chunk_id")
+                if isinstance(value, str) and value:
+                    return value
+        meta = event.meta or {}
+        value = meta.get("operator_id")
+        return value if isinstance(value, str) and value else None
+
+    def _runtime_event_interrupt_id(self, event: RuntimeEvent):
+        payload = event.payload
+        if isinstance(payload, dict):
+            value = payload.get("interrupt_id")
+            if isinstance(value, str) and value:
+                return value
+            interrupt = payload.get("interrupt")
+            if isinstance(interrupt, dict):
+                value = interrupt.get("id")
+                if isinstance(value, str) and value:
+                    return value
+            payload_meta = self._runtime_event_payload_meta(event)
+            value = payload_meta.get("interrupt_id")
+            if isinstance(value, str) and value:
+                return value
+        meta = event.meta or {}
+        value = meta.get("interrupt_id")
+        return value if isinstance(value, str) and value else None
+
+    def _runtime_event_resume_request_id(self, event: RuntimeEvent):
+        payload = event.payload
+        if isinstance(payload, dict):
+            value = payload.get("resume_request_id")
+            if isinstance(value, str) and value:
+                return value
+            interrupt = payload.get("interrupt")
+            if isinstance(interrupt, dict):
+                value = interrupt.get("resume_request_id")
+                if isinstance(value, str) and value:
+                    return value
+            payload_meta = self._runtime_event_payload_meta(event)
+            value = payload_meta.get("resume_request_id")
+            if isinstance(value, str) and value:
+                return value
+        meta = event.meta or {}
+        value = meta.get("resume_request_id")
+        return value if isinstance(value, str) and value else None
+
+    def _runtime_event_actor_id(self, event: RuntimeEvent):
+        payload = event.payload
+        if isinstance(payload, dict):
+            for key in ("actor_id", "actor", "resumed_by"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            interrupt = payload.get("interrupt")
+            if isinstance(interrupt, dict):
+                for key in ("actor_id", "resumed_by"):
+                    value = interrupt.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+            payload_meta = self._runtime_event_payload_meta(event)
+            for key in ("actor_id", "actor"):
+                value = payload_meta.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        meta = event.meta or {}
+        value = meta.get("actor_id")
+        return value if isinstance(value, str) and value else None
+
+    def _runtime_event_exchange_id(self, event: RuntimeEvent):
+        payload = event.payload
+        if isinstance(payload, dict):
+            for key in ("exchange_id", "external_wait_request_id"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            for envelope_key in ("external_wait_request", "request"):
+                envelope = payload.get(envelope_key)
+                value = self._runtime_event_exchange_id_from_external_wait(envelope)
+                if value:
+                    return value
+            interrupt = payload.get("interrupt")
+            if isinstance(interrupt, dict):
+                value = self._runtime_event_exchange_id_from_external_wait(
+                    interrupt.get("external_wait_request")
+                )
+                if value:
+                    return value
+        meta = event.meta or {}
+        value = meta.get("exchange_id")
+        return value if isinstance(value, str) and value else None
+
+    def _runtime_event_exchange_id_from_external_wait(self, envelope: Any):
+        if not isinstance(envelope, dict):
+            return None
+        value = envelope.get("exchange_id")
+        if isinstance(value, str) and value:
+            return value
+        audit_metadata = envelope.get("audit_metadata")
+        if isinstance(audit_metadata, dict):
+            value = audit_metadata.get("exchange_id")
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    async def _persist_runtime_event(self, event: RuntimeEvent):
+        runtime_event_store = self._runtime_event_store
+        if runtime_event_store is None:
+            return None
+        append_runtime_event = runtime_event_store.append_runtime_event
+        append_kwargs = self._filter_callable_kwargs(
+            append_runtime_event,
+            {
+                "idempotency_key": event.event_id,
+                "state_version": self._state_version,
+                "parent_signal_id": self._runtime_event_parent_signal_id(event),
+                "node_id": self._runtime_event_node_id(event),
+                "operator_id": self._runtime_event_operator_id(event),
+                "interrupt_id": self._runtime_event_interrupt_id(event),
+                "resume_request_id": self._runtime_event_resume_request_id(event),
+                "actor_id": self._runtime_event_actor_id(event),
+                "exchange_id": self._runtime_event_exchange_id(event),
+                "lease_owner_id": self._owner_id,
+                "aggregation_scope": self._runtime_event_aggregation_scope(event),
+            },
+        )
+        return await append_runtime_event(self.id, event, **append_kwargs)
+
+    def _filter_callable_kwargs(self, callable_object: Any, kwargs: dict[str, Any]):
+        try:
+            signature = inspect.signature(callable_object)
+        except (TypeError, ValueError):
+            return kwargs
+        parameters = signature.parameters.values()
+        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+            return kwargs
+        accepted_names = {
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.kind in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+        }
+        return {key: value for key, value in kwargs.items() if key in accepted_names}
 
     def get_status(self):
         return self._status
@@ -1203,7 +1465,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self._interrupts.build_resume_context(interrupt_id, interrupt, value)
 
     def _set_runtime_resource(self, key: str, value: Any):
-        self._runtime_resources.set(str(key), value)
+        normalized_key = str(key)
+        self._runtime_resources.set(normalized_key, value)
+        self._bind_durable_provider_resource(normalized_key, value)
         return self
 
     def _get_runtime_resource(self, key: str, default: Any = None):
@@ -1235,9 +1499,493 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             self._set_runtime_resource(str(key), value)
         return self
 
+    def _bind_durable_provider_resource(self, key: str, value: Any):
+        if key == "workspace":
+            if self._snapshot_store is None and hasattr(value, "put_snapshot"):
+                self._bind_snapshot_store(value)
+            if self._runtime_event_store is None and hasattr(value, "append_runtime_event"):
+                self._bind_runtime_event_store(value)
+            return
+        if key == "durable_provider":
+            if hasattr(value, "put_snapshot"):
+                self._bind_snapshot_store(value)
+            if hasattr(value, "append_runtime_event"):
+                self._bind_runtime_event_store(value)
+            return
+        if key == "snapshot_store":
+            self._bind_snapshot_store(value)
+            return
+        if key == "runtime_event_store":
+            self._bind_runtime_event_store(value)
+
     def _clear_runtime_resources(self):
         self._runtime_resources.clear()
         return self
+
+    def _declare_resource_requirement(
+        self,
+        key: str,
+        *,
+        kind: str = "runtime_resource",
+        required: bool = True,
+        metadata: dict[str, Any] | None = None,
+        resolver: str | None = None,
+        provider_kind: str | None = None,
+        secret_ref: str | None = None,
+        config_ref: str | None = None,
+        resolver_version: str | None = None,
+        resolver_fingerprint: str | None = None,
+        health: str | None = None,
+        fail_policy: str | None = None,
+    ):
+        requirement = {
+            "kind": str(kind),
+            "key": str(key),
+            "required": bool(required),
+            "source": "execution",
+            "metadata": {"scope": "execution", **dict(metadata or {})},
+        }
+        for field, value in (
+            ("resolver", resolver),
+            ("provider_kind", provider_kind),
+            ("secret_ref", secret_ref),
+            ("config_ref", config_ref),
+            ("resolver_version", resolver_version),
+            ("resolver_fingerprint", resolver_fingerprint),
+            ("health", health),
+            ("fail_policy", fail_policy),
+        ):
+            if value is not None:
+                requirement[field] = str(value)
+        self._resource_requirements = [
+            item
+            for item in self._resource_requirements
+            if not (
+                item.get("kind") == requirement["kind"]
+                and item.get("key") == requirement["key"]
+                and item.get("source") == requirement["source"]
+            )
+        ]
+        self._resource_requirements.append(requirement)
+        return self
+
+    def get_resource_requirements(self):
+        return copy.deepcopy(self._trigger_flow.get_resource_requirements()) + copy.deepcopy(
+            self._resource_requirements
+        )
+
+    def _record_compaction_segment(
+        self,
+        segment_id: str,
+        *,
+        sequence_from: int,
+        sequence_to: int,
+        summary: str | None = None,
+        artifact_refs: list[Any] | None = None,
+        retained_anchor_ids: list[str] | None = None,
+        reducer: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        if sequence_from < 0 or sequence_to < 0:
+            raise ValueError("compaction segment sequence bounds must be non-negative.")
+        if sequence_to < sequence_from:
+            raise ValueError("compaction segment sequence_to must be greater than or equal to sequence_from.")
+        segment = {
+            "segment_id": str(segment_id),
+            "sequence_from": int(sequence_from),
+            "sequence_to": int(sequence_to),
+            "summary": summary,
+            "artifact_refs": self._to_serializable_value(artifact_refs or []),
+            "retained_anchor_ids": [str(anchor_id) for anchor_id in retained_anchor_ids or []],
+            "reducer": str(reducer) if reducer is not None else None,
+            "metadata": self._to_serializable_value(dict(metadata or {})),
+        }
+        self._compaction_segments = [
+            item
+            for item in self._compaction_segments
+            if item.get("segment_id") != segment["segment_id"]
+        ]
+        self._compaction_segments.append(segment)
+        self._bump_state_version()
+        return self
+
+    def _record_retained_lineage_anchor(
+        self,
+        anchor_id: str,
+        *,
+        anchor_type: str = "compaction",
+        sequence: int | None = None,
+        event_id: str | None = None,
+        parent_signal_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        fingerprint: str | None = None,
+    ):
+        if sequence is not None and sequence < 0:
+            raise ValueError("lineage anchor sequence must be non-negative or None.")
+        anchor = {
+            "anchor_id": str(anchor_id),
+            "anchor_type": str(anchor_type),
+            "sequence": int(sequence) if sequence is not None else None,
+            "event_id": str(event_id) if event_id is not None else None,
+            "parent_signal_id": str(parent_signal_id) if parent_signal_id is not None else None,
+            "metadata": self._to_serializable_value(dict(metadata or {})),
+        }
+        anchor["fingerprint"] = fingerprint or self._lineage_anchor_fingerprint(anchor)
+        self._retained_lineage_anchors = [
+            item
+            for item in self._retained_lineage_anchors
+            if item.get("anchor_id") != anchor["anchor_id"]
+        ]
+        self._retained_lineage_anchors.append(anchor)
+        self._bump_state_version()
+        return self
+
+    def _record_snapshot_artifact_ref(
+        self,
+        artifact_ref: Any,
+        *,
+        kind: str = "payload",
+        required: bool = True,
+        status: str = "available",
+        metadata: dict[str, Any] | None = None,
+    ):
+        ref = {
+            "kind": str(kind),
+            "required": bool(required),
+            "status": str(status),
+            "ref": self._to_serializable_value(artifact_ref),
+            "metadata": self._to_serializable_value(dict(metadata or {})),
+        }
+        self._snapshot_artifact_refs.append(ref)
+        self._bump_state_version()
+        return self
+
+    def _set_compaction_policy(
+        self,
+        *,
+        min_runtime_events: int | None = 1,
+        reducer: Any | None = None,
+        reducer_ref: str | None = None,
+        artifact_kind: str = "snapshot_payload",
+        load_read_limit: int | None = None,
+        enabled: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ):
+        if min_runtime_events is not None and min_runtime_events < 0:
+            raise ValueError("compaction min_runtime_events must be non-negative or None.")
+        if load_read_limit is not None and load_read_limit < 0:
+            raise ValueError("compaction load_read_limit must be non-negative or None.")
+        if reducer is not None and reducer_ref is not None:
+            raise ValueError("Set either reducer or reducer_ref, not both.")
+        resolved_reducer = reducer_ref if reducer_ref is not None else reducer
+        self._compaction_policy = {
+            "enabled": bool(enabled),
+            "min_runtime_events": int(min_runtime_events) if min_runtime_events is not None else None,
+            "reducer": resolved_reducer,
+            "artifact_kind": str(artifact_kind),
+            "load_read_limit": int(load_read_limit) if load_read_limit is not None else None,
+            "metadata": self._to_serializable_value(dict(metadata or {})),
+        }
+        self._bump_state_version()
+        return self
+
+    def _set_load_read_limit(self, limit: int | None):
+        if limit is not None and limit < 0:
+            raise ValueError("load read limit must be non-negative or None.")
+        if limit is None:
+            self._load_policy.pop("runtime_event_read_limit", None)
+        else:
+            self._load_policy["runtime_event_read_limit"] = int(limit)
+        self._bump_state_version()
+        return self
+
+    def _lineage_anchor_fingerprint(self, anchor: dict[str, Any]):
+        material = {
+            key: value
+            for key, value in anchor.items()
+            if key != "fingerprint"
+        }
+        return hashlib.sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    def _serializable_compaction_policy(self):
+        policy = dict(self._compaction_policy)
+        reducer = policy.get("reducer")
+        if callable(reducer):
+            reducer_ref = self._callable_ref(reducer)
+            if reducer_ref is not None:
+                policy["reducer"] = reducer_ref
+            else:
+                policy.pop("reducer", None)
+                policy["reducer_kind"] = "callable"
+        return self._to_serializable_value(policy)
+
+    def _callable_ref(self, callback: Any):
+        module = getattr(callback, "__module__", None)
+        qualname = getattr(callback, "__qualname__", None)
+        if not module or not qualname or "<locals>" in str(qualname):
+            return None
+        return f"{ module }:{ qualname }"
+
+    def _resolve_import_ref(self, ref: str):
+        if ":" not in ref:
+            raise ValueError(f"TriggerFlow import reference must use 'module:attribute': { ref }")
+        module_name, attribute_path = ref.split(":", 1)
+        value = importlib.import_module(module_name)
+        for part in attribute_path.split("."):
+            value = getattr(value, part)
+        return value
+
+    def _compaction_reducer_ref(self):
+        reducer = self._compaction_policy.get("reducer")
+        if isinstance(reducer, str):
+            return reducer
+        if callable(reducer):
+            return self._callable_ref(reducer)
+        return None
+
+    def _resolve_compaction_reducer(self):
+        reducer = self._compaction_policy.get("reducer")
+        if isinstance(reducer, str):
+            reducer = self._resolve_import_ref(reducer)
+        if reducer is not None and not callable(reducer):
+            raise TypeError("TriggerFlow compaction reducer must be callable or an import reference string.")
+        return reducer
+
+    async def _call_compaction_reducer(
+        self,
+        reducer: Any,
+        *,
+        records: list[dict[str, Any]],
+        sequence_from: int,
+        sequence_to: int,
+        run_id: str,
+        snapshot_store: Any,
+        runtime_event_store: Any,
+    ) -> dict[str, Any]:
+        context = {
+            "execution": self,
+            "records": records,
+            "events": records,
+            "sequence_from": sequence_from,
+            "sequence_to": sequence_to,
+            "run_id": run_id,
+            "snapshot_store": snapshot_store,
+            "runtime_event_store": runtime_event_store,
+            "policy": self._serializable_compaction_policy(),
+        }
+        kwargs = {"context": context, **context}
+        try:
+            signature = inspect.signature(reducer)
+            parameters = signature.parameters
+            if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+                result = reducer(**kwargs)
+            else:
+                accepted_kwargs = {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key in parameters
+                }
+                result = reducer(**accepted_kwargs) if accepted_kwargs else reducer(context)
+        except (TypeError, ValueError) as exc:
+            if isinstance(exc, ValueError):
+                raise
+            result = reducer(context)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is None:
+            return {}
+        if not isinstance(result, dict):
+            return {"summary": str(result)}
+        return cast(dict[str, Any], result)
+
+    def _runtime_event_record_sequence(self, record: dict[str, Any]):
+        try:
+            return int(record["sequence"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _compaction_policy_min_events(self):
+        min_events = self._compaction_policy.get("min_runtime_events")
+        if min_events is None:
+            return 1
+        try:
+            return int(min_events)
+        except (TypeError, ValueError):
+            return 1
+
+    def _latest_compacted_sequence(self):
+        latest = 0
+        for segment in self._compaction_segments:
+            try:
+                latest = max(latest, int(segment.get("sequence_to", 0)))
+            except (TypeError, ValueError):
+                continue
+        return latest
+
+    def _compaction_provider(self, snapshot_store: Any, runtime_event_store: Any):
+        if snapshot_store is not None and (
+            hasattr(snapshot_store, "put_artifact_ref")
+            or hasattr(snapshot_store, "add_retention_anchor")
+        ):
+            return snapshot_store
+        if runtime_event_store is not None and (
+            hasattr(runtime_event_store, "put_artifact_ref")
+            or hasattr(runtime_event_store, "add_retention_anchor")
+        ):
+            return runtime_event_store
+        return snapshot_store
+
+    async def _maybe_apply_compaction_policy(
+        self,
+        *,
+        snapshot_store: Any,
+        run_id: str,
+    ):
+        if not self._compaction_policy.get("enabled"):
+            return False
+        runtime_event_store = self._runtime_event_store or snapshot_store
+        if runtime_event_store is None or not hasattr(runtime_event_store, "query_runtime_events"):
+            raise TypeError(
+                "TriggerFlow compaction policy requires a runtime_event_store with query_runtime_events(...)."
+            )
+        query_runtime_events = runtime_event_store.query_runtime_events
+        sequence_from = self._latest_compacted_sequence() + 1
+        query_kwargs = self._filter_callable_kwargs(
+            query_runtime_events,
+            {"sequence_from": sequence_from},
+        )
+        records = await query_runtime_events(self.id, **query_kwargs)
+        if not isinstance(records, list):
+            records = list(records or [])
+        records = [dict(record) for record in records if isinstance(record, dict)]
+        min_events = self._compaction_policy_min_events()
+        if len(records) < min_events:
+            return False
+        sequences = [
+            sequence
+            for sequence in (self._runtime_event_record_sequence(record) for record in records)
+            if sequence is not None
+        ]
+        if not sequences:
+            return False
+        segment_from = min(sequences)
+        segment_to = max(sequences)
+        reducer = self._resolve_compaction_reducer()
+        reducer_result: dict[str, Any] = (
+            await self._call_compaction_reducer(
+                reducer,
+                records=records,
+                sequence_from=segment_from,
+                sequence_to=segment_to,
+                run_id=run_id,
+                snapshot_store=snapshot_store,
+                runtime_event_store=runtime_event_store,
+            )
+            if reducer is not None
+            else {}
+        )
+        provider = self._compaction_provider(snapshot_store, runtime_event_store)
+        policy_metadata = self._compaction_policy.get("metadata", {})
+        if not isinstance(policy_metadata, dict):
+            policy_metadata = {}
+        reducer_metadata = reducer_result.get("metadata", {})
+        if not isinstance(reducer_metadata, dict):
+            reducer_metadata = {}
+        metadata = {
+            "generated_by": "triggerflow.compaction_policy",
+            **policy_metadata,
+            **reducer_metadata,
+        }
+        artifact_refs = list(reducer_result.get("artifact_refs", []) or [])
+        if "artifact" in reducer_result:
+            if provider is None or not hasattr(provider, "put_artifact_ref"):
+                raise TypeError(
+                    "TriggerFlow compaction reducer returned artifact content, but provider has no put_artifact_ref(...)."
+                )
+            artifact_metadata = {
+                "kind": reducer_result.get("artifact_kind", self._compaction_policy.get("artifact_kind")),
+                "summary": reducer_result.get("summary", f"Compacted TriggerFlow events { segment_from }-{ segment_to }"),
+                "scope": {"execution_id": self.id, "sequence_from": segment_from, "sequence_to": segment_to},
+                **metadata,
+            }
+            artifact_refs.append(await provider.put_artifact_ref(self.id, reducer_result["artifact"], metadata=artifact_metadata))
+
+        retained_anchors = reducer_result.get("retained_lineage_anchors")
+        if retained_anchors is None:
+            first_record = records[0]
+            retained_anchors = [
+                {
+                    "anchor_id": f"auto-compaction:{ segment_from }:{ segment_to }",
+                    "anchor_type": "compaction",
+                    "sequence": segment_from,
+                    "event_id": first_record.get("event_id"),
+                    "parent_signal_id": first_record.get("parent_signal_id"),
+                    "metadata": metadata,
+                }
+            ]
+        if isinstance(retained_anchors, dict):
+            retained_anchors = [retained_anchors]
+        anchor_ids: list[str] = []
+        event_ids = [str(record.get("event_id")) for record in records if record.get("event_id")]
+        for anchor in retained_anchors or []:
+            if not isinstance(anchor, dict):
+                continue
+            anchor_id = str(anchor.get("anchor_id") or f"auto-compaction:{ segment_from }:{ segment_to }")
+            anchor_result_metadata = anchor.get("metadata", {})
+            if not isinstance(anchor_result_metadata, dict):
+                anchor_result_metadata = {}
+            anchor_metadata = {
+                **metadata,
+                **anchor_result_metadata,
+            }
+            if provider is not None and hasattr(provider, "add_retention_anchor"):
+                anchor_ref = await provider.add_retention_anchor(
+                    self.id,
+                    anchor_type=str(anchor.get("anchor_type", "compaction")),
+                    sequence=anchor.get("sequence", segment_from),
+                    preserved_event_ids=event_ids,
+                    meta=anchor_metadata,
+                )
+                anchor_metadata["retention_anchor_ref"] = self._to_serializable_value(anchor_ref)
+            self._record_retained_lineage_anchor(
+                anchor_id,
+                anchor_type=str(anchor.get("anchor_type", "compaction")),
+                sequence=anchor.get("sequence", segment_from),
+                event_id=anchor.get("event_id"),
+                parent_signal_id=anchor.get("parent_signal_id"),
+                metadata=anchor_metadata,
+                fingerprint=anchor.get("fingerprint"),
+            )
+            anchor_ids.append(anchor_id)
+
+        for artifact_ref in artifact_refs:
+            self._record_snapshot_artifact_ref(
+                artifact_ref,
+                kind=str(reducer_result.get("artifact_kind", self._compaction_policy.get("artifact_kind", "snapshot_payload"))),
+                metadata=metadata,
+            )
+
+        segment_value = reducer_result.get("segment", {})
+        segment = dict(segment_value) if isinstance(segment_value, dict) else {}
+        segment_metadata = segment.get("metadata", {})
+        if not isinstance(segment_metadata, dict):
+            segment_metadata = {}
+        self._record_compaction_segment(
+            str(segment.get("segment_id") or f"auto-compaction:{ segment_from }:{ segment_to }"),
+            sequence_from=int(segment.get("sequence_from", segment_from)),
+            sequence_to=int(segment.get("sequence_to", segment_to)),
+            summary=segment.get("summary", reducer_result.get("summary")),
+            artifact_refs=artifact_refs,
+            retained_anchor_ids=list(segment.get("retained_anchor_ids", anchor_ids) or anchor_ids),
+            reducer=segment.get("reducer", self._compaction_reducer_ref()),
+            metadata={**metadata, **segment_metadata},
+        )
+        load_read_limit = reducer_result.get("load_read_limit", self._compaction_policy.get("load_read_limit"))
+        if load_read_limit is not None:
+            self._set_load_read_limit(int(load_read_limit))
+        return True
 
     def get_runtime_resources(self):
         resources = self._runtime_resources.get(None, {}, inherit=True)
@@ -1316,17 +2064,308 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         *,
         encoding: str | None = "utf-8",
         runtime_resources: dict[str, Any] | None = None,
+        execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        validate_resources: bool = False,
     ):
         return self._persistence.load(
             state,
             encoding=encoding,
             runtime_resources=runtime_resources,
+            execution_environments=execution_environments,
+            validate_resources=validate_resources,
         )
+
+    def _bind_snapshot_store(self, snapshot_store: "TriggerFlowExecutionSnapshotStore | None"):
+        if snapshot_store is not None and not hasattr(snapshot_store, "put_snapshot"):
+            raise TypeError(
+                "TriggerFlow snapshot_store must expose async put_snapshot(run_id, state, step_id=...)."
+            )
+        self._snapshot_store = snapshot_store
+        return self
+
+    def _bind_runtime_event_store(self, runtime_event_store: "RuntimeEventStore | None"):
+        if runtime_event_store is not None and not hasattr(runtime_event_store, "append_runtime_event"):
+            raise TypeError(
+                "TriggerFlow runtime_event_store must expose async append_runtime_event(execution_id, event, ...)."
+            )
+        self._runtime_event_store = runtime_event_store
+        return self
+
+    def _provider_features(self, provider: Any):
+        capabilities_getter = getattr(provider, "capabilities", None)
+        if not callable(capabilities_getter):
+            return {}
+        capabilities = capabilities_getter()
+        if not isinstance(capabilities, dict):
+            return {}
+        raw_features = capabilities.get("features", capabilities)
+        if not isinstance(raw_features, dict):
+            return {}
+        return {str(key): bool(value) for key, value in raw_features.items()}
+
+    def _require_provider_capabilities(
+        self,
+        provider: Any,
+        *,
+        required: tuple[str, ...],
+        usage: str,
+    ):
+        features = self._provider_features(provider)
+        missing = [name for name in required if features.get(name) is not True]
+        if missing:
+            raise RuntimeError(
+                f"TriggerFlow durable provider can not be used for { usage }; "
+                f"missing capabilities: { ', '.join(missing) }. "
+                "The provider must report them from capabilities()['features']."
+            )
+        return features
+
+    def _require_provider_methods(
+        self,
+        provider: Any,
+        *,
+        required: tuple[str, ...],
+        usage: str,
+    ):
+        missing = [name for name in required if not callable(getattr(provider, name, None))]
+        if missing:
+            raise RuntimeError(
+                f"TriggerFlow durable provider can not be used for { usage }; "
+                f"missing methods: { ', '.join(missing) }."
+            )
+
+    def _require_distributed_durable_provider(self, snapshot_store: Any):
+        self._require_provider_capabilities(
+            snapshot_store,
+            required=DISTRIBUTED_SNAPSHOT_PROVIDER_CAPABILITIES,
+            usage="distributed snapshot recovery",
+        )
+        self._require_provider_methods(
+            snapshot_store,
+            required=DISTRIBUTED_SNAPSHOT_PROVIDER_METHODS,
+            usage="distributed snapshot recovery",
+        )
+        if self._runtime_event_store is None:
+            raise RuntimeError(
+                "TriggerFlow distributed recovery requires a runtime event store. "
+                "Pass runtime_resources={'runtime_event_store': store} or set_runtime_resource('runtime_event_store', store)."
+            )
+        self._require_provider_capabilities(
+            self._runtime_event_store,
+            required=DISTRIBUTED_RUNTIME_EVENT_PROVIDER_CAPABILITIES,
+            usage="distributed runtime event recovery",
+        )
+
+    def inspect_load(
+        self,
+        state: dict[str, Any] | str | Path,
+        *,
+        encoding: str | None = "utf-8",
+        runtime_resources: dict[str, Any] | None = None,
+        execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+    ):
+        return self._persistence.inspect_load(
+            state,
+            encoding=encoding,
+            runtime_resources=runtime_resources,
+            execution_environments=execution_environments,
+        )
+
+    def inspect_runtime_event_records(self, records: list[dict[str, Any]]):
+        return diagnose_runtime_event_records(records)
+
+    def project_runtime_event_record(self, record: dict[str, Any]):
+        return project_runtime_event_record(record)
+
+    async def async_load(
+        self,
+        state: dict[str, Any] | str | Path,
+        *,
+        encoding: str | None = "utf-8",
+        runtime_resources: dict[str, Any] | None = None,
+        execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        require_resources: bool = True,
+        restore_execution_environments: bool = True,
+    ):
+        resolver_report = await self._persistence.async_resolve_load_resources(
+            state,
+            encoding=encoding,
+            runtime_resources=runtime_resources,
+            execution_environments=execution_environments,
+            require_resources=require_resources,
+        )
+        resolved_runtime_resources = dict(runtime_resources or {})
+        resolved_runtime_resources.update(resolver_report.get("runtime_resources", {}))
+        self.load(
+            state,
+            encoding=encoding,
+            runtime_resources=resolved_runtime_resources or None,
+            execution_environments=execution_environments,
+            validate_resources=False,
+        )
+        if restore_execution_environments:
+            await self._ensure_execution_environments()
+        load = self.inspect_load(
+            self.save(),
+            runtime_resources=None,
+            execution_environments=None,
+        )
+        load["diagnostics"] = [
+            *load.get("diagnostics", []),
+            *resolver_report.get("diagnostics", []),
+        ]
+        load["resolved_resource_keys"] = sorted(
+            {
+                *load.get("resolved_resource_keys", []),
+                *resolver_report.get("resolved_resource_keys", []),
+            }
+        )
+        load["unresolved_resource_keys"] = sorted(
+            {
+                *load.get("unresolved_resource_keys", []),
+                *resolver_report.get("unresolved_resource_keys", []),
+            }
+        )
+        if require_resources and not load.get("ready", False):
+            raise RuntimeError(
+                f"Can not load TriggerFlow execution { self.id }; "
+                f"missing resources: { load.get('missing_resource_keys', []) }."
+            )
+        return load
+
+    async def async_save(
+        self,
+        snapshot_store: Any | None = None,
+        *,
+        run_id: str | None = None,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+        require_idle: bool = False,
+        require_distributed_provider: bool = False,
+    ):
+        resolved_snapshot_store = snapshot_store if snapshot_store is not None else self._snapshot_store
+        if resolved_snapshot_store is None or not hasattr(resolved_snapshot_store, "put_snapshot"):
+            raise TypeError(
+                "TriggerFlow snapshot_store must expose async put_snapshot(run_id, state, step_id=...). "
+                "Pass snapshot_store to async_save(...) or set runtime resource 'snapshot_store'."
+            )
+        resolved_snapshot_store = cast(Any, resolved_snapshot_store)
+        if require_distributed_provider:
+            self._require_distributed_durable_provider(resolved_snapshot_store)
+        resolved_run_id = run_id or self.run_context.run_id or self.id
+        await self._maybe_apply_compaction_policy(
+            snapshot_store=resolved_snapshot_store,
+            run_id=resolved_run_id,
+        )
+        state = self.save(require_idle=require_idle)
+        resolved_step_id = step_id or f"state:{ self._state_version }"
+        put_snapshot = resolved_snapshot_store.put_snapshot
+        put_kwargs = self._filter_callable_kwargs(
+            put_snapshot,
+            {
+                "step_id": resolved_step_id,
+                "expected_state_version": expected_state_version,
+            },
+        )
+        return await put_snapshot(
+            resolved_run_id,
+            state,
+            **put_kwargs,
+        )
+
+    async def _async_read_runtime_events_for_load(
+        self,
+        runtime_event_store: Any | None = None,
+        *,
+        run_id: str | None = None,
+        sequence_from: int | None = None,
+        limit: int | None = None,
+    ):
+        if limit is None:
+            limit = self._load_policy.get("runtime_event_read_limit")
+        if limit is not None and limit < 0:
+            raise ValueError("runtime event load read limit must be non-negative or None.")
+        resolved_runtime_event_store = runtime_event_store if runtime_event_store is not None else self._runtime_event_store
+        if resolved_runtime_event_store is None or not hasattr(resolved_runtime_event_store, "query_runtime_events"):
+            raise TypeError(
+                "TriggerFlow runtime_event_store must expose async query_runtime_events(run_id, ...)."
+            )
+        query_runtime_events = resolved_runtime_event_store.query_runtime_events
+        query_kwargs = self._filter_callable_kwargs(
+            query_runtime_events,
+            {
+                "sequence_from": sequence_from,
+                "limit": limit,
+            },
+        )
+        return await query_runtime_events(run_id or self.id, **query_kwargs)
+
+    def claim_lease(
+        self,
+        owner_id: str,
+        *,
+        lease_ttl: float | None = None,
+        now: float | None = None,
+    ):
+        if not owner_id:
+            raise ValueError("TriggerFlow execution lease owner_id must be non-empty.")
+        timestamp = time.time() if now is None else float(now)
+        ttl = self._lease_ttl if lease_ttl is None else lease_ttl
+        self._owner_id = str(owner_id)
+        self._lease_ttl = ttl
+        self._heartbeat_at = timestamp
+        self._lease_until = timestamp + ttl if ttl is not None else None
+        self._bump_state_version()
+        return self
+
+    def heartbeat_lease(
+        self,
+        *,
+        owner_id: str | None = None,
+        lease_ttl: float | None = None,
+        now: float | None = None,
+    ):
+        if owner_id is not None and self._owner_id is not None and str(owner_id) != str(self._owner_id):
+            raise RuntimeError(
+                f"TriggerFlow execution { self.id } lease is owned by '{ self._owner_id }', "
+                f"not '{ owner_id }'."
+            )
+        timestamp = time.time() if now is None else float(now)
+        ttl = self._lease_ttl if lease_ttl is None else lease_ttl
+        self._lease_ttl = ttl
+        self._heartbeat_at = timestamp
+        self._lease_until = timestamp + ttl if ttl is not None else None
+        self._bump_state_version()
+        return self
+
+    def get_lease(self):
+        return {
+            "owner_id": self._owner_id,
+            "lease_ttl": self._lease_ttl,
+            "lease_until": self._lease_until,
+            "heartbeat_at": self._heartbeat_at,
+        }
 
     # Set Concurrency
     def set_concurrency(self, concurrency):
         self._concurrency_semaphore = asyncio.Semaphore(concurrency) if concurrency and concurrency > 0 else None
         return self
+
+    async def _async_dispatch_signal_yielding_current_permit(self, signal: TriggerFlowSignal):
+        if self._concurrency_semaphore is None or not self._concurrency_permit_held.get():
+            return await self._async_dispatch_signal(signal)
+        token = self._concurrency_permit_held.set(False)
+        self._concurrency_semaphore.release()
+        try:
+            return await self._async_dispatch_signal(signal)
+        finally:
+            await self._concurrency_semaphore.acquire()
+            self._concurrency_permit_held.reset(token)
+
+    def _without_current_concurrency_permit_context(self):
+        if not self._concurrency_permit_held.get():
+            return None
+        return self._concurrency_permit_held.set(False)
 
     # Emit Event
     async def async_emit(
@@ -1347,7 +2386,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             source=_source,
             meta=_meta,
         )
-        return await self._async_dispatch_signal(signal)
+        return await self._async_dispatch_signal_yielding_current_permit(signal)
 
     async def async_emit_nowait(
         self,
@@ -1372,7 +2411,12 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             return None
         self._accepted_signal_ids.add(signal.id)
         self._mark_activity()
-        task = asyncio.create_task(self._async_dispatch_signal(signal))
+        token = self._without_current_concurrency_permit_context()
+        try:
+            task = asyncio.create_task(self._async_dispatch_signal(signal))
+        finally:
+            if token is not None:
+                self._concurrency_permit_held.reset(token)
         return self._track_task(task, origin=f"emit_nowait:{ trigger_type }:{ trigger_event }")
 
     def _emit_nowait(
@@ -1409,15 +2453,27 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             return None
         self._accepted_signal_ids.add(signal.id)
         self._mark_activity()
-        task = loop.create_task(self._async_dispatch_signal(signal))
+        token = self._without_current_concurrency_permit_context()
+        try:
+            task = loop.create_task(self._async_dispatch_signal(signal))
+        finally:
+            if token is not None:
+                self._concurrency_permit_held.reset(token)
         return self._track_task(task, origin=f"emit_nowait:{ trigger_type }:{ trigger_event }")
 
     async def _resume_interrupts_for_signal(self, signal: TriggerFlowSignal):
         return await self._interrupts.async_resume_for_signal(signal)
 
     async def _async_dispatch_signal(self, signal: TriggerFlowSignal):
-        from agently.base import async_emit_runtime
+        self._active_runtime_operation_count += 1
+        self._mark_activity()
+        try:
+            return await self._async_dispatch_signal_inner(signal)
+        finally:
+            self._active_runtime_operation_count -= 1
+            self._mark_activity()
 
+    async def _async_dispatch_signal_inner(self, signal: TriggerFlowSignal):
         signal_preaccepted = signal.id in self._accepted_signal_ids
         if not self._accepts_signal_in_current_lifecycle(signal, preaccepted=signal_preaccepted):
             await self._reject_signal(signal)
@@ -1427,18 +2483,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._mark_activity()
         await self._resume_interrupts_for_signal(signal)
         self._remember_signal(signal)
-        await async_emit_runtime(
-            {
-                "event_type": "triggerflow.signal",
-                "source": "TriggerFlowExecution",
-                "level": "DEBUG",
-                "message": f"Dispatch signal '{ signal.trigger_event }'.",
-                "payload": signal.to_debug_dict(),
-                "run": self.run_context,
-                "meta": {
-                    "execution_id": self.id,
-                },
-            }
+        await self._emit_runtime_event(
+            "triggerflow.signal",
+            level="DEBUG",
+            message=f"Dispatch signal '{ signal.trigger_event }'.",
+            payload=signal.to_debug_dict(),
         )
         tasks = []
         handlers = self._handlers[signal.trigger_type]
@@ -1447,23 +2496,17 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             for handler_id, handler in handlers[signal.trigger_event].items():
                 operator = self._get_handler_operator(handler_id)
                 chunk_run_context = self._create_chunk_run_context(operator, signal) if operator is not None else None
-                await async_emit_runtime(
-                    {
-                        "event_type": "triggerflow.handler_dispatch",
-                        "source": "TriggerFlowExecution",
-                        "level": "DEBUG",
-                        "message": f"Dispatch handler '{ handler_id }' for signal '{ signal.trigger_event }'.",
-                        "payload": {
-                            "event": signal.trigger_event,
-                            "type": signal.trigger_type,
-                            "handler": handler_id,
-                            "signal_id": signal.id,
-                        },
-                        "run": self.run_context,
-                        "meta": {
-                            "execution_id": self.id,
-                        },
-                    }
+                await self._emit_runtime_event(
+                    "triggerflow.handler_dispatch",
+                    level="DEBUG",
+                    message=f"Dispatch handler '{ handler_id }' for signal '{ signal.trigger_event }'.",
+                    payload={
+                        "event": signal.trigger_event,
+                        "type": signal.trigger_type,
+                        "handler": handler_id,
+                        "signal_id": signal.id,
+                        "node_id": operator.get("id") if operator is not None else None,
+                    },
                 )
                 await self._async_apply_auto_interventions(operator, signal)
 
@@ -1530,16 +2573,13 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                         if self._concurrency_semaphore is None:
                             result = await execute_handler()
                         else:
-                            depth = self._concurrency_depth.get()
-                            token = self._concurrency_depth.set(depth + 1)
+                            await self._concurrency_semaphore.acquire()
+                            token = self._concurrency_permit_held.set(True)
                             try:
-                                if depth > 0:
-                                    result = await execute_handler()
-                                else:
-                                    async with self._concurrency_semaphore:
-                                        result = await execute_handler()
+                                result = await execute_handler()
                             finally:
-                                self._concurrency_depth.reset(token)
+                                self._concurrency_permit_held.reset(token)
+                                self._concurrency_semaphore.release()
 
                         if bound_operator is not None and bound_chunk_run_context is not None:
                             await self._emit_chunk_runtime_event(
@@ -1639,7 +2679,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 value = self._runtime_data[key]
                 self._bump_state_version()
             case "del":
-                if self._runtime_data.get(key, None):
+                missing = object()
+                if self._runtime_data.get(key, missing) is not missing:
                     del self._runtime_data[key]
                     value = None
                     self._bump_state_version()
@@ -1725,6 +2766,15 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         )
 
     async def _async_run_start(self, initial_value: InputT | None = None):
+        self._active_runtime_operation_count += 1
+        self._mark_activity()
+        try:
+            return await self._async_run_start_inner(initial_value)
+        finally:
+            self._active_runtime_operation_count -= 1
+            self._mark_activity()
+
+    async def _async_run_start_inner(self, initial_value: InputT | None = None):
         if self._lifecycle_state != TRIGGER_FLOW_LIFECYCLE_OPEN:
             signal = self._build_signal("START", initial_value, trigger_type="event", source="start")
             await self._reject_signal(signal)
@@ -1850,25 +2900,53 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self,
         *,
         type: str = "pause",
+        exchange_kind: str | None = None,
         payload: Any = None,
         resume_event: str | None = None,
         interrupt_id: str | None = None,
         resume_to: Any = None,
+        max_resumes: int | None = 1,
+        channel_id: str | None = None,
+        provider_id: str | None = None,
+        wait_mode: str = "disconnected",
+        hot_wait_timeout: float | None = None,
+        cold_persistence_policy: str = "persist",
+        request_payload_schema: dict[str, Any] | None = None,
+        response_payload_schema: dict[str, Any] | None = None,
+        audit_metadata: dict[str, Any] | None = None,
     ):
         return await self._interrupts.async_pause_for(
             type=type,
+            exchange_kind=exchange_kind,
             payload=payload,
             resume_event=resume_event,
             interrupt_id=interrupt_id,
             resume_to=resume_to,
+            max_resumes=max_resumes,
+            channel_id=channel_id,
+            provider_id=provider_id,
+            wait_mode=wait_mode,
+            hot_wait_timeout=hot_wait_timeout,
+            cold_persistence_policy=cold_persistence_policy,
+            request_payload_schema=request_payload_schema,
+            response_payload_schema=response_payload_schema,
+            audit_metadata=audit_metadata,
         )
 
     async def async_continue_with(
         self,
         interrupt_id: str,
         value: Any = None,
+        *,
+        resume_request_id: str | None = None,
+        actor: str | None = None,
     ):
-        return await self._interrupts.async_continue_with(interrupt_id, value)
+        return await self._interrupts.async_continue_with(
+            interrupt_id,
+            value,
+            resume_request_id=resume_request_id,
+            actor=actor,
+        )
 
     # Runtime Stream
     async def async_put_into_stream(

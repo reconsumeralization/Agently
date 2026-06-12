@@ -2,15 +2,14 @@
 
 Agently 4.1.3 makes `agent.start()` the default user-layer entrypoint for an
 Agent turn. It keeps returning the business result, while the Agent can route
-through ordinary model response, Actions, Skills Executor, or Dynamic Task when
-those candidates were explicitly injected.
+through ordinary model response, Actions, Skills Executor, or a DAG-shaped
+execution route when those candidates were explicitly injected.
 
 ```python
 result = (
     agent
     .use_actions([market_data_action])
     .use_skills_packs(["equity-research"])
-    .use_dynamic_task(mode="auto", max_tasks=8)
     .input("Review this renewal risk.")
     .output({"answer": (str, "final answer", True)})
     .start()
@@ -18,8 +17,15 @@ result = (
 ```
 
 Candidate injection is the boundary. If no Actions, Skills, Skills Packs, or
-Dynamic Task candidates are registered, `agent.start()` remains an ordinary
-model request.
+DAG candidates are registered, `agent.start()` remains an ordinary model
+request.
+
+`TaskDAG` is the foundation DAG capability. `DynamicTask` remains a
+compatibility and convenience facade over DAG planning/execution, not a second
+recommended task lifecycle. `agent.use_dynamic_task(...)` registers an
+Agent-level DAG candidate for later executions. `execution.use_dynamic_task(...)`
+registers a candidate only on the captured `AgentExecution` draft, so one DAG
+route does not leak into unrelated Agent runs.
 
 Quick prompt chains create execution-scoped drafts. The Agent can be kept as a
 service singleton for shared settings, model activation, Actions, Skills,
@@ -48,21 +54,76 @@ Do not rely on `agent.input(...); agent.output(...); await agent.async_start()`
 for execution prompt accumulation. Use `always=True`,
 `set_agent_prompt(...)`, or stable setup methods for Agent-lifetime state; use
 `agent.define(...)` for reusable Agent definition state; use
-`agent.create_turn()` / `set_turn_prompt(...)` only as compatibility aliases and
 `agent.create_request(...)` / `agent.request` only when you intentionally want
 the lower-level request-builder surface.
 
-Accepted development-line routing is candidate-driven and deterministic-first:
-submitted Dynamic Task candidates take precedence and required Skills
-candidates run through the Skills route. When several optional candidates are
-present, such as auto Dynamic Task, model-decision Skills, and ordinary Actions,
-the model chooses the route by default. If there is only one optional candidate,
-that route is selected directly.
+Accepted development-line routing is candidate-driven and deterministic-first.
+Submitted DAG candidates through the DynamicTask facade take precedence and
+required Skills candidates run through the Skills route. When several optional
+candidates are present, such as DAG-shaped execution, model-decision Skills,
+and ordinary Actions, the model chooses the route by default. If there is only
+one optional candidate, that route is selected directly.
 
 The public Agent API stays in core, but route planning and execution are owned
 by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
-protocol. This keeps Skills, Dynamic Task, and future route implementations
-replaceable without teaching core about builtin plugin internals.
+protocol. This keeps Skills, the DAG substrate, and future route
+implementations replaceable without teaching core about builtin plugin
+internals.
+
+## Goal Pursuit
+
+Use `agent.goal(goal_or_goals, success_criteria=None)` when the business goal
+needs a bounded plan, execution, evidence, verification, and replan loop.
+`agent.goals(...)` is only a plural alias for the same entrypoint.
+
+```python
+result = (
+    agent
+    .use_skills("website-builder", "seo-reviewer")
+    .use_actions(write_file, read_file)
+    .require_actions("write_file")
+    .goals(
+        [
+            "Build a small product website.",
+            "Prepare a launch checklist.",
+        ],
+        success_criteria=[
+            "The final artifact is a runnable page file.",
+            "The page content covers every supplied business fact.",
+            "Execution evidence includes file write, readback, and content inspection.",
+        ],
+    )
+    .effort(
+        "high",
+        budget={
+            "iteration_limit": 4,
+            "model_call_limit": 10,
+            "wall_time_seconds": 300,
+        },
+        planning={"depth": "expanded", "max_plan_items": 8},
+        verification={"strictness": "strict"},
+        replan={"policy": "on_verification_failure", "limit": 2},
+        progress={"detail": "phase"},
+    )
+    .start()
+)
+```
+
+Simple code can keep using `.effort("low" | "medium" | "high")`. The expanded
+form keeps the same owner: effort controls strategy and resource intensity, not
+whether an execution is a goal-pursuit task. `budget.iteration_limit` maps to
+the task-loop iteration budget, while `model_call_limit` and
+`wall_time_seconds` map to AgentExecution limits unless explicit limits were
+already set. Completion still requires both model verification and host guards.
+
+`execution.step_plan` defaults to `auto`. Users normally do not need to spell it
+out. It lets a Goal Pursuit iteration use DAG as an internal bounded-step shape
+when the next unit of work naturally has serial or parallel substeps. Use
+`execution={"step_plan": "direct"}` only to force one bounded AgentExecution
+step, or `execution={"step_plan": "dag", "max_tasks": 6}` when the caller wants
+to prefer a DAG-shaped step and bound its size. The DAG result is folded back
+into AgentTaskLoop evidence; it is not accepted task completion until the model
+verifier and host guards both pass.
 
 ## AgentTask Loop
 
@@ -72,10 +133,10 @@ loop instead of one direct AgentExecution. It returns a task-strategy
 owned by one Agent: plan, execute one bounded step, write Workspace evidence,
 verify, replan when needed, then finish as complete or blocked.
 
-In 4.1.3.6 this is a narrow public task-loop slice, not
-the full future AgentTask system. `agent.create_task_loop(...)` is the explicit
-spelling for the same long-task strategy when code wants to make the strategy
-choice visible. Both APIs still return `AgentExecution`; new code should
+In 4.1.3.7 this is a hardened bounded public task-loop strategy, not the full
+future AgentTask system. `agent.create_task_loop(...)` is the explicit spelling
+for the same long-task strategy when code wants to make the strategy choice
+visible. Both APIs still return `AgentExecution`; new code should
 consume data, text, stream, metadata, status, and task refs through
 `execution.get_result()` or the execution stream/meta facade instead of treating
 `AgentTask` as a second public lifecycle.
@@ -117,9 +178,11 @@ task_refs = result.task_refs
 ```
 
 Each iteration writes planning decisions, execution observations, verification
-evidence, and checkpoints to Workspace. The next iteration receives a
-ContextPack from `workspace.build_context(...)`, so the loop can carry evidence
-forward without turning Workspace into an autonomous planner.
+evidence, evidence links, and checkpoints to Workspace. Checkpoints use the
+Workspace checkpoint-store port, and task evidence relationships use
+`workspace.link_evidence(...)`. The next iteration receives a ContextPack from
+`workspace.build_context(...)`, so the loop can carry evidence forward without
+turning Workspace into an autonomous planner.
 
 AgentTask verification remains model-owned, but completion acceptance is
 conservative. The loop normalizes verifier output and will not accept a task as
@@ -150,13 +213,28 @@ the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`)
 is a partial artifact (`accepted=False`, `artifact_status="partial"`), not a
 completed business result.
 
+`examples/agent_task/goal_pursuit_acceptance_matrix.py` is the lightweight
+real-model smoke for this contract. It runs one accepted Goal Pursuit case and
+one non-accepted evidence-guard case with model-owned planning and verification,
+then prints the verifier and host-guard terminal evidence. Force
+`AGENT_TASK_MODEL_PROVIDER=ollama` to reproduce the documented
+`max_iterations` / partial output; stricter providers may classify the same
+missing Action evidence as `blocked`.
+
+`examples/agent_task/agently_architecture_diagram_task.py` is the longer
+design-document experiment for the same path. It uses
+`.goal(...).effort(...).strategy("task")`, a repository-source Action,
+Workspace file Actions, and an independent Agently model judge to produce and
+review a readable Agently architecture diagram.
+
 The first public slice is intentionally narrow: single task, one Agent owner,
 roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps
-may use Actions, Skills, or Dynamic Task candidates that the host already
-enabled on the Agent. AgentTask does not provide multi-task coordination,
-background autonomy, distributed leases, full durable pause/resume, or long-term
-memory management. `AgentExecutionResult.resume()` is a reserved surface for
-future resumable strategies and reports `supported=False` in this slice.
+may use Actions, Skills, or DAG candidates that the host already enabled on the
+Agent or attached to the current execution. AgentTask does not provide
+multi-task coordination, background autonomy, distributed leases, full durable
+pause/resume, or long-term memory management. `AgentExecutionResult.resume()`
+is a reserved surface for future resumable strategies and reports
+`supported=False` in this slice.
 
 For examples that validate model-owned semantic content, combine deterministic
 smoke checks with a second Agently model-judge request. Structural checks such
@@ -178,12 +256,9 @@ Use `agent.create_execution()` when the caller needs route diagnostics, multiple
 result views, or process streaming:
 
 ```python
-execution = (
-    agent
-    .use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
-    .input("Run the reviewed graph.")
-    .create_execution()
-)
+execution = agent.create_execution()
+execution.input("Run the reviewed graph.")
+execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
 
 async for item in execution.get_async_generator(type="instant"):
     if item.is_complete:
@@ -199,14 +274,13 @@ Execution streams yield `AgentExecutionStreamData` from `agently.types.data`.
 This type keeps the familiar `path`, `value`, `delta`, and `is_complete` fields
 and adds route metadata for process-level events.
 
-`create_execution()` defaults to `mode="one_turn"`, which preserves the
-ordinary one-turn Agent behavior. When a developer-owned loop or future
-AgentTaskLoop needs one bounded step, use `mode="task_step"` with explicit
-lineage and limits:
+`create_execution()` creates an AgentExecution draft. Ordinary prompt-only
+drafts run as direct model requests. When a developer-owned loop or task
+strategy needs a bounded step, express the boundary with `lineage` and
+`limits`:
 
 ```python
 execution = agent.input("Try one bounded fix step.").create_execution(
-    mode="task_step",
     lineage={
         "task_id": "issue-123",
         "iteration_id": "iter-2",
@@ -221,13 +295,12 @@ execution = agent.input("Try one bounded fix step.").create_execution(
 )
 ```
 
-`mode="task_step"` is still one Agent execution, not a multi-turn loop. It adds
-stable lineage, route metadata, diagnostics, and shared model-request budget
-counting across direct model routes, Dynamic Task model tasks, and Skills model
-stages. Use `None` for an unlimited budget; `-1` is accepted as a compatibility
-spelling but should not be used in new examples.
+This is still one AgentExecution, not a multi-turn loop. `lineage` provides
+stable correlation, while `limits` provides shared model-request budget counting
+across direct model routes, TaskDAG model tasks, and Skills model stages.
+Use `None` for an unlimited budget.
 
-If a task-step exceeds its model-request budget, Agently raises
+If a bounded execution exceeds its model-request budget, Agently raises
 `AgentExecutionLimitExceeded`, available from the root `agently.core` export or
 from `agently.core.application.AgentExecution`. The execution meta remains
 inspectable and records `status="blocked"` plus the limit event in
@@ -235,7 +308,7 @@ inspectable and records `status="blocked"` plus the limit event in
 
 For stuck executions, `limits.max_seconds` is a hard deadline for the whole
 AgentExecution. `limits.max_no_progress_seconds` is an idle stall boundary: any
-accepted runtime progress from route selection, model streaming, Dynamic Task,
+accepted runtime progress from route selection, model streaming, TaskDAG,
 Skills, or ActionRuntime refreshes the timer. If either boundary is exceeded,
 Agently raises `RuntimeStageStallError`, available from the root `agently.core`
 export or from `agently.core.application.AgentExecution`.
@@ -278,7 +351,7 @@ AgentExecution stream APIs stay raw. Event Center outlet summaries include
 `meta["coalesced"]`, `coalesced_count`, and source event ids when a hook opts in
 to summary delivery.
 
-`async_get_meta()` includes `execution_mode`, `lineage`, `limits`,
+`async_get_meta()` includes `lineage`, `limits`,
 `route`, `route_plan`, `logs`, `diagnostics`, and `workspace_refs`. `logs` is
 the route-independent place to inspect runtime
 facts such as model response ids, ActionRuntime action records, and artifact
@@ -303,13 +376,13 @@ Every process-stream item also receives correlation metadata:
 
 ```python
 item.meta["execution_id"]
-item.meta["execution_mode"]
 item.meta["lineage"]["task_id"]
 ```
 
-When `agent.use_workspace(...)` is configured before `create_execution()`, the
-execution receives that Workspace binding. AgentExecution still does not decide
-what becomes memory automatically; persist explicitly from the execution side:
+Default Agents carry a lazy Workspace binding, and `agent.use_workspace(...)`
+can override it with an explicit root or provider before `create_execution()`.
+AgentExecution still does not decide what becomes memory automatically; persist
+explicitly from the execution side:
 
 ```python
 workspace_record = await execution.async_record_workspace(
@@ -320,10 +393,13 @@ workspace_record = await execution.async_record_workspace(
 )
 ```
 
-This writes through the existing generic Workspace APIs and updates
-`meta["workspace_refs"]` with the record and checkpoint ids. Workspace remains
-the durable substrate and does not need to know AgentExecution semantics. Call
-`workspace.build_context(...)` for the next step.
+This writes through the execution's bound Workspace provider surface. When a
+checkpoint is requested, the helper uses the checkpoint-store port and records
+an evidence link between the AgentExecution record and the checkpoint. The
+record id, checkpoint id, and evidence link id are visible under
+`meta["workspace_refs"]`. Workspace remains the durable substrate and does not
+need to know AgentExecution strategy semantics. Call `workspace.build_context(...)`
+for the next step.
 
 For development diagnostics, attach an EventCenter observation hook or
 temporarily enable console details:
@@ -337,11 +413,12 @@ Use this only while debugging route selection, model requests, ActionRuntime, or
 Workspace persistence. Remove debug hooks/settings from examples and production
 snippets once the problem is understood.
 
-## Submitted Dynamic Task Input
+## Submitted DAG Input
 
-Submitted Dynamic Task DAGs keep using DAG runtime placeholders such as
-`${INIT.ticket}` and `${DEPS.lookup}` inside task `inputs`. Under an Agent
-route, the graph input source is resolved in this order:
+Submitted DAGs routed through the DynamicTask facade keep using DAG runtime
+placeholders such as `${INIT.ticket}` and `${DEPS.lookup}` inside task
+`inputs`. Under an Agent route, the graph input source is resolved in this
+order:
 
 ```text
 use_dynamic_task(graph_input=...)
@@ -353,12 +430,9 @@ This lets ordinary Agent prompt code feed a submitted DAG without inventing a
 second mapping surface:
 
 ```python
-execution = (
-    agent
-    .use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
-    .input({"ticket": "TICKET-OK"})
-    .create_execution()
-)
+execution = agent.create_execution()
+execution.input({"ticket": "TICKET-OK"})
+execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
 ```
 
 The prompt snapshot is captured by `create_execution()`. Later changes to
@@ -400,7 +474,7 @@ If a TriggerFlow-backed route fails, the Agent execution stream is closed and
 the original error is raised to the consumer instead of leaving
 `get_async_generator(...)` waiting for more items.
 
-For Dynamic Task model nodes, structured output fields stream under stable paths:
+For TaskDAG model nodes, structured output fields stream under stable paths:
 
 ```python
 async for item in execution.get_async_generator(type="instant"):

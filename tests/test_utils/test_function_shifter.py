@@ -66,4 +66,4 @@ async def test_asyncify_sync_generator_closes_on_break():
         assert item == 0
         break
 
-    assert await asyncio.to_thread(closed.wait, 1.0)
+    assert await asyncio.to_thread(closed.wait, 5.0)

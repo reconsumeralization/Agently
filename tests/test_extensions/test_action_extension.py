@@ -11,7 +11,7 @@ from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import Any
 from agently import Agently
-from agently.core import PluginManager
+from agently.core import PluginManager, RuntimeStageStallError
 from agently.types.data import AgentlyRequestData
 from agently.types.data import StreamingData
 from agently.utils import Settings
@@ -233,6 +233,41 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     assert Agently.execution_environment.list(scope="action_call") == []
 
 
+def test_action_extension_enable_shell_redacts_env_in_action_info(tmp_path):
+    agent = Agently.create_agent()
+    agent.enable_shell(
+        root=tmp_path,
+        commands=["pwd"],
+        action_id="redacted_env_bash",
+        env={
+            "PUBLIC_FLAG": "1",
+            "SECRET_TOKEN": "should-not-be-model-visible",
+        },
+    )
+
+    raw_spec = agent.action.action_registry.get_spec("redacted_env_bash")
+    assert raw_spec is not None
+    raw_environments = raw_spec.get("execution_environments", [])
+    assert isinstance(raw_environments, list)
+    raw_config = raw_environments[0].get("config", {})
+    assert isinstance(raw_config, dict)
+    raw_env = raw_config.get("env", {})
+    assert isinstance(raw_env, dict)
+    assert raw_env["SECRET_TOKEN"] == "should-not-be-model-visible"
+
+    action_info = agent.action.get_action_info()["redacted_env_bash"]
+    visible_environments = action_info.get("execution_environments", [])
+    assert isinstance(visible_environments, list)
+    visible_config = visible_environments[0].get("config", {})
+    assert isinstance(visible_config, dict)
+    visible_env = visible_config.get("env", {})
+    assert visible_env == {
+        "PUBLIC_FLAG": "[REDACTED]",
+        "SECRET_TOKEN": "[REDACTED]",
+    }
+    assert "should-not-be-model-visible" not in str(action_info)
+
+
 def test_action_extension_enable_shell_supports_multi_token_command_prefixes(tmp_path):
     agent = Agently.create_agent()
     agent.enable_shell(root=tmp_path, commands=["echo allowed"], action_id="test_prefix_bash")
@@ -344,16 +379,17 @@ def test_action_extension_enable_workspace_file_actions_inherits_foundation_work
     assert listed.get("data") == ["notes/todo.txt"]
 
 
-def test_action_extension_enable_workspace_file_actions_without_foundation_warns(tmp_path, monkeypatch):
+def test_action_extension_enable_workspace_file_actions_uses_lazy_workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     agent = Agently.create_agent()
+    workspace = agent.workspace
 
-    with pytest.warns(DeprecationWarning, match="agent.enable_workspace_file_actions"):
-        agent.enable_workspace_file_actions()
+    agent.enable_workspace_file_actions()
 
     spec = agent.action.action_registry.get_spec("read_file")
     assert spec is not None
-    assert spec.get("meta", {}).get("root") == str(tmp_path.resolve())
+    assert spec.get("meta", {}).get("root") == str(workspace.files_root)
+    assert not workspace.root.exists()
 
 
 def test_action_extension_enable_workspace_compat_alias_warns(tmp_path):
@@ -689,6 +725,33 @@ async def test_action_extension_get_action_result_can_skip_reply_storage(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_action_extension_get_action_result_stores_empty_reply_sentinel(monkeypatch):
+    agent = Agently.create_agent()
+
+    def noop_action():
+        return "ok"
+
+    agent.use_actions(noop_action, always=True)
+    prompt = agent.input("probe reentry").prompt
+    calls = 0
+
+    async def fake_plan_and_execute(**kwargs):
+        nonlocal calls
+        _ = kwargs
+        calls += 1
+        return []
+
+    monkeypatch.setattr(agent.action, "async_plan_and_execute", fake_plan_and_execute)
+
+    records = await agent.async_get_action_result(prompt=prompt, store_for_reply=True)
+    await agent._ActionExtension__request_prefix(prompt, None)  # type: ignore[attr-defined]
+
+    assert records == []
+    assert calls == 1
+    assert prompt.get("action_results") == {}
+
+
+@pytest.mark.asyncio
 async def test_action_extension_request_prefix_reuses_stored_action_result(monkeypatch):
     agent = Agently.create_agent()
     request = agent.create_request()
@@ -724,6 +787,70 @@ async def test_action_extension_request_prefix_reuses_stored_action_result(monke
     events = [event async for event in agent._ActionExtension__broadcast_prefix(full_result_data, None)]  # type: ignore[attr-defined]
     assert events[0][0] == "action"
     assert full_result_data["extra"]["action_logs"][0]["result"] == "hello"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_action_extension_get_action_result_timeout_bounds_planning_handler():
+    agent = Agently.create_agent()
+
+    def slow_probe_action():
+        return "ok"
+
+    agent.use_actions(slow_probe_action, always=True)
+
+    async def slow_planner(context, request):
+        _ = (context, request)
+        await asyncio.sleep(5)
+        return {"next_action": "response", "execution_commands": []}
+
+    agent.register_action_planning_handler(slow_planner)
+    agent.input("probe timeout")
+
+    started_at = time.monotonic()
+    with pytest.raises(RuntimeStageStallError) as raised:
+        await agent.async_get_action_result(timeout=0.1, planning_protocol="structured_plan")
+
+    assert time.monotonic() - started_at < 2
+    assert raised.value.stage == "action_loop_close"
+    assert raised.value.timeout_seconds == 0.1
+
+
+def test_action_extension_summarize_records_latest_validation_wins():
+    agent = Agently.create_agent()
+    records = [
+        {
+            "action_id": "run_bash",
+            "status": "success",
+            "success": True,
+            "kwargs": {"cmd": ["python", "-m", "pytest", "tests/test_app.py", "-q"]},
+            "result": {"returncode": 0},
+        },
+        {
+            "action_id": "run_bash",
+            "status": "error",
+            "success": False,
+            "kwargs": {"cmd": ["python", "-m", "pytest", "-q"]},
+            "result": {"returncode": 1, "stdout": "1 failed"},
+            "error": "validation failed",
+        },
+    ]
+
+    summary = agent.action.summarize_records(records, validation_command_markers=["pytest"])
+
+    assert summary["actions_attempted"] == 2
+    assert summary["commands_run"] == ["python -m pytest tests/test_app.py -q"]
+    assert summary["commands_attempted"] == [
+        "python -m pytest tests/test_app.py -q",
+        "python -m pytest -q",
+    ]
+    assert summary["latest_validation"] == {
+        "index": 1,
+        "action_id": "run_bash",
+        "command": "python -m pytest -q",
+        "status": "failed",
+        "returncode": 1,
+    }
+    assert summary["validation_passed"] is False
 
 
 def test_action_extension_must_call_soft_compatible(monkeypatch):

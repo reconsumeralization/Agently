@@ -663,44 +663,44 @@ async def test_model_request_ensure_keys_prefers_complete_json_after_think_block
 
 
 @pytest.mark.asyncio
-async def test_agent_turn_wraps_request_and_model_request_runs():
+async def test_agent_execution_wraps_request_and_model_request_runs():
     MockObservationRequester.reset()
     captured = []
 
     async def capture(event):
         captured.append(event)
 
-    hook_name = "test_model_request_observation.agent_turn_capture"
+    hook_name = "test_model_request_observation.agent_execution_capture"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     try:
         workflow_run = RunContext.create(
             run_kind="workflow_execution",
             agent_name="workflow-agent",
-            execution_id="execution-agent-turn",
-            meta={"flow_name": "agent-turn-flow"},
+            execution_id="execution-agent-execution",
+            meta={"flow_name": "agent-execution-flow"},
         )
         agent = _create_agent()
-        turn = agent.input("Summarize the morning operations notes.")
-        turn.instruct("Focus on GPU cloud demand and operational risk.")
+        execution = agent.input("Summarize the morning operations notes.")
+        execution.instruct("Focus on GPU cloud demand and operational risk.")
 
-        text = await turn.async_get_text(parent_run_context=workflow_run)
+        text = await execution.async_get_text(parent_run_context=workflow_run)
 
         assert "Morning briefing prepared." in text
 
-        turn_events = [event for event in captured if event.run and event.run.run_kind == "agent_turn"]
-        assert [event.event_type for event in turn_events] == [
-            "agent_turn.started",
-            "agent_turn.completed",
+        execution_events = [event for event in captured if event.run and event.run.run_kind == "agent_execution"]
+        assert [event.event_type for event in execution_events] == [
+            "agent_execution.started",
+            "agent_execution.completed",
         ]
 
-        turn_run = turn_events[0].run
-        assert turn_run is not None
-        assert turn_run.parent_run_id == workflow_run.run_id
+        execution_run = execution_events[0].run
+        assert execution_run is not None
+        assert execution_run.parent_run_id == workflow_run.run_id
 
         request_events = [
             event
             for event in captured
-            if event.run and event.run.run_kind == "request" and event.run.parent_run_id == turn_run.run_id
+            if event.run and event.run.run_kind == "request" and event.run.parent_run_id == execution_run.run_id
         ]
         assert [event.event_type for event in request_events if event.event_type.startswith("request.")] == [
             "request.started",
@@ -779,8 +779,8 @@ async def test_tool_runtime_uses_action_runs_under_request_scope():
         agent.register_tool_plan_analysis_handler(fake_plan_handler)
         agent.register_tool_execution_handler(fake_execution_handler)
         agent.tool.tag(["lookup_signal"], f"agent-{ agent.name }")
-        turn = agent.input("Need a briefing with external signal.")
-        await turn.async_get_text()
+        execution = agent.input("Need a briefing with external signal.")
+        await execution.async_get_text()
 
         request_run = next(event.run for event in captured if event.event_type == "request.started")
         action_loop_start = next(event for event in captured if event.event_type == "action.loop_started")
@@ -894,10 +894,10 @@ async def test_trigger_flow_runtime_context_auto_inherits_parent_run_for_agent_a
 
         async def run_inside_flow(data: TriggerFlowRuntimeData):
             agent = _create_agent()
-            turn = agent.input("Summarize the runtime context flow.")
+            execution = agent.input("Summarize the runtime context flow.")
             request = _create_request()
             request.input("Provide a direct request summary.")
-            agent_text = await turn.async_get_text()
+            agent_text = await execution.async_get_text()
             request_text = await request.async_get_text()
             return {
                 "agent_text": agent_text,
@@ -931,15 +931,15 @@ async def test_trigger_flow_runtime_context_auto_inherits_parent_run_for_agent_a
         assert chunk_run is not None
         assert chunk_run.parent_run_id == workflow_run.run_id
 
-        agent_turn_start = next(event for event in captured if event.event_type == "agent_turn.started")
-        assert agent_turn_start.run is not None
-        assert agent_turn_start.run.parent_run_id == chunk_run.run_id
+        agent_execution_start = next(event for event in captured if event.event_type == "agent_execution.started")
+        assert agent_execution_start.run is not None
+        assert agent_execution_start.run.parent_run_id == chunk_run.run_id
 
         request_starts = [event for event in captured if event.event_type == "request.started"]
         assert len(request_starts) >= 2
         parent_ids = {event.run.parent_run_id for event in request_starts if event.run is not None}
         assert chunk_run.run_id in parent_ids
-        assert agent_turn_start.run.run_id in parent_ids
+        assert agent_execution_start.run.run_id in parent_ids
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
@@ -960,10 +960,10 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
         async def summarize_candidate(data: TriggerFlowRuntimeData):
             async def helper():
                 agent = _create_agent()
-                turn = agent.input("Summarize candidate news.")
+                execution = agent.input("Summarize candidate news.")
                 request = _create_request()
                 request.input("Summarize direct request in subflow.")
-                agent_text = await turn.async_get_text()
+                agent_text = await execution.async_get_text()
                 request_text = await request.async_get_text()
                 return {
                     "agent_text": agent_text,
@@ -1015,18 +1015,18 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
         assert summarize_chunk is not None
         assert summarize_chunk.parent_run_id == subflow_workflow_run.run_id
 
-        agent_turn_run = next(
-            event.run for event in captured if event.event_type == "agent_turn.started" and event.run is not None
+        agent_execution_run = next(
+            event.run for event in captured if event.event_type == "agent_execution.started" and event.run is not None
         )
-        assert agent_turn_run is not None
-        assert agent_turn_run.parent_run_id == summarize_chunk.run_id
+        assert agent_execution_run is not None
+        assert agent_execution_run.parent_run_id == summarize_chunk.run_id
 
         request_starts = [
             event.run for event in captured if event.event_type == "request.started" and event.run is not None
         ]
         parent_ids = {run.parent_run_id for run in request_starts}
         assert summarize_chunk.run_id in parent_ids
-        assert agent_turn_run.run_id in parent_ids
+        assert agent_execution_run.run_id in parent_ids
 
         model_request_runs = [
             event.run for event in captured if event.event_type == "model.request_started" and event.run is not None
@@ -1053,8 +1053,8 @@ async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_fail
         async def slow_branch(data: TriggerFlowRuntimeData):
             del data
             agent = _create_slow_agent()
-            turn = agent.input("Wait for sibling cancellation.")
-            return await turn.async_get_text()
+            execution = agent.input("Wait for sibling cancellation.")
+            return await execution.async_get_text()
 
         async def fail_branch(data: TriggerFlowRuntimeData):
             del data
@@ -1076,7 +1076,7 @@ async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_fail
         event_types = [event.event_type for event in captured]
         assert "model.request_failed" in event_types
         assert "request.failed" in event_types
-        assert "agent_turn.failed" in event_types
+        assert "agent_execution.failed" in event_types
         assert "chunk.failed" in event_types
         assert normalize_triggerflow_event_type("triggerflow.execution_failed") in {
             normalize_triggerflow_event_type(event_type) for event_type in event_types
@@ -1106,8 +1106,8 @@ async def test_trigger_flow_for_each_failure_waits_for_sibling_cleanup():
         async def analyze_item(data: TriggerFlowRuntimeData):
             if data.value == "slow":
                 agent = _create_slow_agent()
-                turn = agent.input("Wait for for_each sibling cancellation.")
-                return await turn.async_get_text()
+                execution = agent.input("Wait for for_each sibling cancellation.")
+                return await execution.async_get_text()
             await asyncio.sleep(0.05)
             raise RuntimeError("for_each branch boom")
 
@@ -1119,7 +1119,7 @@ async def test_trigger_flow_for_each_failure_waits_for_sibling_cleanup():
         event_types = [event.event_type for event in captured]
         assert "model.request_failed" in event_types
         assert "request.failed" in event_types
-        assert "agent_turn.failed" in event_types
+        assert "agent_execution.failed" in event_types
         assert "chunk.failed" in event_types
         assert normalize_triggerflow_event_type("triggerflow.execution_failed") in {
             normalize_triggerflow_event_type(event_type) for event_type in event_types

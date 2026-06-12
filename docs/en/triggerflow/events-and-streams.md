@@ -53,9 +53,11 @@ Mechanics:
 
 ### Definition safety vs runtime signals
 
-Module-safe TriggerFlow definition work is about not declaring the same graph
-edge or generated `when(...)` gate twice when service modules are imported,
-reloaded, or assembled repeatedly. It is not runtime signal deduplication.
+Normal Python imports execute a flow module once per process for the same module
+name. TriggerFlow's duplicate-definition protection is the second line of
+defense: it avoids declaring the same graph edge or generated `when(...)` gate
+twice when application code explicitly runs the same `.to(...)` / `.when(...)`
+wiring again on the same flow object. It is not runtime signal deduplication.
 
 During one execution, every `emit` / `emit_nowait` call is still a business
 event. If a chunk emits `Tick` three times, `when("Tick")` should react three
@@ -65,11 +67,19 @@ To-Do executors, dependency joins, side branches, and reflection loops.
 For multi-dependency joins, use:
 
 ```python
-flow.when({"event": ["done:a", "done:b"]}, mode="and").to(continue_after_both)
+flow.when(["done:a", "done:b"], mode="and").to(continue_after_both)
 ```
 
 The join state belongs to one execution. It must not leak across executions or
 be stored in shared flow data.
+
+Signals emitted from inside a chunk carry the parent signal id and inherit the
+current aggregation scope. That keeps framework-owned fan-out, such as `batch`,
+`for_each`, and chunk-internal emits, correlated for `when(..., mode="and")`
+joins. External emits that do not share a runtime scope are separate business
+events; if a host needs to join externally submitted `A` / `B` events for the
+same business item, route them through one scoped flow stage or carry an
+explicit correlation key in the payload and branch on it.
 
 ### Emitting from outside
 

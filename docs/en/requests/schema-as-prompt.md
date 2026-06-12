@@ -22,7 +22,7 @@ A leaf is a tuple:
 |---|---|
 | 1. `TypeExpr` | Python type, typing expression, `Enum` class, `BaseModel`, or a string token like `"str"`, `"list[str]"` |
 | 2. description | Soft hint to the model and to humans |
-| 3. ensure | `True` marks the leaf as required and adds it to `ensure_keys` |
+| 3. ensure | `True` marks the path/key as required and adds it to `ensure_keys`; `"not_null"` also requires a meaningful value |
 
 > The third slot is the **ensure flag**, not a default value. The older "default value as third slot" convention is no longer supported, and YAML's `$default` is gone with it.
 
@@ -63,7 +63,7 @@ The model emits fields in the order you define them. If you explicitly expose fi
 
 ## Ensure compiles to ensure_keys
 
-Every `True` in the third slot adds the leaf's path to the `ensure_keys` list at parse time:
+Every `True` or `"not_null"` in the third slot adds the leaf's path to the `ensure_keys` list at parse time:
 
 ```python
 {
@@ -83,7 +83,15 @@ Compiles to:
 ensure_keys = ["title", "items[*].name"]
 ```
 
-Array wildcards like `items[*]` are part of the path syntax. If `title` is missing or any `items[i].name` is missing in parse output, the request retries (subject to `max_retries`). `value` is allowed to be missing.
+Array wildcards like `items[*]` are part of the path syntax. If `title` is missing or any `items[i].name` is missing in parse output, the request retries (subject to `max_retries`). `value` is allowed to be missing. A `True` marker checks presence only, so an empty string, `None`, `False`, `0`, or an empty list may still be valid data. Use `"not_null"` when the field should retry on `None`, blank strings, empty lists or wildcard matches, or lists containing missing required values.
+
+```python
+{
+    "ready": (bool, "whether the planner can proceed", True),
+    "questions": (list, "clarification questions if needed", True),       # [] is valid
+    "reply": (str, "final reply when ready", "not_null"),                 # blank text retries
+}
+```
 
 For "the entire schema must come back complete", set `ensure_all_keys: True` on the agent or use `$ensure_all_keys: true` at the top of a YAML/JSON prompt — it overrides per-leaf decisions.
 
@@ -110,7 +118,8 @@ Conventions:
 
 - `$type` — the type expression (string token or nested structure)
 - `$desc` — description
-- `$ensure: true` (or `$ensure: 1`) — the ensure flag
+- `$ensure: true` (or `$ensure: 1`) — path/key presence ensure
+- `$ensure: "not_null"` — path/key presence plus built-in meaningful-value validation
 - Aliases `.type` / `.desc` are accepted by the loader but `$`-prefixed keys are recommended
 
 `$default` is **not supported** — defaults are no longer part of authoring.

@@ -36,6 +36,7 @@ async def ask(data: TriggerFlowRuntimeData):
 | `resume_to=` | 可选恢复目标：`"next"`、`"self"` 或 `{"event": "EventName"}`。 |
 | `resume_event=` | 兼容快捷方式。未显式设置 `resume_to` 时，`continue_with` 与匹配的 `emit(...)` 会路由到该事件。 |
 | `interrupt_id=` | 可选。自己指定 id；否则框架生成。 |
+| `max_resumes=` | `resume_to="self"` 的可选护栏。默认 `1`，所以恢复后的 chunk 必须处理 `data.is_resume`，不能再次无限暂停自己。有界 self-retry 传更大的整数；确实需要无界循环时传 `None`，并由应用自己保证退出条件。 |
 
 ## 用 continue_with 恢复
 
@@ -53,11 +54,16 @@ async def gate(data: TriggerFlowRuntimeData):
     if data.is_resume:
         return {"decision": data.resume.value}
     return await data.async_pause_for(
-        type="approval",
+        type="exchange", exchange_kind="approval",
         payload={"question": "批准？"},
         resume_to="self",
     )
 ```
+
+`resume_to="self"` 会在 interrupt ledger 和 signal metadata 中携带
+`resume_count`。默认同一个 signal 只能重放一次；如果恢复后的 chunk 没处理
+`data.is_resume`，又再次调用 `pause_for(..., resume_to="self")`，TriggerFlow
+会以 self-resume limit error 失败，而不是构造无界 interrupt 循环。
 
 使用 `resume_to={"event": "ApprovalGiven"}` 时，TriggerFlow 用恢复 payload 发出该事件。`resume_event="ApprovalGiven"` 保留旧的事件式恢复行为。
 
@@ -73,7 +79,7 @@ async def main():
 
     async def ask(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(
-            type="approval",
+            type="exchange", exchange_kind="approval",
             payload={"question": f"批准工单 {data.input} 退款？"},
             resume_to="next",
         )
@@ -104,9 +110,11 @@ asyncio.run(main())
 
 ## 跨进程重启的 pause
 
-`pause_for(...)` 与 `save` / `load` 配合得很好：
+`pause_for(...)` 可以和 execution snapshot load 配合：
 
 ```python
+flow.declare_resource_requirement("approval_service")
+
 execution = flow.create_execution(auto_close=False)
 await execution.async_start("topic")
 # 此时已碰到 pause_for；存在 pending interrupt
@@ -115,17 +123,21 @@ saved = execution.save()
 # 持久化 saved
 
 # 后续在另一进程 / worker：
-restored = flow.create_execution(
-    auto_close=False,
-    runtime_resources={...},   # chunk 需要的全部重新注入
+restored = flow.create_execution(auto_close=False)
+await restored.async_load(
+    saved,
+    runtime_resources={"approval_service": approval_service},
 )
-restored.load(saved)
 interrupt_id = next(iter(restored.get_pending_interrupts()))
-await restored.async_continue_with(interrupt_id, {"approved": True})
+await restored.async_continue_with(
+    interrupt_id,
+    {"approved": True},
+    resume_request_id="approval-webhook-42",
+)
 snapshot = await restored.async_close()
 ```
 
-interrupt 是 saved state 的一部分，新进程知道有什么待处理。详见 [持久化与 Blueprint](persistence-and-blueprint.md)。
+interrupt 和已接受的 resume request id 都是 saved state 的一部分，新进程知道有什么待处理，也能忽略重复 resume。详见 [持久化与 Blueprint](persistence-and-blueprint.md)。生产级 worker handoff、callback transport、outbox 顺序和 live object 恢复见 [分布式 Pause 与 Resume 边界](distributed-pause-resume.md)。
 
 ## 多个并发 pause
 
@@ -160,3 +172,4 @@ snapshot = await execution.async_close(pending_interrupts="cancel")
 - [Lifecycle](lifecycle.md) —— 恢复后何时 seal/close
 - [持久化与 Blueprint](persistence-and-blueprint.md) —— 跨 pause 保存
 - [State 与 Resources](state-and-resources.md) —— `load()` 后重新注入 `runtime_resources`
+- [分布式 Pause 与 Resume 边界](distributed-pause-resume.md) —— 宿主管理恢复和 live object ownership

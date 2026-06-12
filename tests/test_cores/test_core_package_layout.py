@@ -50,6 +50,17 @@ def test_core_root_exports_remain_stable():
     assert WorkspaceManager.__name__ == "WorkspaceManager"
 
 
+def test_execution_exchange_types_are_publicly_importable():
+    from agently.types.data import ExecutionExchangeProviderResult, ExecutionExchangeRequest
+    from agently.types.plugins import ExecutionExchangeProvider
+    from agently.types.trigger_flow import TriggerFlowExternalWaitRequest
+
+    assert ExecutionExchangeProviderResult.__name__ == "ExecutionExchangeProviderResult"
+    assert ExecutionExchangeRequest.__name__ == "ExecutionExchangeRequest"
+    assert TriggerFlowExternalWaitRequest is ExecutionExchangeRequest
+    assert ExecutionExchangeProvider.__name__ == "ExecutionExchangeProvider"
+
+
 def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.application.AgentExecution import AgentExecutionStream
     from agently.core.application.SkillsExecutor import SkillsExecutor
@@ -95,7 +106,7 @@ def test_core_layout_keeps_only_classified_root_packages():
     root_files = sorted(path.name for path in core_root.iterdir() if path.is_file())
     root_dirs = sorted(path.name for path in core_root.iterdir() if path.is_dir() and path.name != "__pycache__")
 
-    assert root_files == ["Agent.py", "AgentTurn.py", "__init__.py"]
+    assert root_files == ["Agent.py", "__init__.py"]
     assert root_dirs == [
         "application",
         "extension",

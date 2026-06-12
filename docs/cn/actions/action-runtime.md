@@ -116,7 +116,8 @@ print(calculate("3333+6666=?"))
 `agent.action.get_action_info()` 和 `agent.action.get_tool_info()` 默认返回该
 agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 `agent.use_mcp(...)` 挂载的 MCP tools，以及 `enable_*` component helpers。只有需要
-窄范围子集时才传显式 `tags=[...]`。
+窄范围子集时才传显式 `tags=[...]`。托管执行环境 metadata 在这个可见 schema
+里会脱敏原始 `env` 值，但保留 env key；provider 只会在实际执行路径中拿到 raw env。
 
 应用代码要给模型开放 Python、shell、workspace 等常见能力时，优先使用
 `enable_*` helpers。只有在开发自定义 Action 后端时，才需要使用
@@ -165,6 +166,24 @@ raw = agent.action.read_action_artifact(
 `Action.to_action_results(records)` 对指令型 action 使用 digest，因此后续回复能知道发生了什么，
 但不会默认拿到完整 payload。
 
+当 host 显式调用 `agent.get_action_result(prompt=...)` 时，即使返回的
+records 为空，Agently 也会把该 prompt 标记为已经消费过 action loop。之后同一
+prompt 的响应读取不会为了生成最终文本再次进入 ActionRuntime。
+
+host 需要权威 action evidence 摘要时，可以使用
+`agent.action.summarize_records(records)`：
+
+```python
+summary = agent.action.summarize_records(
+    records,
+    validation_command_markers=["pytest", "pyright"],
+)
+
+assert summary["latest_validation"]["status"] in {"passed", "failed"}
+```
+
+摘要会报告 failed actions、尝试过的命令、成功命令，以及最后一个匹配的验证命令。
+
 ## 兼容入口 —— tools
 
 旧入口仍可用：
@@ -205,6 +224,16 @@ agent.set_settings("action.planning_model_key", "task-main")
 路径。当 SkillsExecutor 或 AgentTaskLoop 把一个 bounded action round
 委托给 ActionRuntime 时尤其重要，否则 action planning 可能没有显式使用
 预期的 `model_pool` 业务 key。
+
+`agent.get_action_result(..., timeout=N)` 会约束完整 action loop，包括
+structured planning 和 native tool-call selection。如果 loop 不能在 deadline
+前结束，Agently 会抛出 `RuntimeStageStallError`，其中
+`stage="action_loop_close"`。
+
+当 `planning_protocol="native_tool_calls"` 没有拿到 provider-native tool calls
+时，Agently 会返回一个 `skipped` 诊断 action record，诊断 code 为
+`action_runtime.native_tool_calls.empty`。host 应把它当作 planning evidence，
+而不是已执行工作。
 
 ## handler 接口
 

@@ -18,7 +18,7 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Generator, Mapping
 from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
@@ -41,6 +41,16 @@ AgentTaskStatus = Literal[
     "capability_unavailable",
     "error",
 ]
+
+_STEP_EXECUTION_SHAPES = {
+    "direct",
+    "actions",
+    "skills",
+    "dynamic_task",
+    "execution_dag",
+}
+
+_DAG_STEP_EXECUTION_SHAPES = {"dynamic_task", "execution_dag"}
 
 
 class AgentTask:
@@ -79,7 +89,11 @@ class AgentTask:
         if workspace is not None:
             agent_with_workspace.use_workspace(workspace)
         if getattr(agent, "workspace", None) is None:
-            raise RuntimeError("AgentTask requires a Workspace. Pass workspace=... or call agent.use_workspace(...).")
+            raise RuntimeError(
+                "AgentTask requires a Workspace binding. Standard Agents include a lazy Workspace; "
+                "pass workspace=... or call agent.use_workspace(...) only when you need an explicit "
+                "root, mode, or provider."
+            )
         self.workspace = agent_with_workspace.workspace
         self.status: AgentTaskStatus = "created"
         self.result: Any = None
@@ -90,6 +104,7 @@ class AgentTask:
             "decisions": [],
             "verification": [],
             "checkpoints": [],
+            "evidence_links": [],
         }
         self.created_at = time.time()
         self.started_at: float | None = None
@@ -135,6 +150,15 @@ class AgentTask:
             self.status = "running"
             execution = self._flow.create_execution(auto_close=False)
             try:
+                await self._record_phase(
+                    "configured",
+                    diagnostics={
+                        "goals": [self.goal],
+                        "success_criteria": self.success_criteria,
+                        "max_iterations": self.max_iterations,
+                        "required_capabilities": self.options.get("capability_constraints", {}),
+                    },
+                )
                 await execution.async_start({"task_id": self.id})
                 await execution.async_close()
                 if self.status == "running":
@@ -197,12 +221,25 @@ class AgentTask:
             "plan",
             f"Iteration {iteration_index}: asking the model to plan one bounded execution step.",
         )
-        plan = await self._request_plan(iteration_index, context_pack)
+        plan = self._normalize_step_plan(await self._request_plan(iteration_index, context_pack))
+        await self._record_phase(
+            "planned",
+            iteration=iteration_index,
+            diagnostics={
+                "execution_shape": plan.get("execution_shape", "direct"),
+                "effective_execution_shape": plan.get("effective_execution_shape", plan.get("execution_shape", "direct")),
+                "step_instruction": plan.get("step_instruction", ""),
+                "expected_evidence": plan.get("expected_evidence", ""),
+                "rationale": plan.get("rationale", ""),
+            },
+        )
         await self._emit(f"agent_task.iteration.{iteration_index}.plan", plan)
         await self._emit_snapshot(
             iteration_index,
             "plan",
             {
+                "execution_shape": plan.get("execution_shape", "direct"),
+                "effective_execution_shape": plan.get("effective_execution_shape", plan.get("execution_shape", "direct")),
                 "step_instruction": plan.get("step_instruction", ""),
                 "expected_evidence": plan.get("expected_evidence", ""),
                 "rationale": plan.get("rationale", ""),
@@ -216,6 +253,15 @@ class AgentTask:
             iteration_index,
             "execute",
             f"Iteration {iteration_index}: executing the bounded step and collecting evidence.",
+        )
+        await self._record_phase(
+            "executing",
+            iteration=iteration_index,
+            diagnostics={
+                "execution_shape": plan.get("execution_shape", "direct"),
+                "effective_execution_shape": plan.get("effective_execution_shape", plan.get("execution_shape", "direct")),
+                "step_instruction": plan.get("step_instruction", ""),
+            },
         )
         execution_result, execution_meta = await self._execute_step(iteration_index, plan, context_pack)
         await self._emit_snapshot(
@@ -240,6 +286,16 @@ class AgentTask:
             f"agent_task.iteration.{iteration_index}.observation",
             {"record": observation_ref, "checkpoint": checkpoint_ref},
         )
+        await self._record_phase(
+            "evidence_recorded",
+            iteration=iteration_index,
+            diagnostics={
+                "observation_ref": observation_ref,
+                "checkpoint_ref": checkpoint_ref,
+                "execution_id": execution_meta.get("execution_id"),
+                "route": execution_meta.get("route"),
+            },
+        )
 
         await self._emit_progress(
             iteration_index,
@@ -252,6 +308,25 @@ class AgentTask:
             execution_result=execution_result,
             execution_meta=execution_meta,
             context_pack=context_pack,
+        )
+        await self._record_phase(
+            "verified",
+            iteration=iteration_index,
+            diagnostics={
+                "is_complete": verification.get("is_complete"),
+                "requires_block": verification.get("requires_block"),
+                "missing_criteria": verification.get("missing_criteria", []),
+                "final_result_present": bool(str(verification.get("final_result") or "").strip()),
+            },
+        )
+        await self._record_phase(
+            "guarded",
+            iteration=iteration_index,
+            diagnostics={
+                "guard_reasons": verification.get("guard_reasons", []),
+                "is_complete": verification.get("is_complete"),
+                "requires_block": verification.get("requires_block"),
+            },
         )
         verification_ref = await self._record_verification(iteration_index, verification, observation_ref)
         await self._emit_snapshot(
@@ -302,6 +377,11 @@ class AgentTask:
                 "completed",
                 f"Iteration {iteration_index}: all success criteria are satisfied; the task is complete.",
             )
+            await self._record_phase(
+                "terminal",
+                iteration=iteration_index,
+                diagnostics={"status": self.status, "accepted": True, "artifact_status": "accepted"},
+            )
             await self._emit("agent_task.completed", self.result)
             return {"terminal": True, "status": self.status}
 
@@ -320,6 +400,11 @@ class AgentTask:
                 iteration_index,
                 "blocked",
                 f"Iteration {iteration_index}: verifier blocked the task because it cannot continue safely.",
+            )
+            await self._record_phase(
+                "terminal",
+                iteration=iteration_index,
+                diagnostics={"status": self.status, "accepted": False, "artifact_status": "blocked"},
             )
             await self._emit("agent_task.blocked", self.result)
             return {"terminal": True, "status": self.status}
@@ -340,6 +425,11 @@ class AgentTask:
                 "max_iterations",
                 f"Iteration {iteration_index}: max_iterations reached before verification passed.",
             )
+            await self._record_phase(
+                "terminal",
+                iteration=iteration_index,
+                diagnostics={"status": self.status, "accepted": False, "artifact_status": "partial"},
+            )
             await self._emit("agent_task.blocked", self.result)
             return {"terminal": True, "status": self.status}
 
@@ -351,6 +441,14 @@ class AgentTask:
         await self._emit(
             f"agent_task.iteration.{iteration_index}.replan",
             {
+                "reason": verification.get("reason"),
+                "replan_instruction": verification.get("replan_instruction"),
+            },
+        )
+        await self._record_phase(
+            "replanned",
+            iteration=iteration_index,
+            diagnostics={
                 "reason": verification.get("reason"),
                 "replan_instruction": verification.get("replan_instruction"),
             },
@@ -381,6 +479,146 @@ class AgentTask:
             self.diagnostics.setdefault("recall_fallbacks", []).append(diagnostics["fallback_reason"])
             return fallback
 
+    def _step_execution_policy(self) -> dict[str, Any]:
+        agent_task_options = self.options.get("agent_task")
+        effort = agent_task_options.get("effort") if isinstance(agent_task_options, dict) else None
+        effort = effort if isinstance(effort, dict) else {}
+        execution_policy = effort.get("execution")
+        policy = dict(execution_policy) if isinstance(execution_policy, dict) else {}
+        raw_step_plan = str(
+            policy.get("step_plan")
+            or policy.get("step_execution")
+            or policy.get("execution_shape")
+            or "direct"
+        ).strip().lower()
+        if raw_step_plan in {"dynamic_task", "task_dag", "execution_dag"}:
+            raw_step_plan = "dag"
+        if raw_step_plan not in {"direct", "auto", "dag"}:
+            raw_step_plan = "direct"
+        policy["step_plan"] = raw_step_plan
+        if "max_tasks" not in policy and "max_plan_items" in policy:
+            policy["max_tasks"] = policy.get("max_plan_items")
+        policy.setdefault("allow_dag_steps", raw_step_plan in {"auto", "dag"})
+        return policy
+
+    def _normalize_step_plan(self, plan: Any) -> dict[str, Any]:
+        if isinstance(plan, dict):
+            normalized = plan
+        else:
+            normalized = {"step_instruction": str(plan), "expected_evidence": "", "rationale": ""}
+        raw_shape = (
+            normalized.get("execution_shape")
+            or normalized.get("step_kind")
+            or normalized.get("route")
+            or normalized.get("route_hint")
+            or "direct"
+        )
+        shape = self._normalize_step_execution_shape(raw_shape)
+        normalized["execution_shape"] = shape
+        normalized.setdefault("effective_execution_shape", shape)
+        normalized.setdefault("step_instruction", "")
+        normalized.setdefault("expected_evidence", "")
+        normalized.setdefault("rationale", "")
+        return normalized
+
+    @staticmethod
+    def _normalize_step_execution_shape(value: Any) -> str:
+        text = str(value or "direct").strip().lower().replace("-", "_")
+        aliases = {
+            "model": "direct",
+            "model_request": "direct",
+            "direct_request": "direct",
+            "action": "actions",
+            "tool": "actions",
+            "tools": "actions",
+            "skill": "skills",
+            "dag": "dynamic_task",
+            "task_dag": "dynamic_task",
+            "dynamic_task_dag": "dynamic_task",
+            "agent_execution_dag": "execution_dag",
+        }
+        normalized = aliases.get(text, text)
+        return normalized if normalized in _STEP_EXECUTION_SHAPES else "direct"
+
+    def _step_dynamic_task_candidate(self, plan: dict[str, Any]) -> dict[str, Any] | None:
+        raw_candidate: Any = None
+        for key in ("dynamic_task", "task_dag", "execution_dag"):
+            item = plan.get(key)
+            if isinstance(item, Mapping):
+                raw_candidate = item
+                break
+        if raw_candidate is None and isinstance(plan.get("dynamic_task_plan"), Mapping):
+            raw_candidate = {"plan": plan["dynamic_task_plan"]}
+        if raw_candidate is None:
+            return None
+        candidate = dict(raw_candidate)
+        if not candidate.get("mode"):
+            candidate["mode"] = "submitted" if candidate.get("plan") is not None else "auto"
+        return candidate
+
+    def _configure_step_execution(self, execution: Any, plan: dict[str, Any]) -> dict[str, Any]:
+        policy = self._step_execution_policy()
+        requested_shape = str(plan.get("execution_shape") or "direct")
+        effective_shape = requested_shape
+        candidate_added = False
+        dag_allowed = False
+        warning: str | None = None
+
+        if requested_shape in _DAG_STEP_EXECUTION_SHAPES:
+            candidate = self._step_dynamic_task_candidate(plan)
+            has_dynamic_candidates = bool(
+                getattr(self.agent, "_dynamic_task_candidates", []) or getattr(execution, "local_dynamic_task_candidates", [])
+            )
+            dag_allowed = bool(
+                candidate
+                or has_dynamic_candidates
+                or policy.get("allow_dag_steps")
+                or policy.get("step_plan") in {"auto", "dag"}
+            )
+            if candidate is not None:
+                add_candidate = getattr(execution, "_add_dynamic_task_candidate", None)
+                if callable(add_candidate):
+                    add_candidate(candidate)
+                    candidate_added = True
+            elif not has_dynamic_candidates and dag_allowed:
+                auto_candidate: dict[str, Any] = {"mode": "auto"}
+                for key in ("max_tasks", "timeout", "max_retries", "output_schema", "ensure_keys", "output_format"):
+                    if policy.get(key) is not None:
+                        auto_candidate[key] = policy.get(key)
+                add_candidate = getattr(execution, "_add_dynamic_task_candidate", None)
+                if callable(add_candidate):
+                    add_candidate(auto_candidate)
+                    candidate_added = True
+            else:
+                effective_shape = "direct"
+                warning = "dag_shape_not_enabled"
+
+        plan["effective_execution_shape"] = effective_shape
+        step_execution = {
+            "requested_shape": requested_shape,
+            "effective_shape": effective_shape,
+            "dag_allowed": dag_allowed,
+            "dynamic_task_candidate_added": candidate_added,
+            "policy": DataFormatter.sanitize(policy),
+        }
+        if warning is not None:
+            step_execution["warning"] = warning
+            execution_warnings = plan.get("execution_warnings")
+            if not isinstance(execution_warnings, list):
+                execution_warnings = []
+            execution_warnings.append(warning)
+            plan["execution_warnings"] = execution_warnings
+            self.diagnostics.setdefault("step_execution_warnings", []).append(
+                {"iteration_shape": requested_shape, "warning": warning}
+            )
+        plan["step_execution"] = step_execution
+        record_option = getattr(execution, "record_consumed_option", None)
+        if callable(record_option):
+            record_option("agent_task.step.execution_shape", effective_shape, owner="AgentTaskLoop")
+            if policy.get("step_plan") != "direct":
+                record_option("effort.execution.step_plan", policy.get("step_plan"), owner="AgentTaskLoop")
+        return step_execution
+
     async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPack") -> dict[str, Any]:
         request = self.agent.create_temp_request()
         request.input(
@@ -391,22 +629,35 @@ class AgentTask:
                 "iteration": iteration_index,
                 "previous_iterations": self.iterations,
                 "context_pack": DataFormatter.sanitize(context_pack),
+                "execution_policy": self._step_execution_policy(),
             }
         )
         request.instruct(
             "Plan the next bounded AgentExecution step for this AgentTask. "
-            "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified."
+            "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
+            "Set execution_shape to direct, actions, skills, dynamic_task, or execution_dag. "
+            "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
         )
         request.output(
             {
+                "execution_shape": (
+                    str,
+                    "Execution shape for this bounded step: direct, actions, skills, dynamic_task, or execution_dag",
+                    False,
+                ),
                 "step_instruction": (str, "Instruction for one bounded AgentExecution step", True),
                 "expected_evidence": (str, "Evidence this step should produce", True),
                 "rationale": (str, "Why this is the next step", True),
+                "dynamic_task": (
+                    dict,
+                    "Optional bounded DynamicTask candidate when execution_shape is dynamic_task or execution_dag",
+                    False,
+                ),
             },
             format="json",
         )
         plan = await self._await_task_request(request.async_get_data(), stage="plan")
-        return dict(plan) if isinstance(plan, dict) else {"step_instruction": str(plan), "expected_evidence": "", "rationale": ""}
+        return self._normalize_step_plan(plan)
 
     async def _execute_step(
         self,
@@ -414,29 +665,33 @@ class AgentTask:
         plan: dict[str, Any],
         context_pack: "WorkspaceContextPack",
     ) -> tuple[Any, dict[str, Any]]:
+        plan = self._normalize_step_plan(plan)
         execution = self.agent.create_execution(
-            mode="task_step",
             lineage={
                 "task_id": self.id,
                 "iteration_id": f"iter-{iteration_index}",
                 "step_id": "execute",
+                "scope": {"strategy_phase": "agent_task_execution_step"},
             },
             limits=self.limits,
             options=self.options,
         )
+        step_execution = self._configure_step_execution(execution, plan)
         execution.input(
             {
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
                 "iteration": iteration_index,
-                "plan": plan,
+                "plan": DataFormatter.sanitize(plan),
+                "step_execution": step_execution,
                 "context_pack": DataFormatter.sanitize(context_pack),
             }
         )
         execution.instruct(
             (
                 "Execute exactly one bounded step for the AgentTask. "
+                f"Use the selected execution shape: {step_execution.get('effective_shape', 'direct')}. "
                 "Return concrete evidence for the verifier. Do not claim final completion unless evidence supports it."
             )
         )
@@ -448,11 +703,14 @@ class AgentTask:
             },
             format="json",
         )
-        await self._emit(f"agent_task.iteration.{iteration_index}.execution.started", {"execution_id": execution.id})
+        await self._emit(
+            f"agent_task.iteration.{iteration_index}.execution.started",
+            {"execution_id": execution.id, "step_execution": step_execution},
+        )
         result = await execution.async_get_data()
         meta = await execution.async_get_meta()
         await self._emit(f"agent_task.iteration.{iteration_index}.execution.completed", meta)
-        return result, meta
+        return result, cast(dict[str, Any], meta)
 
     async def _request_verification(
         self,
@@ -550,6 +808,17 @@ class AgentTask:
             normalized["missing_criteria"] = [
                 *normalized["missing_criteria"],
                 f"Unresolved execution risk actions: {', '.join(risky_actions)}",
+            ]
+        missing_required = [
+            *self._normalize_string_list(execution_evidence_summary.get("missing_required_actions")),
+            *self._normalize_string_list(execution_evidence_summary.get("missing_required_skills")),
+        ]
+        if missing_required:
+            normalized["is_complete"] = False
+            guard_reasons.append("required_capability_evidence_missing")
+            normalized["missing_criteria"] = [
+                *normalized["missing_criteria"],
+                f"Missing required capability evidence: {', '.join(missing_required)}",
             ]
         if normalized["is_complete"] and self._requires_final_result() and not normalized["final_result"].strip():
             normalized["is_complete"] = False
@@ -686,7 +955,7 @@ class AgentTask:
             source={"type": "agent_task", "phase": "execute", "execution_id": execution_meta.get("execution_id")},
             meta={"task_id": self.id, "iteration": iteration_index},
         )
-        checkpoint_ref = await self.workspace.checkpoint(
+        checkpoint_ref = await self.workspace.put_checkpoint(
             self.id,
             {
                 "task_id": self.id,
@@ -697,9 +966,26 @@ class AgentTask:
             },
             step_id=f"iteration-{iteration_index}",
         )
-        await self.workspace.link(record_ref, decision_ref, relation="implements_decision")
+        decision_link = await self.workspace.link_evidence(
+            record_ref,
+            decision_ref,
+            relation="implements_decision",
+            execution_id=str(execution_meta.get("execution_id") or "") or None,
+            checkpoint_id=checkpoint_ref.get("id"),
+            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
+        )
+        checkpoint_link = await self.workspace.link_evidence(
+            record_ref,
+            checkpoint_ref,
+            relation="checkpointed_by",
+            execution_id=str(execution_meta.get("execution_id") or "") or None,
+            checkpoint_id=checkpoint_ref.get("id"),
+            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
+        )
         self._append_workspace_ref("observations", record_ref)
         self._append_workspace_ref("checkpoints", checkpoint_ref)
+        self._append_workspace_ref("evidence_links", decision_link)
+        self._append_workspace_ref("evidence_links", checkpoint_link)
         await self._emit(
             "agent_task.checkpoint",
             {"iteration": iteration_index, "checkpoint": checkpoint_ref},
@@ -725,8 +1011,14 @@ class AgentTask:
             source={"type": "agent_task", "phase": "verify"},
             meta={"task_id": self.id, "iteration": iteration_index},
         )
-        await self.workspace.link(record_ref, observation_ref, relation="verifies_observation")
+        evidence_link = await self.workspace.link_evidence(
+            record_ref,
+            observation_ref,
+            relation="verifies_observation",
+            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
+        )
         self._append_workspace_ref("verification", record_ref)
+        self._append_workspace_ref("evidence_links", evidence_link)
         return record_ref
 
     def _append_workspace_ref(self, collection: str, ref: dict[str, Any] | None):
@@ -1061,6 +1353,14 @@ class AgentTask:
         failed_actions = AgentTask._action_ids_by_status(action_records, {"failed", "failure", "error"})
         blocked_actions = AgentTask._action_ids_by_status(action_records, {"blocked"})
         approval_required_actions = AgentTask._action_ids_by_status(action_records, {"approval_required"})
+        required_actions, required_skills = AgentTask._required_capability_constraints(execution_meta)
+        missing_required_actions = [action_id for action_id in required_actions if action_id not in action_ids]
+        selected_skill_ids = AgentTask._selected_skill_ids(logs)
+        missing_required_skills = [
+            skill_id
+            for skill_id in required_skills
+            if skill_id not in selected_skill_ids
+        ]
         validation_actions = [
             record["id"]
             for record in action_records
@@ -1089,12 +1389,56 @@ class AgentTask:
             "failed_actions": failed_actions,
             "blocked_actions": blocked_actions,
             "approval_required_actions": approval_required_actions,
+            "required_actions": required_actions,
+            "missing_required_actions": missing_required_actions,
+            "selected_skill_ids": selected_skill_ids,
+            "required_skills": required_skills,
+            "missing_required_skills": missing_required_skills,
             "validation_actions": validation_actions,
             "artifact_refs": DataFormatter.sanitize(artifact_refs),
             "workspace_refs": DataFormatter.sanitize(workspace_refs),
             "route": DataFormatter.sanitize(route),
             "status": str(execution_meta.get("status") or ""),
         }
+
+    @staticmethod
+    def _required_capability_constraints(execution_meta: dict[str, Any]) -> tuple[list[str], list[str]]:
+        constraints = execution_meta.get("effective_options", {})
+        if not isinstance(constraints, dict):
+            constraints = execution_meta.get("options", {})
+        if not isinstance(constraints, dict):
+            return [], []
+        capability_constraints = constraints.get("capability_constraints", {})
+        if not isinstance(capability_constraints, dict):
+            return [], []
+        actions = capability_constraints.get("actions", {})
+        skills = capability_constraints.get("skills", {})
+        required_actions = actions.get("required", []) if isinstance(actions, dict) else []
+        required_skills = skills.get("required", []) if isinstance(skills, dict) else []
+        return (
+            AgentTask._normalize_string_list(required_actions),
+            AgentTask._normalize_string_list(required_skills),
+        )
+
+    @staticmethod
+    def _selected_skill_ids(logs: dict[str, Any]) -> list[str]:
+        route_logs = logs.get("route_logs", {})
+        if not isinstance(route_logs, dict):
+            return []
+        plan = route_logs.get("plan", {})
+        if not isinstance(plan, dict):
+            return []
+        selected = plan.get("selected_skills", [])
+        if not isinstance(selected, list):
+            return []
+        skill_ids: list[str] = []
+        for item in selected:
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get("skill_id") or item.get("id") or item.get("name") or "").strip()
+            if skill_id and skill_id not in skill_ids:
+                skill_ids.append(skill_id)
+        return skill_ids
 
     @staticmethod
     def _collect_action_records(logs: dict[str, Any]) -> list[dict[str, str]]:
@@ -1141,6 +1485,32 @@ class AgentTask:
             if status in statuses and record.get("id"):
                 result.append(record["id"])
         return result
+
+    async def _record_phase(
+        self,
+        phase: str,
+        *,
+        iteration: int | None = None,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> AgentExecutionStreamData:
+        record = {
+            "phase": phase,
+            "iteration": iteration,
+            "status": self.status,
+            "diagnostics": DataFormatter.sanitize(diagnostics or {}),
+        }
+        self.diagnostics.setdefault("phases", []).append(record)
+        return await self._emit(
+            f"agent_task.phase.{phase}",
+            record,
+            meta={
+                "task_id": self.id,
+                "status": self.status,
+                "iteration": iteration,
+                "phase": phase,
+                "stream_kind": "phase",
+            },
+        )
 
     async def _emit(
         self,

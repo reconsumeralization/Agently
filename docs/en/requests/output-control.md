@@ -10,7 +10,7 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 The validation pipeline runs the first time a structured response result is consumed, then caches the outcome on that response result. It has a fixed order, and each step contributes to the same retry budget.
 
-For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leaves directly in `.output(...)` with the third-slot `ensure` flag, then let the runtime compile those flags into `ensure_keys`. Pass `ensure_keys=` manually only when the required path is runtime-dependent, conditional, or easier to express outside the static schema. Required string leaves must contain non-blank text; a missing key, `None`, blank string, empty wildcard result, or wildcard result containing a blank required value triggers the shared retry flow. `False` and `0` remain valid required values.
+For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leaves directly in `.output(...)` with the third-slot `ensure` flag, then let the runtime compile those flags into `ensure_keys`. Pass `ensure_keys=` manually only when the required path is runtime-dependent, conditional, or easier to express outside the static schema. By default, tuple `True` and runtime `ensure_keys` check path/key presence only; the value may be `None`, a blank string, `False`, `0`, an empty list, or another intentionally empty value. Use the explicit tuple marker `"not_null"` when a required path must also contain a meaningful value; it rejects `None`, blank strings, empty lists or wildcard matches, and lists containing missing required values while still accepting `False` and `0`.
 
 ## Choosing An Output Format
 
@@ -89,7 +89,7 @@ for model-owned content.
 | `xml_field` | Uses one `<agently_output>` payload with `<field name="..." type="text|json">` blocks. The parser is XML-like and boundary-based, not strict XML. Explicit `format="xml_field"` or auto can select it for flat string-only dict schemas. |
 | `yaml_literal` | Uses a target YAML boundary and literal scalars for long text. It is explicit opt-in and remains outside auto by default. |
 | reasoning text | Provider-native reasoning and leading outer `<think>...</think>` content before the payload are normalized to reasoning events before parsing. Payload/code/text-internal `<think>` content is preserved. |
-| tuple `ensure` | Third-slot `True` compiles to `ensure_keys`. The path must resolve to a meaningful value: non-blank string for string leaves, non-empty values for wildcard matches, and ordinary typed values such as `False` or `0` remain valid. |
+| tuple `ensure` | Third-slot `True` compiles to `ensure_keys` and checks path/key presence. Third-slot `"not_null"` opts into strict value presence: `None`, blank strings, empty lists or wildcard matches, and lists containing missing required values retry; `False` and `0` remain valid. |
 
 Typical usage:
 
@@ -332,9 +332,10 @@ Agently-DevTools consumes these defensively. New event keys are additive and sho
 `ensure_keys` and `.validate(...)` are layered:
 
 - `ensure_keys` handles **path presence** (compiled from the `ensure` flag in `.output(...)`).
+- tuple `"not_null"` handles the common built-in **value presence** rule when empty values should retry.
 - `.validate(...)` handles **value rules** that depend on the actual content.
 
-For fixed required leaves, prefer `(TypeExpr, "description", True)` in `.output(...)` rather than manually repeating the same paths in `ensure_keys=`. Use manual `ensure_keys` for conditional or runtime-only paths. Use `.validate(...)` for "this field must satisfy this business rule".
+For fixed required leaves, prefer `(TypeExpr, "description", True)` in `.output(...)` rather than manually repeating the same paths in `ensure_keys=`. Use `(TypeExpr, "description", "not_null")` only when empty values are invalid for that field. Use manual `ensure_keys` for conditional or runtime-only paths. Use `.validate(...)` for "this field must satisfy this business rule".
 
 ## Common patterns
 

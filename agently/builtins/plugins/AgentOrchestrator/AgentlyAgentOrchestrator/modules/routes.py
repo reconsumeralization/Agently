@@ -34,11 +34,11 @@ async def run_model_request_route(
     raise_ensure_failure: bool,
 ) -> Any:
     agent = execution.agent
-    turn_run_context = agent._create_agent_turn_run_context(parent_run_context=execution.parent_run_context)
-    await agent._async_emit_agent_turn_started(turn_run_context)
+    agent_execution_run_context = agent._create_agent_execution_run_context(parent_run_context=execution.parent_run_context)
+    await agent._async_emit_agent_execution_started(agent_execution_run_context)
     if ensure_all_keys is not None:
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
-    result = execution.request.get_result(parent_run_context=turn_run_context)
+    result = execution.request.get_result(parent_run_context=agent_execution_run_context)
     execution.record_model_response_id(result.id)
     has_structured_stream = bool(execution.prompt_snapshot.get("output"))
     if has_structured_stream:
@@ -88,8 +88,70 @@ async def run_model_request_route(
         if isinstance(tool_logs, list):
             for log in tool_logs:
                 await execution.record_action_log(log, route="model_request", source="tool")
+    capability_failure = await _required_action_failure(execution, route="model_request")
+    if capability_failure is not None:
+        execution.status = "blocked"
+        execution.close_snapshot = {
+            "status": "blocked",
+            "route": "model_request",
+            "required_capabilities": capability_failure,
+        }
+        execution.diagnostics.setdefault("required_capabilities", []).append(capability_failure)
+        await execution.emit_stream(
+            "route.required_capability.blocked",
+            capability_failure,
+            route="model_request",
+            source="agent_execution",
+            meta={"status": "blocked"},
+        )
+        return {
+            "status": "blocked",
+            "accepted": False,
+            "artifact_status": "blocked",
+            "reason": capability_failure["reason"],
+            "required_capabilities": capability_failure,
+        }
     execution.close_snapshot = {"status": "success", "route": "model_request"}
     return data
+
+
+async def _required_action_failure(execution: "AgentExecution", *, route: str) -> dict[str, Any] | None:
+    required_actions = execution.required_action_ids()
+    if not required_actions:
+        return None
+    action_logs = execution.logs.get("action_logs", [])
+    if not isinstance(action_logs, list):
+        action_logs = []
+    statuses: dict[str, str] = {}
+    for item in action_logs:
+        if not isinstance(item, dict):
+            continue
+        action_id = str(item.get("action_id") or item.get("id") or item.get("name") or "").strip()
+        if not action_id:
+            continue
+        statuses[action_id] = str(item.get("status") or "").strip().lower()
+    successful_statuses = {"success", "succeeded", "partial_success"}
+    missing = [action_id for action_id in required_actions if action_id not in statuses]
+    failed = [
+        action_id
+        for action_id in required_actions
+        if action_id in statuses and statuses[action_id] not in successful_statuses
+    ]
+    if not missing and not failed:
+        return None
+    reason_bits = []
+    if missing:
+        reason_bits.append(f"missing required action evidence: {', '.join(missing)}")
+    if failed:
+        reason_bits.append(f"required action did not succeed: {', '.join(failed)}")
+    return {
+        "route": route,
+        "required_actions": required_actions,
+        "missing_actions": missing,
+        "failed_actions": failed,
+        "action_statuses": statuses,
+        "reason": "; ".join(reason_bits),
+    }
 
 
 async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, Any]) -> Any:
@@ -105,6 +167,8 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         execution.record_consumed_option("routes.skills.effort", effort, owner="AgentlySkillsExecutor")
     plan = await agent.async_resolve_skills_plan(
         task,
+        skills=route_meta.get("skills"),
+        skills_packs=route_meta.get("skills_packs"),
         mode=mode,
         output=output,
         output_format=output_format,

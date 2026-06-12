@@ -26,9 +26,10 @@ if TYPE_CHECKING:
 class HybridRoutePlanner:
     """Candidate-driven route planner for one Agent execution."""
 
-    def __init__(self, agent: "BaseAgent", *, prompt_snapshot: dict[str, Any] | None = None):
+    def __init__(self, agent: "BaseAgent", *, prompt_snapshot: dict[str, Any] | None = None, execution: Any = None):
         self.agent = agent
         self.prompt_snapshot = dict(prompt_snapshot or {})
+        self.execution = execution
 
     def task_target(self) -> str:
         value = self.prompt_snapshot.get("input")
@@ -39,16 +40,26 @@ class HybridRoutePlanner:
         return "Agent task"
 
     def dynamic_task_candidates(self) -> list[dict[str, Any]]:
-        return list(getattr(self.agent, "_dynamic_task_candidates", []) or [])
+        agent_candidates = list(getattr(self.agent, "_dynamic_task_candidates", []) or [])
+        local_candidates = list(getattr(self.execution, "local_dynamic_task_candidates", []) or [])
+        return [*agent_candidates, *local_candidates]
 
     def action_candidates(self) -> list[dict[str, Any]]:
         action = getattr(self.agent, "action", None)
         if action is None:
             return []
         try:
-            return list(action.get_action_list(tags=[f"agent-{ self.agent.name }"]))
+            candidates = list(action.get_action_list(tags=[f"agent-{ self.agent.name }"]))
         except Exception:
             return []
+        local_ids = set(getattr(self.execution, "local_action_ids", []) or [])
+        if local_ids:
+            return [
+                candidate
+                for candidate in candidates
+                if str(candidate.get("action_id") or candidate.get("name") or "") in local_ids
+            ]
+        return candidates
 
     def skill_candidate_summary(self) -> dict[str, Any]:
         summary: dict[str, Any] = {"model_decision": False, "required": False}
@@ -56,10 +67,18 @@ class HybridRoutePlanner:
             collect_skills = getattr(self.agent, "_collect_skill_selectors", None)
             collect_packs = getattr(self.agent, "_collect_skills_pack_selectors", None)
             try:
-                skills = collect_skills(skills=None, mode=mode) if callable(collect_skills) else []
-                packs = collect_packs(skills_packs=None, mode=mode) if callable(collect_packs) else []
+                raw_skills = collect_skills(skills=None, mode=mode) if callable(collect_skills) else []
+                raw_packs = collect_packs(skills_packs=None, mode=mode) if callable(collect_packs) else []
             except Exception:
-                skills, packs = [], []
+                raw_skills, raw_packs = [], []
+            skills = list(raw_skills) if isinstance(raw_skills, (list, tuple, set)) else []
+            packs = list(raw_packs) if isinstance(raw_packs, (list, tuple, set)) else []
+            for item in getattr(self.execution, "local_skill_selectors", []) or []:
+                if item.get("mode") == mode:
+                    skills.append(item.get("selector"))
+            for item in getattr(self.execution, "local_skills_pack_selectors", []) or []:
+                if item.get("mode") == mode:
+                    packs.append(item.get("selector"))
             summary[mode] = bool(skills or packs)
             summary[f"{ mode }_skills"] = skills
             summary[f"{ mode }_skills_packs"] = packs
@@ -75,13 +94,23 @@ class HybridRoutePlanner:
 
         skills = self.skill_candidate_summary()
         if skills["required"]:
-            return "skills", {"mode": "required", "selected_by": "deterministic"}
+            return "skills", {
+                "mode": "required",
+                "selected_by": "deterministic",
+                "skills": skills.get("required_skills", []),
+                "skills_packs": skills.get("required_skills_packs", []),
+            }
 
         optional_candidates = []
         if dynamic_candidates:
             optional_candidates.append({"route": "dynamic_task", "candidate": dynamic_candidates[-1]})
         if skills["model_decision"]:
-            optional_candidates.append({"route": "skills", "mode": "model_decision"})
+            optional_candidates.append({
+                "route": "skills",
+                "mode": "model_decision",
+                "skills": skills.get("model_decision_skills", []),
+                "skills_packs": skills.get("model_decision_skills_packs", []),
+            })
         action_candidates = self.action_candidates()
         if action_candidates:
             optional_candidates.append({"route": "model_request", "with_actions": True})

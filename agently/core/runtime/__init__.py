@@ -17,7 +17,7 @@ from agently.types.data import RuntimeEvent
 from .RuntimeContext import (
     bind_runtime_context,
     get_current_agent_execution_context,
-    get_current_agent_turn_run_context,
+    get_current_agent_execution_run_context,
     get_current_chunk_run_context,
     get_current_model_run_context,
     get_current_parent_run_context,
@@ -38,7 +38,7 @@ from .RuntimeEvents import (
 __all__ = [
     "bind_runtime_context",
     "get_current_agent_execution_context",
-    "get_current_agent_turn_run_context",
+    "get_current_agent_execution_run_context",
     "get_current_chunk_run_context",
     "get_current_model_run_context",
     "get_current_parent_run_context",

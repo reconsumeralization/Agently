@@ -210,10 +210,40 @@ class TriggerFlowActionFlow:
                     "decision": decision,
                 },
             )
+            planning_diagnostics = decision.get("diagnostics", [])
+            diagnostic_records = []
+            if isinstance(planning_diagnostics, list) and planning_diagnostics:
+                for diagnostic_index, diagnostic in enumerate(planning_diagnostics):
+                    if not isinstance(diagnostic, dict):
+                        continue
+                    diagnostic_records.append(
+                        action._normalize_execution_record(
+                            {
+                                "ok": False,
+                                "status": "skipped",
+                                "success": False,
+                                "purpose": str(diagnostic.get("message", "Action planning diagnostic.")),
+                                "action_id": "action_planning",
+                                "tool_name": "action_planning",
+                                "kwargs": {},
+                                "result": diagnostic,
+                                "data": diagnostic,
+                                "error": str(diagnostic.get("message", "Action planning diagnostic.")),
+                                "diagnostics": [diagnostic],
+                                "expose_to_model": False,
+                                "meta": {
+                                    "planning_protocol": planning_protocol,
+                                    "round_index": round_index,
+                                },
+                            },
+                            None,
+                            diagnostic_index,
+                        )
+                    )
             if action._should_continue(decision, round_index=round_index, max_rounds=max_rounds):
                 await data.async_emit("EXECUTE", decision.get("action_calls", []))
             else:
-                await data.async_emit("DONE", done_plans)
+                await data.async_emit("DONE", [*done_plans, *diagnostic_records])
             return decision
 
         async def execute_step(data):
@@ -469,20 +499,35 @@ class TriggerFlowActionFlow:
         flow.when("EXECUTE").to(execute_step)
         flow.when("DONE").to(lambda data: data.value).end()
 
-        execution = flow.create_execution(parent_run_context=action_loop_run)
+        execution = flow.create_execution(parent_run_context=action_loop_run, auto_close=False)
         try:
             with bind_runtime_context(
                 parent_run_context=action_loop_run,
                 tool_phase_run_context=action_loop_run,
                 settings=settings,
             ):
-                await execution.async_start(wait_for_result=False)
-                self._record_agent_execution_progress("action_loop_close", "started", planning_protocol)
+                async def run_action_loop():
+                    await execution.async_start()
+                    self._record_agent_execution_progress("action_loop_close", "started", planning_protocol)
+                    close_result = await execution.async_close(timeout=timeout)
+                    self._record_agent_execution_progress("action_loop_close", "completed", planning_protocol)
+                    return close_result
+
                 try:
-                    result = await execution.async_close(timeout=timeout)
+                    if timeout is None:
+                        result = await run_action_loop()
+                    else:
+                        result = await asyncio.wait_for(run_action_loop(), timeout=float(timeout))
                 except asyncio.TimeoutError as error:
+                    try:
+                        await execution.async_close(
+                            reason="action_loop_timeout",
+                            timeout=0,
+                            pending_interrupts="cancel",
+                        )
+                    except BaseException:
+                        pass
                     raise self._build_action_loop_close_stall(timeout, planning_protocol) from error
-                self._record_agent_execution_progress("action_loop_close", "completed", planning_protocol)
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise

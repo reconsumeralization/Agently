@@ -49,6 +49,7 @@ This handbook is organized as a learning path. If you have not run a single requ
    - [Event Center](observability/event-center.md)
    - [DevTools](observability/devtools.md)
    - [Coding Agents](development/coding-agents.md)
+   - [Agently 4.1.3.7 Release Notes](development/release-notes-4.1.3.7.md)
    - [Agently 4.1.3.6 Release Notes](development/release-notes-4.1.3.6.md)
    - [Agently 4.1.3.5 Release Notes](development/release-notes-4.1.3.5.md)
    - [Agently 4.1.3.4 Release Notes](development/release-notes-4.1.3.4.md)
@@ -81,6 +82,7 @@ This handbook is organized as a learning path. If you have not run a single requ
 9. **Architecture and reference**
    - [Extension Boundaries](architecture/extension-boundaries.md)
    - [Capability Map](reference/capability-map.md)
+   - [Execution Layer Selection](reference/execution-layer-selection.md)
    - [Glossary](reference/glossary.md)
 
 ## Community

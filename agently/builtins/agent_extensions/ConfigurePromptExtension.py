@@ -82,7 +82,7 @@ class ConfigurePromptExtension(BaseAgent):
         if isinstance(output_prompt_value, dict):
             output_type = None
             output_desc = None
-            output_ensure = False
+            output_ensure_marker = None
             if "$type" in output_prompt_value:
                 output_type = output_prompt_value["$type"]
             if ".type" in output_prompt_value:
@@ -92,21 +92,21 @@ class ConfigurePromptExtension(BaseAgent):
             if ".desc" in output_prompt_value:
                 output_desc = output_prompt_value[".desc"]
             if "$ensure" in output_prompt_value:
-                output_ensure = DataPathBuilder.is_ensure_marker(output_prompt_value["$ensure"])
+                output_ensure_marker = DataPathBuilder.normalize_ensure_marker(output_prompt_value["$ensure"])
             if ".ensure" in output_prompt_value:
-                output_ensure = DataPathBuilder.is_ensure_marker(output_prompt_value[".ensure"])
+                output_ensure_marker = DataPathBuilder.normalize_ensure_marker(output_prompt_value[".ensure"])
             if "$default" in output_prompt_value or ".default" in output_prompt_value:
                 raise ValueError(
                     "Agently output prompt config no longer supports $default/.default. "
                     "Use $ensure for required fields."
                 )
-            if output_type is not None or output_desc is not None or output_ensure:
+            if output_type is not None or output_desc is not None or output_ensure_marker is not None:
                 resolved_type = self._generate_output_value(output_type) if output_type is not None else Any
-                if output_ensure:
+                if output_ensure_marker is not None:
                     return (
                         resolved_type,
                         output_desc,
-                        True,
+                        output_ensure_marker,
                     )
                 return (
                     resolved_type,
@@ -158,6 +158,15 @@ class ConfigurePromptExtension(BaseAgent):
         self.request_prompt.set(key, value, mappings=mappings)
         return self
 
+    def set_execution_prompt(
+        self,
+        key: str,
+        value: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+    ):
+        return self._set_pending_execution_prompt(key, value, mappings=mappings)
+
     def _apply_execution_prompt_config(self, prompt_value: Any, variable_mappings: dict[str, Any] | None):
         if isinstance(prompt_value, dict):
             for request_prompt_key, request_prompt_value in prompt_value.items():
@@ -192,8 +201,10 @@ class ConfigurePromptExtension(BaseAgent):
                             prompt_value,
                             mappings=variable_mappings,
                         )
-                case ".execution" | ".request" | ".turn":
+                case ".execution":
                     self._apply_execution_prompt_config(prompt_value, variable_mappings)
+                case ".request" | ".turn":
+                    raise ValueError("Prompt config .request and .turn are removed; use .execution instead.")
                 case ".alias":
                     if isinstance(prompt_value, dict):
                         for alias_name, alias_parameters in prompt_value.items():

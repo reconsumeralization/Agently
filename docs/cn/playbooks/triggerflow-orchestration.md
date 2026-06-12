@@ -129,7 +129,8 @@ async def handle_one(data):
 ```python
 async def ask(data):
     return await data.async_pause_for(
-        type="approval",
+        type="exchange",
+        exchange_kind="approval",
         payload={"summary": data.input["summary"]},
         resume_to="next",
     )

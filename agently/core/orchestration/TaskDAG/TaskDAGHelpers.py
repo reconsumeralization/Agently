@@ -25,6 +25,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -177,6 +179,12 @@ def _graph_signature(graph: TaskDAG) -> tuple[Any, ...]:
         )
         for task in graph.tasks
     )
+
+
+def _graph_fingerprint(graph: TaskDAG) -> str:
+    return hashlib.sha256(
+        json.dumps(graph.to_dict(), ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def _chunk_name(graph_id: str, phase: str, task_id: str):

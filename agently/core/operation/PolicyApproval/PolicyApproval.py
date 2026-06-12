@@ -200,6 +200,7 @@ class PolicyApprovalManager:
             return decision
         return await runtime_data.async_pause_for(
             type="policy_approval",
+            exchange_kind="approval",
             payload={"request": _copy_public(normalized_request), "decision": _copy_public(decision)},
             interrupt_id=interrupt_id or f"policy:{ normalized_request.get('request_id', '') }",
             resume_to=resume_to,

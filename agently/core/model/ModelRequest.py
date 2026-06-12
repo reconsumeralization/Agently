@@ -318,9 +318,9 @@ class ModelRequest:
             from agently.utils.ModelPool import resolve_model_pool_settings
             resolve_model_pool_settings(self._model_key, self.settings)
         parent_run_context = resolve_parent_run_context(parent_run_context)
-        agent_turn_run_context = (
+        agent_execution_run_context = (
             parent_run_context
-            if parent_run_context is not None and parent_run_context.run_kind == "agent_turn"
+            if parent_run_context is not None and parent_run_context.run_kind == "agent_execution"
             else None
         )
         response = ModelResponse(
@@ -330,7 +330,7 @@ class ModelRequest:
             self.prompt,
             self.extension_handlers,
             run_context=self._create_request_run_context(parent_run_context=parent_run_context),
-            agent_turn_run_context=agent_turn_run_context,
+            agent_execution_run_context=agent_execution_run_context,
             warn_deprecated=False,
         )
         response.run_context.response_id = response.id

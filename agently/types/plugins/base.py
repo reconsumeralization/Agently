@@ -31,6 +31,7 @@ AgentlyPluginType = Literal[
     "ContentStore",
     "MetadataStore",
     "CheckpointStore",
+    "ExecutionSnapshotStore",
     "TextIndex",
     "PolicyEngine",
     "VectorIndex",

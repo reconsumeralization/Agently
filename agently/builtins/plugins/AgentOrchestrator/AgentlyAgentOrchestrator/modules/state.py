@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, TYPE_CHECKING
 
 from agently.types.options import normalize_execution_options
@@ -47,6 +48,8 @@ def configure_execution_options(owner: "AgentExecution", options: Any):
     deep_merge(owner.options, normalized)
     load_strategy_state_from_options(owner)
     owner.effective_options = build_effective_options(owner)
+    apply_effort_strategy_limits(owner)
+    owner.effective_options = build_effective_options(owner)
     return owner
 
 
@@ -67,7 +70,7 @@ def load_strategy_state_from_options(owner: "AgentExecution"):
             owner.goal(goal)
         criteria = task_options.get("success_criteria")
         if criteria is not None:
-            owner.success_criteria(criteria)
+            set_success_criteria(owner, criteria)
 
 
 def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
@@ -76,7 +79,6 @@ def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
     execution_options = dict(execution_options) if isinstance(execution_options, dict) else {}
     execution_options.update(
         {
-            "mode": owner.mode,
             "lineage": owner.lineage,
             "limits": owner.limits,
         }
@@ -86,6 +88,27 @@ def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
     effective["execution"] = execution_options
     if owner.strategy_name is not None:
         effective.setdefault("strategy", owner.strategy_name)
+    effort = effective.get("effort")
+    if effort is not None:
+        effort_name, effort_detail = normalize_effort_configuration(
+            effort,
+            effective.get("effort_strategy"),
+        )
+        effective["effort"] = effort_name
+        effective["effort_strategy"] = resolve_effort_strategy(effort_name, effort_detail)
+    required_actions = owner.required_action_ids()
+    required_skills = owner.required_skill_ids()
+    if required_actions or required_skills:
+        constraints = dict(effective.get("capability_constraints") or {})
+        if required_actions:
+            actions = dict(constraints.get("actions") or {})
+            actions["required"] = required_actions
+            constraints["actions"] = actions
+        if required_skills:
+            skills = dict(constraints.get("skills") or {})
+            skills["required"] = required_skills
+            constraints["skills"] = skills
+        effective["capability_constraints"] = constraints
     if owner.goal_items or owner.success_criteria_items or owner.task_options:
         effective["task"] = {
             **dict(owner.task_options),
@@ -94,6 +117,205 @@ def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
             "generated_success_criteria": list(owner.generated_success_criteria),
         }
     return effective
+
+
+def configure_effort(
+    owner: "AgentExecution",
+    value: Any = "medium",
+    **strategy: Any,
+):
+    name, detail = normalize_effort_configuration(value, strategy)
+    owner.options["effort"] = name
+    if detail:
+        owner.options["effort_strategy"] = detail
+    else:
+        owner.options.pop("effort_strategy", None)
+    owner.effective_options = build_effective_options(owner)
+    apply_effort_strategy_limits(owner)
+    owner.effective_options = build_effective_options(owner)
+    owner._selected_route = None
+    return owner
+
+
+def normalize_effort_configuration(
+    effort: Any = "medium",
+    detail: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    details: dict[str, Any] = {}
+    if isinstance(effort, Mapping):
+        source = dict(effort)
+        name = source.pop("name", None)
+        if name is None:
+            name = source.pop("preset", None)
+        if name is None:
+            name = source.pop("level", None)
+        if name is None:
+            name = "medium"
+        details = _copy_effort_mapping(source)
+    else:
+        name = effort if effort is not None else "medium"
+
+    if isinstance(detail, Mapping):
+        deep_merge(details, _copy_effort_mapping(detail))
+    elif detail is not None:
+        details["detail"] = detail
+
+    effort_name = str(name or "medium").strip().lower() or "medium"
+    return effort_name, details
+
+
+def resolve_effort_strategy(effort: Any, detail: Any = None) -> dict[str, Any]:
+    name, detail_map = normalize_effort_configuration(effort, detail)
+    presets: dict[str, dict[str, Any]] = {
+        "minimal": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
+        "low": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
+        "fast": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
+        "medium": {"planning_depth": "standard", "max_iterations": 3, "verifier_strength": "strong"},
+        "normal": {"planning_depth": "standard", "max_iterations": 3, "verifier_strength": "strong"},
+        "high": {"planning_depth": "deep", "max_iterations": 5, "verifier_strength": "strong"},
+        "max": {"planning_depth": "deep", "max_iterations": 5, "verifier_strength": "strong"},
+    }
+    resolved = dict(presets.get(name) or presets["medium"])
+    resolved["name"] = name
+    if detail_map:
+        deep_merge(resolved, detail_map)
+    _apply_effort_aliases(resolved)
+    return resolved
+
+
+def apply_effort_strategy_limits(owner: "AgentExecution"):
+    strategy = owner.effective_options.get("effort_strategy")
+    if not isinstance(strategy, dict):
+        return owner
+    effort_applied_limits = getattr(owner, "_effort_applied_limits", set())
+    applied: dict[str, tuple[str, Any]] = {
+        "max_model_requests": ("effort.budget.model_call_limit", strategy.get("max_model_requests")),
+        "max_seconds": ("effort.budget.wall_time_seconds", strategy.get("max_seconds")),
+        "max_no_progress_seconds": (
+            "effort.budget.no_progress_seconds",
+            strategy.get("max_no_progress_seconds"),
+        ),
+    }
+    for limit_name, (option_path, value) in applied.items():
+        if value is None:
+            if limit_name in effort_applied_limits:
+                owner.limits[limit_name] = None
+                effort_applied_limits.discard(limit_name)
+            continue
+        if owner.limits.get(limit_name) is not None and limit_name not in effort_applied_limits:
+            continue
+        owner.limits[limit_name] = value
+        effort_applied_limits.add(limit_name)
+        record_consumed_option(owner, option_path, value, owner_name="AgentExecution")
+    owner._effort_applied_limits = effort_applied_limits
+    execution_context = getattr(owner, "execution_context", None)
+    if execution_context is not None:
+        execution_context.limits = owner.limits
+    return owner
+
+
+def _copy_effort_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(item, Mapping):
+            copied[str(key)] = _copy_effort_mapping(item)
+        elif isinstance(item, (list, tuple)):
+            copied[str(key)] = list(item)
+        else:
+            copied[str(key)] = item
+    return copied
+
+
+def _apply_effort_aliases(strategy: dict[str, Any]):
+    budget = strategy.get("budget")
+    budget = budget if isinstance(budget, dict) else {}
+    planning = strategy.get("planning")
+    planning = planning if isinstance(planning, dict) else {}
+    verification = strategy.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+
+    iteration_limit = _first_present(
+        budget,
+        "iteration_limit",
+        "max_iterations",
+        fallback=strategy.get("iteration_limit", strategy.get("max_iterations")),
+    )
+    if iteration_limit is not None:
+        value = _positive_int(iteration_limit, "effort budget iteration_limit")
+        strategy["max_iterations"] = value
+        if isinstance(budget, dict):
+            budget["iteration_limit"] = value
+
+    model_call_limit = _first_present(
+        budget,
+        "model_call_limit",
+        "max_model_requests",
+        fallback=strategy.get("model_call_limit", strategy.get("max_model_requests")),
+    )
+    if model_call_limit is not None:
+        value = _positive_int(model_call_limit, "effort budget model_call_limit")
+        strategy["max_model_requests"] = value
+        if isinstance(budget, dict):
+            budget["model_call_limit"] = value
+
+    wall_time_seconds = _first_present(
+        budget,
+        "wall_time_seconds",
+        "max_seconds",
+        fallback=strategy.get("wall_time_seconds", strategy.get("max_seconds")),
+    )
+    if wall_time_seconds is not None:
+        value = _positive_float(wall_time_seconds, "effort budget wall_time_seconds")
+        strategy["max_seconds"] = value
+        if isinstance(budget, dict):
+            budget["wall_time_seconds"] = value
+
+    no_progress_seconds = _first_present(
+        budget,
+        "no_progress_seconds",
+        "max_no_progress_seconds",
+        fallback=strategy.get("no_progress_seconds", strategy.get("max_no_progress_seconds")),
+    )
+    if no_progress_seconds is not None:
+        value = _positive_float(no_progress_seconds, "effort budget no_progress_seconds")
+        strategy["max_no_progress_seconds"] = value
+        if isinstance(budget, dict):
+            budget["no_progress_seconds"] = value
+
+    planning_depth = planning.get("depth") if isinstance(planning, dict) else None
+    if planning_depth is not None:
+        strategy["planning_depth"] = str(planning_depth).strip() or strategy.get("planning_depth")
+
+    verification_strictness = verification.get("strictness") if isinstance(verification, dict) else None
+    if verification_strictness is not None:
+        strategy["verifier_strength"] = str(verification_strictness).strip() or strategy.get("verifier_strength")
+
+
+def _first_present(source: dict[str, Any], *keys: str, fallback: Any = None) -> Any:
+    for key in keys:
+        if key in source:
+            return source[key]
+    return fallback
+
+
+def _positive_int(value: Any, label: str) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{ label } must be a positive integer.") from error
+    if normalized < 1:
+        raise ValueError(f"{ label } must be a positive integer.")
+    return normalized
+
+
+def _positive_float(value: Any, label: str) -> float:
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{ label } must be a positive number.") from error
+    if normalized <= 0:
+        raise ValueError(f"{ label } must be a positive number.")
+    return normalized
 
 
 def set_execution_goals(owner: "AgentExecution", goals: tuple[Any, ...]):

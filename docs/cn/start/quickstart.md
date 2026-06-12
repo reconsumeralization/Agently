@@ -80,6 +80,22 @@ print(result)
 
 每个叶子写作 `(type, description, ensure)`。第三槽是 **`ensure` 标记**——置为 `True` 时该字段会被强制要求出现，必要时框架会自动重试。详见 [Schema as Prompt](../requests/schema-as-prompt.md)。
 
+## 核心实例创建风格
+
+Agently 对一等核心实例同时支持直接构造和工厂 helper：
+
+```python
+from agently import Agent, Agently, TriggerFlow
+
+agent = Agent("repo-worker")
+factory_agent = Agently.create_agent("repo-worker")
+
+flow = TriggerFlow(name="review-flow")
+factory_flow = Agently.create_trigger_flow("review-flow")
+
+workspace = Agently.create_workspace("./.agently/runs/review-flow")
+```
+
 ## 接下来读什么
 
 - 写服务、流式 UI 或工作流 → [Async First](async-first.md)

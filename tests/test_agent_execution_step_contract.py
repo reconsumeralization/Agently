@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
-import warnings
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -16,7 +14,6 @@ from agently.core.application.AgentExecution import AgentExecutionLimitExceeded,
 from agently.types.data import AgentlyRequestData
 from agently.types.options import ExecutionOptions, SkillsRouteOptions
 from agently.utils import DataFormatter
-from agently.utils import DeprecationWarnings
 from agently.utils import Settings
 
 
@@ -96,8 +93,16 @@ class MockAgentExecutionActionRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
-class MockAgentTurnIsolationRequester(MockAgentExecutionRequester):
-    name = "MockAgentTurnIsolationRequester"
+class MockAgentExecutionIsolationRequester(MockAgentExecutionRequester):
+    name = "MockAgentExecutionIsolationRequester"
+    active_requests = 0
+    max_active_requests = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockAgentExecutionIsolationRequester.active_requests = 0
+        MockAgentExecutionIsolationRequester.max_active_requests = 0
 
     def generate_request_data(self):
         return AgentlyRequestData(
@@ -109,22 +114,30 @@ class MockAgentTurnIsolationRequester(MockAgentExecutionRequester):
                 "output": self.prompt.get("output"),
             },
             request_options={"stream": True},
-            request_url="mock://agent-turn-isolation",
+            request_url="mock://agent-execution-isolation",
         )
 
     async def request_model(self, request_data: AgentlyRequestData):
-        await asyncio.sleep(0.1)
-        payload = DataFormatter.sanitize(request_data.data)
-        prompt_input = payload.get("input")
-        persistent_system = payload.get("system")
-        MockAgentExecutionRequester.requests.append(json.dumps(payload, ensure_ascii=False))
-        yield "message", json.dumps(
-            {
-                "answer": prompt_input,
-                "system": persistent_system,
-            },
-            ensure_ascii=False,
+        MockAgentExecutionIsolationRequester.active_requests += 1
+        MockAgentExecutionIsolationRequester.max_active_requests = max(
+            MockAgentExecutionIsolationRequester.max_active_requests,
+            MockAgentExecutionIsolationRequester.active_requests,
         )
+        try:
+            await asyncio.sleep(0.1)
+            payload = DataFormatter.sanitize(request_data.data)
+            prompt_input = payload.get("input")
+            persistent_system = payload.get("system")
+            MockAgentExecutionRequester.requests.append(json.dumps(payload, ensure_ascii=False))
+            yield "message", json.dumps(
+                {
+                    "answer": prompt_input,
+                    "system": persistent_system,
+                },
+                ensure_ascii=False,
+            )
+        finally:
+            MockAgentExecutionIsolationRequester.active_requests -= 1
 
 
 def _create_agent(name: str = "agent-execution-step-test"):
@@ -134,10 +147,10 @@ def _create_agent(name: str = "agent-execution-step-test"):
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
-def _create_turn_isolation_agent(name: str = "agent-turn-isolation-test"):
+def _create_execution_isolation_agent(name: str = "agent-execution-isolation-test"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
-    plugin_manager.register("ModelRequester", MockAgentTurnIsolationRequester, activate=True)
+    plugin_manager.register("ModelRequester", MockAgentExecutionIsolationRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -164,9 +177,222 @@ Return a short structured answer for the task step contract.
     )
 
 
+def _install_site_skill(tmp_path: Path) -> Path:
+    skill_root = tmp_path / "skill-pack" / "skills" / "website-builder"
+    skill_root.mkdir(parents=True, exist_ok=True)
+    (skill_root / "SKILL.md").write_text(
+        """---
+name: Website Builder
+description: Use to plan and verify small website deliverables.
+---
+
+# Website Builder
+
+Help build a small product website from supplied facts.
+""",
+        encoding="utf-8",
+    )
+    return tmp_path / "skill-pack"
+
+
+def _stub_goal_pursuit(execution: Any, *, final_result: str = "accepted result"):
+    async def request_plan(iteration_index: int, context_pack: dict[str, Any]):
+        return {
+            "step_instruction": f"run bounded step { iteration_index }",
+            "expected_evidence": "final output evidence",
+            "rationale": "one bounded step is enough",
+        }
+
+    async def execute_step(iteration_index: int, plan: dict[str, Any], context_pack: dict[str, Any]):
+        return (
+            {"step_result": final_result, "evidence": ["evidence recorded"], "remaining_work": []},
+            {
+                "execution_id": f"stub-step-{ iteration_index }",
+                "status": "success",
+                "route": {"selected_route": "model_request"},
+                "logs": {"action_logs": [], "route_logs": {}, "artifact_refs": []},
+                "workspace_refs": {},
+                "effective_options": execution.effective_options,
+            },
+        )
+
+    async def request_verification(
+        iteration_index: int,
+        *,
+        plan: dict[str, Any],
+        execution_result: Any,
+        execution_meta: dict[str, Any],
+        context_pack: dict[str, Any],
+    ):
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "model verifier accepted the evidence",
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result": final_result,
+        }
+
+    execution._request_plan = request_plan
+    execution._execute_step = execute_step
+    execution._request_verification = request_verification
+    return execution
+
+
 def test_execution_options_validate_known_route_schema():
     with pytest.raises(ValueError):
         ExecutionOptions.model_validate({"routes": {"skills": {"unknown": True}}})
+
+
+@pytest.mark.asyncio
+async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(tmp_path):
+    skill_pack = _install_site_skill(tmp_path)
+    agent = _create_agent("execution-first-goal-chain").use_workspace(tmp_path / "workspace")
+
+    execution = _stub_goal_pursuit(
+        agent
+        .goal("Build the site.", success_criteria=["The runnable page exists."])
+        .use_skills(str(skill_pack), auto_allow=True)
+        .input("Use the supplied product facts.")
+        .effort("low")
+    )
+
+    stream_items = [item async for item in execution.get_async_generator()]
+    meta = await execution.async_get_meta()
+
+    assert type(execution).__name__ == "AgentExecution"
+    assert execution.goal_items == ["Build the site."]
+    assert execution.success_criteria_items == ["The runnable page exists."]
+    assert execution.prompt_snapshot["input"] == "Use the supplied product facts."
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert meta["effective_options"]["effort_strategy"]["max_iterations"] == 1
+    assert any(item.path == "agent_task.phase.configured" for item in stream_items)
+    assert any(item.path == "agent_task.phase.terminal" for item in stream_items)
+
+
+def test_goal_alias_and_detailed_effort_strategy_are_normalized(tmp_path):
+    agent = _create_agent("execution-goals-effort-alias").use_workspace(tmp_path / "workspace")
+
+    execution = (
+        agent
+        .goals(
+            ["Build the site.", "Publish a launch checklist."],
+            success_criteria=["The runnable page exists."],
+        )
+        .effort(
+            "high",
+            budget={
+                "iteration_limit": 4,
+                "model_call_limit": 8,
+                "wall_time_seconds": 90,
+                "no_progress_seconds": 30,
+            },
+            planning={"depth": "expanded", "max_plan_items": 8},
+            verification={"strictness": "strict"},
+            replan={"policy": "on_verification_failure", "limit": 2},
+            progress={"detail": "phase"},
+        )
+    )
+
+    effort_strategy = execution.effective_options["effort_strategy"]
+    assert execution.goal_items == ["Build the site.", "Publish a launch checklist."]
+    assert execution.success_criteria_items == ["The runnable page exists."]
+    assert effort_strategy["name"] == "high"
+    assert effort_strategy["max_iterations"] == 4
+    assert effort_strategy["planning_depth"] == "expanded"
+    assert effort_strategy["verifier_strength"] == "strict"
+    assert effort_strategy["planning"]["max_plan_items"] == 8
+    assert effort_strategy["replan"]["limit"] == 2
+    assert effort_strategy["progress"]["detail"] == "phase"
+    assert execution.limits["max_model_requests"] == 8
+    assert execution.limits["max_seconds"] == 90.0
+    assert execution.limits["max_no_progress_seconds"] == 30.0
+    assert execution.effective_options["execution"]["limits"]["max_model_requests"] == 8
+
+    explicit_limits = (
+        agent
+        .create_execution(limits={"max_model_requests": 2})
+        .effort("high", budget={"model_call_limit": 8})
+    )
+    assert explicit_limits.limits["max_model_requests"] == 2
+
+    mutable_effort_limits = agent.create_execution().effort("medium", budget={"model_call_limit": 4})
+    mutable_effort_limits.effort("high", budget={"model_call_limit": 6})
+    assert mutable_effort_limits.limits["max_model_requests"] == 6
+    mutable_effort_limits.effort("low")
+    assert mutable_effort_limits.limits["max_model_requests"] is None
+
+
+@pytest.mark.asyncio
+async def test_goal_pursuit_uses_detailed_effort_iteration_limit(tmp_path):
+    agent = _create_agent("execution-detailed-effort-task").use_workspace(tmp_path / "workspace")
+    execution = _stub_goal_pursuit(
+        agent
+        .goal("Build the site.", success_criteria=["The runnable page exists."])
+        .effort("low", budget={"iteration_limit": 2})
+    )
+
+    await execution.async_start()
+    meta = await execution.async_get_meta()
+
+    assert meta["logs"]["route_logs"]["agent_task"]["max_iterations"] == 2
+    assert meta["consumed_options"]["effort.max_iterations"] == {
+        "value": 2,
+        "owner": "AgentTaskLoop",
+    }
+
+
+def test_execution_first_chain_allows_capabilities_before_goal(tmp_path):
+    skill_pack = _install_site_skill(tmp_path)
+    agent = _create_agent("execution-first-skill-first").use_workspace(tmp_path / "workspace")
+
+    execution = (
+        agent
+        .use_skills(str(skill_pack), auto_allow=True)
+        .goal("Build the site.", success_criteria=["The runnable page exists."])
+        .input("Use the supplied product facts.")
+    )
+
+    assert type(execution).__name__ == "AgentExecution"
+    assert execution.goal_items == ["Build the site."]
+    assert execution.success_criteria_items == ["The runnable page exists."]
+    assert execution.prompt_snapshot["input"] == "Use the supplied product facts."
+    assert agent.request.prompt.get(inherit=False) == {}
+    assert agent._collect_skill_selectors(skills=None, mode="model_decision") == []
+    assert execution.local_skill_selectors
+
+
+def test_goal_accepts_multiple_goals_and_optional_success_criteria():
+    agent = _create_agent("execution-first-multiple-goals")
+
+    execution = agent.goal(
+        ["Build the site.", "Include pricing and contact sections."],
+        ["The final site includes both sections."],
+    )
+
+    assert type(execution).__name__ == "AgentExecution"
+    assert execution.goal_items == ["Build the site.", "Include pricing and contact sections."]
+    assert execution.success_criteria_items == ["The final site includes both sections."]
+
+
+@pytest.mark.asyncio
+async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
+    agent = _create_agent("execution-first-goal-after-prompt").use_workspace(tmp_path / "workspace")
+    execution = _stub_goal_pursuit(
+        agent
+        .input("Use these facts.")
+        .output({"summary": (str, "summary", True)}, format="json")
+        .goal("Write the final summary.", success_criteria=["The final summary is returned."])
+    )
+
+    data = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+
+    assert data["accepted"] is True
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert execution.prompt_snapshot["input"] == "Use these facts."
+    assert execution.prompt_snapshot["output"]["summary"][0] is str
+    assert execution.goal_items == ["Write the final summary."]
 
 
 @pytest.mark.asyncio
@@ -235,50 +461,49 @@ def test_create_task_and_task_loop_return_strategy_execution_drafts(tmp_path):
     assert loop_execution.strategy_name == "task_loop"
 
 
-def test_agent_turn_compatibility_surfaces_warn_and_remain_callable():
-    agent = _create_agent("agent-turn-warning-compat")
-    DeprecationWarnings.reset_registry()
+def test_removed_transitional_surfaces_are_not_available():
+    agent = _create_agent("removed-transitional-surfaces")
+    execution = agent.create_execution()
 
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always", DeprecationWarning)
-        agent.set_turn_prompt("input", "pending")
-        turn = agent.create_turn()
-        turn.set_turn_prompt("instruct", "reply")
-
-    messages = [str(item.message) for item in captured]
-    assert turn.request_prompt.get("input", inherit=False) == "pending"
-    assert turn.request_prompt.get("instruct", inherit=False) == "reply"
-    assert agent.request.prompt.get(inherit=False) == {}
-    assert any("set_turn_prompt" in message for message in messages)
-    assert any("create_turn" in message for message in messages)
+    assert not hasattr(agent, "create_turn")
+    assert not hasattr(agent, "set_turn_prompt")
+    assert not hasattr(agent, "set_request_prompt")
+    assert not hasattr(agent, "remove_request_prompt")
+    assert not hasattr(agent, "success_criteria")
+    assert not hasattr(agent, "success_standards")
+    assert hasattr(agent, "goals")
+    assert hasattr(agent, "remove_execution_prompt")
+    assert not hasattr(execution, "success_criteria")
+    assert not hasattr(execution, "success_standards")
+    assert hasattr(execution, "goals")
+    assert not hasattr(execution, "remove_request_prompt")
+    assert hasattr(execution, "remove_execution_prompt")
 
 
 @pytest.mark.asyncio
-async def test_same_agent_quick_prompt_turns_are_request_scoped():
+async def test_same_agent_quick_prompt_executions_are_request_scoped():
     MockAgentExecutionRequester.requests = []
-    agent = _create_turn_isolation_agent("same-agent-turn-isolation")
+    agent = _create_execution_isolation_agent("same-agent-execution-isolation")
     agent.system("shared policy", always=True)
 
-    start = time.monotonic()
     results = await asyncio.gather(
         agent.input("request-A").output({"answer": (str, "answer", True)}, format="json").async_start(),
         agent.input("request-B").output({"answer": (str, "answer", True)}, format="json").async_start(),
         agent.input("request-C").output({"answer": (str, "answer", True)}, format="json").async_start(),
     )
-    elapsed = time.monotonic() - start
 
     assert [result["answer"] for result in results] == ["request-A", "request-B", "request-C"]
     assert [result["system"] for result in results] == ["shared policy", "shared policy", "shared policy"]
-    assert elapsed < 0.25
+    assert MockAgentExecutionIsolationRequester.max_active_requests == 3
     assert agent.request.prompt.get(inherit=False) == {}
     request_payloads = [json.loads(item) for item in MockAgentExecutionRequester.requests]
     assert [payload["input"] for payload in request_payloads] == ["request-A", "request-B", "request-C"]
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_one_turn_keeps_compatibility_mode_and_stream_meta():
+async def test_agent_execution_default_stream_meta_uses_execution_id_and_lineage():
     MockAgentExecutionRequester.requests = []
-    agent = _create_agent("one-turn-compat")
+    agent = _create_agent("default-execution-stream")
     execution = (
         agent
         .input("classify this ticket")
@@ -291,30 +516,25 @@ async def test_agent_execution_one_turn_keeps_compatibility_mode_and_stream_meta
     meta = await execution.async_get_meta()
 
     assert data["answer"] == "ok-1"
-    assert meta["execution_mode"] == "one_turn"
     assert meta["limits"]["max_model_requests"] is None
     assert meta["diagnostics"]["budget"]["model_requests_used"] == 1
     assert any(item.path == "route.selected" for item in stream_items)
     assert all(item.meta["execution_id"] == meta["execution_id"] for item in stream_items if item.meta)
-    assert all(item.meta["execution_mode"] == "one_turn" for item in stream_items if item.meta)
+    assert all("execution_mode" not in item.meta for item in stream_items if item.meta)
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_turn_alias_normalizes_to_one_turn():
-    agent = _create_agent("turn-alias")
-    execution = (
-        agent
-        .input("legacy turn alias")
-        .output({"answer": (str, "answer", True)}, format="json")
-        .create_execution(mode="turn")
-    )
+async def test_agent_execution_rejects_removed_mode_argument():
+    agent = _create_agent("removed-mode-argument")
+    removed_mode_kwargs = {"mode": "removed"}
 
-    data = await execution.async_get_data()
-    meta = await execution.async_get_meta()
-
-    assert data["answer"] == "ok-1"
-    assert execution.mode == "one_turn"
-    assert meta["execution_mode"] == "one_turn"
+    with pytest.raises(TypeError):
+        (
+            agent
+            .input("legacy mode argument")
+            .output({"answer": (str, "answer", True)}, format="json")
+            .create_execution(**removed_mode_kwargs)
+        )
 
 
 @pytest.mark.asyncio
@@ -348,7 +568,6 @@ async def test_agent_execution_model_request_exposes_action_logs_and_artifacts()
         .input("use echo action")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
-            mode="task_step",
             lineage={"task_id": "action-task", "iteration_id": "iter-1", "step_id": "echo"},
             limits={"max_model_requests": None},
         )
@@ -370,6 +589,33 @@ async def test_agent_execution_model_request_exposes_action_logs_and_artifacts()
 
 
 @pytest.mark.asyncio
+async def test_required_action_blocks_when_model_skips_required_evidence():
+    agent = _create_action_agent("required-action-missing")
+
+    @agent.action_func
+    def required_lookup() -> dict[str, str]:
+        return {"status": "looked-up"}
+
+    execution = (
+        agent
+        .require_actions("required_lookup")
+        .input("answer directly without using the required action")
+        .output({"answer": (str, "answer", True)}, format="json")
+    )
+
+    data = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+
+    assert data["status"] == "blocked"
+    assert data["accepted"] is False
+    assert meta["status"] == "blocked"
+    assert meta["route"]["selected_by"] == "required_capability"
+    assert meta["effective_options"]["capability_constraints"]["actions"]["required"] == ["required_lookup"]
+    required_diagnostics = meta["diagnostics"]["required_capabilities"][0]
+    assert required_diagnostics["missing_actions"] == ["required_lookup"]
+
+
+@pytest.mark.asyncio
 async def test_agent_execution_plain_text_model_request_streams_model_delta():
     agent = _create_action_agent("plain-text-stream")
     execution = agent.input("plain text route").create_execution()
@@ -383,7 +629,7 @@ async def test_agent_execution_plain_text_model_request_streams_model_delta():
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_task_step_meta_lineage_and_limit_success():
+async def test_agent_execution_bounded_step_meta_lineage_and_limit_success():
     MockAgentExecutionRequester.requests = []
     agent = _create_agent("task-step-success")
     execution = (
@@ -391,7 +637,6 @@ async def test_agent_execution_task_step_meta_lineage_and_limit_success():
         .input("produce one bounded answer")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
-            mode="task_step",
             lineage={"task_id": "task-1", "iteration_id": "iter-1", "step_id": "draft"},
             limits={"max_model_requests": 1},
         )
@@ -401,21 +646,19 @@ async def test_agent_execution_task_step_meta_lineage_and_limit_success():
     meta = await execution.async_get_meta()
 
     assert data["answer"] == "ok-1"
-    assert meta["execution_mode"] == "task_step"
     assert meta["lineage"]["task_id"] == "task-1"
     assert meta["limits"]["max_model_requests"] == 1
     assert meta["diagnostics"]["budget"]["model_requests_used"] == 1
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_task_step_blocks_when_direct_model_budget_exceeded():
+async def test_agent_execution_bounded_step_blocks_when_direct_model_budget_exceeded():
     agent = _create_agent("task-step-direct-budget")
     execution = (
         agent
         .input("this should exceed budget before provider call")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
-            mode="task_step",
             lineage={"task_id": "budget-task", "iteration_id": "iter-1", "step_id": "direct"},
             limits={"max_model_requests": 0},
         )
@@ -431,7 +674,7 @@ async def test_agent_execution_task_step_blocks_when_direct_model_budget_exceede
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_task_step_budget_covers_dynamic_task_model_tasks():
+async def test_agent_execution_bounded_step_budget_covers_dynamic_task_model_tasks():
     agent = _create_agent("task-step-dynamic-budget")
     execution = (
         agent
@@ -459,7 +702,6 @@ async def test_agent_execution_task_step_budget_covers_dynamic_task_model_tasks(
         )
         .input("run two model tasks")
         .create_execution(
-            mode="task_step",
             lineage={"task_id": "budget-task", "iteration_id": "iter-1", "step_id": "dag"},
             limits={"max_model_requests": 1},
         )
@@ -475,7 +717,7 @@ async def test_agent_execution_task_step_budget_covers_dynamic_task_model_tasks(
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_task_step_budget_covers_skills_model_stage(tmp_path):
+async def test_agent_execution_bounded_step_budget_covers_skills_model_stage(tmp_path):
     MockAgentExecutionRequester.requests = []
     skill_root = tmp_path / "skill-pack" / "skills" / "task-step"
     _write_skill(skill_root)
@@ -488,7 +730,6 @@ async def test_agent_execution_task_step_budget_covers_skills_model_stage(tmp_pa
         agent
         .input("use the task step skill")
         .create_execution(
-            mode="task_step",
             lineage={"task_id": "budget-task", "iteration_id": "iter-1", "step_id": "skills"},
             limits={"max_model_requests": 0},
         )
@@ -508,11 +749,7 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
     captured: dict[str, Any] = {}
     skill_root = tmp_path / "skill-pack" / "skills" / "task-step"
     _write_skill(skill_root)
-    agent = _create_agent("task-step-skills-options").use_skills(
-        str(tmp_path / "skill-pack"),
-        mode="required",
-        auto_allow=True,
-    )
+    agent = _create_agent("task-step-skills-options")
     original_execute_skills_plan = agent.async_execute_skills_plan
 
     async def capture_execute_skills_plan(*args: Any, **kwargs: Any):
@@ -522,6 +759,7 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
     agent.async_execute_skills_plan = capture_execute_skills_plan
     execution = (
         agent
+        .use_skills(str(tmp_path / "skill-pack"), mode="required", auto_allow=True)
         .input("use the task step skill")
         .create_execution(
             options=ExecutionOptions.model_validate(
@@ -537,7 +775,6 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
     meta = await execution.async_get_meta()
     assert captured["effort"] == "fast"
     assert meta["options"]["routes"]["skills"]["effort"] == "fast"
-    assert meta["effective_options"]["execution"]["mode"] == "one_turn"
     assert meta["effective_options"]["execution"]["limits"]["max_model_requests"] == 0
     assert meta["consumed_options"]["routes.skills.effort"] == {
         "value": "fast",
@@ -546,14 +783,13 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_two_task_step_executions_can_be_correlated_as_developer_loop():
+async def test_two_bounded_step_executions_can_be_correlated_as_developer_loop():
     agent = _create_agent("task-step-loop")
     first = (
         agent
         .input("first step")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
-            mode="task_step",
             lineage={"task_id": "loop-task", "iteration_id": "iter-1", "step_id": "first"},
             limits={"max_model_requests": 1},
         )
@@ -566,7 +802,6 @@ async def test_two_task_step_executions_can_be_correlated_as_developer_loop():
         .input({"previous": first_data})
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
-            mode="task_step",
             lineage={
                 "task_id": "loop-task",
                 "iteration_id": "iter-2",
@@ -594,7 +829,6 @@ async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace
         .input("workspace-bound step")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
-            mode="task_step",
             lineage={
                 "task_id": "workspace-task",
                 "iteration_id": "iter-1",
@@ -620,24 +854,36 @@ async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace
     assert workspace_record["checkpoint"] is not None
     assert meta["workspace_refs"]["observations"] == [workspace_record["record"]["id"]]
     assert meta["workspace_refs"]["checkpoints"] == [workspace_record["checkpoint"]["id"]]
+    evidence_link_id = meta["workspace_refs"]["verification_evidence"][0]
     assert agent.workspace is not None
     assert await agent.workspace.get_data(workspace_record["record"]) == {"answer": data["answer"]}
     history = await agent.workspace.checkpoint_history("workspace-task", step_id="record")
     assert [item["id"] for item in history] == [workspace_record["checkpoint"]["id"]]
+    evidence_links = await agent.workspace.links(workspace_record["record"], relation="checkpointed_by")
+    assert [item["id"] for item in evidence_links] == [evidence_link_id]
+    assert evidence_links[0]["target_id"] == workspace_record["checkpoint"]["id"]
+    assert evidence_links[0]["meta"]["evidence"]["execution_id"] == meta["execution_id"]
+    assert evidence_links[0]["meta"]["owner"] == "AgentExecution"
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_record_requires_bound_workspace():
+async def test_agent_execution_workspace_record_uses_lazy_default_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     agent = _create_agent("task-step-workspace-missing")
+    workspace = agent.workspace
+    assert getattr(workspace, "is_materialized") is False
     execution = (
         agent
         .input("missing workspace")
         .output({"answer": (str, "answer", True)}, format="json")
-        .create_execution(mode="task_step", limits={"max_model_requests": 1})
+        .create_execution(limits={"max_model_requests": 1})
     )
 
-    with pytest.raises(RuntimeError, match="agent.use_workspace"):
-        await execution.async_record_workspace()
+    workspace_record = await execution.async_record_workspace()
+
+    assert getattr(workspace, "is_materialized") is True
+    assert workspace_record["record"]["collection"] == "observations"
+    assert workspace.root.exists()
 
 
 def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp_path):
@@ -647,7 +893,6 @@ def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp
         .input("workspace-bound sync step")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
-            mode="task_step",
             lineage={"task_id": "workspace-sync-task", "step_id": "record-sync"},
             limits={"max_model_requests": 1},
         )
@@ -660,3 +905,4 @@ def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp
     assert workspace_record["checkpoint"] is not None
     assert meta["workspace_refs"]["observations"] == [workspace_record["record"]["id"]]
     assert meta["workspace_refs"]["checkpoints"] == [workspace_record["checkpoint"]["id"]]
+    assert meta["workspace_refs"]["verification_evidence"]

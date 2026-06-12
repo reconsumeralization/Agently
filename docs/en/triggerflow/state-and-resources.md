@@ -17,7 +17,7 @@ A TriggerFlow execution carries three distinct storage layers. They look similar
 | Scope | execution-local | flow-shared (across all executions) | execution-local |
 | Serializable | yes | yes | **no** |
 | Goes into close snapshot | yes | no | no, only `resource_keys` recorded |
-| Goes into save / load checkpoints | yes | no | no, must be re-injected after `load()` |
+| Goes into execution snapshots | yes | no | no, must be re-injected after `load()` |
 | Recommended for | business state, intermediate values, anything you want back from `close()` | legacy compatibility / explicitly intentional flow-wide sharing | live clients, sockets, callbacks, file handles, cache references |
 | Status | **recommended primary path** | risky-default — emits `RuntimeWarning` on every call | new concept — use this for anything that can't be serialized |
 
@@ -100,21 +100,55 @@ async def step(data: TriggerFlowRuntimeData):
 
 ### Why resources don't enter the snapshot
 
-A close snapshot is supposed to be a serializable dict. Live objects can't survive serialization (no meaningful representation, no way to reconstruct the live state on the other side). What the snapshot **does** record is `resource_keys` — the names of resources the execution had — so you know what to re-inject on resume:
+A close snapshot is supposed to be a serializable dict. Live objects can't survive serialization (no meaningful representation, no way to reconstruct the live state on the other side). What the snapshot **does** record is `resource_keys` and `resource_requirements` — the resource identities needed for load:
 
 ```python
-saved = execution.save()
-# saved contains state, lifecycle metadata, interrupt state, and resource_keys
-# but NOT the live objects themselves
+flow.declare_resource_requirement("db")
+flow.declare_resource_requirement("logger")
+flow.declare_resource_requirement("search_tool")
 
-restored = flow.create_execution(
-    auto_close=False,
+saved = execution.save()
+# saved contains state, lifecycle metadata, interrupt state,
+# resource requirements, and resource keys, but NOT live objects
+
+restored = flow.create_execution(auto_close=False)
+await restored.async_load(
+    saved,
     runtime_resources={"db": new_db_client, "logger": new_logger, "search_tool": search_function},
 )
-restored.load(saved)
 ```
 
-The caller is responsible for re-injecting compatible resources after `load()`.
+The caller is responsible for re-injecting required resources during load.
+Use `load(saved)` when those resources are already available in the current
+process. Use `async_load(...)` for restart and worker-handoff paths so missing
+resources fail before the execution continues.
+
+For distributed pause/resume, re-injection is not enough when the resource
+carries state. A recreated HTTP client can be equivalent to the old one, but a
+browser page, sandbox process, remote task, or exchange session may need a
+provider-owned state ref, version, lease, or fence token. Store those refs in
+execution state or resource requirements, and let the external system restore
+and validate the live object before TriggerFlow continues.
+
+For service deployments where every worker can import the same factory, declare
+an importable resolver descriptor and let `async_load(...)` rebuild the
+live object:
+
+```python
+flow.declare_resource_requirement(
+    "db",
+    resolver="my_app.resources:create_db",
+    provider_kind="database",
+    config_ref="settings://db",
+    secret_ref="secret://db",
+)
+```
+
+Resolvers receive a context dictionary and return either the live object or
+`{"resource": object, "health": "healthy"}`. Missing, unhealthy, and
+policy-forbidden resources are surfaced in `inspect_load(...)`
+diagnostics; `fail_policy="fail_open"` turns a blocking resolver problem into a
+warning, while the default `fail_closed` blocks strict load.
 
 ### Managed execution resources
 
@@ -136,7 +170,8 @@ resource and releases it when the execution closes. Manually passed
 | A pydantic model, dataclass, or anything serializable to dict | `state` |
 | A database client, HTTP client, websocket | `runtime_resources` |
 | A function or callback | `runtime_resources` |
-| An in-memory cache that should survive across executions of the same flow | `runtime_resources` injected at the flow level (and accept that resources don't survive process restarts unless you re-inject) |
+| An in-memory cache that should survive across executions of the same flow | `runtime_resources` injected at the flow level (and accept that resources don't survive process restarts unless you re-inject or externalize the cache state) |
+| A stateful session that must survive worker handoff | `runtime_resources` plus a durable external state ref and resolver/provider validation |
 | Configuration shared across executions, intentionally global | `flow_data` with `no_warning=True`, **or** `runtime_resources` if it isn't serializable |
 
 ## Common mistakes
@@ -144,10 +179,12 @@ resource and releases it when the execution closes. Manually passed
 - **Putting an SDK client in state.** It either fails to serialize or silently captures a stale snapshot. Use `runtime_resources`.
 - **Putting per-execution business data in `flow_data`.** Two concurrent executions clobber each other. Use `state`.
 - **Forgetting to re-inject `runtime_resources` after `load()`.** The execution restarts in a state where `require_resource(...)` fails. The save snapshot contains `resource_keys` so you can write a re-injection step that won't drift.
+- **Treating a stateful resource as recovered because the key exists.** Key presence only proves that a live object was mounted. The external system still has to restore and validate any state that object carries.
 
 ## See also
 
 - [Lifecycle](lifecycle.md) — what `close()` returns
 - [Execution Environment](../actions/execution-environment.md) — managed live resource lifecycle
 - [Persistence and Blueprint](persistence-and-blueprint.md) — `save` / `load` semantics
+- [Distributed Pause and Resume Boundaries](distributed-pause-resume.md) — host-managed recovery and live object ownership
 - [Compatibility](compatibility.md) — `runtime_data` is the deprecated alias of `state`

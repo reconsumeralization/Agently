@@ -3,6 +3,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
+from agently.types.plugins import ExecutionSnapshotStore, RuntimeEventStore
 from agently.types.data.event import normalize_triggerflow_event_type
 
 
@@ -758,6 +759,62 @@ async def test_trigger_flow_chunk_runtime_events_include_input_output_and_origin
     assert chunk_completed.payload["returned_pause_signal"] is False
     assert stream_event.payload["origin_chunk"]["run_id"] == chunk_started.run.run_id
     assert result_event.payload["origin_chunk"]["run_id"] == chunk_started.run.run_id
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_provider(tmp_path):
+    agent = Agently.create_agent("triggerflow-workspace-provider").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+
+    flow = TriggerFlow(name="workspace-provider-flow")
+
+    async def compute(data: TriggerFlowRuntimeData):
+        await data.async_set_state("input", data.value)
+        return data.value + 1
+
+    flow.to(compute).end()
+    execution = flow.create_execution(
+        runtime_resources={
+            "snapshot_store": cast(ExecutionSnapshotStore, workspace),
+            "runtime_event_store": cast(RuntimeEventStore, workspace),
+        }
+    )
+
+    captured = []
+
+    async def capture(event):
+        if event.meta.get("execution_id") == execution.id:
+            captured.append(event)
+
+    hook_name = "test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_provider.capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        result = await execution.async_start(7)
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert _compat_result(result) == 8
+
+    snapshot_ref = await execution.async_save(step_id="closed")
+    assert snapshot_ref["collection"] == "checkpoints"
+    assert snapshot_ref["scope"]["step_id"] == "closed"
+    snapshot_state = await workspace.get_data(snapshot_ref)
+    assert snapshot_state["execution_id"] == execution.id
+
+    records = await workspace.query_runtime_events(execution.id)
+    captured_event_ids = [event.event_id for event in captured]
+    persisted_event_ids = [record["event_id"] for record in records]
+
+    assert captured_event_ids
+    assert captured_event_ids == persisted_event_ids
+    assert any(record["event_type"] == "triggerflow.execution_started" for record in records)
+    assert any(record["event_type"] == "triggerflow.execution_closed" for record in records)
+
+    chunk_records = [record for record in records if record["event_type"] == "chunk.started"]
+    assert chunk_records
+    assert chunk_records[0]["node_id"]
+    assert chunk_records[0]["aggregation_scope"] == execution.run_context.root_run_id
 
 
 def test_trigger_flow_sub_flow_rejects_invalid_capture_and_write_back_specs():

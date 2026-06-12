@@ -24,6 +24,7 @@ from .ActionRuntime import (
     StandardActionPlanningHandler,
 )
 from .EventHooker import EventHooker
+from .ExecutionExchange import ExecutionExchangeProvider
 from .PromptGenerator import PromptGenerator
 from .ModelRequester import HandlerDrivenModelRequester, ModelProviderResponseGenerator, ModelRequestHandlers, ModelRequester
 from .TaskDAGPlanner import TaskDAGPlanner
@@ -39,12 +40,19 @@ from .AgentExecution import AgentExecution, AgentStepExecutor
 from .Workspace import (
     CheckpointStore,
     ContentStore,
+    DurableCheckpointStore,
+    ExecutionSnapshotStore,
+    EvidenceLinker,
     IngestionProfile,
     MetadataStore,
     PolicyEngine,
+    RefResolver,
+    RetentionPolicy,
+    RuntimeEventStore,
     TextIndex,
     VectorIndex,
     WorkspaceBackend,
+    WorkspaceBackendProvider,
 )
 from .Recall import ContextBuilder, RecallPlanner, Retriever
 from .ResponseParser import ResponseParser

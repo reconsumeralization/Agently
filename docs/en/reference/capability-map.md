@@ -1,7 +1,7 @@
 ---
 title: Capability Map
 description: Decide which Agently layer your current problem belongs to.
-keywords: Agently, capability map, learning path, request, Dynamic Task, TriggerFlow
+keywords: Agently, capability map, learning path, request, TaskDAG, Dynamic Task, TriggerFlow
 ---
 
 # Capability Map
@@ -18,9 +18,9 @@ This is a navigation aid: figure out which layer your problem lives at, then jum
 | 4. Actions and execution environments | Should the model call functions, MCP servers, or sandboxed commands with managed execution dependencies? | [Actions Overview](../actions/overview.md), [Action Runtime](../actions/action-runtime.md), [Execution Environment](../actions/execution-environment.md) |
 | 5. Knowledge and services | Do I need retrieval, HTTP, SSE, or WebSocket exposure? | [Knowledge Base](../knowledge/knowledge-base.md), [FastAPI Service Exposure](../services/fastapi.md) |
 | 6. Observability and development | Do I need observation events, DevTools, or coding-agent guidance? | [Observability Overview](../observability/overview.md), [Coding Agents](../development/coding-agents.md) |
-| 7. Agent auto-orchestration | Should one Agent turn choose among model response, Actions, Skills, or Dynamic Task candidates? | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
+| 7. Agent auto-orchestration | Should one Agent turn choose among model response, Actions, Skills, or DAG candidates? | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
 | 8. AgentTask loop | Should one business task run through plan, bounded execution, Workspace evidence, verification, and replan? | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-loop) |
-| 9. Dynamic task graphs | Should a model or app submit a DAG that must be validated and executed? | [Dynamic Task](../dynamic-task/README.md) |
+| 9. TaskDAG / DAG substrate | Should a model or app submit, validate, customize, and execute a DAG? | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | 10. Orchestration | Branching, concurrency, pause/resume, persistence | [TriggerFlow Overview](../triggerflow/overview.md) |
 
 Each layer assumes the previous ones work. Skipping ahead is the most common reason something goes wrong — for example, jumping into TriggerFlow before a single request returns the right shape.
@@ -35,7 +35,7 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Need to reuse one response multiple ways | [Model Response](../requests/model-response.md) |
 | Multi-turn chat with bounded history | [Session Memory](../requests/session-memory.md) |
 | Multi-turn task needs durable observations, artifacts, decisions, or checkpoints | [Workspace](../requests/workspace.md) |
-| Explicit workflow loop needs durable structured state, record links, checkpoint lookup, and recall | [TriggerFlow Overview](../triggerflow/overview.md) + [Workspace](../requests/workspace.md); see `examples/workspace/workspace_loop_foundation.py` |
+| Explicit workflow loop needs durable structured state, record links, execution snapshot lookup, and recall | [TriggerFlow Overview](../triggerflow/overview.md) + [Workspace](../requests/workspace.md); see `examples/workspace/workspace_loop_foundation.py` |
 | Need the model to call tools / MCP servers | [Action Runtime](../actions/action-runtime.md) |
 | Need common Python / shell / workspace / Node.js / SQLite ability | [Action Runtime](../actions/action-runtime.md), start with `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, or `agent.enable_sqlite(...)` |
 | Need web search or page browse | [Action Runtime](../actions/action-runtime.md), use `from agently.builtins.actions import Search, Browse` and `agent.use_actions(...)` |
@@ -43,9 +43,10 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Deciding where a new extension belongs | [Extension Boundaries](../architecture/extension-boundaries.md) |
 | Building a service over agents | [FastAPI Service Exposure](../services/fastapi.md) |
 | Need to inspect observation events | [Event Center](../observability/event-center.md) → [DevTools](../observability/devtools.md) |
-| Need one Agent turn to choose between model response, Actions, Skills, or Dynamic Task | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
+| Not sure whether to use ModelRequest, AgentExecution, TaskDAG, or TriggerFlow | [Execution Layer Selection](execution-layer-selection.md) |
+| Need one Agent turn to choose between model response, Actions, Skills, or a DAG-shaped route | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
 | Single business task needs plan → bounded execution → evidence → verification → replan | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-loop), start with `agent.create_task(...)` and consume it as an `AgentExecution` result |
-| Model-generated or app-generated DAG that must be validated before execution | [Dynamic Task](../dynamic-task/README.md) |
+| Model-generated or app-generated DAG that must be planned, validated, customized, and executed | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | Multi-stage workflow with branching | [TriggerFlow Overview](../triggerflow/overview.md) → [Patterns](../triggerflow/patterns.md) |
 | Long-running flow with human approval / interrupt | [Pause and Resume](../triggerflow/pause-and-resume.md) |
 | Need to save and resume execution across restarts | [Persistence and Blueprint](../triggerflow/persistence-and-blueprint.md) |
@@ -54,10 +55,11 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 ## Decision shortcuts
 
 - "Do I need TriggerFlow?" — Only when there are explicit stages, branching, concurrency, or wait/resume. A single request with retries does not need TriggerFlow.
-- "Dynamic Task or TriggerFlow?" — Use Dynamic Task when the graph is submitted as data and must be planned, validated, pruned, and executed. Use TriggerFlow directly when you own the workflow topology in code.
+- "Which execution layer?" — Use [Execution Layer Selection](execution-layer-selection.md) when the question is whether to intervene at ModelRequest, AgentExecution, TaskDAG, TriggerFlow, or Workspace.
+- "TaskDAG, Dynamic Task, or TriggerFlow?" — Use TaskDAG modules when the graph is submitted as data and must be planned, validated, pruned, resolved to handlers, customized, and executed. Use the DynamicTask facade when ordinary app code wants one compact compatibility entrypoint. Use TriggerFlow directly when you own the workflow topology in code.
 - "Sync or async?" — Sync for scripts and demos. Async for services, streaming UI, and TriggerFlow. See [Async First](../start/async-first.md).
 - "Action or tool API?" — New code: `Agently.action` / `agent.use_actions(...)`, built-in packages from `agently.builtins.actions`, plus scenario helpers such as `agent.enable_python(...)`, `agent.enable_shell(...)`, and `agent.enable_workspace_file_actions(...)`. Existing `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` keep working but are positioned as a compatibility surface; see [Action Runtime](../actions/action-runtime.md).
-- "Agent start or explicit API?" — Use `agent.start()` for candidate-driven auto-orchestration and `agent.create_execution()` when the caller needs route diagnostics or process streaming. Use explicit `agent.run_skills_task(...)` or `Agently.create_dynamic_task(...)` when the application must force that route.
+- "Agent start or explicit API?" — Use `agent.start()` for candidate-driven auto-orchestration and `agent.create_execution()` when the caller needs route diagnostics, process streaming, or wants to attach a submitted DAG candidate to one execution. Use explicit `agent.run_skills_task(...)` or the TaskDAG / DynamicTask facade when the application must force that route.
 - "AgentTask or TriggerFlow?" — Use `agent.create_task(...)` when the model owns the task-level plan, verification, and replan loop for one business task; it returns a task-strategy `AgentExecution`, so read result/meta/stream/task refs through the AgentExecution result facade. Use TriggerFlow directly when the application owns the exact stages, branching, and wait/resume topology.
 - "Executor or Execution Environment?" — Executors run one call. Execution Environment prepares reusable or policy-bound dependencies before that call; see [Execution Environment](../actions/execution-environment.md).
 - "Core API or syntax sugar?" — App developers should start with built-in actions and Agent Component helpers. Core managers and providers are for framework, action, and plugin developers; see [Extension Boundaries](../architecture/extension-boundaries.md).

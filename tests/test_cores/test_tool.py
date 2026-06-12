@@ -495,7 +495,7 @@ async def test_action_generate_native_tool_calls_matches_structured(monkeypatch)
         def get_async_generator(self, type=None, specific=None, **kwargs):
             _ = kwargs
             assert type == "specific"
-            assert specific == ["tool_calls", "done"]
+            assert specific == ["tool_calls", "delta", "done"]
 
             async def gen():
                 yield (
@@ -554,3 +554,81 @@ async def test_action_generate_native_tool_calls_matches_structured(monkeypatch)
     structured_first = cast(dict[str, Any], structured[0])
     assert native_first["action_id"] == structured_first["action_id"] == action_id
     assert native_first["action_input"] == structured_first["action_input"] == {"query": "Agently TriggerFlow"}
+
+
+@pytest.mark.asyncio
+async def test_native_tool_calls_empty_result_surfaces_planning_diagnostic(monkeypatch):
+    action = Agently.action
+    tag = f"native-tool-empty-{ uuid.uuid4().hex }"
+    action_id = f"search_docs_{ uuid.uuid4().hex[:8] }"
+
+    action.register_action(
+        action_id=action_id,
+        desc="Search docs.",
+        kwargs={"query": (str, "")},
+        func=lambda query: query,
+        tags=[tag],
+    )
+
+    prompt = Agently.create_prompt()
+    prompt.set("input", "inspect the repository")
+    action_list = action.get_action_list(tags=[tag])
+
+    class FakeResponse:
+        def get_async_generator(self, type=None, specific=None, **kwargs):
+            _ = kwargs
+            assert type == "specific"
+            assert specific == ["tool_calls", "delta", "done"]
+
+            async def gen():
+                yield ("delta", "<bash><command>pwd</command></bash>")
+                yield ("done", "")
+
+            return gen()
+
+    class FakeModelRequest:
+        def __init__(self, *args, **kwargs):
+            _ = (args, kwargs)
+            self.prompt = SimpleNamespace(set=lambda *a, **k: None)
+
+        def input(self, *args, **kwargs):
+            _ = (args, kwargs)
+            return self
+
+        def info(self, *args, **kwargs):
+            _ = (args, kwargs)
+            return self
+
+        def instruct(self, *args, **kwargs):
+            _ = (args, kwargs)
+            return self
+
+        def get_response(self, *, parent_run_context=None):
+            _ = parent_run_context
+            return FakeResponse()
+
+    import agently.core as core_module
+
+    monkeypatch.setattr(core_module, "ModelRequest", FakeModelRequest)
+
+    records = await action.async_plan_and_execute(
+        prompt=prompt,
+        settings=Agently.settings,
+        action_list=action_list,
+        agent_name="native-tool-empty-test",
+        max_rounds=1,
+        timeout=2,
+        planning_protocol="native_tool_calls",
+    )
+
+    assert len(records) == 1
+    diagnostic_record = records[0]
+    assert diagnostic_record.get("status") == "skipped"
+    assert diagnostic_record.get("action_id") == "action_planning"
+    diagnostics = diagnostic_record.get("diagnostics", [])
+    assert isinstance(diagnostics, list)
+    first_diagnostic = diagnostics[0]
+    assert first_diagnostic.get("code") == "action_runtime.native_tool_calls.empty"
+    meta = first_diagnostic.get("meta", {})
+    assert isinstance(meta, dict)
+    assert meta.get("textual_tool_markup_detected") is True

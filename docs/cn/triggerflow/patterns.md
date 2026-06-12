@@ -59,6 +59,16 @@ async def store_grade(data):
 
 `match()` 对前一 chunk 的 `data.input` 分发。少量离散值用它；要 predicate 用 `if_condition`。
 
+## when —— 事件 join
+
+```python
+flow.when(["task_a_done", "task_b_done"], mode="and").to(run_after_both)
+```
+
+list 形式是 `flow.when({"event": [...]}, mode="and")` 的事件专用简写。
+开发者拥有的 DAG 依赖推荐使用这个形态，因为依赖边会保留在 TriggerFlow
+definition 和 runtime events 里。
+
 ## batch —— 并行命名分支
 
 ```python
@@ -79,6 +89,12 @@ execution 级限并发：
 ```python
 execution = flow.create_execution(concurrency=2)
 ```
+
+execution concurrency 是该 execution 的全局 handler dispatch 上限，包括 chunk
+continuation 和 `data.async_emit(...)` 触发的嵌套 dispatch。handler 等待内部
+dispatch 时，TriggerFlow 会临时让出并在返回前重新取得 permit，所以
+`concurrency=1` 下普通链式 flow 不会死锁。`batch(..., concurrency=...)`
+和 `for_each(..., concurrency=...)` 仍是 operator 局部 fan-out 上限。
 
 ## for_each —— 对序列输入 fan-out
 

@@ -50,7 +50,7 @@ class AgentExecutionPromptDraft:
         self.request.prompt.set(key, value, mappings=mappings)
         return self
 
-    def remove_request_prompt(self, key: "PromptStandardSlot | str"):
+    def remove_execution_prompt(self, key: "PromptStandardSlot | str"):
         self.request.prompt.set(key, None)
         return self
 

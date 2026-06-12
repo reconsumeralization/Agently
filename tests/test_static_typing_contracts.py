@@ -23,7 +23,7 @@ from agently import (
     SkillRuntimeStreamItem as RootSkillRuntimeStreamItem,
     StreamingData as RootStreamingData,
 )
-from agently.core import AgentExecutionResult, AgentTurn, BaseAgent, ModelResponseResult
+from agently.core import AgentExecutionResult, BaseAgent, ModelResponseResult
 from agently.types.data import (
     AgentExecutionStreamData,
     AgentlyModelResultEvent,
@@ -44,7 +44,7 @@ from agently.types.data import (
 from agently.types.plugins import AgentExecution, SkillsPlanningContext
 
 
-def test_agent_turn_and_model_response_streaming_type_contracts():
+def test_agent_execution_and_model_response_streaming_type_contracts():
     if TYPE_CHECKING:
         agent: BaseAgent = Agently.create_agent("typing-contract")
 
@@ -52,19 +52,19 @@ def test_agent_turn_and_model_response_streaming_type_contracts():
         assert_type(agent.input("persistent", always=True), Agent)
         assert_type(agent.input("hello").get_result(), AgentExecutionResult)
 
-        turn = agent.create_turn().input("hello").output({"reply": (str,)})
-        assert_type(turn, AgentTurn)
-        assert_type(turn.get_generator(type="delta"), Generator[str, None, None])
-        assert_type(turn.get_generator(type="instant"), Generator[StreamingData, None, None])
-        assert_type(turn.get_generator(type="specific"), Generator[AgentlySpecificResultMessage, None, None])
-        assert_type(turn.get_generator(type="all"), Generator[AgentlyModelResultMessage, None, None])
-        assert_type(turn.get_generator(type="original"), Generator[AgentlyOriginalResultPayload, None, None])
+        execution = agent.create_execution().input("hello").output({"reply": (str,)})
+        assert_type(execution, AgentExecution)
+        assert_type(execution.get_generator(type="delta"), Generator[AgentExecutionStreamData, None, None])
+        assert_type(execution.get_generator(type="instant"), Generator[AgentExecutionStreamData, None, None])
+        assert_type(execution.get_generator(type="specific"), Generator[AgentExecutionStreamData, None, None])
+        assert_type(execution.get_generator(type="all"), Generator[AgentExecutionStreamData, None, None])
+        assert_type(execution.get_generator(type="original"), Generator[AgentExecutionStreamData, None, None])
 
-        assert_type(turn.get_async_generator(type="delta"), AsyncGenerator[str, None])
-        assert_type(turn.get_async_generator(type="instant"), AsyncGenerator[StreamingData, None])
-        assert_type(turn.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResultMessage, None])
-        assert_type(turn.get_async_generator(type="all"), AsyncGenerator[AgentlyModelResultMessage, None])
-        assert_type(turn.get_async_generator(type="original"), AsyncGenerator[AgentlyOriginalResultPayload, None])
+        assert_type(execution.get_async_generator(type="delta"), AsyncGenerator[AgentExecutionStreamData, None])
+        assert_type(execution.get_async_generator(type="instant"), AsyncGenerator[AgentExecutionStreamData, None])
+        assert_type(execution.get_async_generator(type="specific"), AsyncGenerator[AgentExecutionStreamData, None])
+        assert_type(execution.get_async_generator(type="all"), AsyncGenerator[AgentExecutionStreamData, None])
+        assert_type(execution.get_async_generator(type="original"), AsyncGenerator[AgentExecutionStreamData, None])
 
         result: ModelResponseResult = agent.create_request().input("hello").get_result()
         assert_type(result.get_generator(type="instant"), Generator[StreamingData, None, None])

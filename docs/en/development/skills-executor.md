@@ -186,9 +186,8 @@ execution = await (
 ```
 
 `set_agent_prompt(...)` values are inherited and kept for later executions.
-`set_turn_prompt(...)`, compatibility `set_request_prompt(...)`, and quick
-prompt values are frozen into the Skill run and then cleared from the pending
-execution prompt. Explicit `output=` and
+Quick prompt values are frozen into the Skill run and then cleared from the
+pending execution prompt. Explicit `output=` and
 `output_format=` arguments override prompt-derived defaults.
 
 `output_format=` selects how that model response is controlled. Leave it as
@@ -364,6 +363,58 @@ model instead of sending the symbolic key as a provider model name.
 When Skills are selected through Agent auto-orchestration, model field stream
 items are bridged to stable paths like `skills.model.fields.<field_path>`.
 
+## Context Packs for DAG Consumers
+
+When a custom planner, Dynamic Task, or TaskDAG node needs complete Skill
+context without forcing the whole Skills execution route, build a context pack.
+The pack exposes the selected `SKILL.md` guidance, task-relevant references,
+examples, optional assets, resource index metadata, citations, diagnostics, and
+policy-gated action candidates under schema
+`agently.skills.context_pack.v1`.
+
+```python
+pack = await agent.async_build_skills_context_pack(
+    "Generate DeepSeek provider setup code.",
+    skills=["model-setup"],
+    intent="generate_code",
+    include_examples="auto",
+    include_references="auto",
+    budget_chars=12000,
+)
+```
+
+For DAG-shaped execution, reuse the Skills Executor resolver adapter instead of
+creating a separate scheduler:
+
+```python
+from agently.core import TaskDAGExecutor
+
+snapshot = await TaskDAGExecutor(
+    Agently.skills_executor.task_dag_resolver()
+).async_run({
+    "graph_id": "skill-context-demo",
+    "task_schema_version": "task_dag/v1",
+    "tasks": [
+        {
+            "id": "skill_context",
+            "kind": "skill",
+            "inputs": {
+                "task": "Generate provider setup code.",
+                "skill_ids": ["model-setup"],
+                "intent": "generate_code",
+            },
+        }
+    ],
+    "semantic_outputs": {"context": "skill_context"},
+})
+```
+
+`include_public_lookup=True` and `actionize_scripts=True` remain opt-in host
+policy operations. Public lookup requires `web_search: "allow"`. Script
+Actionization requires `script_run: "allow"` or an approved PolicyApproval
+decision; it only mounts an allowlisted shell Action candidate and does not run
+the script.
+
 Bundled scripts and resources are never executed just because a Skill is
 installed. When a selected standard Skill describes a need for search, browse,
 HTTP, Workspace file access, Python, shell/script execution, or MCP, Skills
@@ -469,6 +520,9 @@ Agently.skills_executor.configure(
 - `Agently.skills_executor.install_skills_pack(...)`
 - `Agently.skills_executor.configure(...)`
 - `Agently.skills_executor.inspect_skills(...)`
+- `Agently.skills_executor.build_context_pack(...)`
+- `Agently.skills_executor.task_dag_resolver(...)`
+- `agent.build_skills_context_pack(...)`
 - `agent.use_skills(...)`
 - `agent.use_skills_packs(...)`
 - `agent.resolve_skills_plan(...)`
