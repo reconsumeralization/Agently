@@ -73,6 +73,25 @@ reviewer 需要确认 release note 描述的是本次真正交付的最终产品
 需要做小范围 API / 文档调整，必须先回到 release PR 内完成修改，重新运行相关验证，再
 合并。不要先合并，再把 release-note 修正当作后续 marketing 补丁。
 
+## 升级信息呈现格式
+
+所有面向用户的升级说明都必须同时包含样例代码和核心变动表。这个要求适用于
+release notes、release PR body、issue closeout comment、面向维护者的升级摘要，以及
+解释新增或变更 public surface 的 docs 页面。
+
+样例代码必须展示当前推荐用法。如果 API 形态发生变化，要给出 before/after snippet。
+如果本次升级没有可调用 API，则展示相关配置、CLI 命令、manifest entry 或 workflow YAML。
+除非明确标注为 conceptual，否则不要用 pseudo-code。
+
+核心变动表至少包含这些列：
+
+| 领域 | 变动内容 | 推荐用法 | 兼容性 / 风险 | 证据 |
+|---|---|---|---|---|
+| Public API / docs / runtime area | 用户可见行为或契约 | 方法、配置、命令或 example path | Additive、breaking、policy-gated、deferred 或 no-op | Tests、examples、specs、compatibility metadata 或 companion validation |
+
+如果某个声明的切片只完成了部分实现，表格里必须包含一行 deferred，写明剩余范围以及
+承接它的 spec 或 issue。不要把延期工作藏在表格之后的散文里。
+
 ## 验收论证
 
 推荐 release 前，必须为每个用户可见的功能切片写一份 coverage-first 的验收论证。

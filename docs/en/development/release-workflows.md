@@ -88,6 +88,28 @@ adjustments, make those changes in the release PR, rerun the relevant
 validation, and only then merge. Do not merge first and treat release-note fixes
 as follow-up marketing work.
 
+## Upgrade Information Format
+
+Every user-facing upgrade explanation must include both sample code and a core
+changes table. This applies to release notes, release PR bodies, issue closeout
+comments, maintainer-facing upgrade summaries, and docs pages that explain a
+new or changed public surface.
+
+The sample code must show the recommended current usage shape. If an API shape
+changed, include a before/after snippet. If the upgrade has no callable API,
+show the relevant configuration, CLI command, manifest entry, or workflow YAML
+instead. Do not use pseudo-code unless it is explicitly marked as conceptual.
+
+The core changes table must include at least these columns:
+
+| Area | What changed | Recommended usage | Compatibility / risk | Evidence |
+|---|---|---|---|---|
+| Public API / docs / runtime area | User-visible behavior or contract | Method, config, command, or example path | Additive, breaking, policy-gated, deferred, or no-op | Tests, examples, specs, compatibility metadata, or companion validation |
+
+When a claimed slice is only partially implemented, the table must include a
+deferred row with the remaining scope and the spec or issue that owns it. Do not
+hide deferred work in prose after the table.
+
 ## Acceptance Argument
 
 Before recommending a release, write a coverage-first acceptance argument for
