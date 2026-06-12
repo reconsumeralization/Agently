@@ -151,6 +151,8 @@ class AgentExecutionContext:
         execution_id: str,
         lineage: AgentExecutionLineage | dict[str, Any],
         limits: AgentExecutionLimits | dict[str, Any],
+        nesting_depth: int = 0,
+        nesting_budget: int | None = None,
     ):
         self.execution_id = execution_id
         self.lineage = cast(AgentExecutionLineage, dict(lineage))
@@ -161,6 +163,32 @@ class AgentExecutionContext:
         self.last_progress_at = self.started_at
         self.last_progress_event: dict[str, Any] | None = None
         self.stage_events: list[dict[str, Any]] = []
+        # Depth of this AgentExecution in a nested agent-step chain (root = 0).
+        self.nesting_depth = int(nesting_depth)
+        # Effective max nesting depth inherited from the constraining ancestor
+        # (or this execution's own limit). None means unbounded.
+        self.nesting_budget = nesting_budget
+
+    def raise_if_nesting_exceeded(self):
+        if self.nesting_budget is None:
+            return
+        if self.nesting_depth > self.nesting_budget:
+            event = {
+                "type": "limit_exceeded",
+                "limit_name": "max_nested_agent_steps",
+                "limit_value": self.nesting_budget,
+                "used": self.nesting_depth,
+            }
+            self.limit_events.append(event)
+            raise AgentExecutionLimitExceeded(
+                (
+                    "AgentExecution nested agent-step budget exceeded: "
+                    f"max_nested_agent_steps={ self.nesting_budget }, depth={ self.nesting_depth }."
+                ),
+                limit_name="max_nested_agent_steps",
+                limit_value=self.nesting_budget,
+                used=self.nesting_depth,
+            )
 
     def consume_model_request(self, *, response_id: str | None = None, run_id: str | None = None):
         limit = self.limits.get("max_model_requests")

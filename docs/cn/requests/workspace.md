@@ -37,7 +37,7 @@ context_pack = await agent.workspace.build_context(
     goal="Fix the route fallback failure.",
     scope={"task_id": "issue-123"},
     budget={"tokens": 12000},
-    profile="software_dev",
+    profile="auto",
 )
 ```
 

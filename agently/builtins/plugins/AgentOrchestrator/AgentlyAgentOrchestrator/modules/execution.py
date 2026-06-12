@@ -141,10 +141,13 @@ class AgentExecution:
         self.effective_options: dict[str, Any] = {}
         self.consumed_options: dict[str, Any] = {}
         self.workspace = getattr(self.agent, "workspace", None)
+        self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
             lineage=self.lineage,
             limits=self.limits,
+            nesting_depth=self._nesting_depth,
+            nesting_budget=self._nesting_budget,
         )
         self.parent_run_context = parent_run_context
         self.route_info: dict[str, Any] = {}
@@ -224,11 +227,32 @@ class AgentExecution:
     def _load_strategy_state_from_options(self):
         load_strategy_state_from_options(self)
 
+    def _resolve_nesting_state(self) -> tuple[int, int | None]:
+        """Compute this execution's nesting depth and the effective nesting budget.
+
+        Depth is one deeper than the currently bound parent AgentExecutionContext
+        (root = 0). The budget is the most restrictive `max_nested_agent_steps`
+        among the constraining ancestor and this execution's own limits.
+        """
+        from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
+
+        parent_context = get_current_agent_execution_context()
+        parent_depth = getattr(parent_context, "nesting_depth", None)
+        depth = parent_depth + 1 if isinstance(parent_depth, int) else 0
+        own_budget = self.limits.get("max_nested_agent_steps")
+        parent_budget = getattr(parent_context, "nesting_budget", None)
+        budgets = [value for value in (parent_budget, own_budget) if isinstance(value, int)]
+        budget = min(budgets) if budgets else None
+        return depth, budget
+
     def _replace_runtime_context(self):
+        self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
             lineage=self.lineage,
             limits=self.limits,
+            nesting_depth=self._nesting_depth,
+            nesting_budget=self._nesting_budget,
         )
         self.stream = AgentExecutionStream(
             execution_id=self.id,

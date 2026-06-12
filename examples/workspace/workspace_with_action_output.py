@@ -58,7 +58,7 @@ async def main():
             goal="route fallback action output",
             scope={"task_id": "issue-456"},
             budget={"chars": 1200},
-            profile="software_dev",
+            profile="auto",
         )
         context_refs = [item["ref"]["id"] for item in context_pack["items"]]
         summary = {

@@ -52,15 +52,6 @@ class WorkspaceManager:
                 context_builder=DefaultContextBuilder(),
             ),
         )
-        self.register_recall_profile(
-            "software_dev",
-            profile=RecallProfile(
-                name="software_dev",
-                planner=RuleRecallPlanner(),
-                retriever=WorkspaceRetriever(),
-                context_builder=DefaultContextBuilder(),
-            ),
-        )
 
     def create(
         self,

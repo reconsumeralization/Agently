@@ -65,7 +65,7 @@ class AgentTask:
         workspace: str | os.PathLike[str] | None = None,
         max_iterations: int = 3,
         verify: Literal["before_done"] = "before_done",
-        recall_profile: str = "software_dev",
+        recall_profile: str = "auto",
         context_budget: dict[str, Any] | None = None,
         limits: dict[str, Any] | None = None,
         options: dict[str, Any] | None = None,
@@ -175,10 +175,10 @@ class AgentTask:
                 await self._emit("result", self.result)
                 return self.result
             except BaseException as error:
-                self.status = "error"
+                self.status = "timed_out" if self._is_timeout_error(error) else "error"
                 self._error = error
                 self.diagnostics.setdefault("errors", []).append(
-                    {"type": error.__class__.__name__, "message": str(error)}
+                    {"type": error.__class__.__name__, "message": str(error), "status": self.status}
                 )
                 await self._emit("agent_task.error", self.diagnostics["errors"][-1])
                 raise
@@ -193,6 +193,12 @@ class AgentTask:
         except RuntimeError:
             return asyncio.run(self.async_run())
         return self.async_run()
+
+    @staticmethod
+    def _is_timeout_error(error: BaseException) -> bool:
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+            return True
+        return getattr(error, "status", None) == "timed_out"
 
     async def _run_iteration(self, iteration_index: int) -> dict[str, Any]:
         await self._emit_progress(
@@ -464,19 +470,38 @@ class AgentTask:
                 profile=self.recall_profile,
             )
         except Exception as error:
-            fallback = await self.workspace.build_context(
-                goal="",
-                scope={"task_id": self.id},
-                budget=self.context_budget,
-                profile=self.recall_profile,
-            )
-            diagnostics = fallback.setdefault("diagnostics", {})
-            diagnostics["fallback_reason"] = {
+            fallback_reason: dict[str, Any] = {
                 "type": error.__class__.__name__,
                 "message": str(error),
                 "stage": "workspace.build_context",
             }
-            self.diagnostics.setdefault("recall_fallbacks", []).append(diagnostics["fallback_reason"])
+            self.diagnostics.setdefault("recall_fallbacks", []).append(fallback_reason)
+            try:
+                fallback = await self.workspace.build_context(
+                    goal="",
+                    scope={"task_id": self.id},
+                    budget=self.context_budget,
+                    profile=self.recall_profile,
+                )
+            except Exception as fallback_error:
+                # A failing recall backend must not break the task loop. Return an
+                # empty context pack so planning continues with no recalled context.
+                fallback_reason["fallback_error"] = {
+                    "type": fallback_error.__class__.__name__,
+                    "message": str(fallback_error),
+                }
+                return cast(
+                    "WorkspaceContextPack",
+                    {
+                        "goal": self.goal,
+                        "profile": self.recall_profile,
+                        "items": [],
+                        "omitted": [],
+                        "diagnostics": {"fallback_reason": fallback_reason},
+                    },
+                )
+            diagnostics = fallback.setdefault("diagnostics", {})
+            diagnostics["fallback_reason"] = fallback_reason
             return fallback
 
     def _step_execution_policy(self) -> dict[str, Any]:
@@ -601,6 +626,12 @@ class AgentTask:
             "dynamic_task_candidate_added": candidate_added,
             "policy": DataFormatter.sanitize(policy),
         }
+        route_policy = self._route_policy_for_step_execution(effective_shape)
+        if route_policy:
+            apply_route_policy = getattr(execution, "route_policy", None)
+            if callable(apply_route_policy):
+                apply_route_policy(route_policy)
+            step_execution["route_policy"] = DataFormatter.sanitize(route_policy)
         if warning is not None:
             step_execution["warning"] = warning
             execution_warnings = plan.get("execution_warnings")
@@ -615,9 +646,29 @@ class AgentTask:
         record_option = getattr(execution, "record_consumed_option", None)
         if callable(record_option):
             record_option("agent_task.step.execution_shape", effective_shape, owner="AgentTaskLoop")
+            if route_policy:
+                record_option("agent_task.step.route_policy", route_policy, owner="AgentTaskLoop")
             if policy.get("step_plan") != "direct":
                 record_option("effort.execution.step_plan", policy.get("step_plan"), owner="AgentTaskLoop")
         return step_execution
+
+    @staticmethod
+    def _route_policy_for_step_execution(effective_shape: str) -> dict[str, Any]:
+        route_by_shape = {
+            "direct": "model_request",
+            "actions": "model_request",
+            "skills": "skills",
+            "dynamic_task": "dynamic_task",
+            "execution_dag": "dynamic_task",
+        }
+        route = route_by_shape.get(str(effective_shape or "").strip())
+        if route is None:
+            return {}
+        return {
+            "allowed_routes": [route],
+            "owner": "AgentTaskLoop",
+            "step_execution_shape": effective_shape,
+        }
 
     async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPack") -> dict[str, Any]:
         request = self.agent.create_temp_request()
@@ -745,8 +796,11 @@ class AgentTask:
             "a failed required action or failed validation command, do not mark complete. "
             "If a criterion requires a script, command, test, or external validation to pass, require explicit "
             "successful evidence for that validation before completion. "
-            "When marking complete, put every required final deliverable in final_result; if final_result would omit "
-            "a required deliverable, keep is_complete=false and ask for a replan. "
+            "Decide final_result_required from the goal and success criteria: set it true when the task demands a "
+            "concrete final deliverable (answer, file, report, artifact, or similar) and false when the work is "
+            "purely an action or side effect with no expected returned deliverable. "
+            "When marking complete, put every required final deliverable in final_result; if final_result_required is "
+            "true and final_result would omit a required deliverable, keep is_complete=false and ask for a replan. "
             "If evidence is incomplete, set is_complete=false and give a concrete replan_instruction. "
             "Set requires_block=true only when the task cannot continue."
         )
@@ -757,6 +811,7 @@ class AgentTask:
                 "reason": (str, "Concise verification reason", True),
                 "missing_criteria": ([str], "Unmet or weak criteria, empty when none"),
                 "replan_instruction": (str, "Instruction for the next planning round when incomplete"),
+                "final_result_required": (bool, "True when the goal expects a concrete returned final deliverable"),
                 "final_result": (str, "Final business result when complete"),
             },
             format="json",
@@ -769,6 +824,7 @@ class AgentTask:
                 "reason": str(verification),
                 "missing_criteria": self.success_criteria,
                 "replan_instruction": "Run another bounded step with stronger evidence.",
+                "final_result_required": False,
                 "final_result": "",
             }
         return self._normalize_verification(
@@ -820,7 +876,11 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Missing required capability evidence: {', '.join(missing_required)}",
             ]
-        if normalized["is_complete"] and self._requires_final_result() and not normalized["final_result"].strip():
+        final_result_required = self._normalize_bool(
+            verification.get("final_result_required"), default=False
+        )
+        normalized["final_result_required"] = final_result_required
+        if normalized["is_complete"] and final_result_required and not normalized["final_result"].strip():
             normalized["is_complete"] = False
             guard_reasons.append("final_result_missing")
             normalized["missing_criteria"] = [
@@ -851,28 +911,6 @@ class AgentTask:
         if isinstance(value, str) and value.strip():
             return [value.strip()]
         return []
-
-    def _requires_final_result(self) -> bool:
-        markers = (
-            "final",
-            "result",
-            "deliverable",
-            "artifact",
-            "file",
-            "markdown",
-            "report",
-            "brief",
-            "output",
-            "answer",
-            "最终",
-            "结果",
-            "交付",
-            "文件",
-            "产出",
-            "报告",
-        )
-        text = " ".join([self.goal, *self.success_criteria]).lower()
-        return any(marker in text for marker in markers)
 
     async def _await_task_request(self, awaitable, *, stage: str):
         timeout = self._task_request_timeout()
@@ -1312,30 +1350,32 @@ class AgentTask:
     def _operator_safe_progress_snapshot(cls, stage: str, snapshot: dict[str, Any]) -> dict[str, Any]:
         return cast(dict[str, Any], cls._strip_developer_diagnostics({"stage": stage, **snapshot}))
 
+    # Keys whose subtrees carry developer-facing diagnostics (errors, recall
+    # fallbacks, backend traces) and must never reach an operator-facing progress
+    # summary. Stripping is structural by key — no backend-specific error-string
+    # matching — so it stays correct for any Workspace backend or recall source.
+    _DEVELOPER_DIAGNOSTIC_KEYS = frozenset({
+        "diagnostics",
+        "context_pack_diagnostics",
+        "fallback_reason",
+        "errors",
+        "progress_errors",
+        "stream_errors",
+    })
+
     @classmethod
     def _strip_developer_diagnostics(cls, value: Any) -> Any:
-        sensitive_keys = {
-            "diagnostics",
-            "context_pack_diagnostics",
-            "fallback_reason",
-            "errors",
-            "progress_errors",
-            "stream_errors",
-        }
-        sensitive_markers = ("fts5", "sqlite", "fallback_reason", "no such column")
         if isinstance(value, dict):
             cleaned: dict[str, Any] = {}
             for key, item in value.items():
                 normalized_key = str(key)
-                if normalized_key in sensitive_keys or "diagnostic" in normalized_key:
+                if normalized_key in cls._DEVELOPER_DIAGNOSTIC_KEYS or "diagnostic" in normalized_key:
                     cleaned[normalized_key] = {"omitted": "developer_diagnostics"}
                     continue
                 cleaned[normalized_key] = cls._strip_developer_diagnostics(item)
             return cleaned
         if isinstance(value, list):
             return [cls._strip_developer_diagnostics(item) for item in value]
-        if isinstance(value, str) and any(marker in value.lower() for marker in sensitive_markers):
-            return "[developer diagnostic omitted]"
         return value
 
     @staticmethod
@@ -1361,22 +1401,6 @@ class AgentTask:
             for skill_id in required_skills
             if skill_id not in selected_skill_ids
         ]
-        validation_actions = [
-            record["id"]
-            for record in action_records
-            if record.get("id")
-            and any(
-                marker in " ".join(
-                    [
-                        record.get("id", ""),
-                        record.get("name", ""),
-                        record.get("action_type", ""),
-                        record.get("kind", ""),
-                    ]
-                ).lower()
-                for marker in ("shell", "command", "run", "test", "pytest", "read", "write_file", "validation")
-            )
-        ]
         route = execution_meta.get("route", {})
         artifact_refs = logs.get("artifact_refs", [])
         workspace_refs = execution_meta.get("workspace_refs") or logs.get("workspace_refs", {})
@@ -1394,7 +1418,6 @@ class AgentTask:
             "selected_skill_ids": selected_skill_ids,
             "required_skills": required_skills,
             "missing_required_skills": missing_required_skills,
-            "validation_actions": validation_actions,
             "artifact_refs": DataFormatter.sanitize(artifact_refs),
             "workspace_refs": DataFormatter.sanitize(workspace_refs),
             "route": DataFormatter.sanitize(route),

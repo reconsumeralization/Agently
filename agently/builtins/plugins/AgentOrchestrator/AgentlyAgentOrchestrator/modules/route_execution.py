@@ -102,6 +102,7 @@ async def start_execution(
         owner._started = True
         owner.status = "running"
         try:
+            owner.execution_context.raise_if_nesting_exceeded()
             owner.execution_context.record_progress(
                 stage="agent_execution",
                 status="started",

@@ -1775,3 +1775,23 @@ def test_no_matching_skill_returns_no_match(tmp_path):
 
     assert execution.status == "no_match"
     assert execution.output is None
+
+
+def test_model_decision_matches_on_keywords_not_description_words(tmp_path):
+    """ISSUE-006: candidate selection must not over-match on description words.
+
+    The Skill declares keyword ``release``; a task that merely shares a common
+    description word (``review``) but not the keyword/name must not activate it.
+    """
+    _skill(
+        tmp_path / "alpha",
+        name="Alpha Skill",
+        description="Use this to review the alpha release.",
+    )
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    miss = _create_agent().run_skills_task("review the quarterly billing numbers", mode="model_decision")
+    assert miss.status == "no_match"
+
+    hit = _create_agent().run_skills_task("prepare the release notes", mode="model_decision")
+    assert hit.status != "no_match"

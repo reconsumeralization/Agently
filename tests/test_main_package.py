@@ -639,6 +639,50 @@ async def test_hybrid_route_planner_uses_model_when_optional_candidates_are_ambi
 
 
 @pytest.mark.asyncio
+async def test_hybrid_route_planner_respects_allowed_routes_policy():
+    class FakeRequest:
+        def input(self, _payload):
+            raise AssertionError("route policy should avoid ambiguous route model selection")
+
+    class FakeAction:
+        def get_action_list(self, tags=None):
+            return [{"name": "lookup_release"}]
+
+    class FakePrompt:
+        def get(self, _key, default=None):
+            return "prepare release notes"
+
+    class FakeAgent:
+        name = "fake-route-policy-agent"
+        action = FakeAction()
+
+        def __init__(self):
+            self.request = type("Request", (), {"prompt": FakePrompt()})()
+            self._dynamic_task_candidates = [{"mode": "submitted", "name": "planner"}]
+
+        def _collect_skill_selectors(self, *, skills, mode):
+            return ["release-checklist"] if mode == "required" else []
+
+        def _collect_skills_pack_selectors(self, *, skills_packs, mode):
+            return []
+
+        def create_temp_request(self):
+            return FakeRequest()
+
+    execution = type(
+        "FakeExecution",
+        (),
+        {"options": {"route_policy": {"allowed_routes": ["model_request"]}}, "effective_options": {}},
+    )()
+
+    route, meta = await HybridRoutePlanner(cast(Any, FakeAgent()), execution=execution).select_route()
+
+    assert route == "model_request"
+    assert meta["with_actions"] is True
+    assert meta["selected_by"] == "single_candidate"
+
+
+@pytest.mark.asyncio
 async def test_hybrid_route_planner_keeps_required_routes_deterministic():
     class FakePrompt:
         def get(self, _key, default=None):

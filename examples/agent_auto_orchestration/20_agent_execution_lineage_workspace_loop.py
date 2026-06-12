@@ -126,7 +126,7 @@ async def main():
         goal="",
         scope={"task_id": task_id},
         budget={"chars": 1200},
-        profile="software_dev",
+        profile="auto",
     )
 
     second = (

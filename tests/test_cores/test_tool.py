@@ -89,6 +89,62 @@ def test_action_dispatcher_requires_approval():
     assert legacy["status"] == "blocked"
 
 
+def test_model_policy_override_cannot_grant_approval():
+    """ISSUE-001: a model-planned command must not self-grant approval."""
+    action = Agently.action
+    action_id = f"approval_escalation_{ uuid.uuid4().hex[:8] }"
+    action.register_action(
+        action_id=action_id,
+        desc="Approval gated action.",
+        kwargs={},
+        func=lambda: "ok",
+        approval_required=True,
+        expose_to_model=False,
+    )
+
+    # A structured_plan command (model output) cannot bypass the approval gate by
+    # injecting host-only policy keys.
+    blocked = action.execute_action(
+        action_id,
+        {},
+        policy_override={"policy_approval_granted": True, "approval_mode": "auto"},
+        source_protocol="structured_plan",
+    )
+    assert blocked.get("status") == "blocked"
+
+    # Host code calling directly may still pre-grant approval.
+    granted = action.execute_action(
+        action_id,
+        {},
+        policy_override={"policy_approval_granted": True},
+        source_protocol="direct",
+    )
+    assert granted.get("status") == "success"
+
+
+def test_sanitize_policy_override_strips_host_only_keys_for_model_sources():
+    from agently.core.operation.Action.ActionDispatcher import ActionDispatcher
+
+    override = {
+        "policy_approval_granted": True,
+        "allowed_cmd_prefixes": ["rm"],
+        "purpose_hint": "keep me",
+    }
+    sanitized, stripped = ActionDispatcher._sanitize_policy_override(
+        override, source_protocol="native_tool_calls"
+    )
+    assert "policy_approval_granted" not in sanitized
+    assert "allowed_cmd_prefixes" not in sanitized
+    assert sanitized.get("purpose_hint") == "keep me"
+    assert set(stripped) == {"policy_approval_granted", "allowed_cmd_prefixes"}
+
+    kept, none_stripped = ActionDispatcher._sanitize_policy_override(
+        override, source_protocol="direct"
+    )
+    assert kept == override
+    assert none_stripped == []
+
+
 def test_action_dispatcher_fail_closed_handler_returns_approval_required():
     action = Agently.action
     action_id = f"approval_pending_action_{ uuid.uuid4().hex[:8] }"

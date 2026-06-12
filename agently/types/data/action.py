@@ -113,6 +113,7 @@ class ActionCall(TypedDict, total=False):
     tool_kwargs: dict[str, Any]
     execution_environment_handles: dict[str, Any]
     execution_environment_resources: dict[str, Any]
+    diagnostics: list[dict[str, Any]]
 
 
 class ActionDecision(TypedDict, total=False):

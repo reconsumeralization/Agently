@@ -23,6 +23,27 @@ if TYPE_CHECKING:
 async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str, Any]) -> Any:
     from agently.core.application import AgentTask
 
+    if execution.limits.get("allow_create_task") is False:
+        reason = "AgentExecution limits disallow task creation (allow_create_task=False)."
+        execution.status = "blocked"
+        execution.close_snapshot = {"status": "blocked", "route": "agent_task", "reason": reason}
+        execution.diagnostics.setdefault("limit_events", []).append(
+            {"limit_name": "allow_create_task", "limit_value": False, "reason": reason}
+        )
+        await execution.emit_stream(
+            "route.agent_task.blocked",
+            {"reason": reason, "limit_name": "allow_create_task"},
+            route="agent_task",
+            source="agent_execution",
+            meta={"status": "blocked"},
+        )
+        return {
+            "status": "blocked",
+            "accepted": False,
+            "artifact_status": "blocked",
+            "reason": reason,
+        }
+
     task_options = execution.task_strategy_options()
     generated_before = list(getattr(execution, "generated_success_criteria", []) or [])
     goal = execution.task_goal()
@@ -72,15 +93,23 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         workspace=task_options.get("workspace"),
         max_iterations=int(max_iterations or 3),
         verify=cast(Any, task_options.get("verify", "before_done")),
-        recall_profile=str(task_options.get("recall_profile", "software_dev")),
+        recall_profile=str(task_options.get("recall_profile", "auto")),
         context_budget=cast(Any, task_options.get("context_budget")),
         limits=cast(Any, task_options.get("limits", execution.limits)),
         options=cast(Any, agent_task_options),
         task_id=cast(Any, task_options.get("task_id") or execution.lineage.get("task_id")),
     )
-    for name, value in getattr(execution, "__dict__", {}).items():
-        if name.startswith("_") and name in {"_execute_step", "_request_plan", "_request_verification"}:
-            setattr(task, name, value)
+    # Advanced/test step-stage override channel. Callers may set an explicit
+    # `execution._agent_task_step_overrides = {"_request_plan": ..., ...}` before
+    # running to drive the plan/execute/verify stages deterministically. This is
+    # an intentional, documented seam (not a public API): only the named stage
+    # handlers are applied, and nothing is read in normal goal-pursuit runs.
+    step_overrides = getattr(execution, "_agent_task_step_overrides", None)
+    if isinstance(step_overrides, dict):
+        for stage_name in ("_request_plan", "_execute_step", "_request_verification"):
+            handler = step_overrides.get(stage_name)
+            if callable(handler):
+                setattr(task, stage_name, handler)
     execution.task_record = task
     execution.task_refs = {
         "task_id": task.id,

@@ -296,11 +296,11 @@ async def test_workspace_build_context_returns_refs_and_budget_diagnostics(tmp_p
         goal="route fallback failure",
         scope={"task_id": "issue-123"},
         budget={"chars": 600},
-        profile="software_dev",
+        profile="auto",
     )
 
     assert context_pack["goal"] == "route fallback failure"
-    assert context_pack["profile"] == "software_dev"
+    assert context_pack["profile"] == "auto"
     assert [item["ref"]["id"] for item in context_pack["items"]] == [failure_ref["id"]]
     content = context_pack["items"][0]["content"]
     assert isinstance(content, str)
@@ -342,7 +342,7 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
         goal="fix 4.1.3.4 foo.bar question",
         scope={"task_id": "fts-safe"},
         budget={"chars": 1000},
-        profile="software_dev",
+        profile="auto",
     )
 
     assert version_ref["id"] in [item["id"] for item in version_results]

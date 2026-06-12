@@ -783,17 +783,20 @@ class SkillPlanner:
             ]
             return candidates
         task_lower = task_text.lower()
-        candidates = []
+        activation_matches: list[SkillContract] = []
         for contract in installed:
             card = _ensure_dict(contract.get("card"))
             decision_card = _ensure_dict(contract.get("decision_card"))
             names = [str(contract.get("skill_id", "")), str(card.get("display_name", "")), str(decision_card.get("name", ""))]
             keywords = _ensure_string_list(_ensure_dict(card.get("activation_hints")).get("keywords"))
             keywords.extend(_ensure_string_list(decision_card.get("keywords")))
-            haystack = " ".join([*names, *keywords, str(card.get("description", "")), str(decision_card.get("description", ""))]).lower()
-            if any(term and term.lower() in task_lower for term in [*names, *keywords]) or any(word in task_lower for word in haystack.split()):
-                candidates.append(contract)
-        return candidates
+            if any(term and term.lower() in task_lower for term in [*names, *keywords]):
+                activation_matches.append(contract)
+        # Match only on author-declared names/keywords (the intended, language-
+        # neutral activation signal). Description-word overlap is intentionally
+        # not used: it matched on any common word in the Skill metadata language,
+        # selecting every Skill for in-language tasks and none for others.
+        return activation_matches
 
     async def _select_model_ordered(
         self,

@@ -42,6 +42,33 @@ from .ActionRegistry import ActionRegistry
 class ActionDispatcher:
     VALID_STATUSES = {"success", "partial_success", "error", "approval_required", "blocked", "skipped"}
 
+    # Policy keys that only host code may set through a direct
+    # async_execute_action(policy_override=...) call. A model-planned action
+    # command must never carry these: setting them would let model output grant
+    # its own approval or widen sandbox/network/path limits.
+    HOST_ONLY_POLICY_KEYS = frozenset({
+        "policy_approval_granted",
+        "policy_approval_decision",
+        "policy_approval_handler",
+        "approval_mode",
+        "workspace_roots",
+        "path_allowlist",
+        "path_denylist",
+        "allowed_cmd_prefixes",
+        "network_mode",
+        "read_only",
+        "allow_create",
+        "allow_update",
+        "allow_delete",
+        "timeout_seconds",
+        "max_output_bytes",
+        "sandbox_required",
+    })
+
+    # Source protocols whose action commands originate from model output and are
+    # therefore untrusted for host-only policy keys.
+    MODEL_PLANNING_PROTOCOLS = frozenset({"structured_plan", "native_tool_calls"})
+
     def __init__(self, registry: ActionRegistry, settings: Settings):
         self.registry = registry
         self.settings = settings
@@ -49,6 +76,32 @@ class ActionDispatcher:
     @staticmethod
     def _to_dict(value: Any):
         return value if isinstance(value, dict) else {}
+
+    @classmethod
+    def _sanitize_policy_override(
+        cls,
+        policy_override: ActionPolicy | None,
+        *,
+        source_protocol: str,
+    ) -> tuple[ActionPolicy, list[str]]:
+        """Drop host-only policy keys from a model-sourced policy override.
+
+        Returns the sanitized override plus the list of stripped keys so the
+        caller can surface a diagnostic. Host-sourced protocols (direct/dry_run)
+        keep their override untouched.
+        """
+        if not isinstance(policy_override, dict):
+            return cast(ActionPolicy, {}), []
+        if source_protocol not in cls.MODEL_PLANNING_PROTOCOLS:
+            return cast(ActionPolicy, dict(policy_override)), []
+        sanitized: dict[str, Any] = {}
+        stripped: list[str] = []
+        for key, value in policy_override.items():
+            if key in cls.HOST_ONLY_POLICY_KEYS:
+                stripped.append(str(key))
+            else:
+                sanitized[key] = value
+        return cast(ActionPolicy, sanitized), stripped
 
     def _merge_policy(
         self,
@@ -234,6 +287,11 @@ class ActionDispatcher:
         result.setdefault("expose_to_model", bool(spec.get("expose_to_model", True)))
         result.setdefault("side_effect_level", cast(Any, spec.get("side_effect_level", "read")))
         result.setdefault("executor_type", str(spec.get("executor_type", "")))
+        call_diagnostics = action_call.get("diagnostics")
+        if isinstance(call_diagnostics, list) and call_diagnostics:
+            existing_diagnostics = result.get("diagnostics")
+            existing_diagnostics = existing_diagnostics if isinstance(existing_diagnostics, list) else []
+            result["diagnostics"] = [*call_diagnostics, *existing_diagnostics]
         return cast(ActionResult, result)
 
     @staticmethod
@@ -381,18 +439,37 @@ class ActionDispatcher:
                 "executor_type": str(spec.get("executor_type", "")),
             }
 
+        sanitized_override, stripped_policy_keys = self._sanitize_policy_override(
+            policy_override,
+            source_protocol=source_protocol,
+        )
+        call_diagnostics: list[dict[str, Any]] = []
+        if stripped_policy_keys:
+            call_diagnostics.append(
+                {
+                    "source": "ActionDispatcher",
+                    "severity": "warning",
+                    "code": "action.policy_override.host_only_keys_stripped",
+                    "message": (
+                        "Ignored host-only policy override keys from a model-planned action command: "
+                        f"{ ', '.join(sorted(stripped_policy_keys)) }."
+                    ),
+                    "meta": {"source_protocol": source_protocol, "stripped_keys": sorted(stripped_policy_keys)},
+                }
+            )
         action_call: ActionCall = {
             "purpose": purpose or f"Use { action_id }",
             "action_id": action_id,
             "action_input": dict(action_input),
-            "policy_override": policy_override or {},
+            "policy_override": sanitized_override,
             "source_protocol": source_protocol,
             "todo_suggestion": todo_suggestion,
             "next": next_value or todo_suggestion,
             "tool_name": str(spec.get("name", action_id)),
             "tool_kwargs": dict(action_input),
+            "diagnostics": call_diagnostics,
         }
-        policy = self._merge_policy(execution_settings, spec, policy_override)
+        policy = self._merge_policy(execution_settings, spec, sanitized_override)
         policy_approval_handler = execution_settings.get("policy_approval.handler", None)
         if policy_approval_handler is not None and not policy.get("policy_approval_handler"):
             policy["policy_approval_handler"] = str(policy_approval_handler)

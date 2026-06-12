@@ -294,7 +294,7 @@ async def test_agent_task_loop_progress_model_omits_developer_diagnostics(tmp_pa
     async def noisy_context_pack(**_kwargs):
         return {
             "goal": "Repair a legacy Agently script so it runs on the current API.",
-            "profile": "software_dev",
+            "profile": "auto",
             "items": [],
             "omitted": [],
             "diagnostics": {
@@ -460,7 +460,7 @@ async def test_agent_task_loop_executes_dag_shaped_step_without_global_candidate
             },
         }
 
-    task._request_plan = request_plan  # type: ignore[method-assign]
+    task._agent_task_step_overrides = {"_request_plan": request_plan}
 
     result = await task.async_run()
     meta = await task.async_meta()
@@ -475,6 +475,92 @@ async def test_agent_task_loop_executes_dag_shaped_step_without_global_candidate
         "value"
     ] == "ok"
     assert getattr(agent, "_dynamic_task_candidates", []) == []
+
+
+@pytest.mark.asyncio
+async def test_agent_task_loop_actions_step_route_policy_prevents_skill_takeover(tmp_path):
+    class ActionStepRequester(MockAgentTaskRequester):
+        name = "ActionStepRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "the action-shaped step returned bounded evidence",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result": "source evidence collected",
+                }
+            elif "Execute exactly one bounded step" in text:
+                payload = {
+                    "step_result": "collected repository source evidence",
+                    "evidence": ["fetch_agently_architecture_sources returned bounded excerpts"],
+                    "remaining_work": [],
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-action-step-route-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-action-step-route-plugins")
+    plugin_manager.register("ModelRequester", ActionStepRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-action-step-route")
+
+    def fetch_agently_architecture_sources():
+        return {"status": "ok", "sources": ["architecture evidence"]}
+
+    skill_source = tmp_path / "skill-source" / "architecture-diagram"
+    skill_source.mkdir(parents=True)
+    (skill_source / "SKILL.md").write_text(
+        """---
+name: architecture-diagram
+description: Use for architecture diagram rendering.
+---
+
+# architecture-diagram
+
+Render the final diagram only after source evidence is collected.
+""",
+        encoding="utf-8",
+    )
+    Agently.skills_executor.configure(
+        registry_root=tmp_path / "skills-registry",
+        allowed_trust_levels=["local"],
+    )
+    Agently.skills_executor.install_skills(skill_source, trust_level="local")
+
+    agent.use_actions(fetch_agently_architecture_sources, always=True)
+    agent.use_skills(["architecture-diagram"], mode="model_decision", always=True)
+
+    task = agent.create_task(
+        task_id="action-step-route-policy",
+        goal="Gather source evidence before rendering with a skill.",
+        success_criteria=["Source evidence is collected."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    async def request_plan(_iteration_index, _context_pack):
+        return {
+            "execution_shape": "actions",
+            "step_instruction": "Call fetch_agently_architecture_sources before using any Skill.",
+            "expected_evidence": "Repository source evidence is collected.",
+            "rationale": "The task must gather source evidence before rendering.",
+        }
+
+    task._agent_task_step_overrides = {"_request_plan": request_plan}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+    first_iteration = meta["iterations"][0]
+
+    assert result["status"] == "completed"
+    assert first_iteration["plan"]["execution_shape"] == "actions"
+    assert first_iteration["plan"]["step_execution"]["route_policy"]["allowed_routes"] == ["model_request"]
+    assert first_iteration["execution_meta"]["route_plan"]["selected_route"] == "model_request"
+    assert first_iteration["execution_meta"]["route_plan"]["candidates"]["skills"]["model_decision"] is True
 
 
 @pytest.mark.asyncio
@@ -674,6 +760,7 @@ async def test_agent_task_loop_verification_guard_replans_when_final_result_miss
                         "reason": "all evidence is present but no final deliverable was returned",
                         "missing_criteria": [],
                         "replan_instruction": "",
+                        "final_result_required": True,
                         "final_result": "",
                     }
                 else:
@@ -683,6 +770,7 @@ async def test_agent_task_loop_verification_guard_replans_when_final_result_miss
                         "reason": "final deliverable is now included",
                         "missing_criteria": [],
                         "replan_instruction": "",
+                        "final_result_required": True,
                         "final_result": "Final remediation report with verification evidence.",
                     }
             elif "Plan the next bounded AgentExecution step" in text:
@@ -790,7 +878,7 @@ async def test_agent_task_loop_verification_guard_replans_on_failed_action_evide
             },
         )
 
-    task._execute_step = fake_execute  # type: ignore[method-assign]
+    task._agent_task_step_overrides = {"_execute_step": fake_execute}
 
     stream_items = [item async for item in task.stream()]
     result = await task.run()

@@ -195,48 +195,53 @@ Help build a small product website from supplied facts.
     return tmp_path / "skill-pack"
 
 
-def _stub_goal_pursuit(execution: Any, *, final_result: str = "accepted result"):
-    async def request_plan(iteration_index: int, context_pack: dict[str, Any]):
-        return {
-            "step_instruction": f"run bounded step { iteration_index }",
-            "expected_evidence": "final output evidence",
-            "rationale": "one bounded step is enough",
-        }
+class MockGoalPursuitRequester(MockAgentExecutionRequester):
+    """Model-driven mock for the goal-pursuit (AgentTask) execution path.
 
-    async def execute_step(iteration_index: int, plan: dict[str, Any], context_pack: dict[str, Any]):
-        return (
-            {"step_result": final_result, "evidence": ["evidence recorded"], "remaining_work": []},
-            {
-                "execution_id": f"stub-step-{ iteration_index }",
-                "status": "success",
-                "route": {"selected_route": "model_request"},
-                "logs": {"action_logs": [], "route_logs": {}, "artifact_refs": []},
-                "workspace_refs": {},
-                "effective_options": execution.effective_options,
-            },
-        )
+    Drives plan -> bounded step -> verify through real model output rather than
+    patching production AgentTask methods, so the execution->AgentTask wiring is
+    exercised end to end.
+    """
 
-    async def request_verification(
-        iteration_index: int,
-        *,
-        plan: dict[str, Any],
-        execution_result: Any,
-        execution_meta: dict[str, Any],
-        context_pack: dict[str, Any],
-    ):
-        return {
-            "is_complete": True,
-            "requires_block": False,
-            "reason": "model verifier accepted the evidence",
-            "missing_criteria": [],
-            "replan_instruction": "",
-            "final_result": final_result,
-        }
+    name = "MockGoalPursuitRequester"
+    final_result = "accepted result"
 
-    execution._request_plan = request_plan
-    execution._execute_step = execute_step
-    execution._request_verification = request_verification
-    return execution
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "direct",
+                "step_instruction": "run one bounded step",
+                "expected_evidence": "final output evidence",
+                "rationale": "one bounded step is enough",
+            }
+        elif "Execute exactly one bounded step" in text:
+            payload = {
+                "step_result": MockGoalPursuitRequester.final_result,
+                "evidence": ["evidence recorded"],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "model verifier accepted the evidence",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": MockGoalPursuitRequester.final_result,
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
+def _create_goal_pursuit_agent(name: str = "agent-execution-goal-pursuit"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockGoalPursuitRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
 def test_execution_options_validate_known_route_schema():
@@ -247,9 +252,9 @@ def test_execution_options_validate_known_route_schema():
 @pytest.mark.asyncio
 async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(tmp_path):
     skill_pack = _install_site_skill(tmp_path)
-    agent = _create_agent("execution-first-goal-chain").use_workspace(tmp_path / "workspace")
+    agent = _create_goal_pursuit_agent("execution-first-goal-chain").use_workspace(tmp_path / "workspace")
 
-    execution = _stub_goal_pursuit(
+    execution = (
         agent
         .goal("Build the site.", success_criteria=["The runnable page exists."])
         .use_skills(str(skill_pack), auto_allow=True)
@@ -325,8 +330,8 @@ def test_goal_alias_and_detailed_effort_strategy_are_normalized(tmp_path):
 
 @pytest.mark.asyncio
 async def test_goal_pursuit_uses_detailed_effort_iteration_limit(tmp_path):
-    agent = _create_agent("execution-detailed-effort-task").use_workspace(tmp_path / "workspace")
-    execution = _stub_goal_pursuit(
+    agent = _create_goal_pursuit_agent("execution-detailed-effort-task").use_workspace(tmp_path / "workspace")
+    execution = (
         agent
         .goal("Build the site.", success_criteria=["The runnable page exists."])
         .effort("low", budget={"iteration_limit": 2})
@@ -377,8 +382,8 @@ def test_goal_accepts_multiple_goals_and_optional_success_criteria():
 
 @pytest.mark.asyncio
 async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
-    agent = _create_agent("execution-first-goal-after-prompt").use_workspace(tmp_path / "workspace")
-    execution = _stub_goal_pursuit(
+    agent = _create_goal_pursuit_agent("execution-first-goal-after-prompt").use_workspace(tmp_path / "workspace")
+    execution = (
         agent
         .input("Use these facts.")
         .output({"summary": (str, "summary", True)}, format="json")
@@ -393,6 +398,50 @@ async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
     assert execution.prompt_snapshot["input"] == "Use these facts."
     assert execution.prompt_snapshot["output"]["summary"][0] is str
     assert execution.goal_items == ["Write the final summary."]
+
+
+@pytest.mark.asyncio
+async def test_allow_create_task_false_blocks_goal_pursuit(tmp_path):
+    """ISSUE-007: allow_create_task=False is an enforced limit, not a no-op."""
+    agent = _create_goal_pursuit_agent("execution-no-create-task").use_workspace(tmp_path / "workspace")
+    execution = (
+        agent
+        .goal("Build the site.", success_criteria=["The runnable page exists."])
+        .create_execution(limits={"allow_create_task": False})
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+
+    assert result["status"] == "blocked"
+    assert result["accepted"] is False
+    assert meta["route"]["selected_route"] == "agent_task"
+
+
+def test_agent_execution_context_enforces_nesting_budget():
+    """ISSUE-007: max_nested_agent_steps is an enforced recursion control."""
+    from agently.core.application.AgentExecution import AgentExecutionContext, AgentExecutionLimitExceeded
+
+    root = AgentExecutionContext(
+        execution_id="root",
+        lineage={},
+        limits={"max_nested_agent_steps": 1},
+        nesting_depth=0,
+        nesting_budget=1,
+    )
+    root.raise_if_nesting_exceeded()  # depth 0 within budget 1
+
+    nested_ok = AgentExecutionContext(
+        execution_id="nested-1", lineage={}, limits={}, nesting_depth=1, nesting_budget=1
+    )
+    nested_ok.raise_if_nesting_exceeded()  # depth 1 within budget 1
+
+    nested_over = AgentExecutionContext(
+        execution_id="nested-2", lineage={}, limits={}, nesting_depth=2, nesting_budget=1
+    )
+    with pytest.raises(AgentExecutionLimitExceeded) as raised:
+        nested_over.raise_if_nesting_exceeded()
+    assert raised.value.limit_name == "max_nested_agent_steps"
 
 
 @pytest.mark.asyncio

@@ -46,7 +46,7 @@ def build_flow(agent):
             goal="route fallback",
             scope={"task_id": task_id},
             budget={"chars": 1200},
-            profile="software_dev",
+            profile="auto",
         )
         decision = {
             "attempt": attempt,

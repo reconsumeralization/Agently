@@ -32,7 +32,10 @@ from .planner import _matches_selector, _matches_skills_pack_selector
 from .registry import SkillRegistry
 
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_.#/-]+")
+# ASCII identifier runs OR single CJK/Kana/Hangul ideographs. Scripts without
+# word spacing are tokenized per ideograph so non-Latin task text still produces
+# overlap terms instead of degrading to an empty set.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_.#/-]+|[一-鿿぀-ヿ가-힯]")
 _CODE_HINTS = {
     "api",
     "code",
@@ -596,11 +599,13 @@ class SkillContextPackBuilder:
         return bool(terms.intersection(_CODE_HINTS))
 
     def _task_terms(self, task_text: str, intent: str) -> set[str]:
-        return {
-            token.lower()
-            for token in _TOKEN_RE.findall(f"{ task_text } { intent }")
-            if len(token.strip()) >= 2
-        }
+        terms: set[str] = set()
+        for token in _TOKEN_RE.findall(f"{ task_text } { intent }"):
+            stripped = token.strip()
+            # Keep ASCII terms of length >= 2 and any single non-ASCII ideograph.
+            if len(stripped) >= 2 or (stripped and not stripped.isascii()):
+                terms.add(stripped.lower())
+        return terms
 
     def _take_budget(self, content: str, budget: int) -> tuple[str, bool]:
         if budget <= 0 or not content:
