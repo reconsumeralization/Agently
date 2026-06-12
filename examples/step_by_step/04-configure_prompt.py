@@ -17,7 +17,6 @@ def load_yaml_prompt():
     # Mapping rules:
     # - .agent.* -> agent-level prompt (persistent)
     # - .execution.* or top-level keys -> execution prompt (one execution)
-    # - .turn.* / .request.* -> compatibility aliases for .execution.*
     # - $role / $system is shorthand for agent system role
     # See demo_docs/CONFIGURE_PROMPT_RELATION.md for details.
     #
@@ -225,7 +224,6 @@ def roundtrip_configure_prompt():
 # Key rules in the file schema:
 #   .agent.*   keys  -> agent-level prompts (persistent across requests)
 #   .execution.* keys -> execution prompts (one execution only)
-#   .turn.* / .request.* keys -> compatibility aliases for .execution.*
 #   top-level keys without dots -> also execution-level
 #   $ensure_all_keys: true -> require all output keys to be present
 #

@@ -51,10 +51,11 @@ python examples/agent_auto_orchestration/16_report_evaluation.py
 python examples/agent_auto_orchestration/17_self_reflective_research.py
 python examples/agent_auto_orchestration/18_amap_mcp_trip_planner.py   # needs AMAP_API_KEY
 python examples/agent_auto_orchestration/19_remote_skills_weather_event_ops.py
-python examples/agent_auto_orchestration/20_agent_execution_task_step_workspace_loop.py
+python examples/agent_auto_orchestration/20_agent_execution_lineage_workspace_loop.py
 python examples/agent_auto_orchestration/21_agent_execution_github_issue_intake.py
 python examples/agent_auto_orchestration/22_unified_agent_execution_result.py
 python examples/agent_auto_orchestration/23_agent_execution_auto_dispatch.py
+python examples/agent_auto_orchestration/24_execution_local_dynamic_task_candidate.py
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` is the canonical reference for the
@@ -128,15 +129,15 @@ single-shot Skill + host orchestration pattern.
   `DEEPSEEK_API_KEY`, Node.js, and `npx`; skips cleanly when prerequisites are
   missing.
 
-- **20 — AgentExecution Task-Step Workspace Loop.** Acceptance example for the
-  4.1.3.2 AgentExecution step contract. The host owns a two-step loop, runs two
-  real model-backed `create_execution(mode="task_step", lineage=..., limits=...)`
+- **20 — AgentExecution Lineage Workspace Loop.** Acceptance example for the
+  4.1.3.7 AgentExecution lineage/limits contract. The host owns a two-step loop, runs two
+  real model-backed `create_execution(lineage=..., limits=...)`
   calls, explicitly persists observations/checkpoints through the execution's
   bound Workspace helper, builds a ContextPack between steps, and verifies
   stream/meta lineage correlation.
 
-- **21 — GitHub Issue Intake.** Business-scenario example for the 4.1.3.2
-  application landing point. A DeepSeek/Ollama-backed AgentExecution receives a
+- **21 — GitHub Issue Intake.** Business-scenario example for the 4.1.3.7
+  AgentExecution lineage/limits application landing point. A DeepSeek/Ollama-backed AgentExecution receives a
   restricted bash action, decides and runs local `gh search repos`, selects the
   official repo from real command output, then runs `gh issue list` through the
   same ActionRuntime path. Host code reads AgentExecution action logs/artifact
@@ -157,13 +158,19 @@ single-shot Skill + host orchestration pattern.
 
 - **23 — AgentExecution Auto Dispatch.** Minimal real-model route-selection
   example. A quick prompt execution proves the default `model_request` route,
-  then an execution draft with `goal(...)` plus `success_criteria(...)` proves
+  then an execution draft with `goal(..., success_criteria)` proves
   automatic dispatch into the task-strategy `agent_task` route. The task step
   calls a real GitHub issue-fetch Action for the first visible
   `AgentEra/Agently` issues page, the model summarizes still-pending maintainer
   work from the fetched issues, and AgentTask records observations, checkpoints,
   and verification before the example reads refs through AgentExecution
   metadata.
+
+- **24 — Execution-Local Dynamic Task Candidate.** Infrastructure smoke for
+  `execution.use_dynamic_task(...)`. It runs a submitted TaskDAG with a local
+  handler, proves the `dynamic_task` route and TaskDAG stream, and verifies the
+  candidate stays on the captured AgentExecution draft rather than mutating the
+  Agent-level Dynamic Task candidate pool.
 
 ## Actions / Dynamic-Task DAG examples (not Skills)
 

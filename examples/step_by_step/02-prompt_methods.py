@@ -229,7 +229,6 @@ def quick_prompt_methods():
 # Two storage levels exist for prompts:
 #   set_agent_prompt(slot, value)   — persisted across all future requests on this agent
 #   set_execution_prompt(slot, value)    — consumed for one execution only, then cleared
-#   set_request_prompt(slot, value) — compatibility alias for set_execution_prompt()
 # Quick methods like .role(), .input(), .output() are shorthand for the above.
 # Recognized slot names ("system", "input", "output", "instruct", …) are given special
 # treatment in prompt assembly; custom names are included as labelled info blocks.
