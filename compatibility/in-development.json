@@ -130,7 +130,12 @@
       ],
       "partial_success_contract": "Action results with status=partial_success keep success=True/ok=True and carry diagnostics for degraded providers or fallback recovery. ActionFlow treats partial_success as continuable evidence, not action.failed.",
       "search_partial_success": "Built-in Search returns partial_success when earlier ddgs backends fail or return empty parsed results but a later fallback backend returns usable results.",
-      "bash_sandbox_model_description": "Model-visible bash sandbox action descriptions include the allowed command prefixes, allowed working-directory roots, and timeout when the action is registered or enabled through agent.enable_shell(...)."
+      "bash_sandbox_model_description": "Model-visible bash sandbox action descriptions include the allowed command prefixes, allowed working-directory roots, and timeout when the action is registered or enabled through agent.enable_shell(...).",
+      "execution_environment_metadata_redaction": "Action metadata returned by get_action_info()/get_action_list() redacts execution environment env values while preserving env key names; raw env values remain available only to the execution environment provider path.",
+      "action_loop_timeout_contract": "The timeout argument passed to get_action_result(...)/async_get_action_result(...) bounds the full ActionFlow lifecycle, including structured planning and native tool-call selection, and raises RuntimeStageStallError(stage=\"action_loop_close\") when the loop cannot finish before the deadline.",
+      "explicit_action_loop_reply_contract": "After get_action_result(..., store_for_reply=True) runs an explicit action loop, the prompt records action_results even when no action records were produced so later response materialization does not re-enter ActionRuntime for the same prompt.",
+      "native_tool_call_empty_diagnostic": "When native_tool_calls planning produces no executable tool_calls, ActionFlow returns a skipped ActionResult with diagnostic code action_runtime.native_tool_calls.empty instead of silently reporting an empty evidence stream.",
+      "action_record_summary": "agent.action.summarize_records(records, validation_command_markers=...) returns authoritative host-facing counts, failed actions, commands attempted/run, and latest_validation where the latest matching validation command wins."
     },
     "configuration": {
       "settings_contract": "dict-compatible typed helpers under agently.types.settings",

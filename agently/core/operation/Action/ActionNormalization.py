@@ -177,6 +177,7 @@ def normalize_action_decision(decision: Any) -> ActionDecision:
             "use_action": False,
             "next": "",
             "action_calls": [],
+            "diagnostics": [],
         }
 
     fallback_next = decision.get("todo_suggestion")
@@ -224,6 +225,10 @@ def normalize_action_decision(decision: Any) -> ActionDecision:
         action_calls = []
         next_action = "response"
 
+    diagnostics = decision.get("diagnostics", [])
+    if not isinstance(diagnostics, list):
+        diagnostics = []
+
     return {
         "next_action": next_action,
         "use_action": final_use_action,
@@ -232,6 +237,7 @@ def normalize_action_decision(decision: Any) -> ActionDecision:
         "action_calls": action_calls,
         "execution_commands": action_calls,
         "tool_commands": action_calls,
+        "diagnostics": diagnostics,
     }
 
 

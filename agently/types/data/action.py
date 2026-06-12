@@ -125,6 +125,7 @@ class ActionDecision(TypedDict, total=False):
     execution_commands: list[ActionCall]
     tool_command: ActionCall
     tool_commands: list[ActionCall]
+    diagnostics: list[ActionDiagnostic]
 
 
 class ActionResult(TypedDict, total=False):

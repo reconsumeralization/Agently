@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from agently.types.data import (
         ActionCall,
         ActionDecision,
+        ActionDiagnostic,
         ActionExecutionRequest,
         ActionPlanningRequest,
         ActionResult,
@@ -362,18 +363,38 @@ class AgentlyActionRuntime:
         action_request.prompt.set("tools", action_list)
         result = _get_model_request_result(action_request, parent_run_context=parent_run_context)
         tool_call_chunks: list[Any] = []
-        async for event, data in result.get_async_generator(type="specific", specific=["tool_calls", "done"]):
+        text_fragments: list[str] = []
+        async for event, data in result.get_async_generator(type="specific", specific=["tool_calls", "delta", "done"]):
             if event == "tool_calls":
                 tool_call_chunks.append(data)
+            elif event in {"message", "delta", "text"} and data:
+                text_fragments.append(str(data))
             elif event == "done":
                 break
         action_calls = self.action._normalize_native_action_calls(tool_call_chunks)
         if len(action_calls) == 0:
+            diagnostic = cast("ActionDiagnostic", {
+                "source": "ActionRuntime",
+                "severity": "warning",
+                "code": "action_runtime.native_tool_calls.empty",
+                "message": (
+                    "Native tool-call planning returned no executable tool calls. "
+                    "The host should treat this as a planning diagnostic rather than executed action evidence."
+                ),
+                "meta": {
+                    "planning_protocol": "native_tool_calls",
+                    "textual_tool_markup_detected": any(
+                        marker in "".join(text_fragments).lower()
+                        for marker in ("<bash", "<tool", "<command", "```bash")
+                    ),
+                },
+            })
             return {
                 "next_action": "response",
                 "use_action": False,
                 "action_calls": [],
                 "tool_commands": [],
+                "diagnostics": [diagnostic],
             }
         return {
             "next_action": "execute",

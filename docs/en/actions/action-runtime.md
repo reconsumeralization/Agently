@@ -117,7 +117,9 @@ print(calculate("3333+6666=?"))
 visible action/tool schemas registered on that agent by default, including
 agent-scoped actions, MCP tools mounted through `agent.use_mcp(...)`, and
 `enable_*` component helpers. Pass explicit `tags=[...]` only when you need a
-narrow subset.
+narrow subset. Managed execution environment metadata redacts raw `env` values
+in this visible schema while preserving key names; providers still receive the
+raw env only through the execution path.
 
 For application code, prefer `enable_*` helpers when the goal is to give the
 model a common capability such as Python, shell, or workspace access. Use
@@ -174,6 +176,26 @@ raw = agent.action.read_action_artifact(
 actions, so follow-up replies can reason about what happened without receiving
 the full payload by default.
 
+When a host explicitly calls `agent.get_action_result(prompt=...)`, Agently
+marks that prompt as having consumed the action loop even if the returned record
+list is empty. A later response read for the same prompt will not re-enter
+ActionRuntime just to materialize final text.
+
+Use `agent.action.summarize_records(records)` when host code needs an
+authoritative action-evidence summary:
+
+```python
+summary = agent.action.summarize_records(
+    records,
+    validation_command_markers=["pytest", "pyright"],
+)
+
+assert summary["latest_validation"]["status"] in {"passed", "failed"}
+```
+
+The summary reports failed actions, commands attempted, successful commands,
+and the latest matching validation command.
+
 ## Compatibility surface — tools
 
 The older surface still works:
@@ -215,6 +237,16 @@ This applies to the default structured-plan and native tool-call planning
 paths. It is especially important when a higher-level runtime such as
 SkillsExecutor or AgentTaskLoop delegates a bounded action round to
 ActionRuntime.
+
+`agent.get_action_result(..., timeout=N)` bounds the full action loop,
+including structured planning and native tool-call selection. If the loop
+cannot finish before the deadline, Agently raises `RuntimeStageStallError` with
+`stage="action_loop_close"`.
+
+When `planning_protocol="native_tool_calls"` returns no provider-native tool
+calls, Agently emits a skipped diagnostic action record with code
+`action_runtime.native_tool_calls.empty`. Host code should treat that diagnostic
+as planning evidence, not as executed work.
 
 ## Handler interface
 

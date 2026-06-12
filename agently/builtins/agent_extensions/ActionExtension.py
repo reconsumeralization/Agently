@@ -797,10 +797,11 @@ class ActionExtension(BaseAgent):
             timeout=timeout,
             planning_protocol=planning_protocol,
         )
-        if store_for_reply and len(records) > 0:
+        if store_for_reply:
             action_results = self.action.to_action_results(records)
             target_prompt.set("action_results", action_results)
-            target_prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
+            if len(records) > 0:
+                target_prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
             self.__action_logs = records
             self.__prepared_action_results = action_results
         return records
@@ -919,7 +920,8 @@ class ActionExtension(BaseAgent):
                 self.__prepared_action_results = None
             else:
                 self.__action_logs = []
-            if prompt.get("extra_instruction", default=missing) is missing:
+            has_action_results = bool(existing_action_results)
+            if has_action_results and prompt.get("extra_instruction", default=missing) is missing:
                 prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
             return
 
