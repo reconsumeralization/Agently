@@ -5,7 +5,7 @@
 1. [Coding Agents](coding-agents.md)：用 Agently-Skills companion repo 帮 Codex、Claude Code、Cursor 等工具获得当前 Agently 指引。
 2. [Skills Executor](skills-executor.md)：框架内通过 Agent API、plan 和 Actions 消费 runtime skills。
 3. [Agently 4.1.3.6 Release Notes](release-notes-4.1.3.6.md)：AgentExecution ownership、Result-first 消费、stream-end hardening 和 bounded task-loop slice。
-4. [Agently 4.1.3.5 Release Notes](release-notes-4.1.3.5.md)：settings-owned 输出默认值、有意义必填值、AgentTurn prompt 隔离和 `set_turn_prompt(...)`。
+4. [Agently 4.1.3.5 Release Notes](release-notes-4.1.3.5.md)：4.1.3.5 的历史 release note，记录 settings-owned 输出默认值和 prompt 隔离工作；当前合同已由 AgentExecution draft 模型承接。
 5. [Agently 4.1.3.4 Release Notes](release-notes-4.1.3.4.md)：结构化输出解析加固、请求重试、运行时能力策略和 AgentTaskLoop first public slice。
 6. [Agently 4.1.3.3 Release Notes](release-notes-4.1.3.3.md)：typed settings/options、model profiles、API key pool failover、runtime handler ownership、core package refactors 和 image input。
 7. [Agently 4.1.3.2 Release Notes](release-notes-4.1.3.2.md)：bounded AgentExecution task steps、Workspace-backed step context、runtime stall control 和 EventCenter RuntimeEvent delivery。

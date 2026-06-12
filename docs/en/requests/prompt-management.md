@@ -53,7 +53,7 @@ result = (
 | Agent definition (persists for every future execution) | `.define(...)`, `.role(..., always=True)`, `.info(..., always=True)`, `.set_agent_prompt(key, value)` |
 | AgentExecution draft (one execution only) | `.input(...)`, `.output(...)`, `.set_execution_prompt(key, value)` |
 
-The slot you set last wins for that scope, so you can override agent defaults in one execution without mutating the agent. `set_turn_prompt(...)` and `set_request_prompt(...)` remain compatibility aliases for execution-local prompt writes.
+The slot you set last wins for that scope, so you can override agent defaults in one execution without mutating the agent.
 
 ## YAML / JSON prompt files
 
@@ -95,7 +95,8 @@ result = (
 
 `load_json_prompt(...)` is the same API for JSON. Both accept either a path or a raw string body. Pick one config file per prompt or stack multiple prompts with `prompt_key_path="demo.output_control"` to select inside a multi-prompt file.
 
-Prompt config uses `.execution` for one execution. `.turn` and `.request` remain compatibility aliases for older prompt files.
+Prompt config uses `.execution` for one execution. Turn/request-scoped prompt
+config aliases are removed; update older prompt files to `.execution`.
 
 `$ensure_all_keys: true` at the top makes all leaves required regardless of per-leaf `$ensure`. Use it when the entire schema must come back complete.
 

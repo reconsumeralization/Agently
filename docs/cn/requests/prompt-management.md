@@ -53,7 +53,7 @@ result = (
 | Agent definition（每次 execution 都生效） | `.define(...)`、`.role(..., always=True)`、`.info(..., always=True)`、`.set_agent_prompt(key, value)` |
 | AgentExecution draft（仅一次 execution 生效） | `.input(...)`、`.output(...)`、`.set_execution_prompt(key, value)` |
 
-同一作用域内最后一次设置覆盖前面，所以可以在单个 execution 里覆盖 agent 默认值，而不修改 agent。`set_turn_prompt(...)` 和 `set_request_prompt(...)` 保持为 execution-local prompt 写入的兼容别名。
+同一作用域内最后一次设置覆盖前面，所以可以在单个 execution 里覆盖 agent 默认值，而不修改 agent。
 
 ## YAML / JSON prompt 文件
 
@@ -95,7 +95,8 @@ result = (
 
 `load_json_prompt(...)` 是 JSON 版本的同一 API。两者都接受路径或原始字符串。可以一份配置一个 prompt，也可以用 `prompt_key_path="demo.output_control"` 在多 prompt 文件里挑一个。
 
-Prompt 配置使用 `.execution` 表示单次 execution。`.turn` 和 `.request` 继续作为旧 prompt 文件的兼容 alias。
+Prompt 配置使用 `.execution` 表示单次 execution。turn/request-scoped prompt
+config alias 已移除；旧 prompt 文件应改成 `.execution`。
 
 顶层 `$ensure_all_keys: true` 会强制所有叶子都必填，覆盖每叶子的 `$ensure`。整个 schema 必须完整返回时使用。
 

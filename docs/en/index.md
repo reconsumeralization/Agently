@@ -81,6 +81,7 @@ This handbook is organized as a learning path. If you have not run a single requ
 9. **Architecture and reference**
    - [Extension Boundaries](architecture/extension-boundaries.md)
    - [Capability Map](reference/capability-map.md)
+   - [Execution Layer Selection](reference/execution-layer-selection.md)
    - [Glossary](reference/glossary.md)
 
 ## Community
