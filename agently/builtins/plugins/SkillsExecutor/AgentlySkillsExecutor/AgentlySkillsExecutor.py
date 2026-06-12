@@ -17,12 +17,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
+from agently.types.data import SkillContextPack, SkillContextPackIncludeMode, SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
 from agently.types.options import SkillsRouteOptions
 from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
 from agently.utils import DeprecationWarnings, Settings
 
 from .modules.effort_strategies import BUILTIN_EFFORT_STRATEGY_NAMES
+from .modules.context_pack import SkillContextPackBuilder
 from .modules.executor import SkillExecutor
 from .modules.planner import SkillPlanner
 from .modules.registry import SkillRegistry
@@ -149,6 +150,86 @@ class AgentlySkillsExecutor(SkillsExecutor):
 
     def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 262144) -> str:
         return self.registry.read_resource(skill_id, path, max_bytes=max_bytes)
+
+    def build_context_pack(
+        self,
+        *,
+        context: Any = None,
+        task: str | None = None,
+        intent: str | None = None,
+        skill_ids: list[str] | tuple[str, ...] | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        include_guidance: bool = True,
+        include_examples: SkillContextPackIncludeMode = "auto",
+        include_references: SkillContextPackIncludeMode = "auto",
+        include_assets: SkillContextPackIncludeMode = False,
+        include_public_lookup: bool = False,
+        actionize_scripts: bool = False,
+        budget_chars: int = 12000,
+        max_resource_chars: int = 6000,
+    ) -> SkillContextPack:
+        from agently.utils import FunctionShifter
+
+        return FunctionShifter.syncify(self.async_build_context_pack)(
+            context=context,
+            task=task,
+            intent=intent,
+            skill_ids=skill_ids,
+            skills=skills,
+            skills_packs=skills_packs,
+            include_guidance=include_guidance,
+            include_examples=include_examples,
+            include_references=include_references,
+            include_assets=include_assets,
+            include_public_lookup=include_public_lookup,
+            actionize_scripts=actionize_scripts,
+            budget_chars=budget_chars,
+            max_resource_chars=max_resource_chars,
+        )
+
+    async def async_build_context_pack(
+        self,
+        *,
+        context: Any = None,
+        task: str | None = None,
+        intent: str | None = None,
+        skill_ids: list[str] | tuple[str, ...] | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        include_guidance: bool = True,
+        include_examples: SkillContextPackIncludeMode = "auto",
+        include_references: SkillContextPackIncludeMode = "auto",
+        include_assets: SkillContextPackIncludeMode = False,
+        include_public_lookup: bool = False,
+        actionize_scripts: bool = False,
+        budget_chars: int = 12000,
+        max_resource_chars: int = 6000,
+    ) -> SkillContextPack:
+        return await SkillContextPackBuilder(self.registry).async_build(
+            context=context,
+            task=task,
+            intent=intent,
+            skill_ids=skill_ids,
+            skills=skills,
+            skills_packs=skills_packs,
+            include_guidance=include_guidance,
+            include_examples=include_examples,
+            include_references=include_references,
+            include_assets=include_assets,
+            include_public_lookup=include_public_lookup,
+            actionize_scripts=actionize_scripts,
+            budget_chars=budget_chars,
+            max_resource_chars=max_resource_chars,
+        )
+
+    def task_dag_resolver(
+        self,
+        *,
+        context: Any = None,
+        defaults: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return SkillContextPackBuilder(self.registry).task_dag_resolver(context=context, defaults=defaults)
 
     # ── Runtime strategy extension ────────────────────────────────────────
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agently.core import BaseAgent
-from agently.types.data import SkillContract, SkillExecutionPlan, SkillMode, SkillRuntimeStreamHandler
+from agently.types.data import SkillContextPack, SkillContextPackIncludeMode, SkillContract, SkillExecutionPlan, SkillMode, SkillRuntimeStreamHandler
 from agently.types.plugins import SkillsExecutor
 from agently.utils import DeprecationWarnings, FunctionShifter
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
@@ -225,6 +225,86 @@ class SkillsExtension(BaseAgent):
             output=output,
             semantic_outputs=semantic_outputs,
             output_format=output_format,
+        )
+
+    async def async_build_skills_context_pack(
+        self,
+        task: str | None = None,
+        *,
+        intent: str | None = None,
+        skill_ids: list[str] | tuple[str, ...] | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        include_guidance: bool = True,
+        include_examples: SkillContextPackIncludeMode = "auto",
+        include_references: SkillContextPackIncludeMode = "auto",
+        include_assets: SkillContextPackIncludeMode = False,
+        include_public_lookup: bool = False,
+        actionize_scripts: bool = False,
+        budget_chars: int = 12000,
+        max_resource_chars: int = 6000,
+    ) -> SkillContextPack:
+        prompt_defaults = self._dynamic_task_prompt_defaults(task)
+        resolved_task = task if task is not None and prompt_defaults["target"] is None else prompt_defaults["target"]
+        selectors = self._collect_skill_selectors(skills=skills, mode="model_decision")
+        required_selectors = self._collect_skill_selectors(skills=None, mode="required")
+        selectors.extend(required_selectors)
+        skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=skills_packs, mode="model_decision")
+        skills_pack_selectors.extend(self._collect_skills_pack_selectors(skills_packs=None, mode="required"))
+        context = create_agent_skills_runtime_context(
+            self,
+            resource_reader=lambda sid, path, mb: self.skills_executor.read_resource(
+                sid, path, max_bytes=mb
+            ),
+        )
+        return await self.skills_executor.async_build_context_pack(
+            context=context,
+            task=str(resolved_task or ""),
+            intent=intent,
+            skill_ids=skill_ids,
+            skills=selectors,
+            skills_packs=skills_pack_selectors,
+            include_guidance=include_guidance,
+            include_examples=include_examples,
+            include_references=include_references,
+            include_assets=include_assets,
+            include_public_lookup=include_public_lookup,
+            actionize_scripts=actionize_scripts,
+            budget_chars=budget_chars,
+            max_resource_chars=max_resource_chars,
+        )
+
+    def build_skills_context_pack(
+        self,
+        task: str | None = None,
+        *,
+        intent: str | None = None,
+        skill_ids: list[str] | tuple[str, ...] | None = None,
+        skills: Any = None,
+        skills_packs: Any = None,
+        include_guidance: bool = True,
+        include_examples: SkillContextPackIncludeMode = "auto",
+        include_references: SkillContextPackIncludeMode = "auto",
+        include_assets: SkillContextPackIncludeMode = False,
+        include_public_lookup: bool = False,
+        actionize_scripts: bool = False,
+        budget_chars: int = 12000,
+        max_resource_chars: int = 6000,
+    ) -> SkillContextPack:
+        return FunctionShifter.syncify(self.async_build_skills_context_pack)(
+            task,
+            intent=intent,
+            skill_ids=skill_ids,
+            skills=skills,
+            skills_packs=skills_packs,
+            include_guidance=include_guidance,
+            include_examples=include_examples,
+            include_references=include_references,
+            include_assets=include_assets,
+            include_public_lookup=include_public_lookup,
+            actionize_scripts=actionize_scripts,
+            budget_chars=budget_chars,
+            max_resource_chars=max_resource_chars,
         )
 
     async def async_run_skills_task(

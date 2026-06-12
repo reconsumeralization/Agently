@@ -69,6 +69,7 @@
       "authoring_format": "standard SKILL.md only",
       "runtime_capability_contract": {
         "skill_capability_needs": "SkillsExecutor records selected Skill capability needs in SkillExecutionPlan.capability_needs from SKILL.md guidance, resource indexes, public compatibility, public metadata, and optional model-assisted inference.",
+        "skill_context_pack_contract": "SkillsExecutor exposes build_context_pack(...), async_build_context_pack(...), and task_dag_resolver() for custom planners and TaskDAG skill nodes. The agently.skills.context_pack.v1 payload includes SKILL.md guidance excerpts, task-relevant references/examples/assets, citations, diagnostics, fail-closed public lookup, and policy-gated script Action candidates without executing bundled scripts.",
         "model_assisted_discovery_setting": "skills.capability_discovery.model_assisted",
         "host_policy_surface": "agent.configure_skill_capabilities(auto_load={...}, workspace_root=..., mcp_config=..., python=..., search=...) plus agent.configure_policy_approval(handler=...)",
         "search_provider": "Framework Search uses the ddgs package by default, keeps backend configurable through host policy, supports host-approved ddgs refresh before search runs, treats no-result search as a successful empty result, and falls back through configured/default ddgs backends when a selected backend returns no usable parsed result.",

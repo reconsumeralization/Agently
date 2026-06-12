@@ -24,6 +24,8 @@ SkillExecutionStatus = Literal["created", "running", "success", "no_match", "blo
 ExecutionStrategy = Literal["single_shot", "staged", "react"]
 SkillRuntimeStreamItem = dict[str, Any]
 SkillRuntimeStreamHandler = Callable[[SkillRuntimeStreamItem], Awaitable[None] | None]
+SkillContextPackIntent = Literal["auto", "generate_code", "research", "plan", "execute", "verify", "document"]
+SkillContextPackIncludeMode = bool | Literal["auto"]
 
 
 class SkillCard(TypedDict, total=False):
@@ -120,6 +122,43 @@ class SkillCapabilityNeed(TypedDict, total=False):
     confidence: float
     resource_path: str
     capability_config: dict[str, Any]
+
+
+class SkillContextPackResource(TypedDict, total=False):
+    skill_id: str
+    path: str
+    kind: str
+    content: str
+    summary: str
+    reason: str
+    sha256: str
+    size: int
+    score: float
+    truncated: bool
+    citation: str
+
+
+class SkillContextPackSkill(TypedDict, total=False):
+    skill_id: str
+    display_name: str
+    source: dict[str, Any]
+    guidance: dict[str, Any]
+    selected_resources: list[SkillContextPackResource]
+    resource_index: dict[str, Any]
+    action_candidates: list[dict[str, Any]]
+
+
+class SkillContextPack(TypedDict, total=False):
+    schema_version: str
+    task: str
+    intent: str
+    budget_chars: int
+    used_chars: int
+    truncated: bool
+    skills: list[SkillContextPackSkill]
+    public_sources: list[dict[str, Any]]
+    citations: list[str]
+    diagnostics: list[dict[str, Any]]
 
 
 class SkillExecutionPlan(TypedDict, total=False):

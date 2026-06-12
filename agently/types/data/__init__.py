@@ -158,6 +158,11 @@ from .policy_approval import (
 
 from .skill import (
     ExecutionStrategy,
+    SkillContextPack,
+    SkillContextPackIncludeMode,
+    SkillContextPackIntent,
+    SkillContextPackResource,
+    SkillContextPackSkill,
     SkillCapabilityNeed,
     SkillCard,
     SkillContract,

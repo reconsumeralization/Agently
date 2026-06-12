@@ -11,7 +11,7 @@ from agently import Agently
 from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import create_agent_skills_runtime_context
 from agently.core.application.AgentExecution import AgentExecutionStream
 from agently.builtins.plugins.SkillsExecutor import SkillInstallError, SkillNormalizationError
-from agently.core import PluginManager
+from agently.core import PluginManager, TaskDAGExecutor
 from agently.types.data import AgentlyRequestData
 from agently.utils import Settings
 
@@ -382,6 +382,155 @@ def test_discover_skills_pack_does_not_install_full_skill(tmp_path):
     assert report["status"] == "success"
     assert report["contracts"][0]["skill_id"] == "docx-skill"
     assert Agently.skills_executor.list_skills() == []
+
+
+def test_build_context_pack_includes_task_relevant_examples_references_and_citations(tmp_path):
+    source = tmp_path / "source"
+    _skill(
+        source,
+        name="Model Setup Skill",
+        description="Generate Agently provider setup code.",
+        body="Read the reference and use the runnable example before producing setup code.",
+    )
+    _write(
+        source / "references" / "provider-setup.md",
+        "Use Agently.set_settings for provider model keys and keep API keys in environment variables.\n",
+    )
+    _write(
+        source / "examples" / "model-setup-minimal.py",
+        "from agently import Agently\nAgently.set_settings('model.OpenAICompatible.model', 'deepseek-chat')\n",
+    )
+    contract = Agently.skills_executor.install_skills(source)
+
+    pack = Agently.skills_executor.build_context_pack(
+        task="Generate Python provider setup code for DeepSeek.",
+        intent="generate_code",
+        skill_ids=[str(contract["skill_id"])],
+        include_examples="auto",
+        include_references=True,
+        budget_chars=8000,
+    )
+
+    assert pack["schema_version"] == "agently.skills.context_pack.v1"
+    assert pack["skills"][0]["guidance"]["citation"] == "skills/model-setup-skill/SKILL.md"
+    resources = pack["skills"][0]["selected_resources"]
+    paths = {item["path"] for item in resources}
+    assert "examples/model-setup-minimal.py" in paths
+    assert "references/provider-setup.md" in paths
+    assert any("Agently.set_settings" in item["content"] for item in resources)
+    assert "skills/model-setup-skill/examples/model-setup-minimal.py" in pack["citations"]
+    assert "skills/model-setup-skill/references/provider-setup.md" in pack["citations"]
+
+
+def test_build_context_pack_fails_closed_for_public_lookup_without_context(tmp_path):
+    source = tmp_path / "source"
+    _skill(source, name="Lookup Skill", description="Uses public lookup.")
+    contract = Agently.skills_executor.install_skills(source)
+
+    pack = Agently.skills_executor.build_context_pack(
+        task="Refresh public facts before drafting.",
+        skill_ids=[str(contract["skill_id"])],
+        include_public_lookup=True,
+    )
+
+    assert pack["public_sources"] == []
+    assert any(
+        item["code"] == "skill_context_pack.public_lookup_context_missing"
+        for item in pack["diagnostics"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_build_skills_context_pack_actionizes_scripts_only_when_allowed(monkeypatch, tmp_path):
+    source = tmp_path / "source"
+    _skill(
+        source,
+        name="Script Skill",
+        description="Uses a bundled helper.",
+        body="Run scripts/helper.sh only when the host policy allows script execution.",
+    )
+    _write(source / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(auto_load={"script_run": "allow"})
+    enable_calls: list[dict[str, Any]] = []
+    executed = False
+
+    def fake_enable_shell(**kwargs):
+        nonlocal executed
+        enable_calls.append(dict(kwargs))
+
+        def fake_script_action(cmd):
+            nonlocal executed
+            executed = True
+            return {"cmd": cmd}
+
+        agent.action.register_action(
+            action_id=kwargs["action_id"],
+            desc="Run a bundled Skill script.",
+            kwargs={"cmd": (list, "Command.")},
+            func=fake_script_action,
+            tags=[f"agent-{ agent.name }"],
+            expose_to_model=bool(kwargs.get("expose_to_model", True)),
+            side_effect_level="exec",
+        )
+        return agent
+
+    monkeypatch.setattr(agent, "enable_shell", fake_enable_shell)
+
+    pack = await agent.async_build_skills_context_pack(
+        "Run the helper if useful.",
+        skill_ids=["script-skill"],
+        actionize_scripts=True,
+    )
+
+    skills = cast(list[dict[str, Any]], pack.get("skills", []))
+    candidates = cast(list[dict[str, Any]], skills[0].get("action_candidates", []))
+    assert candidates[0]["action_id"] == "run_script_skill_script"
+    assert candidates[0]["source_path"] == "scripts/helper.sh"
+    assert agent.action.action_registry.has("run_script_skill_script")
+    assert enable_calls[0]["root"] == Path(Agently.skills_executor.inspect_skills("script-skill")["source"]["installed_path"])
+    assert "scripts/helper.sh" in enable_calls[0]["commands"]
+    assert executed is False
+
+
+@pytest.mark.asyncio
+async def test_skills_context_pack_task_dag_resolver_emits_pack_output(tmp_path):
+    source = tmp_path / "source"
+    _skill(
+        source,
+        name="DAG Skill",
+        description="Feeds TaskDAG context.",
+        body="Use the example when generating setup code.",
+    )
+    _write(source / "examples" / "setup.py", "from agently import Agently\n")
+    contract = Agently.skills_executor.install_skills(source)
+    graph = {
+        "graph_id": "skills-context-pack-dag",
+        "task_schema_version": "task_dag/v1",
+        "tasks": [
+            {
+                "id": "pack",
+                "kind": "skill",
+                "inputs": {
+                    "task": "Generate setup code.",
+                    "skill_ids": [str(contract["skill_id"])],
+                    "intent": "generate_code",
+                    "include_examples": True,
+                },
+            }
+        ],
+        "semantic_outputs": {"pack": "pack"},
+    }
+
+    snapshot = await TaskDAGExecutor(
+        Agently.skills_executor.task_dag_resolver()
+    ).async_run(graph, timeout=1)
+
+    result = snapshot["task_results"]["pack"]
+    assert result["schema_version"] == "agently.skills.context_pack.v1"
+    assert result["skills"][0]["skill_id"] == "dag-skill"
+    assert result["skills"][0]["selected_resources"][0]["path"] == "examples/setup.py"
+    assert snapshot["semantic_outputs"]["pack"]["result"]["schema_version"] == "agently.skills.context_pack.v1"
 
 
 @pytest.mark.asyncio

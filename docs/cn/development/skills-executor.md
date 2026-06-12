@@ -335,6 +335,56 @@ Skills runtime 内部模型调用使用符号阶段 key：`planner`、`research`
 通过 Agent 自动编排选中 Skills route 时，模型字段流会桥接到稳定路径，例如
 `skills.model.fields.<field_path>`。
 
+## 面向 DAG 消费者的 Context Pack
+
+当自定义 planner、Dynamic Task 或 TaskDAG node 需要完整 Skill 上下文，但不需要强制
+进入完整 Skills execution route 时，可以构建 context pack。Context pack 会在
+`agently.skills.context_pack.v1` schema 下提供已选 Skill 的 `SKILL.md` 指导、
+和任务相关的 references、examples、可选 assets、resource index metadata、citations、
+diagnostics，以及受宿主 policy 控制的 action candidates。
+
+```python
+pack = await agent.async_build_skills_context_pack(
+    "Generate DeepSeek provider setup code.",
+    skills=["model-setup"],
+    intent="generate_code",
+    include_examples="auto",
+    include_references="auto",
+    budget_chars=12000,
+)
+```
+
+DAG-shaped execution 应复用 Skills Executor 的 resolver adapter，不需要创建新的
+scheduler：
+
+```python
+from agently.core import TaskDAGExecutor
+
+snapshot = await TaskDAGExecutor(
+    Agently.skills_executor.task_dag_resolver()
+).async_run({
+    "graph_id": "skill-context-demo",
+    "task_schema_version": "task_dag/v1",
+    "tasks": [
+        {
+            "id": "skill_context",
+            "kind": "skill",
+            "inputs": {
+                "task": "Generate provider setup code.",
+                "skill_ids": ["model-setup"],
+                "intent": "generate_code",
+            },
+        }
+    ],
+    "semantic_outputs": {"context": "skill_context"},
+})
+```
+
+`include_public_lookup=True` 和 `actionize_scripts=True` 仍然是显式开启的宿主
+policy 操作。公开检索需要 `web_search: "allow"`。脚本 Action 化需要
+`script_run: "allow"` 或通过 PolicyApproval；它只挂载 allowlisted shell Action
+candidate，不会执行脚本。
+
 安装 Skill 不会自动执行 bundled scripts 或资源。标准 Skill 如果在正文、资源、
 `compatibility` 或公开 `metadata` 里表达了 search、browse、HTTP、Workspace file、
 Python、shell/script 或 MCP 需求，Skills Executor 会在 plan 里记录结构化
@@ -430,6 +480,9 @@ Agently.skills_executor.configure(
 - `Agently.skills_executor.install_skills_pack(...)`
 - `Agently.skills_executor.configure(...)`
 - `Agently.skills_executor.inspect_skills(...)`
+- `Agently.skills_executor.build_context_pack(...)`
+- `Agently.skills_executor.task_dag_resolver(...)`
+- `agent.build_skills_context_pack(...)`
 - `agent.use_skills(...)`
 - `agent.use_skills_packs(...)`
 - `agent.resolve_skills_plan(...)`

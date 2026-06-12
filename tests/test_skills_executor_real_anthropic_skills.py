@@ -6,7 +6,7 @@ Two layers:
   the *structural* shapes observed in github.com/anthropics/skills — long quoted
   descriptions with backticks / arrows / em-dashes / escaped quotes, frontmatter
   with no `keywords` and no `version`, a `license` field, and resource trees that
-  mix standard (`scripts`/`references`/`assets`) with non-standard layout
+  mix standard (`scripts`/`references`/`examples`/`assets`) with non-standard layout
   (`reference/` singular, `agents/`, loose root `.md`). No proprietary skill text
   is copied into the repo.
 
@@ -35,7 +35,7 @@ _ALLOWED_CARD_KEYS = {
     "checksum",
 }
 _FORBIDDEN_CARD_KEYS = {"only_when", "exclude_when", "not_for", "required_context", "availability"}
-_STANDARD_RESOURCE_TOP = {"scripts", "references", "assets"}
+_STANDARD_RESOURCE_TOP = {"scripts", "references", "examples", "assets"}
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +118,7 @@ def test_resource_index_covers_standard_dirs_only_but_copies_full_tree(tmp_path)
     # Standard resource dirs (indexed):
     _write(source / "scripts" / "init.py", "print('hi')\n")
     _write(source / "references" / "patterns.md", "# patterns\n")
+    _write(source / "examples" / "minimal.py", "print('example')\n")
     _write(source / "assets" / "logo.txt", "logo\n")
     # Non-standard layout (copied, NOT indexed): singular `reference/`, `agents/`,
     # `eval-viewer/`, and loose root files.
@@ -135,9 +136,9 @@ def test_resource_index_covers_standard_dirs_only_but_copies_full_tree(tmp_path)
         assert (installed / rel).is_file(), f"expected copied: {rel}"
 
     resource_paths = {r["path"] for r in contract["resource_index"]["resources"]}
-    assert resource_paths == {"scripts/init.py", "references/patterns.md", "assets/logo.txt"}
+    assert resource_paths == {"scripts/init.py", "references/patterns.md", "examples/minimal.py", "assets/logo.txt"}
     assert {r["path"].split("/")[0] for r in contract["resource_index"]["resources"]} <= _STANDARD_RESOURCE_TOP
-    assert {r["kind"] for r in contract["resource_index"]["resources"]} == {"script", "reference", "asset"}
+    assert {r["kind"] for r in contract["resource_index"]["resources"]} == {"script", "reference", "example", "asset"}
     # Non-standard content stays out of the index.
     for stray in ("reference/legacy.md", "agents/helper.md", "eval-viewer/index.html", "forms.md", "LICENSE.txt"):
         assert stray not in resource_paths

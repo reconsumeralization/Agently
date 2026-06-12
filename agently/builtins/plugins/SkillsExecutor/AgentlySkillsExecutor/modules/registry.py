@@ -42,7 +42,7 @@ _ROOT_MANIFEST_NAMES = (
     "skill.yml",
     "skill.json",
 )
-_STANDARD_RESOURCE_DIRS = ("scripts", "references", "assets")
+_STANDARD_RESOURCE_DIRS = ("scripts", "references", "examples", "assets")
 _DECISION_CARD_FORBIDDEN_KEYS = {"only_when", "exclude_when", "not_for", "required_context", "availability"}
 
 
