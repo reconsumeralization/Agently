@@ -194,7 +194,10 @@ async def test_session_extension_finally_recording_with_keys():
     assert agent.activated_session is not None
 
     agent.system("base-system", always=True)
-    agent.set_settings("session.input_keys", ["city", ".agent.system", "input.code"])
+    agent.set_settings(
+        "session.input_keys",
+        ["city", ".agent.system", ".execution.input.code", ".request.input.code"],
+    )
     agent.set_settings("session.reply_keys", ["answer.text", "score"])
 
     prompt = agent.request_prompt
@@ -223,8 +226,9 @@ async def test_session_extension_finally_recording_with_keys():
     assert "Shanghai" in str(history[0].content)
     assert "[.agent.system]:" in str(history[0].content)
     assert "base-system" in str(history[0].content)
-    assert "[input.code]:" in str(history[0].content)
+    assert "[.execution.input.code]:" in str(history[0].content)
     assert "200" in str(history[0].content)
+    assert "[.request.input.code]:" not in str(history[0].content)
 
     assert history[1].role == "assistant"
     assert "[answer.text]:" in str(history[1].content)

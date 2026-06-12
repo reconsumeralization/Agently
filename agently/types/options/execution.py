@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import ConfigDict
 
@@ -31,7 +31,6 @@ class AgentExecutionRouteOptions(AgentlyConfigModel):
 
 
 class AgentExecutionLifecycleOptions(AgentlyConfigModel):
-    mode: Literal["one_turn", "task_step"] | str | None = None
     lineage: dict[str, Any] | None = None
     limits: dict[str, Any] | None = None
 

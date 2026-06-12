@@ -317,7 +317,7 @@ not json
 def test_prompt_config_aliases_accept_new_formats():
     agent = Agently.create_agent("structured-prompt-config-xml")
     yaml_prompt = """
-.request:
+.execution:
   output:
     $format: xml_field
     notes:
@@ -329,7 +329,7 @@ def test_prompt_config_aliases_accept_new_formats():
 
     agent = Agently.create_agent("structured-prompt-config-yaml")
     yaml_prompt = """
-.request:
+.execution:
   output:
     .output_format: yaml_literal
     notes:

@@ -84,45 +84,30 @@ def test_load_yaml_prompt_accepts_explicit_mappings_keyword():
     assert agent.request_prompt.get("input", inherit=False) == "Hello Alice"
 
 
-def test_agent_set_turn_prompt_matches_set_request_prompt():
+def test_removed_agent_turn_prompt_methods_are_not_available():
     agent = Agently.create_agent()
 
-    assert agent.set_turn_prompt("input", "from-turn") is agent
-    assert agent.request_prompt.get("input", inherit=False) == "from-turn"
-
-    assert agent.set_request_prompt("input", "from-request") is agent
-    assert agent.request_prompt.get("input", inherit=False) == "from-request"
+    assert not hasattr(agent, "set_turn_prompt")
+    assert not hasattr(agent, "set_request_prompt")
+    assert not hasattr(agent, "create_turn")
 
 
-def test_agent_turn_set_turn_prompt_matches_set_request_prompt():
+def test_agent_execution_set_execution_prompt_updates_local_prompt():
     agent = Agently.create_agent()
-    turn = agent.create_turn()
+    execution = agent.create_execution()
 
-    assert turn.set_turn_prompt("input", "turn-local") is turn
-    assert turn.request_prompt.get("input", inherit=False) == "turn-local"
-    assert agent.request_prompt.get("input", inherit=False) is None
-
-    assert turn.set_request_prompt("input", "compat") is turn
-    assert turn.request_prompt.get("input", inherit=False) == "compat"
-
-
-def test_agent_set_turn_prompt_is_transferred_to_create_turn():
-    agent = Agently.create_agent()
-
-    agent.set_turn_prompt("input", "pending-turn")
-    turn = agent.create_turn()
-
-    assert turn.request_prompt.get("input", inherit=False) == "pending-turn"
+    assert execution.set_execution_prompt("input", "execution-local") is execution
+    assert execution.request_prompt.get("input", inherit=False) == "execution-local"
     assert agent.request_prompt.get("input", inherit=False) is None
 
 
-def test_load_yaml_prompt_accepts_turn_scope_and_set_turn_prompt_alias():
+def test_load_yaml_prompt_accepts_execution_scope_and_set_execution_prompt_alias():
     agent = Agently.create_agent()
     yaml_prompt = """
-.turn:
+.execution:
   input: "Hello ${name}"
 .alias:
-  set_turn_prompt:
+  set_execution_prompt:
     .args:
       - instruct
       - Reply briefly.
@@ -197,7 +182,7 @@ def test_load_yaml_prompt_rejects_positional_mappings():
 def test_load_yaml_prompt_output_accepts_format_metadata():
     agent = Agently.create_agent()
     yaml_prompt = """
-.request:
+.execution:
   output:
     $format: flat_markdown
     reply:
@@ -219,7 +204,7 @@ def test_load_json_prompt_output_accepts_output_format_metadata():
     agent = Agently.create_agent()
     json_prompt = json.dumps(
         {
-            ".request": {
+            ".execution": {
                 "output": {
                     "$output_format": "hybrid",
                     "summary": {"$type": "str", "$ensure": True},
@@ -257,7 +242,7 @@ $output:
 def test_output_format_metadata_supports_mappings():
     agent = Agently.create_agent()
     yaml_prompt = """
-.request:
+.execution:
   output:
     $format: ${format_name}
     html:
@@ -268,3 +253,13 @@ def test_output_format_metadata_supports_mappings():
     agent.load_yaml_prompt(yaml_prompt, mappings={"format_name": "flat_markdown"})
 
     assert agent.request_prompt.get("output_format", inherit=False) == "flat_markdown"
+
+
+def test_load_prompt_rejects_removed_request_and_turn_scopes():
+    agent = Agently.create_agent()
+
+    with pytest.raises(ValueError, match=r"use \.execution instead"):
+        agent.load_yaml_prompt(".request:\n  input: removed\n")
+
+    with pytest.raises(ValueError, match=r"use \.execution instead"):
+        agent.load_json_prompt(json.dumps({".turn": {"input": "removed"}}))

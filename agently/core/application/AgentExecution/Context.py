@@ -20,7 +20,6 @@ from typing import Any, cast
 from agently.types.data import (
     AgentExecutionLineage,
     AgentExecutionLimits,
-    AgentExecutionMode,
 )
 from agently.utils import DataFormatter
 
@@ -97,15 +96,6 @@ class RuntimeStageStallError(TimeoutError):
         }
 
 
-def normalize_execution_mode(value: str | None = None) -> AgentExecutionMode:
-    normalized = str(value or "one_turn").strip()
-    if normalized == "turn":
-        normalized = "one_turn"
-    if normalized not in {"one_turn", "task_step"}:
-        raise ValueError("AgentExecution mode must be one of: 'one_turn', 'task_step'.")
-    return normalized  # type: ignore[return-value]
-
-
 def normalize_execution_lineage(value: AgentExecutionLineage | dict[str, Any] | None = None) -> AgentExecutionLineage:
     source = dict(value or {})
     scope = source.get("scope")
@@ -120,18 +110,16 @@ def normalize_execution_lineage(value: AgentExecutionLineage | dict[str, Any] | 
 
 def normalize_execution_limits(
     value: AgentExecutionLimits | dict[str, Any] | None = None,
-    *,
-    mode: AgentExecutionMode,
 ) -> AgentExecutionLimits:
     source = dict(value or {})
     return {
-        "allow_create_task": _bool(source.get("allow_create_task"), default=(mode == "one_turn")),
+        "allow_create_task": _bool(source.get("allow_create_task"), default=True),
         "max_model_requests": _normalize_limit_value(
-            source.get("max_model_requests", None if mode == "one_turn" else 1),
+            source.get("max_model_requests"),
             key="max_model_requests",
         ),
         "max_nested_agent_steps": _normalize_limit_value(
-            source.get("max_nested_agent_steps", None if mode == "one_turn" else 0),
+            source.get("max_nested_agent_steps"),
             key="max_nested_agent_steps",
         ),
         "max_seconds": _normalize_seconds_limit(source.get("max_seconds"), key="max_seconds"),
@@ -146,12 +134,10 @@ def merge_stream_meta(
     meta: dict[str, Any] | None,
     *,
     execution_id: str,
-    mode: AgentExecutionMode,
     lineage: AgentExecutionLineage,
 ) -> dict[str, Any]:
     merged = dict(meta or {})
     merged.setdefault("execution_id", execution_id)
-    merged.setdefault("execution_mode", mode)
     merged.setdefault("lineage", dict(lineage))
     return DataFormatter.sanitize(merged)
 
@@ -163,12 +149,10 @@ class AgentExecutionContext:
         self,
         *,
         execution_id: str,
-        mode: AgentExecutionMode,
         lineage: AgentExecutionLineage | dict[str, Any],
         limits: AgentExecutionLimits | dict[str, Any],
     ):
         self.execution_id = execution_id
-        self.mode = mode
         self.lineage = cast(AgentExecutionLineage, dict(lineage))
         self.limits = cast(AgentExecutionLimits, dict(limits))
         self.model_request_count = 0

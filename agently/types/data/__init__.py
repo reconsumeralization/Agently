@@ -195,7 +195,6 @@ from .agent_execution import (
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
-    AgentExecutionMode,
     AgentExecutionStatus,
     AgentExecutionStreamMeta,
     AgentExecutionWorkspaceRecord,

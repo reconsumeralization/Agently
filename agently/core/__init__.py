@@ -15,7 +15,6 @@
 from agently.types.data import TaskDAG, TaskDAGNode
 
 from .Agent import BaseAgent
-from .AgentTurn import AgentTurn
 from .application import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
@@ -92,7 +91,6 @@ __all__ = [
     "AgentExecutionResult",
     "AgentExecutionStream",
     "AgentTask",
-    "AgentTurn",
     "AttemptRunner",
     "BaseAgent",
     "CompiledTaskDAG",

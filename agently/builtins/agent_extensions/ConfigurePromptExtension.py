@@ -158,6 +158,15 @@ class ConfigurePromptExtension(BaseAgent):
         self.request_prompt.set(key, value, mappings=mappings)
         return self
 
+    def set_execution_prompt(
+        self,
+        key: str,
+        value: Any,
+        *,
+        mappings: dict[str, Any] | None = None,
+    ):
+        return self._set_pending_execution_prompt(key, value, mappings=mappings)
+
     def _apply_execution_prompt_config(self, prompt_value: Any, variable_mappings: dict[str, Any] | None):
         if isinstance(prompt_value, dict):
             for request_prompt_key, request_prompt_value in prompt_value.items():
@@ -192,8 +201,10 @@ class ConfigurePromptExtension(BaseAgent):
                             prompt_value,
                             mappings=variable_mappings,
                         )
-                case ".execution" | ".request" | ".turn":
+                case ".execution":
                     self._apply_execution_prompt_config(prompt_value, variable_mappings)
+                case ".request" | ".turn":
+                    raise ValueError("Prompt config .request and .turn are removed; use .execution instead.")
                 case ".alias":
                     if isinstance(prompt_value, dict):
                         for alias_name, alias_parameters in prompt_value.items():

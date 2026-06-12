@@ -75,7 +75,6 @@ def record_error_diagnostic(owner: "AgentExecution", error: BaseException):
 def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
     return {
         "execution_id": owner.id,
-        "execution_mode": owner.mode,
         "status": owner.status,
         "strategy": owner.strategy_name,
         "goals": DataFormatter.sanitize(owner.goal_items),

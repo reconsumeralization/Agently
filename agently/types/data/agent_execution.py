@@ -20,7 +20,6 @@ from typing_extensions import TypedDict
 from .workspace import WorkspaceRecordRef
 
 
-AgentExecutionMode: TypeAlias = Literal["one_turn", "task_step"]
 AgentExecutionStatus: TypeAlias = Literal["created", "running", "success", "blocked", "error", "cancelled"] | str
 
 
@@ -56,6 +55,7 @@ class AgentExecutionDiagnostics(TypedDict):
     timeouts: list[dict[str, Any]]
     stages: dict[str, Any]
     last_progress: dict[str, Any]
+    required_capabilities: list[dict[str, Any]]
 
 
 class AgentExecutionRouteInfo(TypedDict):
@@ -79,13 +79,13 @@ class AgentExecutionActionLog(TypedDict, total=False):
 
 class AgentExecutionMeta(TypedDict):
     execution_id: str
-    execution_mode: AgentExecutionMode
     status: AgentExecutionStatus
     strategy: str | None
     goals: list[str]
     success_criteria: list[str]
     generated_success_criteria: list[str]
     task_refs: dict[str, Any]
+    iterations: list[dict[str, Any]]
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
     options: dict[str, Any]
@@ -101,7 +101,6 @@ class AgentExecutionMeta(TypedDict):
 
 class AgentExecutionStreamMeta(TypedDict, total=False):
     execution_id: str
-    execution_mode: AgentExecutionMode
     lineage: AgentExecutionLineage
 
 

@@ -275,7 +275,6 @@ async def test_agent_execution_max_no_progress_seconds_raises_typed_stall():
 async def test_agent_execution_stream_keeps_delta_events_raw():
     stream = AgentExecutionStream(
         execution_id="exec-output-policy",
-        execution_mode="task_step",
         lineage={"task_id": "issue-intake", "step_id": "collect"},
     )
 
@@ -320,10 +319,7 @@ async def test_agent_execution_stream_keeps_delta_events_raw():
 
 @pytest.mark.asyncio
 async def test_agent_execution_stream_default_delta_path_remains_uncoalesced():
-    stream = AgentExecutionStream(
-        execution_id="exec-output-default",
-        execution_mode="one_turn",
-    )
+    stream = AgentExecutionStream(execution_id="exec-output-default")
 
     await stream.emit("model.text", "A", delta="A", event_type="delta", is_complete=False)
     await stream.emit("model.text", "AB", delta="B", event_type="delta", is_complete=False)
@@ -409,7 +405,6 @@ async def test_action_runtime_planning_handler_timeout_is_typed_stage_stall():
     runtime = agent.action.action_runtime
     context = AgentExecutionContext(
         execution_id="action-runtime-stall",
-        mode="task_step",
         lineage={"task_id": "issue-intake", "step_id": "plan"},
         limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 0.001},
     )
@@ -439,7 +434,6 @@ async def test_action_runtime_structured_planning_timeout_is_typed_stage_stall()
     runtime = agent.action.action_runtime
     context = AgentExecutionContext(
         execution_id="action-runtime-structured-stall",
-        mode="task_step",
         lineage={"task_id": "issue-intake", "step_id": "plan"},
         limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 0.001},
     )
@@ -464,7 +458,6 @@ async def test_action_flow_close_timeout_is_typed_stage_stall():
     flow = TriggerFlowActionFlow(plugin_manager=Agently.plugin_manager, settings=Agently.settings)
     context = AgentExecutionContext(
         execution_id="action-flow-close-stall",
-        mode="task_step",
         lineage={"task_id": "issue-intake", "step_id": "execute"},
         limits={"max_model_requests": None, "max_nested_agent_steps": 0},
     )

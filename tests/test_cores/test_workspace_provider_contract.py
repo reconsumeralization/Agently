@@ -871,7 +871,6 @@ async def test_remote_audit_workspace_backend_proves_provider_contract_across_co
         .input("prove provider")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
-            mode="task_step",
             lineage={"task_id": "remote-provider-task", "step_id": "record"},
             limits={"max_model_requests": 1},
         )

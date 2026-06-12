@@ -692,7 +692,7 @@ async def test_dynamic_task_default_structured_contract_overrides_planner_flat_m
 def test_agent_create_dynamic_task_consumes_prompt_snapshot_for_target_and_output_contract():
     agent = Agently.create_agent("dynamic-task-prompt-agent")
     agent.set_agent_prompt("info", {"customer": "Acme"})
-    agent.set_request_prompt("instruct", "Focus on renewal risk.")
+    agent.set_execution_prompt("instruct", "Focus on renewal risk.")
     task = (
         agent
         .input({"account": "Acme", "ticket": "T-42"})

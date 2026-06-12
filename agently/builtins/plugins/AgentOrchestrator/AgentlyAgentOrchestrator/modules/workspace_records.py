@@ -51,7 +51,6 @@ async def record_workspace(
     record_source = workspace_source(owner, source)
     record_meta = {
         "execution_id": owner.id,
-        "execution_mode": owner.mode,
         "lineage": DataFormatter.sanitize(owner.lineage),
     }
     record_meta.update(dict(meta or {}))
@@ -87,7 +86,6 @@ async def record_workspace(
             checkpoint_id=checkpoint_ref.get("id"),
             meta={
                 "owner": "AgentExecution",
-                "execution_mode": owner.mode,
                 "lineage": DataFormatter.sanitize(owner.lineage),
             },
         )
@@ -117,7 +115,6 @@ def workspace_source(owner: "AgentExecution", source: dict[str, Any] | None = No
     default_source = {
         "type": "agent_execution",
         "execution_id": owner.id,
-        "execution_mode": owner.mode,
         "task_id": owner.lineage.get("task_id"),
         "iteration_id": owner.lineage.get("iteration_id"),
         "step_id": owner.lineage.get("step_id"),
@@ -130,7 +127,6 @@ def default_workspace_content(owner: "AgentExecution") -> dict[str, Any]:
     return DataFormatter.sanitize(
         {
             "execution_id": owner.id,
-            "execution_mode": owner.mode,
             "status": owner.status,
             "lineage": owner.lineage,
             "result": owner.result,
@@ -142,7 +138,7 @@ def default_workspace_content(owner: "AgentExecution") -> dict[str, Any]:
 
 def default_workspace_summary(owner: "AgentExecution", collection: str) -> str:
     task_id = owner.lineage.get("task_id") or owner.id
-    step_id = owner.lineage.get("step_id") or owner.mode
+    step_id = owner.lineage.get("step_id") or "execution"
     return f"{ task_id } { step_id } AgentExecution { collection }"
 
 
@@ -150,7 +146,6 @@ def default_checkpoint_state(owner: "AgentExecution", record_ref: dict[str, Any]
     return DataFormatter.sanitize(
         {
             "execution_id": owner.id,
-            "execution_mode": owner.mode,
             "status": owner.status,
             "lineage": owner.lineage,
             "record_ref": record_ref,

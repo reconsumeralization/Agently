@@ -95,7 +95,7 @@ def matches_observation_event_type(event_type: str | None, expected_event_types:
     return matches_runtime_event_type(event_type, expected_event_types)
 
 RunKind: TypeAlias = Literal[
-    "agent_turn",
+    "agent_execution",
     "request",
     "model_request",
     "workflow_execution",

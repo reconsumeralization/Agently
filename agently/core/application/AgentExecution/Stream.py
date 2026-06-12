@@ -29,13 +29,11 @@ class AgentExecutionStream:
         self,
         *,
         execution_id: str | None = None,
-        execution_mode: str | None = None,
         lineage: Mapping[str, Any] | None = None,
     ):
         self.items: list[AgentExecutionStreamData] = []
         self.queues: list[asyncio.Queue[Any]] = []
         self.execution_id = execution_id
-        self.execution_mode = execution_mode
         self.lineage = dict(lineage or {})
         self._execution: Any = None
 
@@ -67,8 +65,6 @@ class AgentExecutionStream:
         item_meta = dict(meta or {})
         if self.execution_id is not None:
             item_meta.setdefault("execution_id", self.execution_id)
-        if self.execution_mode is not None:
-            item_meta.setdefault("execution_mode", self.execution_mode)
         if self.lineage:
             item_meta.setdefault("lineage", dict(self.lineage))
         completed = event_type == "done"

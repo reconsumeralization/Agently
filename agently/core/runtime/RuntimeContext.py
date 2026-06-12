@@ -37,8 +37,8 @@ _current_model_run_context: ContextVar["RunContext | None"] = ContextVar(
 	"agently_current_model_run_context",
 	default=None,
 )
-_current_agent_turn_run_context: ContextVar["RunContext | None"] = ContextVar(
-	"agently_current_agent_turn_run_context",
+_current_agent_execution_run_context: ContextVar["RunContext | None"] = ContextVar(
+	"agently_current_agent_execution_run_context",
 	default=None,
 )
 _current_chunk_run_context: ContextVar["RunContext | None"] = ContextVar(
@@ -65,7 +65,7 @@ def bind_runtime_context(
 	parent_run_context: "RunContext | None | object" = _MISSING,
 	request_run_context: "RunContext | None | object" = _MISSING,
 	model_run_context: "RunContext | None | object" = _MISSING,
-	agent_turn_run_context: "RunContext | None | object" = _MISSING,
+	agent_execution_run_context: "RunContext | None | object" = _MISSING,
 	chunk_run_context: "RunContext | None | object" = _MISSING,
 	tool_phase_run_context: "RunContext | None | object" = _MISSING,
 	agent_execution_context: object | None = _MISSING,
@@ -94,11 +94,11 @@ def bind_runtime_context(
 					_current_model_run_context.set(cast("RunContext | None", model_run_context)),
 				)
 			)
-		if agent_turn_run_context is not _MISSING:
+		if agent_execution_run_context is not _MISSING:
 			tokens.append(
 				(
-					_current_agent_turn_run_context,
-					_current_agent_turn_run_context.set(cast("RunContext | None", agent_turn_run_context)),
+					_current_agent_execution_run_context,
+					_current_agent_execution_run_context.set(cast("RunContext | None", agent_execution_run_context)),
 				)
 			)
 		if chunk_run_context is not _MISSING:
@@ -147,8 +147,8 @@ def get_current_model_run_context():
 	return _current_model_run_context.get()
 
 
-def get_current_agent_turn_run_context():
-	return _current_agent_turn_run_context.get()
+def get_current_agent_execution_run_context():
+	return _current_agent_execution_run_context.get()
 
 
 def get_current_chunk_run_context():

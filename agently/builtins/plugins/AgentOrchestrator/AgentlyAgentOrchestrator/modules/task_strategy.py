@@ -36,17 +36,46 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             source="agent_execution",
         )
 
+    effort_strategy = execution.effective_options.get("effort_strategy")
+    effort_strategy = dict(effort_strategy) if isinstance(effort_strategy, dict) else {}
+    max_iterations = task_options.get("max_iterations")
+    if max_iterations is None and effort_strategy:
+        max_iterations = effort_strategy.get("max_iterations")
+        execution.record_consumed_option(
+            "effort.max_iterations",
+            max_iterations,
+            owner="AgentTaskLoop",
+        )
+    agent_task_options = dict(task_options.get("options") or {})
+    if effort_strategy:
+        agent_task_options.setdefault("agent_task", {})
+        if isinstance(agent_task_options["agent_task"], dict):
+            agent_task_options["agent_task"].setdefault("effort", effort_strategy)
+    required_actions = execution.required_action_ids()
+    required_skills = execution.required_skill_ids()
+    if required_actions or required_skills:
+        constraints = dict(agent_task_options.get("capability_constraints") or {})
+        if required_actions:
+            constraints.setdefault("actions", {})
+            if isinstance(constraints["actions"], dict):
+                constraints["actions"]["required"] = required_actions
+        if required_skills:
+            constraints.setdefault("skills", {})
+            if isinstance(constraints["skills"], dict):
+                constraints["skills"]["required"] = required_skills
+        agent_task_options["capability_constraints"] = constraints
+
     task = AgentTask(
         execution.agent,
         goal=goal,
         success_criteria=success_criteria,
         workspace=task_options.get("workspace"),
-        max_iterations=int(task_options.get("max_iterations", 3) or 3),
+        max_iterations=int(max_iterations or 3),
         verify=cast(Any, task_options.get("verify", "before_done")),
         recall_profile=str(task_options.get("recall_profile", "software_dev")),
         context_budget=cast(Any, task_options.get("context_budget")),
         limits=cast(Any, task_options.get("limits", execution.limits)),
-        options=cast(Any, task_options.get("options") or {}),
+        options=cast(Any, agent_task_options),
         task_id=cast(Any, task_options.get("task_id") or execution.lineage.get("task_id")),
     )
     for name, value in getattr(execution, "__dict__", {}).items():

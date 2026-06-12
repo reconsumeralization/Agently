@@ -166,7 +166,6 @@ def test_builtin_agent_execution_matches_protocol_without_core_builtin_dependenc
     execution = agent.input("protocol smoke").create_execution()
 
     assert isinstance(execution, AgentExecution)
-    assert execution.mode == "one_turn"
     assert CompatAgentExecutionStream is AgentExecutionStream
     for method_name in _method_names(AgentExecution):
         assert callable(getattr(execution, method_name))

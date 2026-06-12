@@ -64,6 +64,7 @@ class ActionExtension(BaseAgent):
         self.__prepared_action_results: dict[str, Any] | None = None
         self.__action_planning_handler = None
         self.__action_execution_handler = None
+        self.__required_action_ids: list[str] = []
 
         self.extension_handlers.append("request_prefixes", self.__request_prefix)
         self.extension_handlers.append("broadcast_prefixes", self.__broadcast_prefix)
@@ -167,7 +168,7 @@ class ActionExtension(BaseAgent):
             return [str(item) for item in value if str(item)]
         return []
 
-    def use_actions(self, actions: Callable | str | list[str | Callable] | Any):
+    def _register_action_items(self, actions: Callable | str | list[str | Callable] | Any) -> list[str]:
         names: list[str] = []
         local_registry = getattr(self.action, "action_registry", None)
         agent_tag = f"agent-{ self.name }"
@@ -188,7 +189,24 @@ class ActionExtension(BaseAgent):
                 names.append(action_name)
         if names:
             self.action.tag(names, agent_tag)
+        return names
+
+    def use_actions(self, actions: Callable | str | list[str | Callable] | Any, *, always: bool = False):
+        if not always:
+            return self.create_execution().use_actions(actions)
+        self._register_action_items(actions)
         return self
+
+    def require_actions(self, actions: Callable | str | list[str | Callable] | Any, *, always: bool = False):
+        if not always:
+            return self.create_execution().require_actions(actions)
+        for name in self._register_action_items(actions):
+            if name not in self.__required_action_ids:
+                self.__required_action_ids.append(name)
+        return self
+
+    def _collect_required_action_ids(self) -> list[str]:
+        return list(self.__required_action_ids)
 
     def use_tools(self, tools: Callable | str | list[str | Callable] | Any):
         return self.use_actions(tools)

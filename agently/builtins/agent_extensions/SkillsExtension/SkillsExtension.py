@@ -60,9 +60,23 @@ class SkillsExtension(BaseAgent):
         *,
         mode: SkillMode = "model_decision",
         auto_allow: bool = False,
+        always: bool = False,
     ):
+        if not always:
+            return self.create_execution().use_skills(skills, mode=mode, auto_allow=auto_allow)
+        self._add_skill_selectors(skills, mode=mode, auto_allow=auto_allow)
+        return self
+
+    def _normalize_skill_selector_entries(
+        self,
+        skills: Any,
+        *,
+        mode: SkillMode = "model_decision",
+        auto_allow: bool = False,
+    ) -> list[dict[str, Any]]:
         if mode not in {"model_decision", "required"}:
             raise ValueError("Skill mode must be one of: 'model_decision', 'required'.")
+        entries: list[dict[str, Any]] = []
         for item in _ensure_list(skills):
             selector = _copy_public(item)
             if isinstance(selector, dict):
@@ -73,15 +87,38 @@ class SkillsExtension(BaseAgent):
                     selector = {"source": raw_selector, "auto_allow": True}
                 else:
                     selector = {"id": raw_selector, "auto_allow": True}
-            self.__session_skill_selectors.append({"selector": selector, "mode": mode})
-        return self
+            entries.append({"selector": selector, "mode": mode})
+        return entries
+
+    def _add_skill_selectors(
+        self,
+        skills: Any,
+        *,
+        mode: SkillMode = "model_decision",
+        auto_allow: bool = False,
+    ) -> list[dict[str, Any]]:
+        entries = self._normalize_skill_selector_entries(skills, mode=mode, auto_allow=auto_allow)
+        self.__session_skill_selectors.extend(entries)
+        return entries
+
+    def require_skills(
+        self,
+        skills: Any,
+        *,
+        auto_allow: bool = False,
+        always: bool = False,
+    ):
+        return self.use_skills(skills, mode="required", auto_allow=auto_allow, always=always)
 
     def use_skills_packs(
         self,
         skills_packs: Any,
         *,
         mode: SkillMode = "model_decision",
+        always: bool = False,
     ):
+        if not always:
+            return self.create_execution().use_skills_packs(skills_packs, mode=mode)
         if mode not in {"model_decision", "required"}:
             raise ValueError("Skill mode must be one of: 'model_decision', 'required'.")
         for item in _ensure_list(skills_packs):

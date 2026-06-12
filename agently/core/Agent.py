@@ -22,19 +22,17 @@ from typing_extensions import Self
 
 from agently.core.extension import ExtensionHandlers
 from agently.core.application import AgentTask, DynamicTask
-from agently.core.AgentTurn import AgentTurn
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
 from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
-from agently.utils import DataFormatter, DeprecationWarnings, Settings
+from agently.utils import DataFormatter, Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
-        AgentExecutionMode,
         AgentlyModelResultMessage,
         AgentlyOriginalResultPayload,
         AgentlySpecificResultMessage,
@@ -243,16 +241,16 @@ class BaseAgent:
             use_actions = getattr(self, "use_actions", None)
             if not callable(use_actions):
                 raise AttributeError("agent.define(actions=...) requires the Actions extension.")
-            use_actions(actions)
+            use_actions(actions, always=True)
         if skills is not None:
             use_skills = getattr(self, "use_skills", None)
             if not callable(use_skills):
                 raise AttributeError("agent.define(skills=...) requires the Skills extension.")
             if isinstance(skills, (list, tuple)):
                 for item in skills:
-                    use_skills(item)
+                    use_skills(item, always=True)
             else:
-                use_skills(skills)
+                use_skills(skills, always=True)
         if workspace is not None:
             cast(Any, self).use_workspace(workspace)
         if policy is not None:
@@ -299,20 +297,6 @@ class BaseAgent:
             inherit_extension_handlers=False,
             model_key=model_key,
         )
-
-    def create_turn(self) -> AgentTurn:
-        DeprecationWarnings.warn_deprecated_once(
-            "BaseAgent.create_turn",
-            "agent.create_turn() is a compatibility API. "
-            "Use agent.create_execution() or non-always quick prompt methods to create an AgentExecution draft.",
-            stacklevel=2,
-        )
-        request = self.create_request()
-        prompt_snapshot = self._snapshot_request_prompt()
-        if prompt_snapshot:
-            request.prompt.update(prompt_snapshot)
-            self.request.prompt.clear()
-        return AgentTurn(self, request=request)
 
     _DYNAMIC_TASK_TARGET_EXCLUDED_PROMPT_KEYS = {
         "output",
@@ -491,7 +475,7 @@ class BaseAgent:
         )
         return self
 
-    def _create_agent_turn_run_context(
+    def _create_agent_execution_run_context(
         self,
         *,
         parent_run_context: "RunContext | None" = None,
@@ -503,7 +487,7 @@ class BaseAgent:
         if session_id is not None:
             session_id = str(session_id)
         return RunContext.create(
-            run_kind="agent_turn",
+            run_kind="agent_execution",
             parent=parent_run_context,
             agent_id=self.id,
             agent_name=self.name,
@@ -511,35 +495,35 @@ class BaseAgent:
             meta={"entrypoint": "agent"},
         )
 
-    def _emit_agent_turn_started(self, turn_run_context: "RunContext"):
+    def _emit_agent_execution_started(self, agent_execution_run_context: "RunContext"):
         from agently.base import emit_runtime
 
         emit_runtime(
             {
-                "event_type": "agent_turn.started",
+                "event_type": "agent_execution.started",
                 "source": "BaseAgent",
-                "message": f"Agent turn started for '{ self.name }'.",
+                "message": f"AgentExecution started for '{ self.name }'.",
                 "payload": {
                     "agent_id": self.id,
                     "agent_name": self.name,
                 },
-                "run": turn_run_context,
+                "run": agent_execution_run_context,
             }
         )
 
-    async def _async_emit_agent_turn_started(self, turn_run_context: "RunContext"):
+    async def _async_emit_agent_execution_started(self, agent_execution_run_context: "RunContext"):
         from agently.base import async_emit_runtime
 
         await async_emit_runtime(
             {
-                "event_type": "agent_turn.started",
+                "event_type": "agent_execution.started",
                 "source": "BaseAgent",
-                "message": f"Agent turn started for '{ self.name }'.",
+                "message": f"AgentExecution started for '{ self.name }'.",
                 "payload": {
                     "agent_id": self.id,
                     "agent_name": self.name,
                 },
-                "run": turn_run_context,
+                "run": agent_execution_run_context,
             }
         )
 
@@ -592,34 +576,34 @@ class BaseAgent:
         )
 
     def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
-        return self.request.get_response(parent_run_context=turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_execution_started(agent_execution_run_context)
+        return self.request.get_response(parent_run_context=agent_execution_run_context)
 
     def get_result(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
-        return self.request.get_result(parent_run_context=turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_execution_started(agent_execution_run_context)
+        return self.request.get_result(parent_run_context=agent_execution_run_context)
 
     def get_meta(self, *, parent_run_context: "RunContext | None" = None):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
-        return self.request.get_meta(parent_run_context=turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_execution_started(agent_execution_run_context)
+        return self.request.get_meta(parent_run_context=agent_execution_run_context)
 
     async def async_get_meta(self, *, parent_run_context: "RunContext | None" = None):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        await self._async_emit_agent_turn_started(turn_run_context)
-        return await self.request.async_get_meta(parent_run_context=turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        await self._async_emit_agent_execution_started(agent_execution_run_context)
+        return await self.request.async_get_meta(parent_run_context=agent_execution_run_context)
 
     def get_text(self, *, parent_run_context: "RunContext | None" = None):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
-        return self.request.get_text(parent_run_context=turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_execution_started(agent_execution_run_context)
+        return self.request.get_text(parent_run_context=agent_execution_run_context)
 
     async def async_get_text(self, *, parent_run_context: "RunContext | None" = None):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        await self._async_emit_agent_turn_started(turn_run_context)
-        return await self.request.async_get_text(parent_run_context=turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        await self._async_emit_agent_execution_started(agent_execution_run_context)
+        return await self.request.async_get_text(parent_run_context=agent_execution_run_context)
 
     def get_data(
         self,
@@ -633,8 +617,8 @@ class BaseAgent:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_data(
             type=type,
             ensure_keys=ensure_keys,
@@ -643,7 +627,7 @@ class BaseAgent:
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
-            parent_run_context=turn_run_context,
+            parent_run_context=agent_execution_run_context,
         )
 
     async def async_get_data(
@@ -658,8 +642,8 @@ class BaseAgent:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        await self._async_emit_agent_turn_started(turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_data(
             type=type,
             ensure_keys=ensure_keys,
@@ -668,7 +652,7 @@ class BaseAgent:
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
-            parent_run_context=turn_run_context,
+            parent_run_context=agent_execution_run_context,
         )
 
     def get_data_object(
@@ -682,8 +666,8 @@ class BaseAgent:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_data_object(
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
@@ -691,7 +675,7 @@ class BaseAgent:
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
-            parent_run_context=turn_run_context,
+            parent_run_context=agent_execution_run_context,
         )
 
     async def async_get_data_object(
@@ -705,8 +689,8 @@ class BaseAgent:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ):
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        await self._async_emit_agent_turn_started(turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_data_object(
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
@@ -714,7 +698,7 @@ class BaseAgent:
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
-            parent_run_context=turn_run_context,
+            parent_run_context=agent_execution_run_context,
         )
 
     @overload
@@ -785,13 +769,13 @@ class BaseAgent:
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
     ) -> Generator:
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_execution_started(agent_execution_run_context)
         return cast(Any, self.request).get_generator(
             type=type,
             content=content,
             specific=specific,
-            parent_run_context=turn_run_context,
+            parent_run_context=agent_execution_run_context,
         )
 
     @overload
@@ -862,13 +846,13 @@ class BaseAgent:
         specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
         parent_run_context: "RunContext | None" = None,
     ) -> AsyncGenerator:
-        turn_run_context = self._create_agent_turn_run_context(parent_run_context=parent_run_context)
-        self._emit_agent_turn_started(turn_run_context)
+        agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
+        self._emit_agent_execution_started(agent_execution_run_context)
         return cast(Any, self.request).get_async_generator(
             type=type,
             content=content,
             specific=specific,
-            parent_run_context=turn_run_context,
+            parent_run_context=agent_execution_run_context,
         )
 
     def start(
@@ -918,18 +902,16 @@ class BaseAgent:
     def create_execution(
         self,
         *,
-        mode: "AgentExecutionMode | str" = "one_turn",
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
         options: "ExecutionOptions | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> "AgentExecution":
         plugin_name = str(self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator"))
         plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentOrchestrator", plugin_name))
         orchestrator = plugin_class(plugin_manager=self.plugin_manager, settings=self.settings)
         return orchestrator.create_execution(
             self,
-            mode=mode,
             lineage=lineage,
             limits=limits,
             options=options,
@@ -971,9 +953,7 @@ class BaseAgent:
                 "task": {key: value for key, value in task_options.items() if value is not None},
             },
         )
-        execution.goal(goal)
-        if success_criteria:
-            execution.success_criteria(success_criteria)
+        execution.goal(goal, success_criteria)
         execution.workspace = getattr(self, "workspace", None)
         return execution
 
@@ -1021,37 +1001,11 @@ class BaseAgent:
         self.agent_prompt.set(key, value, mappings=mappings)
         return self
 
-    def set_turn_prompt(
-        self,
-        key: "PromptStandardSlot | str",
-        value: Any,
-        *,
-        mappings: dict[str, Any] | None = None,
-    ):
-        DeprecationWarnings.warn_deprecated_once(
-            "BaseAgent.set_turn_prompt",
-            "agent.set_turn_prompt(...) is a compatibility API. "
-            "Use agent.input(...), agent.create_execution().set_execution_prompt(...), "
-            "or agent.set_agent_prompt(...) for persistent Agent definition state.",
-            stacklevel=2,
-        )
-        self.request.prompt.set(key, value, mappings=mappings)
-        return self
-
-    def set_request_prompt(
-        self,
-        key: "PromptStandardSlot | str",
-        value: Any,
-        *,
-        mappings: dict[str, Any] | None = None,
-    ):
-        return self.set_turn_prompt(key, value, mappings=mappings)
-
     def remove_agent_prompt(self, key: "PromptStandardSlot | str"):
         self.agent_prompt.set(key, None)
         return self
 
-    def remove_request_prompt(self, key: "PromptStandardSlot | str"):
+    def remove_execution_prompt(self, key: "PromptStandardSlot | str"):
         self.request.prompt.set(key, None)
         return self
 
@@ -1535,25 +1489,18 @@ class BaseAgent:
             return self
         return self.create_execution().set_prompt_options(options)
 
-    def goal(self, goal: Any):
-        return self.create_execution().goal(goal)
+    def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution":
+        return self.create_execution().goal(goal, success_criteria=success_criteria)
 
-    def goals(self, *goals: Any):
-        return self.create_execution().goals(*goals)
+    goals = goal
 
-    def success_criteria(self, criteria: Any = None, *more: Any):
-        return self.create_execution().success_criteria(criteria, *more)
+    def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
+        return self.create_execution().effort(value, **strategy)
 
-    def success_standards(self, criteria: Any = None, *more: Any):
-        return self.create_execution().success_criteria(criteria, *more)
-
-    def effort(self, value: Any):
-        return self.create_execution().effort(value)
-
-    def route_policy(self, value: Any):
+    def route_policy(self, value: Any) -> "AgentExecution":
         return self.create_execution().route_policy(value)
 
-    def strategy(self, value: str | None = None, **options: Any):
+    def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution":
         return self.create_execution().strategy(value, **options)
 
     # Prompt
