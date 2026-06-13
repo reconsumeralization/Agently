@@ -136,6 +136,7 @@ class AgentExecution:
         self.local_skill_selectors: list[dict[str, Any]] = []
         self.local_skills_pack_selectors: list[dict[str, Any]] = []
         self.local_dynamic_task_candidates: list[dict[str, Any]] = []
+        self._agent_task_step_overrides: dict[str, Any] = {}
         self.task_options: dict[str, Any] = {}
         self.strategy_name: str | None = None
         self.effective_options: dict[str, Any] = {}

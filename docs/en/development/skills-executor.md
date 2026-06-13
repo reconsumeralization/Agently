@@ -458,6 +458,12 @@ internal targets. The default script allowlist contains local interpreters
 fetch and execute arbitrary remote code; add them through policy only when
 required.
 
+When `capability_scope="execution"`, SkillsExecutor releases only capabilities
+that were newly mounted for that execution. If the host Agent already has an
+action with the requested action id, SkillsExecutor reuses it and leaves it
+registered after the Skills run; execution-scoped cleanup must not overwrite or
+unregister host-owned actions.
+
 For search-oriented Skills, Agently mounts the framework Search package backed
 by the `ddgs` Python package. Keep `ddgs` upgraded in the host environment
 before real search runs (`python -m pip install --upgrade ddgs`); Agently does

@@ -18,7 +18,7 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import AsyncGenerator, Generator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Generator, Mapping
 from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
@@ -54,6 +54,12 @@ _DAG_STEP_EXECUTION_SHAPES = {"dynamic_task", "execution_dag"}
 
 # Upper bound on the in-memory stream replay buffer for late subscribers.
 _STREAM_REPLAY_LIMIT = 5000
+
+
+class _AgentTaskDeadlineExceeded(TimeoutError):
+    def __init__(self, stage: str):
+        super().__init__(f"AgentTask exceeded max_seconds while running stage '{stage}'.")
+        self.stage = stage
 
 
 class AgentTask:
@@ -214,11 +220,12 @@ class AgentTask:
             return True
         return getattr(error, "status", None) == "timed_out"
 
-    async def _terminate_timed_out(self, iteration_index: int) -> dict[str, Any]:
+    async def _terminate_timed_out(self, iteration_index: int, *, stage: str | None = None) -> dict[str, Any]:
         self.status = "timed_out"
+        stage_text = f" during the { stage } stage" if stage else ""
         reason = (
             "Task exceeded its wall-clock budget "
-            f"(max_seconds={ self._task_max_seconds() }) before completion."
+            f"(max_seconds={ self._task_max_seconds() }){ stage_text } before completion."
         )
         self.result = {
             "status": "timed_out",
@@ -239,35 +246,46 @@ class AgentTask:
         return {"terminal": True, "status": self.status}
 
     async def _run_iteration(self, iteration_index: int) -> dict[str, Any]:
-        if self._task_deadline_exceeded():
-            return await self._terminate_timed_out(iteration_index)
-        await self._emit_progress(
-            iteration_index,
-            "context",
-            f"Iteration {iteration_index}: building a Workspace context pack for the task goal.",
-        )
-        await self._emit(f"agent_task.iteration.{iteration_index}.started", {"iteration": iteration_index})
-        context_pack = await self._build_context()
-        await self._emit(f"agent_task.iteration.{iteration_index}.context", context_pack)
-        await self._emit_snapshot(
-            iteration_index,
-            "context",
-            {
-                "context_item_count": len(context_pack.get("items", [])),
-                "diagnostics": context_pack.get("diagnostics", {}),
-            },
-            message=(
-                f"Iteration {iteration_index}: context pack ready with "
-                f"{len(context_pack.get('items', []))} item(s)."
-            ),
-        )
+        try:
+            if self._task_deadline_exceeded():
+                return await self._terminate_timed_out(iteration_index)
+            await self._emit_progress(
+                iteration_index,
+                "context",
+                f"Iteration {iteration_index}: building a Workspace context pack for the task goal.",
+            )
+            await self._emit(f"agent_task.iteration.{iteration_index}.started", {"iteration": iteration_index})
+            context_pack = await self._await_task_deadline(
+                self._build_context(),
+                stage="context",
+            )
+            await self._emit(f"agent_task.iteration.{iteration_index}.context", context_pack)
+            await self._emit_snapshot(
+                iteration_index,
+                "context",
+                {
+                    "context_item_count": len(context_pack.get("items", [])),
+                    "diagnostics": context_pack.get("diagnostics", {}),
+                },
+                message=(
+                    f"Iteration {iteration_index}: context pack ready with "
+                    f"{len(context_pack.get('items', []))} item(s)."
+                ),
+            )
 
-        await self._emit_progress(
-            iteration_index,
-            "plan",
-            f"Iteration {iteration_index}: asking the model to plan one bounded execution step.",
-        )
-        plan = self._normalize_step_plan(await self._request_plan(iteration_index, context_pack))
+            await self._emit_progress(
+                iteration_index,
+                "plan",
+                f"Iteration {iteration_index}: asking the model to plan one bounded execution step.",
+            )
+            plan = self._normalize_step_plan(
+                await self._await_task_deadline(
+                    self._request_plan(iteration_index, context_pack),
+                    stage="plan",
+                )
+            )
+        except _AgentTaskDeadlineExceeded as error:
+            return await self._terminate_timed_out(iteration_index, stage=error.stage)
         await self._record_phase(
             "planned",
             iteration=iteration_index,
@@ -309,7 +327,13 @@ class AgentTask:
                 "step_instruction": plan.get("step_instruction", ""),
             },
         )
-        execution_result, execution_meta = await self._execute_step(iteration_index, plan, context_pack)
+        try:
+            execution_result, execution_meta = await self._await_task_deadline(
+                self._execute_step(iteration_index, plan, context_pack),
+                stage="execute",
+            )
+        except _AgentTaskDeadlineExceeded as error:
+            return await self._terminate_timed_out(iteration_index, stage=error.stage)
         await self._emit_snapshot(
             iteration_index,
             "execution",
@@ -348,13 +372,19 @@ class AgentTask:
             "verify",
             f"Iteration {iteration_index}: verifying the evidence against every success criterion.",
         )
-        verification = await self._request_verification(
-            iteration_index,
-            plan=plan,
-            execution_result=execution_result,
-            execution_meta=execution_meta,
-            context_pack=context_pack,
-        )
+        try:
+            verification = await self._await_task_deadline(
+                self._request_verification(
+                    iteration_index,
+                    plan=plan,
+                    execution_result=execution_result,
+                    execution_meta=execution_meta,
+                    context_pack=context_pack,
+                ),
+                stage="verify",
+            )
+        except _AgentTaskDeadlineExceeded as error:
+            return await self._terminate_timed_out(iteration_index, stage=error.stage)
         await self._record_phase(
             "verified",
             iteration=iteration_index,
@@ -1092,10 +1122,44 @@ class AgentTask:
         return self._normalize_timeout(self.limits.get("max_seconds"))
 
     def _task_deadline_exceeded(self) -> bool:
+        remaining = self._task_deadline_remaining()
+        return remaining is not None and remaining <= 0
+
+    def _task_deadline_remaining(self) -> float | None:
         max_seconds = self._task_max_seconds()
         if max_seconds is None or self.started_at is None:
-            return False
-        return (time.time() - self.started_at) >= max_seconds
+            return None
+        return max_seconds - (time.time() - self.started_at)
+
+    async def _await_task_deadline(self, awaitable: Awaitable[Any], *, stage: str) -> Any:
+        remaining = self._task_deadline_remaining()
+        if remaining is None:
+            return await awaitable
+        if remaining <= 0:
+            self._close_unawaited(awaitable)
+            raise _AgentTaskDeadlineExceeded(stage)
+        task = asyncio.ensure_future(awaitable)
+        done, pending = await asyncio.wait({task}, timeout=remaining)
+        if pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            raise _AgentTaskDeadlineExceeded(stage)
+        return await next(iter(done))
+
+    @staticmethod
+    def _close_unawaited(awaitable: Awaitable[Any]) -> None:
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+            return
+        cancel = getattr(awaitable, "cancel", None)
+        if callable(cancel):
+            cancel()
 
     @staticmethod
     def _normalize_timeout(value: Any) -> float | None:

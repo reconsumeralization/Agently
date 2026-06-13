@@ -423,6 +423,10 @@ agent.configure_policy_approval(handler="input_timeout_fail")
 默认脚本白名单只包含本地解释器（`bash`、`sh`、`python`、`node`），不含会拉取并执行
 任意远端代码的包运行器（`npx`/`npm`）；确有需要时再通过 policy 显式加入。
 
+当 `capability_scope="execution"` 时，SkillsExecutor 只回收本次执行中新挂载的能力。
+如果宿主 Agent 已经存在请求的 action id，SkillsExecutor 会复用该宿主 action，并在
+Skills run 结束后保留它；execution-scoped cleanup 不能覆盖或注销宿主拥有的 actions。
+
 面向搜索的 Skills，Agently 会装载由 `ddgs` Python package 支撑的框架 Search
 能力。请在宿主环境中预先保持 `ddgs` 最新（`python -m pip install --upgrade ddgs`）；
 Agently 运行时不会改动宿主环境。backend 策略不能被固定成某一个 provider；

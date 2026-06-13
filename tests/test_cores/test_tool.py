@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from agently import Agently
 from agently.core import Action, PluginManager
-from agently.types.data import ActionCall, ActionDecision
+from agently.types.data import ActionCall, ActionDecision, ActionPolicy
 from agently.utils import Settings
 
 
@@ -125,17 +125,16 @@ def test_model_policy_override_cannot_grant_approval():
 def test_sanitize_policy_override_strips_host_only_keys_for_model_sources():
     from agently.core.operation.Action.ActionDispatcher import ActionDispatcher
 
-    override = {
+    override: ActionPolicy = {
         "policy_approval_granted": True,
         "allowed_cmd_prefixes": ["rm"],
-        "purpose_hint": "keep me",
     }
     sanitized, stripped = ActionDispatcher._sanitize_policy_override(
         override, source_protocol="native_tool_calls"
     )
     assert "policy_approval_granted" not in sanitized
     assert "allowed_cmd_prefixes" not in sanitized
-    assert sanitized.get("purpose_hint") == "keep me"
+    assert sanitized == {}
     assert set(stripped) == {"policy_approval_granted", "allowed_cmd_prefixes"}
 
     kept, none_stripped = ActionDispatcher._sanitize_policy_override(

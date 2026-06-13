@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import asyncio
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -460,7 +460,7 @@ async def test_agent_task_loop_executes_dag_shaped_step_without_global_candidate
             },
         }
 
-    task._agent_task_step_overrides = {"_request_plan": request_plan}
+    cast(Any, task)._agent_task_step_overrides = {"_request_plan": request_plan}
 
     result = await task.async_run()
     meta = await task.async_meta()
@@ -550,7 +550,7 @@ Render the final diagram only after source evidence is collected.
             "rationale": "The task must gather source evidence before rendering.",
         }
 
-    task._agent_task_step_overrides = {"_request_plan": request_plan}
+    cast(Any, task)._agent_task_step_overrides = {"_request_plan": request_plan}
 
     result = await task.async_run()
     meta = await task.async_meta()
@@ -878,7 +878,7 @@ async def test_agent_task_loop_verification_guard_replans_on_failed_action_evide
             },
         )
 
-    task._agent_task_step_overrides = {"_execute_step": fake_execute}
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": fake_execute}
 
     stream_items = [item async for item in task.stream()]
     result = await task.run()
@@ -950,7 +950,7 @@ async def test_required_capabilities_satisfied_cumulatively_across_iterations(tm
         max_iterations=3,
         options={"capability_constraints": constraints["capability_constraints"]},
     )
-    task._agent_task_step_overrides = {"_execute_step": step_with_capability}
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": step_with_capability}
 
     result = await task.async_run()
     meta = await task.async_meta()
@@ -965,7 +965,7 @@ async def test_required_capabilities_satisfied_cumulatively_across_iterations(tm
 
 @pytest.mark.asyncio
 async def test_task_wall_clock_budget_surfaces_timed_out(tmp_path):
-    """ISSUE-010: max_seconds is a task deadline (timed_out), not a request timeout."""
+    """ISSUE-010: max_seconds is a task wall-clock deadline across task stages."""
     agent = _create_agent("agent-task-deadline").use_workspace(tmp_path / "task-workspace")
     task = agent.create_task(
         task_id="deadline",
@@ -973,15 +973,23 @@ async def test_task_wall_clock_budget_surfaces_timed_out(tmp_path):
         success_criteria=["The script runs successfully."],
         workspace=tmp_path / "task-workspace",
         max_iterations=3,
-        limits={"max_seconds": 0.0001},
+        limits={"max_seconds": 0.2},
     )
-    # Force the wall-clock budget to be already exceeded before the first step.
-    import time as _time
-    task.started_at = _time.time() - 5
+
+    async def slow_request_plan(_iteration_index, _context_pack):
+        await asyncio.sleep(0.6)
+        return {
+            "step_instruction": "repair the script",
+            "expected_evidence": "script execution succeeds",
+            "rationale": "the task should not reach this plan after the deadline",
+        }
+
+    cast(Any, task)._agent_task_step_overrides = {"_request_plan": slow_request_plan}
 
     result = await task.async_run()
     assert result["status"] == "timed_out"
     assert task.status == "timed_out"
+    assert "plan stage" in result["reason"]
 
 
 def test_action_final_status_exempts_recovered_actions():

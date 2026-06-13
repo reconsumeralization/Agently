@@ -521,6 +521,7 @@ class SkillExecutor:
                 continue
             mounted_keys.add(mount_key)
             try:
+                action_ids_before_mount = self._agent_action_ids(agent)
                 action_ids = await self._mount_capability(
                     agent=agent,
                     need=need,
@@ -538,7 +539,7 @@ class SkillExecutor:
                 })
                 blocked = True
                 continue
-            for action_id in action_ids:
+            for action_id in self._new_action_ids(agent, action_ids_before_mount):
                 if action_id and action_id not in mounted_action_ids:
                     mounted_action_ids.append(action_id)
             diagnostics.append({
@@ -712,6 +713,8 @@ class SkillExecutor:
         if need_name == "python":
             before = self._agent_action_ids(agent)
             action_id = str(_ensure_dict(policy.get("python")).get("action_id") or "run_python")
+            if self._agent_has_action(agent, action_id):
+                return [action_id]
             agent.enable_python(action_id=action_id)
             return self._new_action_ids(agent, before) or [action_id]
         if need_name in {"shell", "script_run"}:
@@ -719,6 +722,8 @@ class SkillExecutor:
             root = self._skill_root_for_selection(selection)
             commands = self._script_commands(selection, need)
             action_id = self._script_action_id(need, selection)
+            if self._agent_has_action(agent, action_id):
+                return [action_id]
             agent.enable_shell(root=root, commands=commands or None, action_id=action_id)
             return self._new_action_ids(agent, before) or [action_id]
         if need_name == "http_request":
@@ -750,6 +755,12 @@ class SkillExecutor:
             for item in action_items
             if str(item.get("action_id") or item.get("name") or "")
         }
+
+    def _agent_has_action(self, agent: Any, action_id: str) -> bool:
+        action = getattr(agent, "action", None)
+        registry = getattr(action, "action_registry", None)
+        has_action = getattr(registry, "has", None)
+        return bool(callable(has_action) and has_action(action_id))
 
     def _new_action_ids(self, agent: Any, before: set[str]) -> list[str]:
         return sorted(self._agent_action_ids(agent) - before)
@@ -841,6 +852,8 @@ class SkillExecutor:
 
     def _mount_http_request(self, agent: Any, http_policy: dict[str, Any] | None = None) -> list[str]:
         before = self._agent_action_ids(agent)
+        if self._agent_has_action(agent, "http_request"):
+            return ["http_request"]
         host_policy = _ensure_dict(http_policy)
 
         def http_request(url: str, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None, timeout: int = 20):

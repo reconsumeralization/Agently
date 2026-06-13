@@ -727,6 +727,54 @@ Search public sources and write the final Markdown deliverable to a file.
 
 
 @pytest.mark.asyncio
+async def test_execution_scoped_capabilities_preserve_existing_host_action(tmp_path):
+    """Execution-scoped auto-load must not overwrite or unregister host actions."""
+    source = tmp_path / "python-skill-scoped"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Python Skill Scoped
+description: Uses Python for deterministic calculations.
+---
+
+# Python Skill Scoped
+
+Run Python for small deterministic calculations before producing the final result.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(
+        auto_load={"python": "allow"},
+        capability_scope="execution",
+    )
+    agent.register_action(
+        name="run_python",
+        desc="Host-owned Python capability.",
+        kwargs={},
+        func=lambda: {"owner": "host"},
+    )
+    host_action = agent.action.action_registry.get_func("run_python")
+
+    execution = await agent.async_run_skills_task(
+        "calculate with Python",
+        skills=["python-skill-scoped"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert agent.action.action_registry.has("run_python")
+    assert agent.action.action_registry.get_func("run_python") is host_action
+    assert host_action is not None
+    assert host_action() == {"owner": "host"}
+    assert any(
+        item.get("type") == "skills.capability.mounted"
+        and item.get("need") == "python"
+        and item.get("action_ids") == ["run_python"]
+        for item in execution.runtime_stream
+    )
+
+
+@pytest.mark.asyncio
 async def test_skill_web_search_mounts_without_environment_mutation(monkeypatch, tmp_path):
     source = tmp_path / "search-skill"
     _write(
