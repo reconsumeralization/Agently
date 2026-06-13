@@ -61,7 +61,10 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.7"
+    assert in_development["target_version"] == "4.1.3.8"
+    assert in_development["release_train"] == "2026-06-4.1.3.8-dev"
+    assert "framework-level bug fixes and structural cleanup" in in_development["notes"]
+    assert "business-specific special-case fixes" in in_development["notes"]
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",
@@ -147,6 +150,11 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentExecution.success_criteria" not in task_loop_contract["surface"]
     assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
     assert "agent.goal(goal_or_goals, success_criteria=None)" in task_loop_contract["contract"]
+    assert "4.1.3.8 development target" in task_loop_contract["contract"]
+    assert "planner-visible capability summaries" in task_loop_contract["contract"]
+    assert "structured bounded-step scope" in task_loop_contract["contract"]
+    assert "capability/evidence requirements" in task_loop_contract["contract"]
+    assert "business-specific special-case fixes" in task_loop_contract["contract"]
     assert "plural alias agent.goals(...)" in task_loop_contract["contract"]
     assert "effort budget iteration_limit maps to task-loop max_iterations" in task_loop_contract["contract"]
     assert "effort execution.step_plan" in task_loop_contract["contract"]
@@ -160,6 +168,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "artifact_status=partial" in task_loop_contract["contract"]
     assert "agent.resume(task_id)" in task_loop_contract["contract"]
     assert "compatibility aliases only" in task_loop_contract["contract"]
+    assert "planner-visible capability summaries instead of provider- or example-specific prompt patches" in task_loop_contract["scope"]["current_slice"]
+    assert "structured bounded-step capability scope instead of prose-only step instructions" in task_loop_contract["scope"]["current_slice"]
     assert "multi-task scheduling" in task_loop_contract["scope"]["deferred"]
     assert (
         "distributed pause/resume beyond the single-task agent.resume(...) snapshot slice"
