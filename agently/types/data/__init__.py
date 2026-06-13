@@ -204,6 +204,8 @@ from .agent_execution import (
     AgentExecutionStreamMeta,
     AgentExecutionWorkspaceRecord,
     AgentExecutionWorkspaceRefs,
+    PlannerCapabilitySummary,
+    PlannerSkillCandidate,
 )
 
 from .attempt import (

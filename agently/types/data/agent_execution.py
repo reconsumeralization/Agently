@@ -99,6 +99,32 @@ class AgentExecutionMeta(TypedDict):
     workspace_refs: AgentExecutionWorkspaceRefs
 
 
+class PlannerSkillCandidate(TypedDict, total=False):
+    """One installed-skill candidate, sanitized for planner consumption.
+
+    Carries only inert data (no plugin objects): the skill id, the mode it is
+    bound under, and an optional decision-card description. Produced by the
+    orchestrator route from its route-planner output and passed into AgentTask
+    options; AgentTask reads it but never reaches back into the plugin.
+    """
+
+    id: str
+    mode: Literal["model_decision", "required"]
+    description: str
+
+
+class PlannerCapabilitySummary(TypedDict, total=False):
+    """Sanitized planner-facing capability snapshot injected into AgentTask options.
+
+    A typed, inert snapshot (skill ids + descriptions, no plugin objects),
+    computed once at task construction from the top-level routing execution.
+    AgentTask consumes only this snapshot; it must not import AgentOrchestrator
+    or HybridRoutePlanner internals or hold an execution-draft reference.
+    """
+
+    skills: list[PlannerSkillCandidate]
+
+
 class AgentExecutionStreamMeta(TypedDict, total=False):
     execution_id: str
     lineage: AgentExecutionLineage

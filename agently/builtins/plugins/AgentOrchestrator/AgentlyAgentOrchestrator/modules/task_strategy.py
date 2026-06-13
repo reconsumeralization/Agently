@@ -102,6 +102,17 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
                 constraints["skills"]["required"] = required_skills
         agent_task_options["capability_constraints"] = constraints
 
+    # Planner-visibility snapshot (BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC
+    # 4.1): adapt the route planner's skill candidate summary into a sanitized,
+    # inert snapshot and pass it into AgentTask options. AgentTask reads only
+    # this snapshot; it never imports HybridRoutePlanner or holds the execution
+    # draft. Computed once here, at task construction, from the top-level routing
+    # execution. The caller's explicitly supplied snapshot, if any, wins.
+    if "available_skills" not in agent_task_options:
+        candidate_snapshot = _planner_skill_candidate_snapshot(execution)
+        if candidate_snapshot:
+            agent_task_options["available_skills"] = candidate_snapshot
+
     if not isinstance(task, AgentTask):
         task = AgentTask(
             execution.agent,
@@ -162,3 +173,67 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         execution.workspace_refs["agent_task"] = task_meta["workspace_refs"]
     execution.status = "success" if task.status == "completed" else str(task.status)
     return task.result
+
+
+def _planner_skill_candidate_snapshot(execution: "AgentExecution") -> list[dict[str, Any]]:
+    """Sanitized planner-facing skill candidate snapshot (inert data only).
+
+    Adapts the route planner's `skill_candidate_summary()` into the typed
+    `PlannerSkillCandidate` shape (id + mode + best-effort decision-card
+    description). Descriptions are a best-effort enrichment read from the agent's
+    installed-skill records; any failure degrades to an empty description rather
+    than raising, so planner visibility never depends on registry availability.
+    """
+    try:
+        summary = execution.skill_candidate_summary()
+    except Exception:
+        return []
+    if not isinstance(summary, dict):
+        return []
+
+    descriptions = _installed_skill_descriptions(execution)
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for mode in ("model_decision", "required"):
+        for selector in summary.get(f"{mode}_skills", []) or []:
+            skill_id = _skill_id_from_selector(selector)
+            if not skill_id or skill_id in seen:
+                continue
+            seen.add(skill_id)
+            candidates.append(
+                {
+                    "id": skill_id,
+                    "mode": mode,
+                    "description": descriptions.get(skill_id, ""),
+                }
+            )
+    return candidates
+
+
+def _skill_id_from_selector(selector: Any) -> str:
+    if isinstance(selector, dict):
+        for key in ("id", "skill_id", "name", "source"):
+            value = selector.get(key)
+            if value:
+                return str(value).strip()
+        return ""
+    return str(selector or "").strip()
+
+
+def _installed_skill_descriptions(execution: "AgentExecution") -> dict[str, str]:
+    skills_executor = getattr(getattr(execution, "agent", None), "skills_executor", None)
+    list_skills = getattr(skills_executor, "list_skills", None)
+    if not callable(list_skills):
+        return {}
+    try:
+        records = list_skills()
+    except Exception:
+        return {}
+    descriptions: dict[str, str] = {}
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        skill_id = str(record.get("skill_id") or "").strip()
+        if skill_id:
+            descriptions[skill_id] = str(record.get("description") or "").strip()
+    return descriptions

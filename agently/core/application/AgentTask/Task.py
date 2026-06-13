@@ -652,6 +652,10 @@ class AgentTask:
         normalized.setdefault("step_instruction", "")
         normalized.setdefault("expected_evidence", "")
         normalized.setdefault("rationale", "")
+        # Structured scope field (BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC
+        # 4.2): scope comes from this explicit list, never from parsing the
+        # natural-language step_instruction.
+        normalized["allowed_action_ids"] = self._normalize_string_list(normalized.get("allowed_action_ids"))
         return normalized
 
     @staticmethod
@@ -727,11 +731,26 @@ class AgentTask:
                 warning = "dag_shape_not_enabled"
 
         plan["effective_execution_shape"] = effective_shape
+        # Structured step scope (BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC
+        # 4.2): when the plan names an explicit action allowlist, narrow this
+        # step's action candidates to it via the execution-local action-id seam.
+        # This restricts scope from a structured field, never from parsing the
+        # step_instruction prose. The hard guarantee remains the verifier gate
+        # (4.3); this only prevents an evidence-gathering step from silently
+        # completing the whole task with unrelated actions.
+        allowed_action_ids = self._normalize_string_list(plan.get("allowed_action_ids"))
+        if allowed_action_ids and effective_shape in {"direct", "actions"}:
+            local_action_ids = getattr(execution, "local_action_ids", None)
+            if isinstance(local_action_ids, list):
+                for action_id in allowed_action_ids:
+                    if action_id not in local_action_ids:
+                        local_action_ids.append(action_id)
         step_execution = {
             "requested_shape": requested_shape,
             "effective_shape": effective_shape,
             "dag_allowed": dag_allowed,
             "dynamic_task_candidate_added": candidate_added,
+            "allowed_action_ids": allowed_action_ids,
             "policy": DataFormatter.sanitize(policy),
         }
         route_policy = self._route_policy_for_step_execution(effective_shape)
@@ -781,8 +800,51 @@ class AgentTask:
             "step_execution_shape": effective_shape,
         }
 
+    def _available_skill_candidates(self) -> list[dict[str, Any]]:
+        """Planner-facing installed-skill candidate snapshot (inert data only).
+
+        Read from the typed snapshot the orchestrator route injected into
+        options at task construction (see
+        BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC 4.1). AgentTask consumes
+        only this snapshot; it does not reach back into the routing plugin.
+        """
+        raw = self.options.get("available_skills")
+        if not isinstance(raw, list):
+            return []
+        candidates: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get("id") or item.get("skill_id") or "").strip()
+            if not skill_id:
+                continue
+            candidates.append(
+                {
+                    "id": skill_id,
+                    "mode": str(item.get("mode") or "model_decision"),
+                    "description": str(item.get("description") or ""),
+                }
+            )
+        return candidates
+
+    def _skill_evidence_requirements(self) -> list[str]:
+        """Structured, authored skill-evidence requirement (skill ids).
+
+        The load-bearing gate's trigger (see
+        BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC 4.3): which skill ids must
+        appear in execution evidence for the task to be acceptable. Authored as a
+        structured option, independent of skill mode; never inferred from
+        free-text criteria. Accepts a plain list of ids or a dict carrying a
+        `skills` list for forward compatibility.
+        """
+        raw = self.options.get("skill_evidence_requirements")
+        if isinstance(raw, dict):
+            raw = raw.get("skills")
+        return self._normalize_string_list(raw)
+
     async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPack") -> dict[str, Any]:
         request = self.agent.create_temp_request()
+        available_skills = self._available_skill_candidates()
         request.input(
             {
                 "task_id": self.id,
@@ -792,13 +854,24 @@ class AgentTask:
                 "previous_iterations": self._iteration_prompt_summaries(),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_policy": self._step_execution_policy(),
+                "available_skills": available_skills,
             }
+        )
+        skill_instruction = (
+            " Installed skills are listed in available_skills; their full guidance reaches the model "
+            "only through a step with execution_shape=skills (a direct/actions step cannot load it). "
+            "Choose execution_shape=skills when an available skill is the intended way to satisfy a criterion."
+            if available_skills
+            else ""
         )
         request.instruct(
             "Plan the next bounded AgentExecution step for this AgentTask. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
             "Set execution_shape to direct, actions, skills, dynamic_task, or execution_dag. "
             "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
+            + skill_instruction
+            + " Optionally set allowed_action_ids to the specific action ids this bounded step should be limited to "
+            "when the step is only meant to gather evidence; leave it empty when the step may use any available action."
         )
         request.output(
             {
@@ -810,6 +883,11 @@ class AgentTask:
                 "step_instruction": (str, "Instruction for one bounded AgentExecution step", True),
                 "expected_evidence": (str, "Evidence this step should produce", True),
                 "rationale": (str, "Why this is the next step", True),
+                "allowed_action_ids": (
+                    [str],
+                    "Optional structured allowlist of action ids this bounded step may use; empty means no restriction",
+                    False,
+                ),
                 "dynamic_task": (
                     dict,
                     "Optional bounded DynamicTask candidate when execution_shape is dynamic_task or execution_dag",
@@ -983,6 +1061,7 @@ class AgentTask:
                 "execution_result": DataFormatter.sanitize(execution_result),
                 "execution_meta": DataFormatter.sanitize(execution_meta),
                 "execution_evidence_summary": self._execution_log_summary(execution_meta),
+                "skill_evidence_requirements": self._skill_evidence_requirements(),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "previous_iterations": self._iteration_prompt_summaries(),
             }
@@ -1086,7 +1165,30 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Missing required capability evidence: {', '.join(missing_required)}",
             ]
+        # Load-bearing structured skill-evidence gate
+        # (BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC 4.3). This is a
+        # deterministic correspondence check between an authored, structured
+        # requirement (skill ids that must appear in execution evidence) and the
+        # accumulated selected_skill_ids evidence. It is independent of skill
+        # mode: a model_decision skill the goal depends on can be required as
+        # evidence here WITHOUT forcing the route via require_skills. No prose or
+        # model reading participates in the pass/fail decision.
+        skill_evidence_requirements = self._skill_evidence_requirements()
+        missing_skill_evidence = [
+            skill_id
+            for skill_id in skill_evidence_requirements
+            if skill_id not in self._satisfied_required_skills
+        ]
+        if missing_skill_evidence:
+            normalized["is_complete"] = False
+            guard_reasons.append("skill_evidence_missing")
+            normalized["missing_criteria"] = [
+                *normalized["missing_criteria"],
+                f"Missing required skill evidence: {', '.join(missing_skill_evidence)}",
+            ]
+            missing_required = [*missing_required, *missing_skill_evidence]
         normalized["missing_required_capabilities"] = missing_required
+        normalized["missing_skill_evidence"] = missing_skill_evidence
         final_result_required = self._normalize_bool(
             verification.get("final_result_required"), default=False
         )

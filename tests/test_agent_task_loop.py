@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import asyncio
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -1196,3 +1197,233 @@ async def test_agent_task_loop_progress_model_failure_is_side_channel(tmp_path):
 
 async def _collect_stream(task) -> list[Any]:
     return [item async for item in task.stream()]
+
+
+def _skill_gate_agent(name: str):
+    """Agent whose verifier always claims completion (drives the gate tests)."""
+
+    class AlwaysCompleteVerifier(MockAgentTaskRequester):
+        name = "SkillGateVerifier"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            MockAgentTaskRequester.calls.append(text)
+            if "Verify the task against every success criterion" in text:
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "looks done from the verifier's view",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result_required": False,
+                    "final_result": "done",
+                }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {
+                    "execution_shape": "direct",
+                    "step_instruction": "produce the artifact directly",
+                    "expected_evidence": "x",
+                    "rationale": "y",
+                }
+            elif "Execute exactly one bounded step" in text:
+                payload = {
+                    "step_result": "produced the artifact",
+                    "evidence": ["artifact written"],
+                    "remaining_work": [],
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name=f"{name}-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{name}-plugins")
+    plugin_manager.register("ModelRequester", AlwaysCompleteVerifier, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+@pytest.mark.asyncio
+async def test_skill_evidence_gate_blocks_bypass_when_skill_unused(tmp_path):
+    """BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC 4.3 (load-bearing).
+
+    The exact bypass path from the evidence run: the model verifier claims
+    completion, but no skill appears in execution evidence. A structured
+    skill-evidence requirement must turn this into a hard verification failure,
+    so 'accepted with the skill bypassed' becomes impossible.
+    """
+    agent = _skill_gate_agent("agent-task-skill-evidence-bypass")
+
+    async def bypass_step(iteration_index, plan, context_pack):
+        # model_request route, no selected_skills -> skill was bypassed.
+        return (
+            {"step_result": "drew it from memory", "evidence": ["wrote a file"], "remaining_work": []},
+            {
+                "execution_id": f"exec-{iteration_index}",
+                "status": "completed",
+                "route": {"selected_route": "model_request"},
+                "logs": {
+                    "action_logs": {"write_file": {"name": "write_file", "status": "success"}},
+                    "route_logs": {},
+                },
+            },
+        )
+
+    task = agent.create_task(
+        task_id="skill-evidence-bypass",
+        goal="Render a diagram using the installed architecture-diagram skill.",
+        success_criteria=["The diagram uses the installed skill's design system."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={"skill_evidence_requirements": ["architecture-diagram"]},
+    )
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": bypass_step}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] != "completed"
+    assert result["accepted"] is False
+    verification = meta["iterations"][0]["verification"]
+    assert verification["is_complete"] is False
+    assert "skill_evidence_missing" in verification.get("guard_reasons", [])
+    assert "architecture-diagram" in " ".join(verification.get("missing_skill_evidence", []))
+    assert "architecture-diagram" in " ".join(verification.get("missing_required_capabilities", []))
+
+
+@pytest.mark.asyncio
+async def test_skill_evidence_gate_passes_when_skill_route_evidence_present(tmp_path):
+    """BUG_FIX 4.3: the same requirement passes when the skill genuinely shows
+    up in execution evidence (skills-route selected_skills record)."""
+    agent = _skill_gate_agent("agent-task-skill-evidence-present")
+
+    async def skills_step(iteration_index, plan, context_pack):
+        return (
+            {"step_result": "used the skill", "evidence": ["rendered via skill"], "remaining_work": []},
+            {
+                "execution_id": f"exec-{iteration_index}",
+                "status": "completed",
+                "route": {"selected_route": "skills"},
+                "logs": {
+                    "action_logs": {},
+                    "route_logs": {"plan": {"selected_skills": [{"skill_id": "architecture-diagram"}]}},
+                },
+            },
+        )
+
+    task = agent.create_task(
+        task_id="skill-evidence-present",
+        goal="Render a diagram using the installed architecture-diagram skill.",
+        success_criteria=["The diagram uses the installed skill's design system."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=2,
+        options={"skill_evidence_requirements": ["architecture-diagram"]},
+    )
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": skills_step}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    verification = meta["iterations"][0]["verification"]
+    assert verification["is_complete"] is True
+    assert verification.get("missing_skill_evidence", []) == []
+
+
+@pytest.mark.asyncio
+async def test_step_planner_prompt_exposes_installed_skill_candidates(tmp_path):
+    """BUG_FIX 4.1: installed skill candidates reach the planner prompt as a
+    typed snapshot in options, and the instruction tells the planner the skills
+    shape is the only way to load their guidance."""
+    MockAgentTaskRequester.reset()
+    agent = _skill_gate_agent("agent-task-planner-skill-visibility")
+
+    task = agent.create_task(
+        task_id="planner-skill-visibility",
+        goal="Render a diagram, choosing the right execution shape.",
+        success_criteria=["A diagram is produced."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={
+            "available_skills": [
+                {
+                    "id": "architecture-diagram",
+                    "mode": "model_decision",
+                    "description": "Create polished dark-themed architecture diagrams.",
+                }
+            ]
+        },
+    )
+
+    await task.async_run()
+
+    # MockAgentTaskRequester records every request payload on the class.
+    plan_calls = [
+        text
+        for text in MockAgentTaskRequester.calls
+        if "Plan the next bounded AgentExecution step" in text
+    ]
+    assert plan_calls, "planner was never invoked"
+    plan_text = plan_calls[0]
+    assert "available_skills" in plan_text
+    assert "architecture-diagram" in plan_text
+    assert "execution_shape=skills" in plan_text
+
+
+def test_agent_task_module_does_not_import_orchestrator_internals():
+    """BUG_FIX 4.1 layering: AgentTask consumes the inert options snapshot and
+    must not import AgentOrchestrator / HybridRoutePlanner internals."""
+    import ast
+    import inspect
+
+    from agently.core.application import AgentTask as AgentTaskClass
+
+    source_file = inspect.getsourcefile(AgentTaskClass)
+    assert source_file is not None
+    source = Path(source_file).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.append(node.module or "")
+    joined = " ".join(imported)
+    assert "AgentOrchestrator" not in joined
+    assert "HybridRoutePlanner" not in joined
+
+
+def test_example_design_system_fingerprint_smoke(tmp_path):
+    """BUG_FIX 4.4: design-system fingerprint smoke fails the 2026-06-12 light
+    bypass artifact and passes a skill-template-derived artifact. Fingerprints
+    are read from the installed skill, not hand-written into core."""
+    from examples.agent_task.agently_architecture_diagram_cocoon_skill_task import (
+        _design_system_fingerprint_hits,
+        _design_system_fingerprints,
+    )
+
+    skill_dir = tmp_path / "architecture-diagram"
+    (skill_dir / "resources").mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        'Use #020617 background, JetBrains Mono font, <pattern id="grid"> and stroke-dasharray.',
+        encoding="utf-8",
+    )
+    (skill_dir / "resources" / "template.html").write_text("<svg></svg>", encoding="utf-8")
+
+    fingerprints = _design_system_fingerprints(skill_dir)
+    assert "#020617" in fingerprints
+    assert "JetBrains Mono" in fingerprints
+
+    light_bypass_artifact = (
+        "<html><body style=\"background:#f5f5f5;font-family:'Segoe UI'\">"
+        "<svg></svg></body></html>"
+    )
+    assert _design_system_fingerprint_hits(light_bypass_artifact, fingerprints) == []
+
+    template_derived_artifact = (
+        "<html><style>body{background:#020617;font-family:'JetBrains Mono'}</style>"
+        '<svg><pattern id="grid"></pattern><rect stroke-dasharray="4,4"/></svg></html>'
+    )
+    hits = _design_system_fingerprint_hits(template_derived_artifact, fingerprints)
+    assert "#020617" in hits
+    assert "JetBrains Mono" in hits
+    assert len(hits) >= (len(fingerprints) + 1) // 2
