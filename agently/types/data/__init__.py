@@ -131,6 +131,12 @@ from .action import (
     ActionStatus,
 )
 
+from .capability import (
+    CapabilityRiskLevel,
+    CapabilitySideEffectDescriptor,
+    CapabilitySideEffectOwner,
+)
+
 from .execution_resource import (
     ExecutionResourceDecision,
     ExecutionResourceHandle,
