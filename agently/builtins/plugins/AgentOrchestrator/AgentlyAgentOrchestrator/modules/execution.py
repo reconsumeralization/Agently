@@ -545,6 +545,7 @@ class AgentExecution:
             text = str(name or "").strip()
             if text and text not in self.local_action_ids:
                 self.local_action_ids.append(text)
+        self._sync_action_scope(source="AgentExecution.use_actions")
         self._selected_route = None
         self.effective_options = self._build_effective_options()
         return self
@@ -564,8 +565,16 @@ class AgentExecution:
                 self.local_action_ids.append(text)
             if text and text not in self.local_required_action_ids:
                 self.local_required_action_ids.append(text)
+        self._sync_action_scope(source="AgentExecution.require_actions")
         self._selected_route = None
         self.effective_options = self._build_effective_options()
+        return self
+
+    def _sync_action_scope(self, *, source: str):
+        self.execution_context.set_action_scope(self.local_action_ids, source=source)
+        self.diagnostics["action_scope"] = DataFormatter.sanitize(
+            dict(self.execution_context.action_scope)
+        )
         return self
 
     def use_skills(self, skills: Any, **kwargs: Any):

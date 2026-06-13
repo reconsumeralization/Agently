@@ -167,6 +167,14 @@ class SkillExecutor:
             )
 
         effort_config = self._resolve_effort(context, effort)
+        if mounted_action_ids:
+            configured_allowed = _ensure_list(effort_config.get("allowed_actions"))
+            allowed_actions: list[str] = []
+            for action_id in [*configured_allowed, *mounted_action_ids]:
+                text = str(action_id or "").strip()
+                if text and text not in allowed_actions:
+                    allowed_actions.append(text)
+            effort_config["allowed_actions"] = allowed_actions
         strategy_name = self._resolve_strategy_name(plan=plan, effort=effort, effort_config=effort_config)
         strategy_handler = self._strategy_handlers().get(strategy_name)
         if strategy_handler is None:

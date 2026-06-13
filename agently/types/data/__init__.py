@@ -204,8 +204,13 @@ from .agent_execution import (
     AgentExecutionStreamMeta,
     AgentExecutionWorkspaceRecord,
     AgentExecutionWorkspaceRefs,
+    CapabilityKind,
+    CapabilityRoute,
+    EvidenceRequirement,
+    EvidenceRequirementKind,
+    GuidanceAccess,
+    PlannerCapabilityCandidate,
     PlannerCapabilitySummary,
-    PlannerSkillCandidate,
 )
 
 from .attempt import (

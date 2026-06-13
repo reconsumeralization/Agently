@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -102,16 +103,17 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
                 constraints["skills"]["required"] = required_skills
         agent_task_options["capability_constraints"] = constraints
 
-    # Planner-visibility snapshot (BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC
-    # 4.1): adapt the route planner's skill candidate summary into a sanitized,
-    # inert snapshot and pass it into AgentTask options. AgentTask reads only
-    # this snapshot; it never imports HybridRoutePlanner or holds the execution
-    # draft. Computed once here, at task construction, from the top-level routing
-    # execution. The caller's explicitly supplied snapshot, if any, wins.
-    if "available_skills" not in agent_task_options:
-        candidate_snapshot = _planner_skill_candidate_snapshot(execution)
-        if candidate_snapshot:
-            agent_task_options["available_skills"] = candidate_snapshot
+    # Planner capability visibility (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
+    # adapt the route planner's action / skill / skill-pack / dynamic-task
+    # candidates into one sanitized, inert capability snapshot and pass it into
+    # AgentTask options. AgentTask reads only this snapshot; it never imports
+    # HybridRoutePlanner or holds the execution draft. Computed once here, at task
+    # construction, from the top-level routing execution. A caller-supplied
+    # snapshot, if any, wins.
+    if "planner_capabilities" not in agent_task_options:
+        capability_snapshot = _planner_capability_snapshot(execution)
+        if capability_snapshot:
+            agent_task_options["planner_capabilities"] = capability_snapshot
 
     if not isinstance(task, AgentTask):
         task = AgentTask(
@@ -175,44 +177,88 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     return task.result
 
 
-def _planner_skill_candidate_snapshot(execution: "AgentExecution") -> list[dict[str, Any]]:
-    """Sanitized planner-facing skill candidate snapshot (inert data only).
+def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, Any]]:
+    """Sanitized planner-facing capability snapshot (inert data only).
 
-    Adapts the route planner's `skill_candidate_summary()` into the typed
-    `PlannerSkillCandidate` shape (id + mode + best-effort decision-card
-    description). Descriptions are a best-effort enrichment read from the agent's
-    installed-skill records; any failure degrades to an empty description rather
-    than raising, so planner visibility never depends on registry availability.
+    Adapts the route planner's action / skill / skill-pack / dynamic-task
+    candidates into one list of `PlannerCapabilityCandidate` dicts. Each entry
+    carries inert data only (id + kind + route + guidance_access + description),
+    so AgentTask never reaches back into the route planner. Any per-source
+    failure degrades to skipping that source rather than raising, so planner
+    visibility never depends on a single producer's availability.
     """
+    capabilities: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(candidate_id: str, kind: str, route: str, guidance_access: str, *, mode: str = "", description: str = "") -> None:
+        candidate_id = str(candidate_id or "").strip()
+        if not candidate_id or (candidate_id, kind) in seen:
+            return
+        seen.add((candidate_id, kind))
+        entry: dict[str, Any] = {
+            "id": candidate_id,
+            "kind": kind,
+            "route": route,
+            "guidance_access": guidance_access,
+            "description": str(description or "").strip(),
+        }
+        if mode:
+            entry["mode"] = mode
+        capabilities.append(entry)
+
+    # Actions -> model_request route, no model-facing guidance beyond their spec.
+    try:
+        for action in execution.action_candidates() or []:
+            if not isinstance(action, dict):
+                continue
+            add(
+                action.get("action_id") or action.get("name") or "",
+                "action",
+                "model_request",
+                "none",
+                description=str(action.get("desc") or action.get("description") or ""),
+            )
+    except Exception:
+        pass
+
+    # Skills / skill packs -> skills route; their guidance (SKILL.md) reaches the
+    # model only when that route runs.
     try:
         summary = execution.skill_candidate_summary()
     except Exception:
-        return []
-    if not isinstance(summary, dict):
-        return []
+        summary = None
+    if isinstance(summary, dict):
+        descriptions = _installed_skill_descriptions(execution)
+        for mode in ("model_decision", "required"):
+            for selector in summary.get(f"{mode}_skills", []) or []:
+                skill_id = _capability_id_from_selector(selector)
+                add(skill_id, "skill", "skills", "route_context", mode=mode, description=descriptions.get(skill_id, ""))
+            for selector in summary.get(f"{mode}_skills_packs", []) or []:
+                pack_id = _capability_id_from_selector(selector)
+                add(pack_id, "skill_pack", "skills", "route_context", mode=mode, description=descriptions.get(pack_id, ""))
 
-    descriptions = _installed_skill_descriptions(execution)
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for mode in ("model_decision", "required"):
-        for selector in summary.get(f"{mode}_skills", []) or []:
-            skill_id = _skill_id_from_selector(selector)
-            if not skill_id or skill_id in seen:
+    # DynamicTask / DAG candidates -> dynamic_task route.
+    try:
+        for candidate in execution.dynamic_task_candidates() or []:
+            if not isinstance(candidate, dict):
                 continue
-            seen.add(skill_id)
-            candidates.append(
-                {
-                    "id": skill_id,
-                    "mode": mode,
-                    "description": descriptions.get(skill_id, ""),
-                }
+            add(
+                candidate.get("name") or candidate.get("id") or "",
+                "dynamic_task",
+                "dynamic_task",
+                "none",
+                mode=str(candidate.get("mode") or ""),
+                description=str(candidate.get("description") or ""),
             )
-    return candidates
+    except Exception:
+        pass
+
+    return capabilities
 
 
-def _skill_id_from_selector(selector: Any) -> str:
+def _capability_id_from_selector(selector: Any) -> str:
     if isinstance(selector, dict):
-        for key in ("id", "skill_id", "name", "source"):
+        for key in ("id", "skill_id", "skills_pack_id", "name", "source"):
             value = selector.get(key)
             if value:
                 return str(value).strip()
@@ -229,8 +275,10 @@ def _installed_skill_descriptions(execution: "AgentExecution") -> dict[str, str]
         records = list_skills()
     except Exception:
         return {}
+    if not isinstance(records, Sequence):
+        return {}
     descriptions: dict[str, str] = {}
-    for record in records or []:
+    for record in records:
         if not isinstance(record, dict):
             continue
         skill_id = str(record.get("skill_id") or "").strip()

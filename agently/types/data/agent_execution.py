@@ -99,30 +99,81 @@ class AgentExecutionMeta(TypedDict):
     workspace_refs: AgentExecutionWorkspaceRefs
 
 
-class PlannerSkillCandidate(TypedDict, total=False):
-    """One installed-skill candidate, sanitized for planner consumption.
+CapabilityKind: TypeAlias = Literal["action", "skill", "skill_pack", "dynamic_task"]
+CapabilityRoute: TypeAlias = Literal["model_request", "skills", "dynamic_task"]
+GuidanceAccess: TypeAlias = Literal["route_context", "context_pack", "summary_only", "none"]
 
-    Carries only inert data (no plugin objects): the skill id, the mode it is
-    bound under, and an optional decision-card description. Produced by the
-    orchestrator route from its route-planner output and passed into AgentTask
-    options; AgentTask reads it but never reaches back into the plugin.
+
+class PlannerCapabilityCandidate(TypedDict, total=False):
+    """One planner-facing capability candidate, sanitized to inert data.
+
+    A capability is any route candidate the planner may choose: an Action, a
+    Skill, a Skill pack, or a DynamicTask/DAG candidate. Carries no plugin
+    objects. Produced by the orchestrator route from its route-planner output and
+    passed into AgentTask options; AgentTask reads it but never reaches back into
+    the plugin (see AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC).
+
+    `route` is the execution shape that exposes the capability. `guidance_access`
+    records how the capability's instructions reach the model: `route_context`
+    (only when that route runs, e.g. a Skill's SKILL.md), `context_pack`,
+    `summary_only`, or `none` (e.g. a plain Action). `mode` is kind-specific and
+    optional (e.g. `model_decision`/`required` for skills, `auto`/`submitted` for
+    dynamic tasks) and is not normalized across kinds.
     """
 
     id: str
-    mode: Literal["model_decision", "required"]
+    kind: CapabilityKind
+    route: CapabilityRoute
+    guidance_access: GuidanceAccess
+    mode: str
     description: str
 
 
 class PlannerCapabilitySummary(TypedDict, total=False):
     """Sanitized planner-facing capability snapshot injected into AgentTask options.
 
-    A typed, inert snapshot (skill ids + descriptions, no plugin objects),
+    A typed, inert snapshot (capability ids + descriptions, no plugin objects),
     computed once at task construction from the top-level routing execution.
     AgentTask consumes only this snapshot; it must not import AgentOrchestrator
     or HybridRoutePlanner internals or hold an execution-draft reference.
     """
 
-    skills: list[PlannerSkillCandidate]
+    capabilities: list[PlannerCapabilityCandidate]
+
+
+# Evidence-requirement kinds. Only the kinds with a deterministic structural
+# check are enforced by the AgentTaskLoop host guard today
+# (`capability_used`, `action_succeeded`); the remainder are reserved contract
+# vocabulary that the host guard does not yet enforce and that the model verifier
+# may treat advisorily, so a requirement never claims a guarantee the guard
+# cannot actually make.
+EvidenceRequirementKind: TypeAlias = Literal[
+    "capability_used",
+    "action_succeeded",
+    "artifact_readback",
+    "validation_passed",
+    "source_referenced",
+]
+_ENFORCED_EVIDENCE_REQUIREMENT_KINDS: frozenset[str] = frozenset({"capability_used", "action_succeeded"})
+
+
+class EvidenceRequirement(TypedDict, total=False):
+    """One structured completion-evidence requirement authored for a task.
+
+    The trigger for the load-bearing verifier gate: a deterministic
+    requirement-vs-evidence correspondence the host guard checks, never a
+    free-text reading of success criteria. `capability_id` names the capability
+    that must appear in execution evidence; `kind` selects which evidence
+    bucket; `required` gates acceptance; `source` records provenance.
+    `criterion_id` is optional and only used when criteria carry stable ids.
+    """
+
+    capability_id: str
+    capability_kind: CapabilityKind
+    kind: EvidenceRequirementKind
+    required: bool
+    source: Literal["host", "criterion", "policy"]
+    criterion_id: str
 
 
 class AgentExecutionStreamMeta(TypedDict, total=False):

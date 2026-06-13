@@ -329,14 +329,15 @@ inspectable and records `status="blocked"` plus the limit event in
 `diagnostics`.
 
 For stuck executions, `limits.max_seconds` is a hard deadline for the whole
-AgentExecution. `limits.max_no_progress_seconds` is an idle stall boundary: any
-accepted runtime progress from route selection, model streaming, TaskDAG,
-Skills, or ActionRuntime refreshes the timer. If either boundary is exceeded,
-Agently raises `RuntimeStageStallError`, available from the root `agently.core`
-export or from `agently.core.application.AgentExecution`.
-`async_get_meta()` remains inspectable and records `status="timed_out"` or
-`status="stalled"` with `diagnostics["timeouts"]` / `diagnostics["stalls"]` and
-the last progress event.
+AgentExecution. In Goal Pursuit / task-strategy runs, AgentTaskLoop owns that
+wall-clock budget and returns a task `timed_out` result with task metadata; other
+routes surface the hard deadline as `RuntimeStageStallError`, available from the
+root `agently.core` export or from `agently.core.application.AgentExecution`.
+`limits.max_no_progress_seconds` is an idle stall boundary: any accepted runtime
+progress from route selection, model streaming, TaskDAG, Skills, or ActionRuntime
+refreshes the timer. `async_get_meta()` remains inspectable and records
+`status="timed_out"` or `status="stalled"` with `diagnostics["timeouts"]` /
+`diagnostics["stalls"]` and the last progress event.
 
 Provider and response materialization waits have separate knobs:
 

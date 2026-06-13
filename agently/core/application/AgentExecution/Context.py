@@ -163,6 +163,7 @@ class AgentExecutionContext:
         self.last_progress_at = self.started_at
         self.last_progress_event: dict[str, Any] | None = None
         self.stage_events: list[dict[str, Any]] = []
+        self.action_scope: dict[str, Any] = {}
         # Depth of this AgentExecution in a nested agent-step chain (root = 0).
         self.nesting_depth = int(nesting_depth)
         # Effective max nesting depth inherited from the constraining ancestor
@@ -223,11 +224,38 @@ class AgentExecutionContext:
                 "max_model_requests": self.limits.get("max_model_requests"),
             },
             "limit_events": [dict(item) for item in self.limit_events],
+            "action_scope": DataFormatter.sanitize(dict(self.action_scope)),
             "stages": {
                 "events": [dict(item) for item in self.stage_events[-50:]],
             },
             "last_progress": last_progress,
         }
+
+    def set_action_scope(
+        self,
+        allowed_action_ids: list[str] | tuple[str, ...] | set[str] | None,
+        *,
+        source: str,
+    ) -> None:
+        normalized: list[str] = []
+        for item in allowed_action_ids or []:
+            text = str(item or "").strip()
+            if text and text not in normalized:
+                normalized.append(text)
+        if not normalized:
+            self.action_scope = {}
+            return
+        self.action_scope = {
+            "allowed_action_ids": normalized,
+            "source": source,
+        }
+
+    def scoped_action_ids(self) -> set[str] | None:
+        ids = self.action_scope.get("allowed_action_ids")
+        if not isinstance(ids, list):
+            return None
+        normalized = {str(item).strip() for item in ids if str(item).strip()}
+        return normalized or None
 
     def record_progress(
         self,

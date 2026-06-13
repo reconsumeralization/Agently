@@ -1131,6 +1131,13 @@ eight concrete questions.
     action_rounds: list[set[str]] = []
 
     async def fake_plan_and_execute(**kwargs):
+        prompt_obj = kwargs.get("prompt")
+        prompt_input = (
+            prompt_obj.get("input")
+            if prompt_obj is not None and callable(getattr(prompt_obj, "get", None))
+            else prompt_obj
+        )
+        assert "Write the final Markdown deliverable" in str(prompt_input)
         action_ids = {
             str(item.get("action_id") or item.get("name") or "")
             for item in kwargs.get("action_list", [])

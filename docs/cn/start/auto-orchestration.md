@@ -294,14 +294,15 @@ execution = agent.input("Try one bounded fix step.").create_execution(
 `agently.core.application.AgentExecution` 引入。execution meta 仍然可以检查，
 并会记录 `status="blocked"`，以及 `diagnostics` 里的 limit event。
 
-对于卡住的执行，`limits.max_seconds` 是整个 AgentExecution 的硬截止时间。
-`limits.max_no_progress_seconds` 是 idle stall 边界：route selection、模型流、
-TaskDAG、Skills、ActionRuntime 任何被接受的运行进展都会刷新计时。如果任一边界
-被超过，Agently 会抛出 `RuntimeStageStallError`，可以从 `agently.core` 根导出或
-`agently.core.application.AgentExecution` 引入。
-`async_get_meta()` 仍然可检查，并记录 `status="timed_out"` 或
-`status="stalled"`，以及 `diagnostics["timeouts"]` / `diagnostics["stalls"]`
-和最后一次进展事件。
+对于卡住的执行，`limits.max_seconds` 是整个 AgentExecution 的硬截止时间。在
+Goal Pursuit / task strategy 运行中，这个 wall-clock budget 由 AgentTaskLoop
+拥有，并返回带 task metadata 的 `timed_out` 任务结果；其它 route 会把硬截止
+时间暴露为 `RuntimeStageStallError`，可以从 `agently.core` 根导出或
+`agently.core.application.AgentExecution` 引入。`limits.max_no_progress_seconds`
+是 idle stall 边界：route selection、模型流、TaskDAG、Skills、ActionRuntime
+任何被接受的运行进展都会刷新计时。`async_get_meta()` 仍然可检查，并记录
+`status="timed_out"` 或 `status="stalled"`，以及 `diagnostics["timeouts"]` /
+`diagnostics["stalls"]` 和最后一次进展事件。
 
 Provider 与 response materialization 等待有独立配置：
 

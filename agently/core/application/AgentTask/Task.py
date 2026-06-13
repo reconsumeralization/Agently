@@ -127,6 +127,16 @@ class AgentTask:
         # together satisfy required actions and required skills.
         self._satisfied_required_actions: set[str] = set()
         self._satisfied_required_skills: set[str] = set()
+        # Capability ids used in any bounded step, accumulated across iterations so
+        # a capability-evidence requirement can be satisfied cumulatively.
+        self._satisfied_capabilities: set[str] = set()
+        # Action ids that succeeded in any bounded step, accumulated the same way
+        # so an action_succeeded evidence requirement is not lost on a later step.
+        self._satisfied_succeeded_actions: set[str] = set()
+        # Execution shapes that failed earlier in this task. In auto mode the
+        # planner should adapt instead of repeatedly selecting the same failing
+        # route shape.
+        self._failed_execution_shapes: set[str] = set()
         # Durable resume state (populated by AgentTask.async_resume before run).
         self._resumed_from_iteration: int = 0
         self._resumed_iteration_summaries: list[dict[str, Any]] = []
@@ -266,6 +276,52 @@ class AgentTask:
         await self._emit("agent_task.blocked", self.result)
         return {"terminal": True, "status": self.status}
 
+    def _failed_execution_result(
+        self,
+        iteration_index: int,
+        *,
+        plan: dict[str, Any],
+        error: Exception,
+        execution_id: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        message = str(error) or error.__class__.__name__
+        error_info = {
+            "type": error.__class__.__name__,
+            "message": message,
+            "stage": "execute",
+            "iteration": iteration_index,
+        }
+        self.diagnostics.setdefault("execution_errors", []).append(error_info)
+        selected_route = str(
+            plan.get("effective_execution_shape")
+            or plan.get("execution_shape")
+            or "unknown"
+        )
+        return (
+            {
+                "step_result": "",
+                "evidence": [f"Execution failed: {error.__class__.__name__}: {message}"],
+                "remaining_work": [f"Retry or replan after execution failure: {message}"],
+                "error": error_info,
+            },
+            {
+                "execution_id": execution_id or f"{self.id}:iter-{iteration_index}:failed-step",
+                "status": "failed",
+                "route": {
+                    "selected_route": selected_route,
+                    "status": "failed",
+                },
+                "logs": {
+                    "action_logs": {},
+                    "route_logs": {},
+                    "errors": [error_info],
+                },
+                "diagnostics": {
+                    "execution_error": error_info,
+                },
+            },
+        )
+
     async def _run_iteration(self, iteration_index: int) -> dict[str, Any]:
         try:
             if self._task_deadline_exceeded():
@@ -355,6 +411,14 @@ class AgentTask:
             )
         except _AgentTaskDeadlineExceeded as error:
             return await self._terminate_timed_out(iteration_index, stage=error.stage)
+        execution_failed = str(execution_meta.get("status") or "").strip().lower() in {
+            "failed",
+            "error",
+            "timed_out",
+            "blocked",
+        }
+        if execution_failed:
+            self._record_failed_execution_shape(plan, execution_meta)
         await self._emit_snapshot(
             iteration_index,
             "execution",
@@ -364,7 +428,11 @@ class AgentTask:
                 "route": execution_meta.get("route"),
                 "logs": self._execution_log_summary(execution_meta),
             },
-            message=f"Iteration {iteration_index}: bounded step finished; execution evidence was captured.",
+            message=(
+                f"Iteration {iteration_index}: bounded step failed; failure evidence was captured."
+                if execution_failed
+                else f"Iteration {iteration_index}: bounded step finished; execution evidence was captured."
+            ),
         )
         observation_ref, checkpoint_ref = await self._record_observation(
             iteration_index,
@@ -632,9 +700,14 @@ class AgentTask:
         if "max_tasks" not in policy and "max_plan_items" in policy:
             policy["max_tasks"] = policy.get("max_plan_items")
         policy.setdefault("allow_dag_steps", raw_step_plan in {"auto", "dag"})
+        failed_dag_shapes = sorted(self._failed_execution_shapes.intersection(_DAG_STEP_EXECUTION_SHAPES))
+        if raw_step_plan == "auto" and failed_dag_shapes:
+            policy["allow_dag_steps"] = False
+            policy["suppressed_execution_shapes"] = failed_dag_shapes
         return policy
 
     def _normalize_step_plan(self, plan: Any) -> dict[str, Any]:
+        normalized: dict[str, Any]
         if isinstance(plan, dict):
             normalized = plan
         else:
@@ -652,10 +725,18 @@ class AgentTask:
         normalized.setdefault("step_instruction", "")
         normalized.setdefault("expected_evidence", "")
         normalized.setdefault("rationale", "")
-        # Structured scope field (BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC
-        # 4.2): scope comes from this explicit list, never from parsing the
-        # natural-language step_instruction.
-        normalized["allowed_action_ids"] = self._normalize_string_list(normalized.get("allowed_action_ids"))
+        # Structured step scope (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
+        # scope comes from explicit capability lists, never from parsing the
+        # natural-language step_instruction. `allowed_action_ids` is retained as an
+        # internal alias for the action-id enforcement seam.
+        raw_scope = normalized.get("step_scope")
+        if not isinstance(raw_scope, dict):
+            raw_scope = {}
+        allowed_capability_ids = self._normalize_string_list(
+            raw_scope.get("allowed_capability_ids") or normalized.get("allowed_action_ids")
+        )
+        normalized["step_scope"] = {"allowed_capability_ids": allowed_capability_ids}
+        normalized["allowed_action_ids"] = allowed_capability_ids
         return normalized
 
     @staticmethod
@@ -702,17 +783,27 @@ class AgentTask:
         warning: str | None = None
 
         if requested_shape in _DAG_STEP_EXECUTION_SHAPES:
+            dag_suppressed = (
+                policy.get("step_plan") == "auto"
+                and bool(self._failed_execution_shapes.intersection(_DAG_STEP_EXECUTION_SHAPES))
+            )
             candidate = self._step_dynamic_task_candidate(plan)
             has_dynamic_candidates = bool(
                 getattr(self.agent, "_dynamic_task_candidates", []) or getattr(execution, "local_dynamic_task_candidates", [])
             )
             dag_allowed = bool(
-                candidate
-                or has_dynamic_candidates
-                or policy.get("allow_dag_steps")
-                or policy.get("step_plan") in {"auto", "dag"}
+                not dag_suppressed
+                and (
+                    candidate
+                    or has_dynamic_candidates
+                    or policy.get("allow_dag_steps")
+                    or policy.get("step_plan") in {"auto", "dag"}
+                )
             )
-            if candidate is not None:
+            if dag_suppressed:
+                effective_shape = "direct"
+                warning = "dag_shape_failed_previously"
+            elif candidate is not None:
                 add_candidate = getattr(execution, "_add_dynamic_task_candidate", None)
                 if callable(add_candidate):
                     add_candidate(candidate)
@@ -731,26 +822,32 @@ class AgentTask:
                 warning = "dag_shape_not_enabled"
 
         plan["effective_execution_shape"] = effective_shape
-        # Structured step scope (BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC
-        # 4.2): when the plan names an explicit action allowlist, narrow this
-        # step's action candidates to it via the execution-local action-id seam.
-        # This restricts scope from a structured field, never from parsing the
-        # step_instruction prose. The hard guarantee remains the verifier gate
-        # (4.3); this only prevents an evidence-gathering step from silently
-        # completing the whole task with unrelated actions.
-        allowed_action_ids = self._normalize_string_list(plan.get("allowed_action_ids"))
-        if allowed_action_ids and effective_shape in {"direct", "actions"}:
+        # Structured step scope (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
+        # when the plan names an explicit capability allowlist, narrow this step's
+        # action candidates to it via the execution-local action-id seam. Scope
+        # comes from the structured step_scope field, never from parsing the
+        # step_instruction prose. The hard guarantee remains the verifier evidence
+        # gate; this only prevents an evidence-gathering step from silently
+        # completing the whole task with unrelated capabilities.
+        step_scope = plan.get("step_scope")
+        if not isinstance(step_scope, dict):
+            step_scope = {}
+        allowed_capability_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
+        if allowed_capability_ids and effective_shape in {"direct", "actions"}:
             local_action_ids = getattr(execution, "local_action_ids", None)
             if isinstance(local_action_ids, list):
-                for action_id in allowed_action_ids:
-                    if action_id not in local_action_ids:
-                        local_action_ids.append(action_id)
+                for capability_id in allowed_capability_ids:
+                    if capability_id not in local_action_ids:
+                        local_action_ids.append(capability_id)
+            sync_action_scope = getattr(execution, "_sync_action_scope", None)
+            if callable(sync_action_scope):
+                sync_action_scope(source="AgentTaskLoop.step_scope")
         step_execution = {
             "requested_shape": requested_shape,
             "effective_shape": effective_shape,
             "dag_allowed": dag_allowed,
             "dynamic_task_candidate_added": candidate_added,
-            "allowed_action_ids": allowed_action_ids,
+            "step_scope": DataFormatter.sanitize(step_scope),
             "policy": DataFormatter.sanitize(policy),
         }
         route_policy = self._route_policy_for_step_execution(effective_shape)
@@ -800,51 +897,129 @@ class AgentTask:
             "step_execution_shape": effective_shape,
         }
 
-    def _available_skill_candidates(self) -> list[dict[str, Any]]:
-        """Planner-facing installed-skill candidate snapshot (inert data only).
+    def _planner_capabilities(self) -> list[dict[str, Any]]:
+        """Planner-facing capability candidate snapshot (inert data only).
 
-        Read from the typed snapshot the orchestrator route injected into
-        options at task construction (see
-        BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC 4.1). AgentTask consumes
-        only this snapshot; it does not reach back into the routing plugin.
+        Read from the typed snapshot the orchestrator route injected into options
+        at task construction (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC).
+        Covers actions, skills, skill packs, and dynamic-task candidates as one
+        capability list. AgentTask consumes only this snapshot; it does not reach
+        back into the routing plugin.
         """
-        raw = self.options.get("available_skills")
+        raw = self.options.get("planner_capabilities")
         if not isinstance(raw, list):
             return []
-        candidates: list[dict[str, Any]] = []
+        capabilities: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
                 continue
-            skill_id = str(item.get("id") or item.get("skill_id") or "").strip()
-            if not skill_id:
+            capability_id = str(item.get("id") or item.get("capability_id") or "").strip()
+            if not capability_id:
                 continue
-            candidates.append(
-                {
-                    "id": skill_id,
-                    "mode": str(item.get("mode") or "model_decision"),
-                    "description": str(item.get("description") or ""),
-                }
-            )
-        return candidates
+            entry: dict[str, Any] = {
+                "id": capability_id,
+                "kind": str(item.get("kind") or "action"),
+                "route": str(item.get("route") or "model_request"),
+                "guidance_access": str(item.get("guidance_access") or "none"),
+                "description": str(item.get("description") or ""),
+            }
+            if item.get("mode"):
+                entry["mode"] = str(item.get("mode"))
+            capabilities.append(entry)
+        return capabilities
 
-    def _skill_evidence_requirements(self) -> list[str]:
-        """Structured, authored skill-evidence requirement (skill ids).
+    def _capability_evidence_requirements(self) -> list[dict[str, Any]]:
+        """Structured, authored completion-evidence requirements (inert data).
 
-        The load-bearing gate's trigger (see
-        BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC 4.3): which skill ids must
-        appear in execution evidence for the task to be acceptable. Authored as a
-        structured option, independent of skill mode; never inferred from
-        free-text criteria. Accepts a plain list of ids or a dict carrying a
-        `skills` list for forward compatibility.
+        The load-bearing gate's trigger
+        (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC): which capabilities
+        must appear in execution evidence for the task to be acceptable. Authored
+        as a structured option, independent of capability mode; never inferred
+        from free-text criteria. Accepts either a list of capability-id strings
+        (treated as `capability_used`) or a list of EvidenceRequirement dicts. The
+        legacy `skill_evidence_requirements` option is read as a fallback alias.
         """
-        raw = self.options.get("skill_evidence_requirements")
+        raw = self.options.get("capability_evidence_requirements")
+        if raw is None:
+            raw = self.options.get("skill_evidence_requirements")
         if isinstance(raw, dict):
-            raw = raw.get("skills")
-        return self._normalize_string_list(raw)
+            raw = raw.get("capabilities") or raw.get("skills")
+        if not isinstance(raw, (list, tuple)):
+            return []
+        requirements: list[dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, str):
+                capability_id = item.strip()
+                if capability_id:
+                    requirements.append(
+                        {"capability_id": capability_id, "kind": "capability_used", "required": True, "source": "criterion"}
+                    )
+                continue
+            if not isinstance(item, dict):
+                continue
+            capability_id = str(item.get("capability_id") or item.get("id") or "").strip()
+            if not capability_id:
+                continue
+            requirement: dict[str, Any] = {
+                "capability_id": capability_id,
+                "kind": str(item.get("kind") or "capability_used"),
+                "required": bool(item.get("required", True)),
+                "source": str(item.get("source") or "criterion"),
+            }
+            if item.get("capability_kind"):
+                requirement["capability_kind"] = str(item.get("capability_kind"))
+            if item.get("criterion_id"):
+                requirement["criterion_id"] = str(item.get("criterion_id"))
+            requirements.append(requirement)
+        return requirements
+
+    def _evaluate_capability_evidence(self) -> tuple[list[str], list[dict[str, Any]]]:
+        """Deterministically check structured evidence requirements.
+
+        Returns (missing_capability_ids, unenforced_requirements). Checks run
+        against capability evidence accumulated across iterations
+        (`_satisfied_capabilities` for `capability_used`,
+        `_satisfied_succeeded_actions` for `action_succeeded`). Only the wired
+        combinations are enforced; anything without a structural producer
+        (the reserved evidence kinds, and `capability_used` for a
+        `dynamic_task` capability whose usage is not recorded in evidence) is
+        returned as an unenforced diagnostic rather than silently passing or
+        false-failing.
+        """
+        requirements = self._capability_evidence_requirements()
+        if not requirements:
+            return [], []
+
+        missing: list[str] = []
+        unenforced: list[dict[str, Any]] = []
+        for requirement in requirements:
+            if not requirement.get("required", True):
+                continue
+            capability_id = str(requirement.get("capability_id") or "").strip()
+            if not capability_id:
+                continue
+            kind = str(requirement.get("kind") or "capability_used")
+            capability_kind = str(requirement.get("capability_kind") or "")
+            if kind == "capability_used" and capability_kind != "dynamic_task":
+                if capability_id not in self._satisfied_capabilities:
+                    missing.append(capability_id)
+            elif kind == "action_succeeded":
+                if capability_id not in self._satisfied_succeeded_actions:
+                    missing.append(capability_id)
+            else:
+                unenforced.append(
+                    {"task_id": self.id, "capability_id": capability_id, "kind": kind, "capability_kind": capability_kind}
+                )
+        # De-duplicate while preserving order.
+        deduped: list[str] = []
+        for capability_id in missing:
+            if capability_id not in deduped:
+                deduped.append(capability_id)
+        return deduped, unenforced
 
     async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPack") -> dict[str, Any]:
         request = self.agent.create_temp_request()
-        available_skills = self._available_skill_candidates()
+        planner_capabilities = self._planner_capabilities()
         request.input(
             {
                 "task_id": self.id,
@@ -854,14 +1029,20 @@ class AgentTask:
                 "previous_iterations": self._iteration_prompt_summaries(),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_policy": self._step_execution_policy(),
-                "available_skills": available_skills,
+                "planner_capabilities": planner_capabilities,
             }
         )
-        skill_instruction = (
-            " Installed skills are listed in available_skills; their full guidance reaches the model "
-            "only through a step with execution_shape=skills (a direct/actions step cannot load it). "
-            "Choose execution_shape=skills when an available skill is the intended way to satisfy a criterion."
-            if available_skills
+        # Explanatory note only (not a guarantee): the hard guarantee is the
+        # verifier evidence gate, not this prompt text. It tells the planner which
+        # capabilities exist and that some kinds (e.g. a Skill's guidance) load
+        # only on their own route.
+        capability_note = (
+            " Available capabilities are listed in planner_capabilities, each with a kind "
+            "(action/skill/skill_pack/dynamic_task), the execution_shape route that exposes it, and "
+            "guidance_access. A capability whose guidance_access is route_context (such as a Skill's "
+            "guidance) only reaches the model on its own route, so choose that execution_shape when such "
+            "a capability is the intended way to satisfy a criterion."
+            if planner_capabilities
             else ""
         )
         request.instruct(
@@ -869,9 +1050,9 @@ class AgentTask:
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
             "Set execution_shape to direct, actions, skills, dynamic_task, or execution_dag. "
             "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
-            + skill_instruction
-            + " Optionally set allowed_action_ids to the specific action ids this bounded step should be limited to "
-            "when the step is only meant to gather evidence; leave it empty when the step may use any available action."
+            + capability_note
+            + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
+            "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
         )
         request.output(
             {
@@ -883,9 +1064,9 @@ class AgentTask:
                 "step_instruction": (str, "Instruction for one bounded AgentExecution step", True),
                 "expected_evidence": (str, "Evidence this step should produce", True),
                 "rationale": (str, "Why this is the next step", True),
-                "allowed_action_ids": (
-                    [str],
-                    "Optional structured allowlist of action ids this bounded step may use; empty means no restriction",
+                "step_scope": (
+                    dict,
+                    "Optional structured scope: {allowed_capability_ids: [...]}; empty means no restriction",
                     False,
                 ),
                 "dynamic_task": (
@@ -947,11 +1128,45 @@ class AgentTask:
             f"agent_task.iteration.{iteration_index}.execution.started",
             {"execution_id": execution.id, "step_execution": step_execution},
         )
-        result = await execution.async_get_data()
-        meta = await execution.async_get_meta()
+        try:
+            result = await execution.async_get_data()
+            meta = await execution.async_get_meta()
+        except Exception as error:
+            result, failed_meta = self._failed_execution_result(
+                iteration_index,
+                plan=plan,
+                error=error,
+                execution_id=str(getattr(execution, "id", "") or "") or None,
+            )
+            await self._emit(
+                f"agent_task.iteration.{iteration_index}.execution.failed",
+                {"execution_meta": failed_meta},
+            )
+            await self._record_phase(
+                "execution_failed",
+                iteration=iteration_index,
+                diagnostics={
+                    "execution_id": failed_meta.get("execution_id"),
+                    "route": failed_meta.get("route"),
+                    "error": failed_meta.get("diagnostics", {}).get("execution_error"),
+                },
+            )
+            return result, failed_meta
         self._reconcile_effective_shape(plan, cast(dict[str, Any], meta))
         await self._emit(f"agent_task.iteration.{iteration_index}.execution.completed", meta)
         return result, cast(dict[str, Any], meta)
+
+    def _record_failed_execution_shape(self, plan: dict[str, Any], execution_meta: dict[str, Any]) -> None:
+        route = execution_meta.get("route", {})
+        route_name = ""
+        if isinstance(route, dict):
+            route_name = str(route.get("selected_route") or "")
+        shape = self._shape_for_route(route_name) if route_name else ""
+        if not shape:
+            shape = str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "")
+        shape = self._normalize_step_execution_shape(shape)
+        if shape:
+            self._failed_execution_shapes.add(shape)
 
     def _iteration_prompt_summaries(self) -> list[dict[str, Any]]:
         """Bounded, low-noise iteration history for plan/verify prompts.
@@ -1061,7 +1276,7 @@ class AgentTask:
                 "execution_result": DataFormatter.sanitize(execution_result),
                 "execution_meta": DataFormatter.sanitize(execution_meta),
                 "execution_evidence_summary": self._execution_log_summary(execution_meta),
-                "skill_evidence_requirements": self._skill_evidence_requirements(),
+                "capability_evidence_requirements": self._capability_evidence_requirements(),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "previous_iterations": self._iteration_prompt_summaries(),
             }
@@ -1132,6 +1347,23 @@ class AgentTask:
         if normalized["missing_criteria"]:
             normalized["is_complete"] = False
             guard_reasons.append("missing_criteria_present")
+        execution_status = str(execution_evidence_summary.get("status") or "").strip().lower()
+        if execution_status in {"failed", "error", "timed_out", "blocked"}:
+            normalized["is_complete"] = False
+            guard_reasons.append("execution_status_failed")
+            execution_errors = execution_evidence_summary.get("errors", [])
+            error_message = ""
+            if isinstance(execution_errors, list) and execution_errors:
+                first_error = execution_errors[0]
+                if isinstance(first_error, dict):
+                    error_message = str(first_error.get("message") or first_error.get("type") or "")
+                else:
+                    error_message = str(first_error)
+            detail = f": {error_message}" if error_message else ""
+            normalized["missing_criteria"] = [
+                *normalized["missing_criteria"],
+                f"Execution step status is {execution_status}{detail}.",
+            ]
         risky_actions = [
             *self._normalize_string_list(execution_evidence_summary.get("failed_actions")),
             *self._normalize_string_list(execution_evidence_summary.get("blocked_actions")),
@@ -1152,6 +1384,14 @@ class AgentTask:
         self._satisfied_required_skills.update(
             self._normalize_string_list(execution_evidence_summary.get("selected_skill_ids"))
         )
+        self._satisfied_capabilities.update(
+            self._normalize_string_list(execution_evidence_summary.get("capabilities_used"))
+        )
+        capability_evidence = execution_evidence_summary.get("capability_evidence")
+        if isinstance(capability_evidence, dict) and isinstance(capability_evidence.get("actions"), dict):
+            self._satisfied_succeeded_actions.update(
+                self._normalize_string_list(capability_evidence["actions"].get("succeeded"))
+            )
         required_actions = self._normalize_string_list(execution_evidence_summary.get("required_actions"))
         required_skills = self._normalize_string_list(execution_evidence_summary.get("required_skills"))
         missing_required = [
@@ -1165,30 +1405,32 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Missing required capability evidence: {', '.join(missing_required)}",
             ]
-        # Load-bearing structured skill-evidence gate
-        # (BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC 4.3). This is a
-        # deterministic correspondence check between an authored, structured
-        # requirement (skill ids that must appear in execution evidence) and the
-        # accumulated selected_skill_ids evidence. It is independent of skill
-        # mode: a model_decision skill the goal depends on can be required as
-        # evidence here WITHOUT forcing the route via require_skills. No prose or
-        # model reading participates in the pass/fail decision.
-        skill_evidence_requirements = self._skill_evidence_requirements()
-        missing_skill_evidence = [
-            skill_id
-            for skill_id in skill_evidence_requirements
-            if skill_id not in self._satisfied_required_skills
-        ]
-        if missing_skill_evidence:
+        # Load-bearing structured capability-evidence gate
+        # (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC). A deterministic
+        # correspondence check between authored, structured requirements (which
+        # capabilities must appear in execution evidence) and the accumulated
+        # capability/action evidence. It is independent of capability mode: a
+        # model_decision skill (or any capability) the goal depends on can be
+        # required as evidence here WITHOUT forcing routing. No prose or model
+        # reading participates in the pass/fail decision. Only the kinds with a
+        # deterministic check are enforced; reserved kinds are recorded as
+        # unenforced diagnostics for the advisory model verifier.
+        missing_capability_evidence, unenforced_requirements = self._evaluate_capability_evidence()
+        if missing_capability_evidence:
             normalized["is_complete"] = False
-            guard_reasons.append("skill_evidence_missing")
+            guard_reasons.append("capability_evidence_missing")
             normalized["missing_criteria"] = [
                 *normalized["missing_criteria"],
-                f"Missing required skill evidence: {', '.join(missing_skill_evidence)}",
+                f"Missing required capability evidence: {', '.join(missing_capability_evidence)}",
             ]
-            missing_required = [*missing_required, *missing_skill_evidence]
+            missing_required = [*missing_required, *missing_capability_evidence]
+        if unenforced_requirements:
+            self.diagnostics.setdefault("unenforced_evidence_requirements", []).extend(unenforced_requirements)
         normalized["missing_required_capabilities"] = missing_required
-        normalized["missing_skill_evidence"] = missing_skill_evidence
+        normalized["missing_capability_evidence"] = missing_capability_evidence
+        # Surface unenforced requirements so a reserved or not-yet-wired evidence
+        # kind is visible rather than a silent no-op (it does not block).
+        normalized["unenforced_evidence_requirements"] = unenforced_requirements
         final_result_required = self._normalize_bool(
             verification.get("final_result_required"), default=False
         )
@@ -1344,6 +1586,9 @@ class AgentTask:
                         "iterations_summary": self._iteration_prompt_summaries(),
                         "satisfied_required_actions": sorted(self._satisfied_required_actions),
                         "satisfied_required_skills": sorted(self._satisfied_required_skills),
+                        "satisfied_capabilities": sorted(self._satisfied_capabilities),
+                        "satisfied_succeeded_actions": sorted(self._satisfied_succeeded_actions),
+                        "failed_execution_shapes": sorted(self._failed_execution_shapes),
                         "last_verification": {
                             "is_complete": bool(verification.get("is_complete")),
                             "requires_block": bool(verification.get("requires_block")),
@@ -1412,6 +1657,15 @@ class AgentTask:
         )
         task._satisfied_required_skills = set(
             cls._normalize_string_list(state.get("satisfied_required_skills"))
+        )
+        task._satisfied_capabilities = set(
+            cls._normalize_string_list(state.get("satisfied_capabilities"))
+        )
+        task._satisfied_succeeded_actions = set(
+            cls._normalize_string_list(state.get("satisfied_succeeded_actions"))
+        )
+        task._failed_execution_shapes = set(
+            cls._normalize_string_list(state.get("failed_execution_shapes"))
         )
         last_verification = state.get("last_verification")
         if isinstance(last_verification, dict):
@@ -1892,7 +2146,7 @@ class AgentTask:
     def _execution_log_summary(execution_meta: dict[str, Any]) -> dict[str, Any]:
         logs = execution_meta.get("logs", {})
         if not isinstance(logs, dict):
-            return {}
+            logs = {}
         action_records = AgentTask._collect_action_records(logs)
         action_ids = [record["id"] for record in action_records if record.get("id")]
         action_statuses = {
@@ -1914,9 +2168,32 @@ class AgentTask:
             for skill_id in required_skills
             if skill_id not in selected_skill_ids
         ]
+        succeeded_actions = AgentTask._action_ids_by_final_status(
+            action_statuses, {"success", "succeeded", "partial_success"}
+        )
         route = execution_meta.get("route", {})
         artifact_refs = logs.get("artifact_refs", [])
         workspace_refs = execution_meta.get("workspace_refs") or logs.get("workspace_refs", {})
+        raw_errors = logs.get("errors", [])
+        execution_errors: list[Any]
+        if isinstance(raw_errors, list):
+            execution_errors = raw_errors
+        elif raw_errors:
+            execution_errors = [raw_errors]
+        else:
+            execution_errors = []
+        diagnostics = execution_meta.get("diagnostics", {})
+        if isinstance(diagnostics, dict) and diagnostics.get("execution_error"):
+            execution_errors.append(diagnostics["execution_error"])
+        # Unified capability-evidence view (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
+        # one capability id space across kinds plus per-kind evidence buckets. A
+        # capability is "used" when it ran (action) or was selected (skill). The
+        # artifacts/validations buckets are reserved: no structural producer feeds
+        # them yet, so the verifier guard does not enforce those evidence kinds.
+        capabilities_used: list[str] = []
+        for capability_id in [*action_ids, *selected_skill_ids]:
+            if capability_id and capability_id not in capabilities_used:
+                capabilities_used.append(capability_id)
         return {
             "model_response_count": len(logs.get("model_responses", [])) if isinstance(logs.get("model_responses", []), list) else 0,
             "action_log_count": len(action_ids),
@@ -1931,10 +2208,18 @@ class AgentTask:
             "selected_skill_ids": selected_skill_ids,
             "required_skills": required_skills,
             "missing_required_skills": missing_required_skills,
+            "capabilities_used": capabilities_used,
+            "capability_evidence": {
+                "actions": {"succeeded": succeeded_actions, "failed": failed_actions},
+                "skills": {"selected": selected_skill_ids},
+                "artifacts": {"readback": []},
+                "validations": {"passed": [], "failed": []},
+            },
             "artifact_refs": DataFormatter.sanitize(artifact_refs),
             "workspace_refs": DataFormatter.sanitize(workspace_refs),
             "route": DataFormatter.sanitize(route),
             "status": str(execution_meta.get("status") or ""),
+            "errors": DataFormatter.sanitize(execution_errors),
         }
 
     @staticmethod
@@ -2005,10 +2290,16 @@ class AgentTask:
     @staticmethod
     def _compact_action_record(action_id: Any, record: dict[str, Any]) -> dict[str, str]:
         normalized_id = str(action_id or record.get("action_id") or record.get("id") or record.get("name") or "")
+        status = str(record.get("status") or "").strip()
+        if not status:
+            if record.get("error"):
+                status = "failed"
+            elif "result" in record or "artifact" in record:
+                status = "success"
         return {
             "id": normalized_id,
             "name": str(record.get("name") or normalized_id),
-            "status": str(record.get("status") or ""),
+            "status": status,
             "action_type": str(record.get("action_type") or record.get("type") or ""),
             "kind": str(record.get("kind") or ""),
         }

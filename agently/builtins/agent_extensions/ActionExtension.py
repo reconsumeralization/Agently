@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar
 
 from agently.core import BaseAgent
+from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
 from agently.utils import DeprecationWarnings, FunctionShifter
 
 if TYPE_CHECKING:
@@ -207,6 +208,28 @@ class ActionExtension(BaseAgent):
 
     def _collect_required_action_ids(self) -> list[str]:
         return list(self.__required_action_ids)
+
+    @staticmethod
+    def _action_item_id(item: dict[str, Any]) -> str:
+        return str(item.get("action_id") or item.get("name") or "").strip()
+
+    def _get_scoped_action_list(self) -> list[dict[str, Any]]:
+        action_list = self.action.get_action_list(tags=[f"agent-{ self.name }"])
+        execution_context = get_current_agent_execution_context()
+        scoped_action_ids = getattr(execution_context, "scoped_action_ids", None)
+        raw_allowed_ids = scoped_action_ids() if callable(scoped_action_ids) else None
+        allowed_ids = (
+            {str(item).strip() for item in raw_allowed_ids if str(item).strip()}
+            if isinstance(raw_allowed_ids, set)
+            else set()
+        )
+        if not allowed_ids:
+            return action_list
+        return [
+            item
+            for item in action_list
+            if self._action_item_id(item) in allowed_ids
+        ]
 
     def use_tools(self, tools: Callable | str | list[str | Callable] | Any):
         return self.use_actions(tools)
@@ -737,7 +760,7 @@ class ActionExtension(BaseAgent):
         planning_protocol: str | None = None,
     ) -> list["ActionCall"]:
         target_prompt = prompt if prompt is not None else self.request.prompt
-        action_list = self.action.get_action_list(tags=[f"agent-{ self.name }"])
+        action_list = self._get_scoped_action_list()
         return await self.action.async_generate_action_call(
             prompt=target_prompt,
             settings=self.settings,
@@ -781,7 +804,7 @@ class ActionExtension(BaseAgent):
         store_for_reply: bool = True,
     ) -> list["ActionResult"]:
         target_prompt = prompt if prompt is not None else self.request.prompt
-        action_list = self.action.get_action_list(tags=[f"agent-{ self.name }"])
+        action_list = self._get_scoped_action_list()
         if len(action_list) == 0:
             return []
 
@@ -929,7 +952,7 @@ class ActionExtension(BaseAgent):
         if settings.get("action.loop.enabled", settings.get("tool.loop.enabled", True)) is not True:
             return
 
-        action_list = self.action.get_action_list(tags=[f"agent-{ self.name }"])
+        action_list = self._get_scoped_action_list()
         if len(action_list) == 0:
             return
 

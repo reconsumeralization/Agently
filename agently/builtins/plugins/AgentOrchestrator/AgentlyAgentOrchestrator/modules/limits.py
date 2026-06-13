@@ -30,9 +30,16 @@ async def await_route_with_limits(owner: "AgentExecution", run_coro: Any):
     if max_seconds is None and max_no_progress_seconds is None:
         return await run_coro
 
+    task_strategy_owns_wall_clock = False
+    is_task_strategy = getattr(owner, "is_task_strategy", None)
+    if callable(is_task_strategy):
+        try:
+            task_strategy_owns_wall_clock = bool(is_task_strategy())
+        except Exception:
+            task_strategy_owns_wall_clock = False
     hard_deadline = (
         owner.execution_context.started_at + float(max_seconds)
-        if max_seconds is not None
+        if max_seconds is not None and not task_strategy_owns_wall_clock
         else None
     )
     idle_limit = float(max_no_progress_seconds) if max_no_progress_seconds is not None else None

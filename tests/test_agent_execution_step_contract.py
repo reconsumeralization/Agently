@@ -93,6 +93,31 @@ class MockAgentExecutionActionRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockScopedActionRequester(MockAgentExecutionRequester):
+    name = "MockScopedActionRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "next_action" in text and "execution_commands" in text:
+            action_id = "blocked_action" if "blocked_action" in text else "allowed_action"
+            payload = {
+                "next_action": "execute",
+                "execution_commands": [
+                    {
+                        "purpose": f"Run {action_id}",
+                        "action_id": action_id,
+                        "action_input": {},
+                    }
+                ],
+            }
+        elif "[ACTION RESULTS]" in text:
+            payload = {"answer": "used scoped action", "status": "ready"}
+        else:
+            payload = {"answer": "plain-text-delta", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockAgentExecutionIsolationRequester(MockAgentExecutionRequester):
     name = "MockAgentExecutionIsolationRequester"
     active_requests = 0
@@ -158,6 +183,13 @@ def _create_action_agent(name: str = "agent-execution-action-test"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockAgentExecutionActionRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_scoped_action_agent(name: str = "agent-execution-scoped-action-test"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockScopedActionRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -345,6 +377,35 @@ async def test_goal_pursuit_uses_detailed_effort_iteration_limit(tmp_path):
         "value": 2,
         "owner": "AgentTaskLoop",
     }
+
+
+@pytest.mark.asyncio
+async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task_loop(tmp_path):
+    agent = _create_goal_pursuit_agent("execution-task-route-deadline-owner").use_workspace(tmp_path / "workspace")
+    execution = (
+        agent
+        .goal("Build the site.", success_criteria=["The runnable page exists."])
+        .create_execution(limits={"max_seconds": 0.2, "max_no_progress_seconds": 5})
+    )
+
+    async def slow_request_plan(_iteration_index, _context_pack):
+        await asyncio.sleep(0.6)
+        return {
+            "step_instruction": "build the site",
+            "expected_evidence": "site exists",
+            "rationale": "this should be interrupted by the AgentTaskLoop deadline",
+        }
+
+    cast(Any, execution)._agent_task_step_overrides = {"_request_plan": slow_request_plan}
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+
+    assert result["status"] == "timed_out"
+    assert execution.status == "timed_out"
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert meta["close_snapshot"]["task"]["status"] == "timed_out"
+    assert "plan stage" in result["reason"]
 
 
 def test_execution_first_chain_allows_capabilities_before_goal(tmp_path):
@@ -677,6 +738,44 @@ async def test_agent_execution_model_request_exposes_action_logs_and_artifacts()
 
 
 @pytest.mark.asyncio
+async def test_agent_execution_action_scope_filters_action_runtime_boundary():
+    agent = _create_scoped_action_agent("action-scope-runtime-boundary")
+    agent.set_action_loop(max_rounds=1)
+
+    @agent.action_func
+    def allowed_action() -> dict[str, str]:
+        return {"status": "allowed"}
+
+    @agent.action_func
+    def blocked_action() -> dict[str, str]:
+        return {"status": "blocked"}
+
+    execution = (
+        agent
+        .create_execution()
+        .use_actions(["allowed_action"])
+        .input("use the scoped action")
+        .output({"answer": (str, "answer", True)}, format="json")
+    )
+
+    data = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    planning_calls = [
+        call
+        for call in MockAgentExecutionRequester.requests
+        if "next_action" in call and "execution_commands" in call
+    ]
+    action_ids = [item.get("action_id") for item in meta["logs"]["action_logs"]]
+
+    assert data["answer"] == "used scoped action"
+    assert planning_calls
+    assert "allowed_action" in planning_calls[0]
+    assert "blocked_action" not in planning_calls[0]
+    assert action_ids == ["allowed_action"]
+    assert meta["diagnostics"]["action_scope"]["allowed_action_ids"] == ["allowed_action"]
+
+
+@pytest.mark.asyncio
 async def test_required_action_blocks_when_model_skips_required_evidence():
     agent = _create_action_agent("required-action-missing")
 
@@ -842,6 +941,7 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
 
     async def capture_execute_skills_plan(*args: Any, **kwargs: Any):
         captured["effort"] = kwargs.get("effort")
+        captured["output_format"] = kwargs.get("output_format")
         return await original_execute_skills_plan(*args, **kwargs)
 
     agent.async_execute_skills_plan = capture_execute_skills_plan
@@ -851,7 +951,7 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
         .input("use the task step skill")
         .create_execution(
             options=ExecutionOptions.model_validate(
-                {"routes": {"skills": SkillsRouteOptions(effort="fast")}}
+                {"routes": {"skills": SkillsRouteOptions(effort="fast", output_format="flat_markdown")}}
             ),
             limits={"max_model_requests": 0},
         )
@@ -862,10 +962,16 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
 
     meta = await execution.async_get_meta()
     assert captured["effort"] == "fast"
+    assert captured["output_format"] == "flat_markdown"
     assert meta["options"]["routes"]["skills"]["effort"] == "fast"
+    assert meta["options"]["routes"]["skills"]["output_format"] == "flat_markdown"
     assert meta["effective_options"]["execution"]["limits"]["max_model_requests"] == 0
     assert meta["consumed_options"]["routes.skills.effort"] == {
         "value": "fast",
+        "owner": "AgentlySkillsExecutor",
+    }
+    assert meta["consumed_options"]["routes.skills.output_format"] == {
+        "value": "flat_markdown",
         "owner": "AgentlySkillsExecutor",
     }
 

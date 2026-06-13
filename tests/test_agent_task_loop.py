@@ -1199,11 +1199,11 @@ async def _collect_stream(task) -> list[Any]:
     return [item async for item in task.stream()]
 
 
-def _skill_gate_agent(name: str):
+def _capability_gate_agent(name: str):
     """Agent whose verifier always claims completion (drives the gate tests)."""
 
     class AlwaysCompleteVerifier(MockAgentTaskRequester):
-        name = "SkillGateVerifier"
+        name = "CapabilityGateVerifier"
 
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
@@ -1242,20 +1242,20 @@ def _skill_gate_agent(name: str):
 
 
 @pytest.mark.asyncio
-async def test_skill_evidence_gate_blocks_bypass_when_skill_unused(tmp_path):
-    """BUG_FIX_AGENT_TASK_SKILL_GUIDANCE_BYPASS_SPEC 4.3 (load-bearing).
+async def test_capability_evidence_gate_blocks_bypass_when_capability_unused(tmp_path):
+    """AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC (load-bearing gate).
 
-    The exact bypass path from the evidence run: the model verifier claims
-    completion, but no skill appears in execution evidence. A structured
-    skill-evidence requirement must turn this into a hard verification failure,
-    so 'accepted with the skill bypassed' becomes impossible.
+    The verifier claims completion, but the required capability never appears in
+    execution evidence. The structured capability-evidence requirement must turn
+    this into a hard verification failure, so 'accepted with the capability
+    bypassed' becomes impossible — regardless of the capability kind.
     """
-    agent = _skill_gate_agent("agent-task-skill-evidence-bypass")
+    agent = _capability_gate_agent("agent-task-capability-bypass")
 
     async def bypass_step(iteration_index, plan, context_pack):
-        # model_request route, no selected_skills -> skill was bypassed.
+        # model_request route, no skill selected -> the capability was bypassed.
         return (
-            {"step_result": "drew it from memory", "evidence": ["wrote a file"], "remaining_work": []},
+            {"step_result": "did it without the capability", "evidence": ["wrote a file"], "remaining_work": []},
             {
                 "execution_id": f"exec-{iteration_index}",
                 "status": "completed",
@@ -1268,12 +1268,16 @@ async def test_skill_evidence_gate_blocks_bypass_when_skill_unused(tmp_path):
         )
 
     task = agent.create_task(
-        task_id="skill-evidence-bypass",
-        goal="Render a diagram using the installed architecture-diagram skill.",
-        success_criteria=["The diagram uses the installed skill's design system."],
+        task_id="capability-evidence-bypass",
+        goal="Produce the artifact using the intended capability.",
+        success_criteria=["The artifact reflects the intended capability."],
         workspace=tmp_path / "task-workspace",
         max_iterations=1,
-        options={"skill_evidence_requirements": ["architecture-diagram"]},
+        options={
+            "capability_evidence_requirements": [
+                {"capability_id": "design-skill", "capability_kind": "skill", "kind": "capability_used"}
+            ]
+        },
     )
     cast(Any, task)._agent_task_step_overrides = {"_execute_step": bypass_step}
 
@@ -1284,38 +1288,91 @@ async def test_skill_evidence_gate_blocks_bypass_when_skill_unused(tmp_path):
     assert result["accepted"] is False
     verification = meta["iterations"][0]["verification"]
     assert verification["is_complete"] is False
-    assert "skill_evidence_missing" in verification.get("guard_reasons", [])
-    assert "architecture-diagram" in " ".join(verification.get("missing_skill_evidence", []))
-    assert "architecture-diagram" in " ".join(verification.get("missing_required_capabilities", []))
+    assert "capability_evidence_missing" in verification.get("guard_reasons", [])
+    assert "design-skill" in " ".join(verification.get("missing_capability_evidence", []))
+    assert "design-skill" in " ".join(verification.get("missing_required_capabilities", []))
 
 
 @pytest.mark.asyncio
-async def test_skill_evidence_gate_passes_when_skill_route_evidence_present(tmp_path):
-    """BUG_FIX 4.3: the same requirement passes when the skill genuinely shows
-    up in execution evidence (skills-route selected_skills record)."""
-    agent = _skill_gate_agent("agent-task-skill-evidence-present")
+async def test_execution_exception_becomes_verifier_visible_failed_evidence(tmp_path, monkeypatch):
+    """A bounded step runtime error must not crash AgentTask before the
+    observation/verifier path can see it. The deterministic guard blocks a
+    verifier that incorrectly claims completion over failed execution evidence."""
+    agent = _capability_gate_agent("agent-task-execution-failure-evidence")
+
+    class FailingExecution:
+        id = "exec-failed-route"
+
+        def __init__(self):
+            self.local_action_ids: list[str] = []
+            self.local_dynamic_task_candidates: list[Any] = []
+
+        def input(self, value):
+            return self
+
+        def instruct(self, value):
+            return self
+
+        def output(self, value, *, format=None):
+            return self
+
+        async def async_get_data(self):
+            raise RuntimeError("runtime placeholder path is invalid")
+
+        async def async_get_meta(self):
+            return {"execution_id": self.id, "status": "failed", "route": {"selected_route": "direct"}, "logs": {}}
+
+    task = agent.create_task(
+        task_id="execution-failure-evidence",
+        goal="Produce the artifact using a bounded execution step.",
+        success_criteria=["The artifact is produced."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+    monkeypatch.setattr(agent, "create_execution", lambda **kwargs: FailingExecution())
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] == "max_iterations"
+    assert result["accepted"] is False
+    execution_meta = meta["iterations"][0]["execution_meta"]
+    assert execution_meta["status"] == "failed"
+    assert execution_meta["logs"]["errors"][0]["message"] == "runtime placeholder path is invalid"
+    verification = meta["iterations"][0]["verification"]
+    assert verification["is_complete"] is False
+    assert "execution_status_failed" in verification.get("guard_reasons", [])
+    assert "runtime placeholder path is invalid" in " ".join(verification.get("missing_criteria", []))
+    assert meta["diagnostics"]["execution_errors"][0]["message"] == "runtime placeholder path is invalid"
+
+
+@pytest.mark.asyncio
+async def test_capability_evidence_gate_passes_when_capability_used(tmp_path):
+    """The same requirement passes when the capability genuinely shows up in
+    execution evidence (here, a skills-route selected_skills record)."""
+    agent = _capability_gate_agent("agent-task-capability-present")
 
     async def skills_step(iteration_index, plan, context_pack):
         return (
-            {"step_result": "used the skill", "evidence": ["rendered via skill"], "remaining_work": []},
+            {"step_result": "used the capability", "evidence": ["rendered via capability"], "remaining_work": []},
             {
                 "execution_id": f"exec-{iteration_index}",
                 "status": "completed",
                 "route": {"selected_route": "skills"},
                 "logs": {
                     "action_logs": {},
-                    "route_logs": {"plan": {"selected_skills": [{"skill_id": "architecture-diagram"}]}},
+                    "route_logs": {"plan": {"selected_skills": [{"skill_id": "design-skill"}]}},
                 },
             },
         )
 
     task = agent.create_task(
-        task_id="skill-evidence-present",
-        goal="Render a diagram using the installed architecture-diagram skill.",
-        success_criteria=["The diagram uses the installed skill's design system."],
+        task_id="capability-evidence-present",
+        goal="Produce the artifact using the intended capability.",
+        success_criteria=["The artifact reflects the intended capability."],
         workspace=tmp_path / "task-workspace",
         max_iterations=2,
-        options={"skill_evidence_requirements": ["architecture-diagram"]},
+        options={"capability_evidence_requirements": ["design-skill"]},
     )
     cast(Any, task)._agent_task_step_overrides = {"_execute_step": skills_step}
 
@@ -1326,47 +1383,327 @@ async def test_skill_evidence_gate_passes_when_skill_route_evidence_present(tmp_
     assert result["accepted"] is True
     verification = meta["iterations"][0]["verification"]
     assert verification["is_complete"] is True
-    assert verification.get("missing_skill_evidence", []) == []
+    assert verification.get("missing_capability_evidence", []) == []
 
 
 @pytest.mark.asyncio
-async def test_step_planner_prompt_exposes_installed_skill_candidates(tmp_path):
-    """BUG_FIX 4.1: installed skill candidates reach the planner prompt as a
-    typed snapshot in options, and the instruction tells the planner the skills
-    shape is the only way to load their guidance."""
-    MockAgentTaskRequester.reset()
-    agent = _skill_gate_agent("agent-task-planner-skill-visibility")
+async def test_capability_evidence_satisfied_cumulatively_across_iterations(tmp_path):
+    """Capability evidence accumulates across iterations: iteration 1 lacks it
+    (gate fails -> replan), iteration 2 supplies it (task accepted)."""
+    agent = _capability_gate_agent("agent-task-capability-cumulative")
+
+    async def step(iteration_index, plan, context_pack):
+        if iteration_index == 1:
+            logs = {"action_logs": {"prep": {"name": "prep", "status": "success"}}, "route_logs": {}}
+        else:
+            logs = {"action_logs": {}, "route_logs": {"plan": {"selected_skills": [{"skill_id": "design-skill"}]}}}
+        return (
+            {"step_result": f"iteration {iteration_index}", "evidence": ["ok"], "remaining_work": []},
+            {
+                "execution_id": f"exec-{iteration_index}",
+                "status": "completed",
+                "route": {"selected_route": "model_request" if iteration_index == 1 else "skills"},
+                "logs": logs,
+            },
+        )
 
     task = agent.create_task(
-        task_id="planner-skill-visibility",
-        goal="Render a diagram, choosing the right execution shape.",
-        success_criteria=["A diagram is produced."],
+        task_id="capability-evidence-cumulative",
+        goal="Produce the artifact using the intended capability.",
+        success_criteria=["The artifact reflects the intended capability."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=3,
+        options={"capability_evidence_requirements": ["design-skill"]},
+    )
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": step}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] == "completed"
+    assert result["iterations"] == 2
+    first = meta["iterations"][0]["verification"]
+    assert first["is_complete"] is False
+    assert "design-skill" in " ".join(first.get("missing_capability_evidence", []))
+
+
+@pytest.mark.asyncio
+async def test_step_planner_prompt_exposes_capability_candidates_of_all_kinds(tmp_path):
+    """Planner visibility: action, skill, and skill_pack capability candidates
+    reach the planner prompt as one typed snapshot in options, with guidance_access
+    so the planner knows which capabilities need their own route."""
+    MockAgentTaskRequester.reset()
+    agent = _capability_gate_agent("agent-task-capability-visibility")
+
+    task = agent.create_task(
+        task_id="capability-visibility",
+        goal="Produce the artifact, choosing the right execution shape.",
+        success_criteria=["An artifact is produced."],
         workspace=tmp_path / "task-workspace",
         max_iterations=1,
         options={
-            "available_skills": [
-                {
-                    "id": "architecture-diagram",
-                    "mode": "model_decision",
-                    "description": "Create polished dark-themed architecture diagrams.",
-                }
+            "planner_capabilities": [
+                {"id": "fetch_sources", "kind": "action", "route": "model_request", "guidance_access": "none", "description": "gather"},
+                {"id": "design-skill", "kind": "skill", "route": "skills", "guidance_access": "route_context", "mode": "model_decision", "description": "design"},
+                {"id": "report-pack", "kind": "skill_pack", "route": "skills", "guidance_access": "route_context", "description": "pack"},
             ]
         },
     )
 
     await task.async_run()
 
-    # MockAgentTaskRequester records every request payload on the class.
     plan_calls = [
-        text
-        for text in MockAgentTaskRequester.calls
-        if "Plan the next bounded AgentExecution step" in text
+        text for text in MockAgentTaskRequester.calls if "Plan the next bounded AgentExecution step" in text
     ]
     assert plan_calls, "planner was never invoked"
     plan_text = plan_calls[0]
-    assert "available_skills" in plan_text
-    assert "architecture-diagram" in plan_text
-    assert "execution_shape=skills" in plan_text
+    assert "planner_capabilities" in plan_text
+    for capability_id in ("fetch_sources", "design-skill", "report-pack"):
+        assert capability_id in plan_text
+    for kind in ("action", "skill", "skill_pack"):
+        assert kind in plan_text
+    assert "guidance_access" in plan_text
+
+
+def test_step_scope_restricts_step_actions_from_structured_field(tmp_path):
+    """Step scope comes from the structured step_scope field (not prose): an
+    allowed_capability_ids list narrows the bounded step's action candidates via
+    the execution-local action-id seam."""
+    from agently.core.application import AgentTask
+
+    agent = _capability_gate_agent("agent-task-step-scope")
+    task = AgentTask(
+        agent,
+        goal="Gather evidence in a scoped step.",
+        success_criteria=["Evidence gathered."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    class _FakeExecution:
+        def __init__(self):
+            self.local_action_ids: list[str] = []
+            self.local_dynamic_task_candidates: list[Any] = []
+            self.applied_route_policy: dict[str, Any] | None = None
+
+        def route_policy(self, value):
+            self.applied_route_policy = value
+
+        def record_consumed_option(self, *args, **kwargs):
+            pass
+
+    execution = _FakeExecution()
+    plan = cast(Any, task)._normalize_step_plan(
+        {
+            "execution_shape": "direct",
+            "step_instruction": "gather only",
+            "expected_evidence": "x",
+            "rationale": "y",
+            "step_scope": {"allowed_capability_ids": ["fetch_sources"]},
+        }
+    )
+    step_execution = cast(Any, task)._configure_step_execution(execution, plan)
+
+    assert execution.local_action_ids == ["fetch_sources"]
+    assert step_execution["step_scope"]["allowed_capability_ids"] == ["fetch_sources"]
+
+
+def test_auto_step_plan_suppresses_dag_after_prior_dag_failure(tmp_path):
+    from agently.core.application import AgentTask
+
+    agent = _capability_gate_agent("agent-task-auto-dag-suppression")
+    task = AgentTask(
+        agent,
+        goal="Run the next useful step.",
+        success_criteria=["The result is produced."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=2,
+        options={"agent_task": {"effort": {"execution": {"step_plan": "auto"}}}},
+    )
+    cast(Any, task)._failed_execution_shapes.add("dynamic_task")
+
+    class _FakeExecution:
+        def __init__(self):
+            self.local_action_ids: list[str] = []
+            self.local_dynamic_task_candidates: list[Any] = []
+            self.added_candidates: list[Any] = []
+
+        def _add_dynamic_task_candidate(self, candidate):
+            self.added_candidates.append(candidate)
+
+    execution = _FakeExecution()
+    plan = cast(Any, task)._normalize_step_plan(
+        {
+            "execution_shape": "execution_dag",
+            "step_instruction": "try a DAG",
+            "expected_evidence": "result",
+            "rationale": "has substeps",
+            "dynamic_task": {"plan": {"tasks": []}},
+        }
+    )
+
+    step_execution = cast(Any, task)._configure_step_execution(execution, plan)
+
+    assert step_execution["effective_shape"] == "direct"
+    assert step_execution["warning"] == "dag_shape_failed_previously"
+    assert step_execution["policy"]["allow_dag_steps"] is False
+    assert step_execution["policy"]["suppressed_execution_shapes"] == ["dynamic_task"]
+    assert execution.added_candidates == []
+
+
+def test_explicit_dag_step_plan_keeps_dag_after_prior_dag_failure(tmp_path):
+    from agently.core.application import AgentTask
+
+    agent = _capability_gate_agent("agent-task-explicit-dag-kept")
+    task = AgentTask(
+        agent,
+        goal="Run the requested DAG step.",
+        success_criteria=["The result is produced."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={"agent_task": {"effort": {"execution": {"step_plan": "dag"}}}},
+    )
+    cast(Any, task)._failed_execution_shapes.add("dynamic_task")
+
+    class _FakeExecution:
+        def __init__(self):
+            self.local_action_ids: list[str] = []
+            self.local_dynamic_task_candidates: list[Any] = []
+            self.added_candidates: list[Any] = []
+
+        def _add_dynamic_task_candidate(self, candidate):
+            self.added_candidates.append(candidate)
+
+    execution = _FakeExecution()
+    plan = cast(Any, task)._normalize_step_plan(
+        {
+            "execution_shape": "dynamic_task",
+            "step_instruction": "run the explicit DAG",
+            "expected_evidence": "result",
+            "rationale": "caller asked for dag",
+            "dynamic_task": {"plan": {"tasks": []}},
+        }
+    )
+
+    step_execution = cast(Any, task)._configure_step_execution(execution, plan)
+
+    assert step_execution["effective_shape"] == "dynamic_task"
+    assert step_execution["dynamic_task_candidate_added"] is True
+    assert execution.added_candidates == [{"plan": {"tasks": []}, "mode": "submitted"}]
+
+
+def test_execution_log_summary_infers_action_success_from_route_history():
+    """Older or nested route histories may expose action result records without
+    a status field. AgentTask still needs a deterministic evidence projection."""
+    from agently.core.application import AgentTask
+
+    summary = AgentTask._execution_log_summary(
+        {
+            "status": "success",
+            "logs": {
+                "route_logs": {
+                    "output": {
+                        "history": [
+                            {"name": "write_file", "result": {"path": "out.html"}},
+                            {"name": "read_file", "error": "not found"},
+                        ]
+                    }
+                }
+            },
+        }
+    )
+
+    assert summary["action_statuses"]["write_file"] == "success"
+    assert summary["action_statuses"]["read_file"] == "failed"
+    assert summary["capability_evidence"]["actions"]["succeeded"] == ["write_file"]
+    assert summary["capability_evidence"]["actions"]["failed"] == ["read_file"]
+
+
+@pytest.mark.asyncio
+async def test_action_succeeded_evidence_satisfied_in_earlier_iteration(tmp_path):
+    """action_succeeded evidence accumulates across iterations: the action
+    succeeds in iteration 1, and a later iteration must not false-fail the
+    requirement just because the action did not re-run."""
+    agent = _capability_gate_agent("agent-task-action-succeeded-cumulative")
+
+    async def step(iteration_index, plan, context_pack):
+        if iteration_index == 1:
+            # The required action succeeds here; iteration 2 omits it but the
+            # capability_used requirement for "later-skill" is still unmet.
+            logs = {
+                "action_logs": {"build_action": {"name": "build_action", "status": "success"}},
+                "route_logs": {},
+            }
+            route = "model_request"
+        else:
+            logs = {"action_logs": {}, "route_logs": {"plan": {"selected_skills": [{"skill_id": "later-skill"}]}}}
+            route = "skills"
+        return (
+            {"step_result": f"iteration {iteration_index}", "evidence": ["ok"], "remaining_work": []},
+            {"execution_id": f"exec-{iteration_index}", "status": "completed", "route": {"selected_route": route}, "logs": logs},
+        )
+
+    task = agent.create_task(
+        task_id="action-succeeded-cumulative",
+        goal="Use an action and a skill across steps.",
+        success_criteria=["The action ran and the skill was used."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=3,
+        options={
+            "capability_evidence_requirements": [
+                {"capability_id": "build_action", "kind": "action_succeeded"},
+                {"capability_id": "later-skill", "capability_kind": "skill", "kind": "capability_used"},
+            ]
+        },
+    )
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": step}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] == "completed"
+    assert result["iterations"] == 2
+    # Iteration 2 must not report build_action as missing — it succeeded in iter 1.
+    second = meta["iterations"][1]["verification"]
+    assert "build_action" not in " ".join(second.get("missing_capability_evidence", []))
+
+
+@pytest.mark.asyncio
+async def test_unenforced_evidence_kind_is_recorded_not_silently_blocking(tmp_path):
+    """A reserved/not-yet-wired evidence kind (e.g. artifact_readback) does not
+    block acceptance but is surfaced as an unenforced requirement rather than
+    silently dropped."""
+    agent = _capability_gate_agent("agent-task-unenforced-kind")
+
+    async def step(iteration_index, plan, context_pack):
+        return (
+            {"step_result": "done", "evidence": ["ok"], "remaining_work": []},
+            {"execution_id": f"exec-{iteration_index}", "status": "completed", "route": {"selected_route": "model_request"}, "logs": {"action_logs": {}, "route_logs": {}}},
+        )
+
+    task = agent.create_task(
+        task_id="unenforced-kind",
+        goal="Produce an artifact.",
+        success_criteria=["An artifact exists."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={
+            "capability_evidence_requirements": [
+                {"capability_id": "the-artifact", "kind": "artifact_readback"}
+            ]
+        },
+    )
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": step}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    # Unenforced kind must not block; it is recorded for visibility.
+    assert result["status"] == "completed"
+    verification = meta["iterations"][0]["verification"]
+    assert verification.get("missing_capability_evidence", []) == []
+    unenforced = verification.get("unenforced_evidence_requirements", [])
+    assert any(item.get("capability_id") == "the-artifact" for item in unenforced)
 
 
 def test_agent_task_module_does_not_import_orchestrator_internals():
