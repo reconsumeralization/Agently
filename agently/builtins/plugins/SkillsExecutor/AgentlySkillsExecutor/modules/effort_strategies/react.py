@@ -34,6 +34,11 @@ async def run_react_strategy(
     step_budget = to_int(ec.get("step_budget") or executor.registry.settings.get("skills.react_max_steps", 30), 30)
     model_key = str(ec.get("reason_key") or executor._stage_model_key(plan, "reason"))
     artifact_inline_limit = to_int(ec.get("artifact_inline_limit") or executor.registry.settings.get("skills.artifact_inline_limit", 65536), 65536)
+    # Tool/script authorization flows from effort_config so callers can grant the
+    # react loop direct tool/action/script access (default stays deny-all).
+    allowed_tools = [str(item) for item in (ec.get("allowed_tools") or []) if str(item).strip()]
+    allowed_actions = [str(item) for item in (ec.get("allowed_actions") or []) if str(item).strip()]
+    allow_scripts = bool(ec.get("allow_scripts", False))
     capture_context = RuntimeStreamCaptureContext(context, runtime_stream)
 
     try:
@@ -44,9 +49,9 @@ async def run_react_strategy(
             settings=executor.registry.settings,
             step_budget=step_budget,
             model_key=model_key,
-            allowed_tools=[],
-            allowed_actions=[],
-            allow_scripts=False,
+            allowed_tools=allowed_tools,
+            allowed_actions=allowed_actions,
+            allow_scripts=allow_scripts,
             artifact_inline_limit=artifact_inline_limit,
         )
     except Exception as error:

@@ -963,6 +963,27 @@ async def test_required_capabilities_satisfied_cumulatively_across_iterations(tm
     assert "skill_y" in " ".join(first.get("missing_required_capabilities", []))
 
 
+@pytest.mark.asyncio
+async def test_task_wall_clock_budget_surfaces_timed_out(tmp_path):
+    """ISSUE-010: max_seconds is a task deadline (timed_out), not a request timeout."""
+    agent = _create_agent("agent-task-deadline").use_workspace(tmp_path / "task-workspace")
+    task = agent.create_task(
+        task_id="deadline",
+        goal="Repair a legacy Agently script so it runs on the current API.",
+        success_criteria=["The script runs successfully."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=3,
+        limits={"max_seconds": 0.0001},
+    )
+    # Force the wall-clock budget to be already exceeded before the first step.
+    import time as _time
+    task.started_at = _time.time() - 5
+
+    result = await task.async_run()
+    assert result["status"] == "timed_out"
+    assert task.status == "timed_out"
+
+
 def test_action_final_status_exempts_recovered_actions():
     """ISSUE-012: an action that failed then succeeded is not a risk action."""
     from agently.core.application.AgentTask.Task import AgentTask

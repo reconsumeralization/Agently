@@ -50,10 +50,14 @@ class SkillExecution:
     def to_dict(self) -> SkillExecutionDict:
         return _copy_public(self.data)
 
-    # ── Snapshot durability (E5) ──
+    # ── Snapshot inspection ──
+    # A SkillExecution snapshot is a read-only record of a completed run. It is
+    # for persistence and inspection, not active resume: a closed snapshot has no
+    # live TriggerFlow execution to continue. Resuming an active wait must use the
+    # underlying TriggerFlow execution continue_with(...) lifecycle.
 
     def save_snapshot(self, path: str) -> None:
-        """Persist execution snapshot to a JSON file for later resume."""
+        """Persist the execution snapshot to a JSON file for later inspection."""
         import json as _json
         snapshot = self.to_dict()
         with open(path, "w", encoding="utf-8") as f:
@@ -68,7 +72,11 @@ class SkillExecution:
         return cls(cast(SkillExecutionDict, data))
 
     def get_pending_waits(self) -> list[dict[str, Any]]:
-        """Return pending intervention records that need human input."""
+        """Return intervention records recorded as pending in this snapshot.
+
+        These are informational for inspection; resuming them requires the live
+        TriggerFlow execution, not a closed snapshot.
+        """
         return [
             r for r in self.intervention_records
             if r.get("status") == "pending"
@@ -83,9 +91,10 @@ class SkillExecution:
 
     async def async_resume_wait(self, wait_id: str, payload: Any = None) -> "SkillExecution":
         del payload
-        raise KeyError(
-            f"Skill wait '{wait_id}' is not resumable from a closed SkillExecution snapshot. "
-            "Use the underlying TriggerFlow execution continue_with(...) lifecycle for active waits."
+        raise NotImplementedError(
+            f"Skill wait '{wait_id}' is not resumable from a closed SkillExecution snapshot, which is "
+            "inspection-only. Resume an active wait through the underlying TriggerFlow execution "
+            "continue_with(...) lifecycle while the execution is still open."
         )
 
 

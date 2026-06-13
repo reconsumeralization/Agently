@@ -206,7 +206,33 @@ class AgentTask:
             return True
         return getattr(error, "status", None) == "timed_out"
 
+    async def _terminate_timed_out(self, iteration_index: int) -> dict[str, Any]:
+        self.status = "timed_out"
+        reason = (
+            "Task exceeded its wall-clock budget "
+            f"(max_seconds={ self._task_max_seconds() }) before completion."
+        )
+        self.result = {
+            "status": "timed_out",
+            "accepted": False,
+            "artifact_status": "partial",
+            "task_id": self.id,
+            "reason": reason,
+            "iterations": len(self.iterations),
+        }
+        self.diagnostics.setdefault("terminal_reason", "timed_out")
+        await self._emit_progress(iteration_index, "timed_out", f"Iteration {iteration_index}: { reason }")
+        await self._record_phase(
+            "terminal",
+            iteration=iteration_index,
+            diagnostics={"status": self.status, "accepted": False, "artifact_status": "partial"},
+        )
+        await self._emit("agent_task.blocked", self.result)
+        return {"terminal": True, "status": self.status}
+
     async def _run_iteration(self, iteration_index: int) -> dict[str, Any]:
+        if self._task_deadline_exceeded():
+            return await self._terminate_timed_out(iteration_index)
         await self._emit_progress(
             iteration_index,
             "context",
@@ -700,7 +726,7 @@ class AgentTask:
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
                 "iteration": iteration_index,
-                "previous_iterations": self.iterations,
+                "previous_iterations": self._iteration_prompt_summaries(),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_policy": self._step_execution_policy(),
             }
@@ -786,6 +812,53 @@ class AgentTask:
         await self._emit(f"agent_task.iteration.{iteration_index}.execution.completed", meta)
         return result, cast(dict[str, Any], meta)
 
+    def _iteration_prompt_summaries(self) -> list[dict[str, Any]]:
+        """Bounded, low-noise iteration history for plan/verify prompts.
+
+        Full iteration records (including execution_meta) stay in self.iterations
+        and the Workspace; prompts receive only step intent, the verification
+        outcome, and Workspace refs so context does not grow unboundedly with the
+        full execution metadata of every prior step.
+        """
+        limit = self._iterations_prompt_limit()
+        records = self.iterations[-limit:] if isinstance(limit, int) and limit > 0 else self.iterations
+        summaries: list[dict[str, Any]] = []
+        for record in records:
+            plan = record.get("plan")
+            if not isinstance(plan, dict):
+                plan = {}
+            verification = record.get("verification")
+            if not isinstance(verification, dict):
+                verification = {}
+            summaries.append(
+                {
+                    "iteration": record.get("iteration"),
+                    "step_instruction": plan.get("step_instruction", ""),
+                    "effective_execution_shape": plan.get(
+                        "effective_execution_shape", plan.get("execution_shape", "")
+                    ),
+                    "verification": {
+                        "is_complete": verification.get("is_complete"),
+                        "reason": verification.get("reason", ""),
+                        "missing_criteria": verification.get("missing_criteria", []),
+                        "replan_instruction": verification.get("replan_instruction", ""),
+                    },
+                    "observation_ref": record.get("observation_ref"),
+                    "verification_ref": record.get("verification_ref"),
+                }
+            )
+        return summaries
+
+    def _iterations_prompt_limit(self) -> int | None:
+        configured = self._agent_task_option("iterations_prompt_limit", None)
+        if configured is None:
+            return None
+        try:
+            limit = int(configured)
+        except (TypeError, ValueError):
+            return None
+        return limit if limit > 0 else None
+
     @staticmethod
     def _shape_for_route(route: str) -> str:
         return {
@@ -842,7 +915,7 @@ class AgentTask:
                 "execution_meta": DataFormatter.sanitize(execution_meta),
                 "execution_evidence_summary": self._execution_log_summary(execution_meta),
                 "context_pack": DataFormatter.sanitize(context_pack),
-                "previous_iterations": self.iterations,
+                "previous_iterations": self._iteration_prompt_summaries(),
             }
         )
         request.instruct(
@@ -991,6 +1064,9 @@ class AgentTask:
             raise TimeoutError(f"AgentTask {stage} request timed out after {timeout} seconds.") from error
 
     def _task_request_timeout(self) -> float | None:
+        # Per plan/verify request timeout. max_seconds is the task wall-clock
+        # budget (enforced separately in the loop) and must not be reused as a
+        # per-request timeout; the no-progress idle limit is the closest fallback.
         agent_task_options = self.options.get("agent_task")
         if isinstance(agent_task_options, dict):
             configured = agent_task_options.get("request_timeout_seconds")
@@ -999,11 +1075,19 @@ class AgentTask:
         configured = self.options.get("request_timeout_seconds")
         if configured is not None:
             return self._normalize_timeout(configured)
-        for key in ("max_no_progress_seconds", "max_seconds"):
-            configured = self.limits.get(key)
-            if configured is not None:
-                return self._normalize_timeout(configured)
+        configured = self.limits.get("max_no_progress_seconds")
+        if configured is not None:
+            return self._normalize_timeout(configured)
         return None
+
+    def _task_max_seconds(self) -> float | None:
+        return self._normalize_timeout(self.limits.get("max_seconds"))
+
+    def _task_deadline_exceeded(self) -> bool:
+        max_seconds = self._task_max_seconds()
+        if max_seconds is None or self.started_at is None:
+            return False
+        return (time.time() - self.started_at) >= max_seconds
 
     @staticmethod
     def _normalize_timeout(value: Any) -> float | None:

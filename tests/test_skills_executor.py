@@ -1279,6 +1279,25 @@ async def test_effort_normal_runs_full_runtime_chain(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_staged_strategy_without_stages_reports_error(tmp_path):
+    """ISSUE-014: staged with no execution_stages must report error, not success."""
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    agent = _create_agent()
+    agent.set_settings("effort_presets", {"staged_preset": {"strategy": "staged"}})
+
+    execution = await agent.async_run_skills_task(
+        "handle release",
+        skills=["alpha-skill"],
+        mode="required",
+        effort="staged_preset",
+    )
+
+    assert execution.status == "error"
+    assert "execution_stages" in str(execution.output)
+
+
+@pytest.mark.asyncio
 async def test_custom_effort_strategy_handler_executes(tmp_path):
     _skill(tmp_path / "alpha", name="Alpha Skill")
     Agently.skills_executor.install_skills(tmp_path / "alpha")
