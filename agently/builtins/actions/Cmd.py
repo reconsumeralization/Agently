@@ -38,7 +38,12 @@ class Cmd:
             for prefix in self.allowed_cmd_prefixes
             if isinstance(prefix, str) and prefix.strip()
         ]
-        roots = allowed_workdir_roots if allowed_workdir_roots is not None else [Path.cwd()]
+        # No implicit process-cwd boundary: a Workspace-bound shell must inject
+        # the working directory through the Workspace file boundary (e.g.
+        # agent.enable_shell(...) derives allowed_workdir_roots from the bound
+        # Workspace files_root). Executors must not invent a fallback cwd
+        # (spec sections 8.6 / 9).
+        roots = allowed_workdir_roots if allowed_workdir_roots is not None else []
         self.allowed_workdir_roots = [Path(root).resolve() for root in roots]
         self.timeout = timeout
         self.env = env
@@ -102,6 +107,8 @@ class Cmd:
 
     def _is_workdir_allowed(self, workdir: str | Path | None) -> bool:
         workdir_path = self._resolve_workdir(workdir)
+        if workdir_path is None or not self.allowed_workdir_roots:
+            return False
         for root in self.allowed_workdir_roots:
             try:
                 workdir_path.relative_to(root)
@@ -110,12 +117,13 @@ class Cmd:
                 continue
         return False
 
-    def _resolve_workdir(self, workdir: str | Path | None) -> Path:
+    def _resolve_workdir(self, workdir: str | Path | None) -> Path | None:
         if workdir is not None:
             return Path(workdir).resolve()
         if self.allowed_workdir_roots:
             return self.allowed_workdir_roots[0]
-        return Path.cwd().resolve()
+        # No Workspace-issued boundary configured; do not fall back to cwd.
+        return None
 
     async def run(
         self,
@@ -125,6 +133,18 @@ class Cmd:
     ) -> dict:
         args = self._normalize_cmd(cmd)
         workdir_path = self._resolve_workdir(workdir)
+        if workdir_path is None:
+            return {
+                "ok": False,
+                "need_approval": True,
+                "reason": "workspace_boundary_required",
+                "detail": (
+                    "No Workspace-issued working directory. Bind a Workspace and enable a "
+                    "Workspace-bound shell (agent.use_workspace(...) + agent.enable_shell(...)) so "
+                    "the working directory is injected through the Workspace file boundary; "
+                    "executors do not fall back to the process cwd."
+                ),
+            }
         if not self._is_workdir_allowed(workdir):
             return {
                 "ok": False,

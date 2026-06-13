@@ -23,6 +23,25 @@ def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():
     assert hasattr(LegacyCmd(), "tool_info_list")
 
 
+@pytest.mark.asyncio
+async def test_cmd_without_workspace_boundary_fails_closed_no_cwd_fallback(tmp_path):
+    # Without a Workspace-issued working directory, Cmd must refuse instead of
+    # silently running in the process cwd (spec sections 8.6 / 9).
+    cmd = Cmd(allowed_cmd_prefixes=["pwd"])
+    assert cmd.allowed_workdir_roots == []
+    result = await cmd.run("pwd")
+    assert result["ok"] is False
+    assert result["reason"] == "workspace_boundary_required"
+
+
+@pytest.mark.asyncio
+async def test_cmd_with_workspace_boundary_runs_in_injected_root(tmp_path):
+    cmd = Cmd(allowed_cmd_prefixes=["pwd"], allowed_workdir_roots=[str(tmp_path)])
+    result = await cmd.run("pwd")
+    assert result["ok"] is True
+    assert str(tmp_path) in result["stdout"]
+
+
 def test_v2_default_plugins_are_registered():
     action_executors = set(Agently.plugin_manager.get_plugin_list("ActionExecutor"))
     environment_providers = set(Agently.plugin_manager.get_plugin_list("ExecutionResourceProvider"))
