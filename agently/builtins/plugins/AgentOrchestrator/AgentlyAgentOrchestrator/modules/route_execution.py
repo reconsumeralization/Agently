@@ -108,13 +108,10 @@ async def start_execution(
     if parent_run_context is not None:
         owner.parent_run_context = parent_run_context
     async with owner._start_lock:
+        # The lock is held across the whole run, so a second entrant always sees
+        # a completed execution here; there is no started-but-not-completed state
+        # to busy-wait on.
         if owner._completed:
-            if owner._error is not None:
-                raise owner._error
-            return owner.result
-        if owner._started:
-            while not owner._completed:
-                await asyncio.sleep(0.01)
             if owner._error is not None:
                 raise owner._error
             return owner.result

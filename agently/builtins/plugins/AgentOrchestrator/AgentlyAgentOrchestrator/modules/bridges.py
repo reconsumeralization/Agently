@@ -49,7 +49,15 @@ async def record_action_log(
     artifact_refs = log.get("artifact_refs") or model_digest.get("artifact_refs") or []
     if not isinstance(artifact_refs, list):
         artifact_refs = []
-    key = str(action_call_id or f"{ action_id }:{ len(owner.logs.get('action_logs', [])) }")
+    if action_call_id:
+        key = str(action_call_id)
+    else:
+        # No call id: dedup the same action reported through both the stream and
+        # the result's extra.action_logs by action id + status + result content,
+        # rather than the action-log count (which differs between channels and
+        # would double-count the same execution).
+        digest = str(DataFormatter.sanitize(log.get("data") if log.get("data") is not None else log.get("result")))
+        key = f"{ action_id }:{ status }:{ hash(digest) }"
     if key in owner._seen_action_log_keys:
         return None
     owner._seen_action_log_keys.add(key)

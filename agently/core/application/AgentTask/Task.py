@@ -52,6 +52,9 @@ _STEP_EXECUTION_SHAPES = {
 
 _DAG_STEP_EXECUTION_SHAPES = {"dynamic_task", "execution_dag"}
 
+# Upper bound on the in-memory stream replay buffer for late subscribers.
+_STREAM_REPLAY_LIMIT = 5000
+
 
 class AgentTask:
     """Retained owner for one Agent-managed business task lifecycle."""
@@ -166,7 +169,6 @@ class AgentTask:
                     },
                 )
                 await execution.async_start({"task_id": self.id})
-                await execution.async_close()
                 if self.status == "running":
                     self.status = "max_iterations"
                     self.diagnostics.setdefault("terminal_reason", "max_iterations")
@@ -189,6 +191,12 @@ class AgentTask:
                 await self._emit("agent_task.error", self.diagnostics["errors"][-1])
                 raise
             finally:
+                # Always close the auto_close=False execution so its runtime is
+                # not leaked when the loop raises (e.g. a timed-out request).
+                try:
+                    await execution.async_close()
+                except Exception:
+                    pass
                 self.completed_at = time.time()
                 self._completed = True
                 await self._close_streams()
@@ -1717,6 +1725,10 @@ class AgentTask:
             meta=meta or {"task_id": self.id, "status": self.status},
         )
         self._stream_items.append(item)
+        # Bound the replay buffer so a very long task does not grow it without
+        # limit. Late subscribers replay at most the most recent window.
+        if len(self._stream_items) > _STREAM_REPLAY_LIMIT:
+            del self._stream_items[: len(self._stream_items) - _STREAM_REPLAY_LIMIT]
         for queue in list(self._stream_queues):
             await queue.put(item)
         return item

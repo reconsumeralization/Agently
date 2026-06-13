@@ -287,10 +287,16 @@ async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[s
                 ) from error
             raise
 
+    def _dag_started() -> bool:
+        started = getattr(dag_execution, "started", None)
+        if isinstance(started, bool):
+            return started
+        return bool(getattr(dag_execution, "_started", False))
+
     run_task = asyncio.create_task(runner())
-    while not getattr(dag_execution, "_started", False) and not run_task.done():
+    while not _dag_started() and not run_task.done():
         await asyncio.sleep(0)
-    if not getattr(dag_execution, "_started", False):
+    if not _dag_started():
         close_snapshot = await run_task
         task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
         execution.close_snapshot = close_snapshot

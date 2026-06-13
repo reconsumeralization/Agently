@@ -713,6 +713,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     def get_lifecycle_state(self):
         return self._lifecycle_state
 
+    @property
+    def started(self) -> bool:
+        """True once async_start has begun this execution's run."""
+        return self._started
+
     def is_open(self):
         return self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_OPEN
 
