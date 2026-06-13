@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from agently.core import BaseAgent, LazyWorkspace, Workspace
-from agently.core.workspace._defaults import default_physical_root, scoped_files_root, script_scope, slug
+from agently.core.workspace._defaults import (
+    ScopeNode,
+    default_physical_root,
+    lineage_files_root,
+    scope_node,
+    script_scope,
+    slug,
+)
 
 
 class WorkspaceExtension(BaseAgent):
@@ -31,8 +38,13 @@ class WorkspaceExtension(BaseAgent):
     def _default_workspace_root(self) -> str | Path:
         return default_physical_root(self.settings)
 
+    def _default_agent_lineage(self) -> list[ScopeNode]:
+        # The Agent is a lineage root: no narrower framework scope exists at
+        # default-Workspace binding time. Tasks/executions nest under this node.
+        return [scope_node("agents", slug(str(self.name), "agent"))]
+
     def _default_workspace_files_root(self, root: str | Path) -> Path:
-        return scoped_files_root(root, "agents", slug(str(self.name), "agent"))
+        return lineage_files_root(root, self._default_agent_lineage())
 
     def _default_workspace_scope(self) -> dict[str, Any]:
         scope: dict[str, Any] = {
@@ -71,6 +83,7 @@ class WorkspaceExtension(BaseAgent):
             files_root=self._default_workspace_files_root(root),
             default_scope=self._default_workspace_scope(),
             default_search_scope=self._default_workspace_search_scope(),
+            scope_lineage=self._default_agent_lineage(),
             on_materialize=lambda workspace: self._sync_workspace_settings(workspace, lazy=False),
         )
 

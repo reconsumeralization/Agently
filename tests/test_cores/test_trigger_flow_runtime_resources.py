@@ -78,7 +78,9 @@ def test_trigger_flow_execution_binds_lazy_default_workspace(tmp_path, monkeypat
 
     assert getattr(workspace, "is_materialized") is False
     assert workspace.root == expected_root.resolve()
-    assert workspace.files_root == (expected_root / "files" / "executions" / execution.id).resolve()
+    assert workspace.files_root == (
+        expected_root / "files" / "lineage" / "executions" / execution.id / "files"
+    ).resolve()
     assert not workspace.root.exists()
     assert "workspace" in state["resource_keys"]
 
@@ -95,8 +97,8 @@ async def test_trigger_flow_default_executions_share_physical_workspace_db_and_i
 
     assert first_workspace.root == second_workspace.root
     assert first_workspace.files_root != second_workspace.files_root
-    assert first_workspace.files_root.name == first.id
-    assert second_workspace.files_root.name == second.id
+    assert first_workspace.files_root.parent.name == first.id
+    assert second_workspace.files_root.parent.name == second.id
 
     await first_workspace.put("first execution", collection="observations", kind="execution_probe")
     await second_workspace.put("second execution", collection="observations", kind="execution_probe")
@@ -113,7 +115,9 @@ def test_trigger_flow_default_workspace_uses_parent_session_scope(tmp_path, monk
     workspace = cast(Any, execution.require_runtime_resource("workspace"))
 
     assert workspace.root == (tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123").resolve()
-    assert workspace.files_root == (workspace.root / "files" / "executions" / execution.id).resolve()
+    assert workspace.files_root == (
+        workspace.root / "files" / "lineage" / "executions" / execution.id / "files"
+    ).resolve()
 
 
 def test_trigger_flow_execution_can_disable_default_workspace(tmp_path, monkeypatch):

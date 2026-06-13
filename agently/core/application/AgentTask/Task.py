@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
 from agently.core.orchestration import TriggerFlow
-from agently.core.workspace._defaults import scoped_files_root
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter, FunctionShifter
 
@@ -105,12 +104,16 @@ class AgentTask:
                 "root, mode, or provider."
             )
         bound_workspace = agent_with_workspace.workspace
-        with_files_root = getattr(bound_workspace, "with_files_root", None)
-        if callable(with_files_root):
-            self.workspace: Any = with_files_root(
-                scoped_files_root(bound_workspace.root, "tasks", self.id),
-                default_scope={"task_id": self.id},
-                default_search_scope={"task_id": self.id},
+        # Bind the task file root as a lineage child of the Agent scope so the
+        # task subtree (and any nested executions) lives under the Agent node and
+        # can be pruned as one contained subtree (spec section 8.2).
+        with_scope_node = getattr(bound_workspace, "with_scope_node", None)
+        if callable(with_scope_node):
+            self.workspace: Any = with_scope_node(
+                "tasks",
+                self.id,
+                scope={"task_id": self.id},
+                search_scope={"task_id": self.id},
             )
         else:
             self.workspace = bound_workspace

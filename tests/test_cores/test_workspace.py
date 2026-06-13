@@ -22,7 +22,9 @@ async def test_agent_has_lazy_workspace_by_default(tmp_path, monkeypatch):
     assert workspace.is_materialized is False
     expected_root = tmp_path / ".agently" / "workspaces" / "scripts" / script_scope(agent.settings)
     assert workspace.root == expected_root.resolve()
-    assert workspace.files_root == (expected_root / "files" / "agents" / "lazy-workspace").resolve()
+    assert workspace.files_root == (
+        expected_root / "files" / "lineage" / "agents" / "lazy-workspace" / "files"
+    ).resolve()
     assert agent.settings.get("workspace.lazy") is True
     assert agent.settings.get("workspace.root") == str(workspace.root)
     assert not workspace.root.exists()
@@ -52,7 +54,8 @@ async def test_agent_default_workspace_rebinds_to_session_scope(tmp_path, monkey
     assert first.workspace.root == second.workspace.root
     assert first.workspace.root == (tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123").resolve()
     assert first.workspace.files_root == (
-        tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123" / "files" / "agents" / "session-worker"
+        tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123"
+        / "files" / "lineage" / "agents" / "session-worker" / "files"
     ).resolve()
 
     await first.workspace.put("first", collection="observations", kind="probe")
@@ -108,8 +111,12 @@ async def test_agent_tasks_share_script_workspace_db_and_isolate_files(tmp_path,
     )
 
     assert first.workspace.root == second.workspace.root
-    assert first.workspace.files_root == (first.workspace.root / "files" / "tasks" / "task-one").resolve()
-    assert second.workspace.files_root == (second.workspace.root / "files" / "tasks" / "task-two").resolve()
+    assert first.workspace.files_root == (
+        first.workspace.root / "files" / "lineage" / "agents" / "task-worker" / "tasks" / "task-one" / "files"
+    ).resolve()
+    assert second.workspace.files_root == (
+        second.workspace.root / "files" / "lineage" / "agents" / "task-worker" / "tasks" / "task-two" / "files"
+    ).resolve()
     assert first.workspace.files_root != second.workspace.files_root
 
     await first.workspace.put("first task", collection="observations", kind="task_probe")

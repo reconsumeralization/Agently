@@ -20,9 +20,20 @@ from typing import Any, TYPE_CHECKING
 
 from agently.types.plugins import WorkspaceBackend
 
+from ._defaults import (
+    ScopeNode,
+    extend_lineage,
+    extend_lineage_nodes,
+    lineage_files_root,
+    merge_scope,
+    normalize_lineage,
+    scope_from_lineage,
+)
 from .Workspace import Workspace
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from .Manager import WorkspaceManager
 
 
@@ -41,6 +52,7 @@ class LazyWorkspace:
         files_root: str | Path | None = None,
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
+        scope_lineage: "Sequence[Mapping[str, Any]] | None" = None,
         on_materialize: Callable[[Workspace], None] | None = None,
     ):
         self.manager = manager
@@ -52,8 +64,16 @@ class LazyWorkspace:
         self._files_root = Path(str(files_root)).expanduser().resolve() if files_root is not None else None
         self._default_scope = dict(default_scope or {})
         self._default_search_scope = dict(default_search_scope or self._default_scope)
+        self._scope_lineage: list[ScopeNode] = normalize_lineage(scope_lineage)
         self._workspace: Workspace | None = None
         self._on_materialize = on_materialize
+
+    @property
+    def scope_lineage(self) -> list[ScopeNode]:
+        workspace = self._workspace
+        if workspace is not None:
+            return workspace.scope_lineage
+        return list(self._scope_lineage)
 
     @property
     def is_materialized(self) -> bool:
@@ -104,6 +124,64 @@ class LazyWorkspace:
     async def append_runtime_event(self, *args: Any, **kwargs: Any):
         return await self._materialize().append_runtime_event(*args, **kwargs)
 
+    def _bind_child_lazy(
+        self,
+        child_lineage: list[ScopeNode],
+        *,
+        scope: dict[str, Any] | None,
+        search_scope: dict[str, Any] | None,
+    ) -> "LazyWorkspace":
+        lineage_scope = scope_from_lineage(child_lineage)
+        files_root = lineage_files_root(self.root, child_lineage)
+        return LazyWorkspace(
+            self.manager,
+            self._default_root,
+            create=self._create,
+            mode=self._mode,
+            provider=self._provider,
+            provider_options=self._provider_options,
+            files_root=files_root,
+            default_scope=merge_scope(merge_scope(self._default_scope, lineage_scope), scope),
+            default_search_scope=merge_scope(
+                merge_scope(self._default_search_scope, lineage_scope), search_scope
+            ),
+            scope_lineage=child_lineage,
+            on_materialize=None,
+        )
+
+    def with_scope_node(
+        self,
+        kind: str,
+        node_id: str | None,
+        *,
+        scope: dict[str, Any] | None = None,
+        search_scope: dict[str, Any] | None = None,
+    ):
+        if self._workspace is not None:
+            return self._workspace.with_scope_node(
+                kind, node_id, scope=scope, search_scope=search_scope
+            )
+        return self._bind_child_lazy(
+            extend_lineage(self._scope_lineage, kind, node_id),
+            scope=scope,
+            search_scope=search_scope,
+        )
+
+    def with_scope_lineage(
+        self,
+        nodes: "Sequence[Mapping[str, Any]]",
+        *,
+        scope: dict[str, Any] | None = None,
+        search_scope: dict[str, Any] | None = None,
+    ):
+        if self._workspace is not None:
+            return self._workspace.with_scope_lineage(nodes, scope=scope, search_scope=search_scope)
+        return self._bind_child_lazy(
+            extend_lineage_nodes(self._scope_lineage, nodes),
+            scope=scope,
+            search_scope=search_scope,
+        )
+
     def with_files_root(
         self,
         files_root: str | Path,
@@ -117,8 +195,6 @@ class LazyWorkspace:
                 default_scope=default_scope,
                 default_search_scope=default_search_scope,
             )
-        from ._defaults import merge_scope
-
         return LazyWorkspace(
             self.manager,
             self._default_root,
@@ -129,6 +205,7 @@ class LazyWorkspace:
             files_root=files_root,
             default_scope=merge_scope(self._default_scope, default_scope),
             default_search_scope=merge_scope(self._default_search_scope, default_search_scope),
+            scope_lineage=self._scope_lineage,
             on_materialize=None,
         )
 
@@ -143,6 +220,7 @@ class LazyWorkspace:
                 files_root=self._files_root,
                 default_scope=self._default_scope,
                 default_search_scope=self._default_search_scope,
+                scope_lineage=self._scope_lineage,
             )
             if self._on_materialize is not None:
                 self._on_materialize(self._workspace)

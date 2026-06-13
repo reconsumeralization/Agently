@@ -31,9 +31,19 @@ from agently.types.data.workspace import (
     WorkspaceRuntimeEventRecord,
 )
 from agently.types.plugins import WorkspaceBackend
-from ._defaults import merge_scope
+from ._defaults import (
+    ScopeNode,
+    extend_lineage,
+    extend_lineage_nodes,
+    lineage_files_root,
+    merge_scope,
+    normalize_lineage,
+    scope_from_lineage,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from .Manager import WorkspaceManager
 
 
@@ -52,6 +62,7 @@ class Workspace:
         files_root: str | Path | None = None,
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
+        scope_lineage: "Sequence[Mapping[str, Any]] | None" = None,
     ):
         if manager is None:
             from .Manager import WorkspaceManager
@@ -65,6 +76,7 @@ class Workspace:
                 files_root=files_root,
                 default_scope=default_scope,
                 default_search_scope=default_search_scope,
+                scope_lineage=scope_lineage,
             )
             self.__dict__.update(workspace.__dict__)
             return
@@ -80,8 +92,68 @@ class Workspace:
             self.files_root = Path(str(files_root)).expanduser().resolve()
             if mode not in {"read", "read_only", "readonly"}:
                 self.files_root.mkdir(parents=True, exist_ok=True)
+        self.scope_lineage: list[ScopeNode] = normalize_lineage(scope_lineage)
         self.default_scope = dict(default_scope or {})
         self.default_search_scope = dict(default_search_scope or self.default_scope)
+
+    def _bind_child(
+        self,
+        child_lineage: list[ScopeNode],
+        *,
+        scope: dict[str, Any] | None,
+        search_scope: dict[str, Any] | None,
+    ) -> "Workspace":
+        lineage_scope = scope_from_lineage(child_lineage)
+        files_root = lineage_files_root(self.root, child_lineage)
+        return Workspace(
+            self.backend,
+            self.manager,
+            files_root=files_root,
+            mode="read_only" if self.capabilities().get("read_only") else "read_write",
+            default_scope=merge_scope(merge_scope(self.default_scope, lineage_scope), scope),
+            default_search_scope=merge_scope(
+                merge_scope(self.default_search_scope, lineage_scope), search_scope
+            ),
+            scope_lineage=child_lineage,
+        )
+
+    def with_scope_node(
+        self,
+        kind: str,
+        node_id: str | None,
+        *,
+        scope: dict[str, Any] | None = None,
+        search_scope: dict[str, Any] | None = None,
+    ) -> "Workspace":
+        """Bind a child Workspace whose file root is contained under this scope.
+
+        This is the lineage-aware replacement for the removed flat
+        ``scoped_files_root(kind, id)`` helper: the child file root is derived
+        from the full resolved scope chain, and the child ``default_scope``
+        carries the same lineage so physical cleanup and record-index cleanup
+        agree (spec section 8.2).
+        """
+
+        return self._bind_child(
+            extend_lineage(self.scope_lineage, kind, node_id),
+            scope=scope,
+            search_scope=search_scope,
+        )
+
+    def with_scope_lineage(
+        self,
+        nodes: "Sequence[Mapping[str, Any]]",
+        *,
+        scope: dict[str, Any] | None = None,
+        search_scope: dict[str, Any] | None = None,
+    ) -> "Workspace":
+        """Bind a child Workspace extended by several resolved lineage nodes."""
+
+        return self._bind_child(
+            extend_lineage_nodes(self.scope_lineage, nodes),
+            scope=scope,
+            search_scope=search_scope,
+        )
 
     def with_files_root(
         self,
@@ -90,6 +162,9 @@ class Workspace:
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
     ) -> "Workspace":
+        # Internal materialization helper that preserves the resolved scope
+        # lineage. It must not be used to invent flat, lineage-unaware roots;
+        # use ``with_scope_node`` / ``with_scope_lineage`` for child binding.
         return Workspace(
             self.backend,
             self.manager,
@@ -97,6 +172,7 @@ class Workspace:
             mode="read_only" if self.capabilities().get("read_only") else "read_write",
             default_scope=merge_scope(self.default_scope, default_scope),
             default_search_scope=merge_scope(self.default_search_scope, default_search_scope),
+            scope_lineage=self.scope_lineage,
         )
 
     def _scoped_record_scope(self, scope: dict[str, Any] | None) -> dict[str, Any]:

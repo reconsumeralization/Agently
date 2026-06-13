@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -64,6 +65,7 @@ class WorkspaceManager:
         files_root: str | Path | None = None,
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
+        scope_lineage: "Sequence[Mapping[str, Any]] | None" = None,
     ) -> Workspace:
         if provider is not None:
             backend = self._create_backend_from_provider(
@@ -85,6 +87,7 @@ class WorkspaceManager:
             files_root=files_root,
             default_scope=default_scope,
             default_search_scope=default_search_scope,
+            scope_lineage=scope_lineage,
         )
 
     def _validate_backend(self, backend: Any, *, provider: str | None = None) -> WorkspaceBackend:

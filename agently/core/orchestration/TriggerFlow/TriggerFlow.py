@@ -180,15 +180,20 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
     def _create_execution_workspace_resource(self, execution_id: str, run_context: "RunContext | None" = None):
         from agently.base import workspace as global_workspace
         from agently.core.workspace import LazyWorkspace
-        from agently.core.workspace._defaults import scoped_files_root
+        from agently.core.workspace._defaults import lineage_files_root, scope_node
 
         root = self._default_execution_workspace_root(run_context)
+        # A directly started flow execution is a lineage root: tasks/actions/
+        # nested executions created within it nest under this execution node and
+        # share one prunable subtree (spec section 8.2).
+        execution_lineage = [scope_node("executions", execution_id)]
         return LazyWorkspace(
             global_workspace,
             root,
-            files_root=scoped_files_root(root, "executions", execution_id),
+            files_root=lineage_files_root(root, execution_lineage),
             default_scope=self._default_execution_workspace_scope(execution_id, run_context),
             default_search_scope=self._default_execution_workspace_search_scope(run_context),
+            scope_lineage=execution_lineage,
         )
 
     def _coerce_execution_workspace_resource(self, workspace: Any):

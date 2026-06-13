@@ -33,7 +33,6 @@ from agently.core.application.AgentExecution import (
     normalize_execution_limits,
     normalize_execution_lineage,
 )
-from agently.core.workspace._defaults import scoped_files_root
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter, FunctionShifter
 
@@ -143,13 +142,22 @@ class AgentExecution:
         self.effective_options: dict[str, Any] = {}
         self.consumed_options: dict[str, Any] = {}
         self.workspace: Any = getattr(self.agent, "workspace", None)
-        with_files_root = getattr(self.workspace, "with_files_root", None)
-        if callable(with_files_root):
-            self.workspace = with_files_root(
-                scoped_files_root(self.workspace.root, "executions", self.id),
-                default_scope={"execution_id": self.id},
-                default_search_scope={"execution_id": self.id},
-            )
+        # Bind the execution file root from the full resolved scope chain instead
+        # of a flat ``files/executions/<id>`` root. The effective parent scope is
+        # known at construction via ``self.lineage`` (parent task and/or parent
+        # execution), so the execution nests under its real ancestors and shares
+        # a single prunable lineage subtree with them (spec sections 8.2 / 9).
+        with_scope_lineage = getattr(self.workspace, "with_scope_lineage", None)
+        if callable(with_scope_lineage):
+            lineage_nodes: list[dict[str, Any]] = []
+            parent_task_id = self.lineage.get("task_id")
+            if parent_task_id:
+                lineage_nodes.append({"kind": "tasks", "id": str(parent_task_id)})
+            parent_execution_id = self.lineage.get("parent_execution_id")
+            if parent_execution_id:
+                lineage_nodes.append({"kind": "executions", "id": str(parent_execution_id)})
+            lineage_nodes.append({"kind": "executions", "id": self.id})
+            self.workspace = with_scope_lineage(lineage_nodes)
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
