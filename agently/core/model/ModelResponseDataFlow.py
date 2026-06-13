@@ -581,6 +581,32 @@ class ModelResponseDataFlow:
         constraint_text = " and ".join(constraints) if constraints else "output constraints"
         return ValueError(f"Can not satisfy { constraint_text } within { max_retries } retries.")
 
+    async def _apply_retry_backoff(self, retry_count: int) -> None:
+        """Sleep an exponential backoff before re-issuing a model request.
+
+        Opt-in: with no ``model_request.retry_backoff_base`` configured, retries
+        re-issue immediately (current behavior). When set, retries back off with
+        clamped exponential jitter to avoid amplifying provider error storms.
+        """
+        settings = self._result.settings
+        base_raw: Any = settings.get("model_request.retry_backoff_base", None)
+        if base_raw is None:
+            return
+        try:
+            base = float(cast(Any, base_raw))
+        except (TypeError, ValueError):
+            return
+        if base <= 0:
+            return
+        from agently.utils.RequestScheduler import RequestScheduler
+
+        cap_raw: Any = settings.get("model_request.retry_backoff_max", 30.0)
+        try:
+            cap = float(cast(Any, cap_raw))
+        except (TypeError, ValueError):
+            cap = 30.0
+        await asyncio.sleep(RequestScheduler.backoff_delay(max(1, retry_count), base=base, cap=cap))
+
     async def retry_get_data(
         self,
         *,
@@ -595,6 +621,7 @@ class ModelResponseDataFlow:
         from agently.core.model.ModelResponse import ModelResponse
 
         result = self._result
+        await self._apply_retry_backoff(retry_count)
         return await ModelResponse(
             result.agent_name,
             result.plugin_manager,
