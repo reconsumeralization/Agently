@@ -143,7 +143,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         return intervention_mode
 
     def _default_execution_workspace_root(self, run_context: "RunContext | None" = None) -> Path:
-        from agently.core.session.Workspace._defaults import default_physical_root
+        from agently.core.workspace._defaults import default_physical_root
 
         session_id = getattr(run_context, "session_id", None)
         return default_physical_root(session_id=str(session_id) if session_id else None)
@@ -153,7 +153,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         execution_id: str,
         run_context: "RunContext | None" = None,
     ) -> dict[str, Any]:
-        from agently.core.session.Workspace._defaults import script_scope
+        from agently.core.workspace._defaults import script_scope
 
         scope: dict[str, Any] = {
             "execution_id": execution_id,
@@ -170,7 +170,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         self,
         run_context: "RunContext | None" = None,
     ) -> dict[str, Any]:
-        from agently.core.session.Workspace._defaults import script_scope
+        from agently.core.workspace._defaults import script_scope
 
         session_id = getattr(run_context, "session_id", None)
         if session_id:
@@ -179,8 +179,8 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
 
     def _create_execution_workspace_resource(self, execution_id: str, run_context: "RunContext | None" = None):
         from agently.base import workspace as global_workspace
-        from agently.core.session.Workspace import LazyWorkspace
-        from agently.core.session.Workspace._defaults import scoped_files_root
+        from agently.core.workspace import LazyWorkspace
+        from agently.core.workspace._defaults import scoped_files_root
 
         root = self._default_execution_workspace_root(run_context)
         return LazyWorkspace(
@@ -193,7 +193,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
 
     def _coerce_execution_workspace_resource(self, workspace: Any):
         from agently.base import workspace as global_workspace
-        from agently.core.session.Workspace import LazyWorkspace, Workspace
+        from agently.core.workspace import LazyWorkspace, Workspace
 
         if isinstance(workspace, (Workspace, LazyWorkspace)):
             return workspace

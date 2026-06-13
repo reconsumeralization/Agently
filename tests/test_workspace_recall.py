@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from agently.core.session.Recall.Defaults import _context_content, _excerpt
+from agently.core.workspace.Recall.Defaults import _context_content, _excerpt
 
 
 def test_agent_task_observation_context_prioritizes_action_evidence():

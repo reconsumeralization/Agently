@@ -27,7 +27,7 @@ from agently.types.plugins import (
     WorkspaceBackendProvider,
 )
 
-from ..Recall import DefaultContextBuilder, RecallProfile, RuleRecallPlanner, WorkspaceRetriever
+from .Recall import DefaultContextBuilder, RecallProfile, RuleRecallPlanner, WorkspaceRetriever
 from .Errors import WorkspaceConfigurationError
 from .Workspace import Workspace
 from .LocalBackend import LocalWorkspaceBackend

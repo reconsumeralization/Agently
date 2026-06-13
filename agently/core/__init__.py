@@ -67,13 +67,13 @@ from .runtime import (
     RuntimeEventEmitter,
     bind_runtime_context,
 )
-from .session import (
+from .session import Session
+from .workspace import (
     DefaultContextBuilder,
     LazyWorkspace,
     LocalWorkspaceBackend,
     RecallProfile,
     RuleRecallPlanner,
-    Session,
     Workspace,
     WorkspaceConfigurationError,
     WorkspaceError,

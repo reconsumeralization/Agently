@@ -7,7 +7,7 @@ import pytest
 from agently import Agently
 from agently.core import LazyWorkspace, WorkspaceConfigurationError, WorkspacePolicyError
 from agently.core.application import AgentTask
-from agently.core.session.Workspace._defaults import script_scope
+from agently.core.workspace._defaults import script_scope
 from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
 from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPack, WorkspaceRecallPlan, WorkspaceRecordRef
 

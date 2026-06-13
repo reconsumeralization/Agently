@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from agently.core import BaseAgent, LazyWorkspace, Workspace
-from agently.core.session.Workspace._defaults import default_physical_root, scoped_files_root, script_scope, slug
+from agently.core.workspace._defaults import default_physical_root, scoped_files_root, script_scope, slug
 
 
 class WorkspaceExtension(BaseAgent):

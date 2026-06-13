@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
 from agently.core.orchestration import TriggerFlow
-from agently.core.session.Workspace._defaults import scoped_files_root
+from agently.core.workspace._defaults import scoped_files_root
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter, FunctionShifter
 

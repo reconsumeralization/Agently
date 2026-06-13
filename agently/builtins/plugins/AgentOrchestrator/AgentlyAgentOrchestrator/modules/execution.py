@@ -33,7 +33,7 @@ from agently.core.application.AgentExecution import (
     normalize_execution_limits,
     normalize_execution_lineage,
 )
-from agently.core.session.Workspace._defaults import scoped_files_root
+from agently.core.workspace._defaults import scoped_files_root
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter, FunctionShifter
 
