@@ -231,10 +231,27 @@ The first public slice is intentionally narrow: single task, one Agent owner,
 roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps
 may use Actions, Skills, or DAG candidates that the host already enabled on the
 Agent or attached to the current execution. AgentTask does not provide
-multi-task coordination, background autonomy, distributed leases, full durable
+multi-task coordination, background autonomy, distributed leases, mid-step
 pause/resume, or long-term memory management. `AgentExecutionResult.resume()`
 is a reserved surface for future resumable strategies and reports
 `supported=False` in this slice.
+
+### Resume a task after a crash
+
+AgentTask persists a resumable snapshot after every completed iteration. If the
+process crashes, resume the task in a fresh object and continue from the next
+iteration — completed iterations are not re-executed:
+
+```python
+task = await agent.async_resume_task("issue-123")   # or agent.resume_task("issue-123")
+result = await task.async_run()                       # continues from iteration N+1
+```
+
+Resume reads the task's latest snapshot from the Workspace, restores its
+iteration history and cumulative required-capability progress, and raises
+`ValueError` if no resumable snapshot exists. An iteration that was in flight at
+crash time is re-planned, so non-replay-safe step side effects are the host's
+responsibility.
 
 For examples that validate model-owned semantic content, combine deterministic
 smoke checks with a second Agently model-judge request. Structural checks such

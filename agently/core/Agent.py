@@ -26,7 +26,7 @@ from agently.core.model.AttachmentInput import ImageDetail, build_image_attachme
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
 from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
-from agently.utils import DataFormatter, Settings
+from agently.utils import DataFormatter, FunctionShifter, Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
@@ -956,6 +956,31 @@ class BaseAgent:
         execution.goal(goal, success_criteria)
         execution.workspace = getattr(self, "workspace", None)
         return execution
+
+    async def async_resume_task(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ):
+        """Rebuild a previously checkpointed AgentTask and continue it.
+
+        Reads the task's latest durable snapshot from the Workspace and returns
+        an AgentTask that continues from the iteration after the last completed
+        one (or exposes the stored terminal result). Run it with
+        ``await task.async_run()`` / ``task.stream()`` like a fresh task.
+        """
+        from agently.core.application import AgentTask
+
+        return await AgentTask.async_resume(cast(Any, self), str(task_id), workspace=workspace)
+
+    def resume_task(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ):
+        return FunctionShifter.syncify(self.async_resume_task)(task_id, workspace=workspace)
 
     def create_task_loop(
         self,

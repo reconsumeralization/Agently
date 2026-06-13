@@ -210,9 +210,23 @@ Action、Workspace 文件 Actions，以及独立 Agently model judge，生成并
 第一版公开 slice 有明确边界：单任务、单 Agent owner、约 2-5 次迭代，并通过
 `AgentExecution` 执行 bounded step。这些 step 可以使用调用方已经在 Agent 上启用的
 Actions、Skills 或 DAG 候选，也可以使用当前 execution 上临时挂载的 DAG 候选。
-AgentTask 不提供多任务协同、后台自治、分布式租约、完整 durable pause/resume 或
+AgentTask 不提供多任务协同、后台自治、分布式租约、step 内 pause/resume 或
 长期记忆管理。`AgentExecutionResult.resume()` 是为未来 resumable strategy 保留的
 接口；在当前 slice 中会返回 `supported=False`。
+
+### 崩溃后恢复任务
+
+AgentTask 在每次迭代完成后都会持久化一份可恢复快照。若进程崩溃，可以在一个全新的
+任务对象上恢复并从下一次迭代继续——已完成的迭代不会重复执行：
+
+```python
+task = await agent.async_resume_task("issue-123")   # 或 agent.resume_task("issue-123")
+result = await task.async_run()                       # 从第 N+1 次迭代继续
+```
+
+恢复会从 Workspace 读取该任务最新快照，还原迭代历史与累计的 required 能力进度；若不存在
+可恢复快照则抛出 `ValueError`。崩溃时正在执行中的那次迭代会被重新规划，因此非
+replay-safe 的 step 副作用由宿主负责。
 
 当示例需要验证模型生成内容的语义质量时，应组合 deterministic smoke check 和第二个
 Agently model-judge request。文件存在、问题数量、source label 可见等结构检查只能作为
