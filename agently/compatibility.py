@@ -166,7 +166,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                      'working-directory roots, and timeout when the '
                                                                      'action is registered or enabled through '
                                                                      'agent.enable_shell(...).',
-                                   'execution_environment_metadata_redaction': 'Action metadata returned by '
+                                   'execution_resource_metadata_redaction': 'Action metadata returned by '
                                                                                'get_action_info()/get_action_list() '
                                                                                'redacts execution environment env '
                                                                                'values while preserving env key names; '

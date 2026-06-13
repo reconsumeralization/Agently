@@ -42,7 +42,7 @@ class BrowseActionExecutor:
             action_input = {}
         action_id = str(spec.get("action_id", "browse"))
         url = str(action_input.get("url", ""))
-        environment_resources = action_call.get("execution_environment_resources", {})
+        environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
             browser_resource = environment_resources.get(action_id) or environment_resources.get("browse")
             if browser_resource is not None and hasattr(browser_resource, "browse"):

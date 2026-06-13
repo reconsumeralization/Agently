@@ -20,7 +20,7 @@ async def main():
 
     result = await flow.async_start(
         2,
-        execution_environments=[
+        execution_resources=[
             {
                 "kind": "python",
                 "scope": "execution",
@@ -34,7 +34,7 @@ async def main():
     pprint(result)
     assert result == {"answer": 42}
 
-    execution_handles = Agently.execution_environment.list(scope="execution")
+    execution_handles = Agently.execution_resource.list(scope="execution")
     print("[EXECUTION_HANDLES_AFTER_RELEASE]")
     pprint(execution_handles)
     assert execution_handles == []
@@ -48,7 +48,7 @@ if __name__ == "__main__":
 # [EXECUTION_HANDLES_AFTER_RELEASE] prints [] after the execution-scoped Python resource is released.
 
 # How it works:
-# execution_environments=[{kind:"python", scope:"execution", resource_key:"managed_python",
+# execution_resources=[{kind:"python", scope:"execution", resource_key:"managed_python",
 # config:{base_vars:{base:40}}}] declares a Python sandbox that persists across the entire
 # TriggerFlow execution (scope="execution"), not just one action call.
 # data.require_resource("managed_python") retrieves the sandbox handle inside a chunk.
@@ -56,7 +56,7 @@ if __name__ == "__main__":
 # After async_close(), execution-scoped handles are released automatically.
 #
 # Flow:
-# async_start(2, execution_environments=[...])
+# async_start(2, execution_resources=[...])
 #   | Python sandbox created with base_vars={base:40}, scope="execution"
 #   v
 # calculate: data.require_resource("managed_python")

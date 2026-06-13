@@ -20,10 +20,10 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agently.types.data import (
-        ExecutionEnvironmentHandle,
-        ExecutionEnvironmentPolicy,
-        ExecutionEnvironmentRequirement,
-        ExecutionEnvironmentStatus,
+        ExecutionResourceHandle,
+        ExecutionResourcePolicy,
+        ExecutionResourceRequirement,
+        ExecutionResourceStatus,
     )
 
 
@@ -66,8 +66,8 @@ class NodeExecutionResource:
         }
 
 
-class NodeExecutionEnvironmentProvider:
-    name = "NodeExecutionEnvironmentProvider"
+class NodeExecutionResourceProvider:
+    name = "NodeExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
     kind = "node"
 
@@ -82,10 +82,10 @@ class NodeExecutionEnvironmentProvider:
     async def async_ensure(
         self,
         *,
-        requirement: "ExecutionEnvironmentRequirement",
-        policy: "ExecutionEnvironmentPolicy",
-        existing_handle: "ExecutionEnvironmentHandle | None" = None,
-    ) -> "ExecutionEnvironmentHandle":
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+        existing_handle: "ExecutionResourceHandle | None" = None,
+    ) -> "ExecutionResourceHandle":
         _ = existing_handle
         config = requirement.get("config", {})
         resource = NodeExecutionResource(
@@ -105,10 +105,10 @@ class NodeExecutionEnvironmentProvider:
             },
         }
 
-    async def async_health_check(self, handle: "ExecutionEnvironmentHandle") -> "ExecutionEnvironmentStatus":
+    async def async_health_check(self, handle: "ExecutionResourceHandle") -> "ExecutionResourceStatus":
         resource = handle.get("resource")
         return "ready" if resource is not None and hasattr(resource, "run") else "unhealthy"
 
-    async def async_release(self, handle: "ExecutionEnvironmentHandle") -> None:
+    async def async_release(self, handle: "ExecutionResourceHandle") -> None:
         _ = handle
         return None

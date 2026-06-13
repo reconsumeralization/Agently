@@ -19,10 +19,10 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agently.types.data import (
-        ExecutionEnvironmentHandle,
-        ExecutionEnvironmentPolicy,
-        ExecutionEnvironmentRequirement,
-        ExecutionEnvironmentStatus,
+        ExecutionResourceHandle,
+        ExecutionResourcePolicy,
+        ExecutionResourceRequirement,
+        ExecutionResourceStatus,
     )
 
 
@@ -76,8 +76,8 @@ class SQLiteExecutionResource:
         self.connection.close()
 
 
-class SQLiteExecutionEnvironmentProvider:
-    name = "SQLiteExecutionEnvironmentProvider"
+class SQLiteExecutionResourceProvider:
+    name = "SQLiteExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
     kind = "sqlite"
 
@@ -92,10 +92,10 @@ class SQLiteExecutionEnvironmentProvider:
     async def async_ensure(
         self,
         *,
-        requirement: "ExecutionEnvironmentRequirement",
-        policy: "ExecutionEnvironmentPolicy",
-        existing_handle: "ExecutionEnvironmentHandle | None" = None,
-    ) -> "ExecutionEnvironmentHandle":
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+        existing_handle: "ExecutionResourceHandle | None" = None,
+    ) -> "ExecutionResourceHandle":
         _ = (policy, existing_handle)
         config = requirement.get("config", {})
         database = str(config.get("database", ":memory:"))
@@ -112,13 +112,13 @@ class SQLiteExecutionEnvironmentProvider:
             },
         }
 
-    async def async_health_check(self, handle: "ExecutionEnvironmentHandle") -> "ExecutionEnvironmentStatus":
+    async def async_health_check(self, handle: "ExecutionResourceHandle") -> "ExecutionResourceStatus":
         resource = handle.get("resource")
         if resource is not None and hasattr(resource, "health_check") and resource.health_check():
             return "ready"
         return "unhealthy"
 
-    async def async_release(self, handle: "ExecutionEnvironmentHandle") -> None:
+    async def async_release(self, handle: "ExecutionResourceHandle") -> None:
         resource = handle.get("resource")
         if resource is not None and hasattr(resource, "close"):
             await resource.close()

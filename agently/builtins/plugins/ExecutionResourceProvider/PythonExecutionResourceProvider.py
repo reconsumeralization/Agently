@@ -13,21 +13,21 @@
 # limitations under the License.
 
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agently.types.data import (
-        ExecutionEnvironmentHandle,
-        ExecutionEnvironmentPolicy,
-        ExecutionEnvironmentRequirement,
-        ExecutionEnvironmentStatus,
+        ExecutionResourceHandle,
+        ExecutionResourcePolicy,
+        ExecutionResourceRequirement,
+        ExecutionResourceStatus,
     )
 
 
-class MCPExecutionEnvironmentProvider:
-    name = "MCPExecutionEnvironmentProvider"
+class PythonExecutionResourceProvider:
+    name = "PythonExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
-    kind = "mcp"
+    kind = "python"
 
     @staticmethod
     def _on_register():
@@ -40,22 +40,30 @@ class MCPExecutionEnvironmentProvider:
     async def async_ensure(
         self,
         *,
-        requirement: "ExecutionEnvironmentRequirement",
-        policy: "ExecutionEnvironmentPolicy",
-        existing_handle: "ExecutionEnvironmentHandle | None" = None,
-    ) -> "ExecutionEnvironmentHandle":
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+        existing_handle: "ExecutionResourceHandle | None" = None,
+    ) -> "ExecutionResourceHandle":
         _ = (policy, existing_handle)
+        from agently.utils import PythonSandbox
+
         config = requirement.get("config", {})
+        sandbox_kwargs: dict[str, Any] = {
+            "preset_objects": config.get("preset_objects", None),
+            "base_vars": config.get("base_vars", None),
+        }
+        if config.get("allowed_return_types", None) is not None:
+            sandbox_kwargs["allowed_return_types"] = config.get("allowed_return_types")
         return {
-            "handle_id": f"mcp:{ uuid.uuid4().hex }",
-            "resource": config.get("transport"),
+            "handle_id": f"python:{ uuid.uuid4().hex }",
+            "resource": PythonSandbox(**sandbox_kwargs),
             "status": "ready",
             "meta": {"provider": self.name},
         }
 
-    async def async_health_check(self, handle: "ExecutionEnvironmentHandle") -> "ExecutionEnvironmentStatus":
+    async def async_health_check(self, handle: "ExecutionResourceHandle") -> "ExecutionResourceStatus":
         return "ready" if handle.get("resource") is not None else "unhealthy"
 
-    async def async_release(self, handle: "ExecutionEnvironmentHandle") -> None:
+    async def async_release(self, handle: "ExecutionResourceHandle") -> None:
         _ = handle
         return None

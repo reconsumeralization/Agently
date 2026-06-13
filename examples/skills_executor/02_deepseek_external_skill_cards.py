@@ -37,7 +37,7 @@ How it works:
 
     The Anthropic scripts remain package assets/resources. They are not executed
     as arbitrary Python handlers; executable work should be bound through
-    ActionRuntime / ExecutionEnvironment when required.
+    ActionRuntime / ExecutionResource when required.
 
 Flow:
     git URL / GitHub shorthand / local checkout

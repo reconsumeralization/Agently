@@ -82,7 +82,7 @@ def print_response(result):
     print_section("ACTION_LOGS_FROM_RESPONSE_RESULT", action_logs)
 
 # Helper module — no standalone terminal output.
-# Imported by execution_environment examples to provide:
+# Imported by execution_resource examples to provide:
 #   create_agent(provider, system_prompt, temperature=0.7) — configures Ollama or DeepSeek
 #   print_action_results(records) — prints ACTION_RECORDS and ACTION_RESULTS_INJECTED_TO_REPLY
 #   print_response(result) — prints MODEL_REPLY and ACTION_LOGS_FROM_RESPONSE_RESULT

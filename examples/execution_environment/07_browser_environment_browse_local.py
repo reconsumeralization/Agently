@@ -45,7 +45,7 @@ def main():
               <body>
                 <main>
                   <h1>Managed Browser Browse</h1>
-                  <p>This page is loaded through BrowserExecutionEnvironmentProvider.</p>
+                  <p>This page is loaded through BrowserExecutionResourceProvider.</p>
                 </main>
               </body>
             </html>
@@ -72,7 +72,7 @@ def main():
         print("[SKIP] Playwright is installed, but Chromium may be missing. Run: playwright install chromium")
         return
     assert "Managed Browser Browse" in str(result.get("data", ""))
-    assert Agently.execution_environment.list(scope="action_call") == []
+    assert Agently.execution_resource.list(scope="action_call") == []
 
 
 if __name__ == "__main__":

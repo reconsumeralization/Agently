@@ -27,7 +27,7 @@ class ActBlock(FlowBlock):
 
     Gating is default-deny: the block checks the declared affordances and
     trust level before executing. Script execution routes through
-    ``execution_environment``, never raw ``subprocess``.
+    ``execution_resource``, never raw ``subprocess``.
     """
 
     name = "ActBlock"
@@ -136,16 +136,16 @@ class ActBlock(FlowBlock):
                 "Script execution is not allowed for this execution."
             )
 
-        ee = context.execution_environment
+        ee = context.execution_resource
         if act_type == "script" and ee is None:
             raise RuntimeError(
-                "Script execution requires an ExecutionEnvironment, but none is available."
+                "Script execution requires an ExecutionResource, but none is available."
             )
 
     async def _execute_script(
         self, script_name: str, kwargs: dict[str, Any], context: Any
     ) -> Any:
-        ee = context.execution_environment
+        ee = context.execution_resource
         return await ee.async_run_script(script_name, **kwargs)
 
     # ── TriggerFlow operator builder ──

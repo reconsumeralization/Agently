@@ -31,7 +31,7 @@ execution metadata.
     custom Skills-local workflow engines.
   * Side effects, persistence, durable waiting/resume, and approval policy stay
     with the owning Agently layer: host code, TriggerFlow, Action /
-    ActionRuntime, and ExecutionEnvironment.
+    ActionRuntime, and ExecutionResource.
 
 So the migration recipe for every old `skill.yaml` staged Skill is:
   1. Move the stage `purpose` prose into the SKILL.md body as plain guidance.
@@ -39,7 +39,7 @@ So the migration recipe for every old `skill.yaml` staged Skill is:
      `execution: staged` metadata when the Skill genuinely needs model-side
      decomposition.
   3. Lift side-effecting `action` stages OUT of the Skill into host code,
-     Action/ActionRuntime, ExecutionEnvironment, or TriggerFlow chunks.
+     Action/ActionRuntime, ExecutionResource, or TriggerFlow chunks.
 ────────────────────────────────────────────────────────────────────────────────
 """
 
@@ -88,7 +88,7 @@ def install_skill(runtime_dir: Path) -> str:
 # 3. The host owns orchestration. Persisting the document used to be an `action`
 #    stage INSIDE the Skill; now it is a normal host step. (For the Agently-native
 #    surface you would register_action(...) and/or gate it behind an
-#    ExecutionEnvironment approval policy — this is exactly the layer that wait /
+#    ExecutionResource approval policy — this is exactly the layer that wait /
 #    approval belongs to now, not the Skill.)
 # ═══════════════════════════════════════════════════════════════════════════════
 def save_runbook(output_dir: Path, incident_id: str, plan: str, runbook: str) -> Path:

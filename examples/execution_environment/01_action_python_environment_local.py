@@ -40,7 +40,7 @@ def main():
         "max_minus_min_gap": 34,
     }
 
-    action_call_handles = Agently.execution_environment.list(scope="action_call")
+    action_call_handles = Agently.execution_resource.list(scope="action_call")
     print("[ACTION_CALL_HANDLES_AFTER_RELEASE]")
     pprint(action_call_handles)
     assert action_call_handles == []
@@ -59,7 +59,7 @@ if __name__ == "__main__":
 # Python sandbox action without exposing it to the model (direct execution only).
 # execute_action() calls the action directly with python_code as a list of code lines.
 # The sandbox runs the code, reads the `result` variable, and returns it.
-# After the call, Agently.execution_environment.list(scope="action_call") returns []
+# After the call, Agently.execution_resource.list(scope="action_call") returns []
 # because action-call-scoped handles are released automatically when the call ends.
 #
 # Flow:

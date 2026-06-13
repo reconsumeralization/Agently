@@ -12,7 +12,7 @@ def test_core_root_exports_remain_stable():
         BaseAgent,
         DynamicTask,
         EventCenter,
-        ExecutionEnvironmentManager,
+        ExecutionResourceManager,
         ExtensionHandlers,
         ModelRequest,
         ModelResponse,
@@ -33,7 +33,7 @@ def test_core_root_exports_remain_stable():
     assert AgentExecutionStream.__name__ == "AgentExecutionStream"
     assert DynamicTask.__name__ == "DynamicTask"
     assert EventCenter.__name__ == "EventCenter"
-    assert ExecutionEnvironmentManager.__name__ == "ExecutionEnvironmentManager"
+    assert ExecutionResourceManager.__name__ == "ExecutionResourceManager"
     assert ExtensionHandlers.__name__ == "ExtensionHandlers"
     assert ModelRequest.__name__ == "ModelRequest"
     assert ModelResponse.__name__ == "ModelResponse"
@@ -66,7 +66,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.application.SkillsExecutor import SkillsExecutor
     from agently.core.Agent import BaseAgent
     from agently.core.operation.Action import Action, Tool
-    from agently.core.operation.ExecutionEnvironment import ExecutionEnvironmentManager
+    from agently.core.operation.ExecutionResource import ExecutionResourceManager
     from agently.core.extension import ExtensionHandlers, PluginManager
     from agently.core.model import ModelRequest, ModelResponse, ModelResponseResult, Prompt
     from agently.core.application.DynamicTask import DynamicTask
@@ -87,7 +87,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.runtime.EventCenter").EventCenter is EventCenter
     assert importlib.import_module("agently.core.runtime").RuntimeEvent is RuntimeEvent
     assert importlib.import_module("agently.core.runtime.RuntimeContext").bind_runtime_context is bind_runtime_context
-    assert importlib.import_module("agently.core.operation.ExecutionEnvironment.ExecutionEnvironment").ExecutionEnvironmentManager is ExecutionEnvironmentManager
+    assert importlib.import_module("agently.core.operation.ExecutionResource.ExecutionResource").ExecutionResourceManager is ExecutionResourceManager
     assert importlib.import_module("agently.core.extension.PluginManager").PluginManager is PluginManager
     assert importlib.import_module("agently.core.extension.ExtensionHandlers").ExtensionHandlers is ExtensionHandlers
     assert importlib.import_module("agently.core.session.Session").Session is Session
@@ -121,7 +121,7 @@ def test_core_layout_keeps_only_classified_root_packages():
     assert (core_root / "application" / "AgentExecution").is_dir()
     assert (core_root / "application" / "SkillsExecutor").is_dir()
     assert (core_root / "operation" / "Action").is_dir()
-    assert (core_root / "operation" / "ExecutionEnvironment").is_dir()
+    assert (core_root / "operation" / "ExecutionResource").is_dir()
     assert (core_root / "workspace").is_dir()
     assert (core_root / "workspace" / "Recall").is_dir()
     assert not (core_root / "session" / "Workspace").exists()

@@ -10,7 +10,7 @@ import pytest
 class MockStrategyContext:
     """Minimal context stub for strategy runner unit tests."""
 
-    execution_environment: Any = None
+    execution_resource: Any = None
 
     def __init__(self):
         self.model_calls: list[dict[str, Any]] = []

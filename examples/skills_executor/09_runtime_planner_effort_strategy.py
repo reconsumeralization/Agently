@@ -23,7 +23,7 @@ Working principle:
     normal : preflight → research → plan → execute → verify → reflect → finalize
 
 Host code still owns persistence. The Skill provides guidance; ActionRuntime,
-ExecutionEnvironment, TriggerFlow, or host code own real side effects.
+ExecutionResource, TriggerFlow, or host code own real side effects.
 
 Expected key output from one real DeepSeek run:
     fast_strategy=single_shot

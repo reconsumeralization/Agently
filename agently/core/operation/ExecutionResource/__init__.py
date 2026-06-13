@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .ExecutionEnvironment import (
-    ExecutionEnvironmentApprovalDenied,
-    ExecutionEnvironmentApprovalRequired,
-    ExecutionEnvironmentError,
-    ExecutionEnvironmentManager,
+from .ExecutionResource import (
+    ExecutionResourceApprovalDenied,
+    ExecutionResourceApprovalRequired,
+    ExecutionResourceError,
+    ExecutionResourceManager,
 )
 
 __all__ = [
-    "ExecutionEnvironmentApprovalDenied",
-    "ExecutionEnvironmentApprovalRequired",
-    "ExecutionEnvironmentError",
-    "ExecutionEnvironmentManager",
+    "ExecutionResourceApprovalDenied",
+    "ExecutionResourceApprovalRequired",
+    "ExecutionResourceError",
+    "ExecutionResourceManager",
 ]

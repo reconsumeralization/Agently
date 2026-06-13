@@ -21,7 +21,7 @@ from typing_extensions import TypedDict
 
 PolicyApprovalSource = Literal[
     "action",
-    "execution_environment",
+    "execution_resource",
     "skills_capability",
     "task_dag",
     "agent_task",

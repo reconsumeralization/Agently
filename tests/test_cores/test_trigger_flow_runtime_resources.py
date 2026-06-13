@@ -6,7 +6,7 @@ from typing import Any, Callable, cast
 import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowEventData, TriggerFlowRuntimeData
-from agently.base import execution_environment
+from agently.base import execution_resource
 from agently.core.workspace._defaults import script_scope
 from agently.types.data import RunContext
 from agently.types.plugins import ExecutionSnapshotStore, RuntimeEventStore
@@ -610,7 +610,7 @@ async def test_trigger_flow_config_round_trip_with_runtime_resources():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_execution_environment_injects_managed_resource():
+async def test_trigger_flow_execution_resource_injects_managed_resource():
     flow = TriggerFlow()
 
     async def calculate(data: TriggerFlowRuntimeData):
@@ -622,7 +622,7 @@ async def test_trigger_flow_execution_environment_injects_managed_resource():
 
     result = await flow.async_start(
         41,
-        execution_environments=[
+        execution_resources=[
             {
                 "kind": "python",
                 "scope": "execution",
@@ -633,11 +633,11 @@ async def test_trigger_flow_execution_environment_injects_managed_resource():
     )
 
     assert result == {"calculated": 42}
-    assert execution_environment.list(scope="execution") == []
+    assert execution_resource.list(scope="execution") == []
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_save_records_managed_execution_environment_keys():
+async def test_trigger_flow_save_records_managed_execution_resource_keys():
     flow = TriggerFlow()
 
     async def hold_resource(data: TriggerFlowRuntimeData):
@@ -647,7 +647,7 @@ async def test_trigger_flow_save_records_managed_execution_environment_keys():
 
     execution = flow.create_execution(
         auto_close=False,
-        execution_environments=[
+        execution_resources=[
             {
                 "requirement_id": "managed-python-save-test",
                 "kind": "python",
@@ -660,22 +660,22 @@ async def test_trigger_flow_save_records_managed_execution_environment_keys():
     state = execution.save()
 
     assert "managed_python" in state["managed_resource_keys"]
-    assert "managed-python-save-test" in state["execution_environment_requirement_ids"]
+    assert "managed-python-save-test" in state["execution_resource_requirement_ids"]
     requirements = state["resource_requirements"]
     environment_requirements = [
         requirement
         for requirement in requirements
-        if requirement["kind"] == "execution_environment_requirement"
+        if requirement["kind"] == "execution_resource_requirement"
     ]
     assert environment_requirements[0]["metadata"]["resource_key"] == "managed_python"
     assert environment_requirements[0]["metadata"]["requirement"]["requirement_id"] == "managed-python-save-test"
 
     await execution.async_close()
-    assert execution_environment.list(scope="execution") == []
+    assert execution_resource.list(scope="execution") == []
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_async_load_restores_managed_execution_environment():
+async def test_trigger_flow_async_load_restores_managed_execution_resource():
     flow = TriggerFlow()
 
     async def pause(data: TriggerFlowRuntimeData):
@@ -689,7 +689,7 @@ async def test_trigger_flow_async_load_restores_managed_execution_environment():
     flow.to(pause).to(use_environment)
     execution = flow.create_execution(
         auto_close=False,
-        execution_environments=[
+        execution_resources=[
             {
                 "requirement_id": "managed-python-load-test",
                 "kind": "python",
@@ -712,7 +712,7 @@ async def test_trigger_flow_async_load_restores_managed_execution_environment():
     snapshot = await restored.async_close()
 
     assert snapshot["answer"] == 42
-    assert execution_environment.list(scope="execution") == []
+    assert execution_resource.list(scope="execution") == []
 
 
 @pytest.mark.asyncio

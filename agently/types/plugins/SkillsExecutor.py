@@ -92,7 +92,7 @@ class SkillsExecutionContext(SkillsPlanningContext, Protocol):
     # ── Controlled side effects; None when not granted ──
 
     @property
-    def execution_environment(self) -> Any | None: ...
+    def execution_resource(self) -> Any | None: ...
 
 
 @runtime_checkable

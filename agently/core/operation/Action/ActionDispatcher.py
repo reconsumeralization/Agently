@@ -18,10 +18,10 @@ import asyncio
 import json
 from typing import Any, cast
 
-from agently.core.operation.ExecutionEnvironment import (
-    ExecutionEnvironmentApprovalDenied,
-    ExecutionEnvironmentApprovalRequired,
-    ExecutionEnvironmentError,
+from agently.core.operation.ExecutionResource import (
+    ExecutionResourceApprovalDenied,
+    ExecutionResourceApprovalRequired,
+    ExecutionResourceError,
 )
 from agently.types.data import (
     ActionApproval,
@@ -29,9 +29,9 @@ from agently.types.data import (
     ActionPolicy,
     ActionResult,
     ActionSpec,
-    ExecutionEnvironmentHandle,
-    ExecutionEnvironmentPolicy,
-    ExecutionEnvironmentRequirement,
+    ExecutionResourceHandle,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirement,
 )
 from agently.types.plugins import ActionExecutor
 from agently.utils import FunctionShifter, Settings, SettingsNamespace
@@ -295,7 +295,7 @@ class ActionDispatcher:
         return cast(ActionResult, result)
 
     @staticmethod
-    def _to_execution_environment_policy(policy: ActionPolicy) -> ExecutionEnvironmentPolicy:
+    def _to_execution_resource_policy(policy: ActionPolicy) -> ExecutionResourcePolicy:
         keys = {
             "approval_mode",
             "policy_approval_handler",
@@ -311,16 +311,16 @@ class ActionDispatcher:
             "allow_update",
             "allow_delete",
         }
-        return cast(ExecutionEnvironmentPolicy, {key: policy[key] for key in keys if key in policy})
+        return cast(ExecutionResourcePolicy, {key: policy[key] for key in keys if key in policy})
 
-    def _resolve_execution_environment_owner_id(
+    def _resolve_execution_resource_owner_id(
         self,
         settings: Settings,
-        requirement: ExecutionEnvironmentRequirement,
+        requirement: ExecutionResourceRequirement,
     ):
         if requirement.get("owner_id"):
             return str(requirement.get("owner_id", ""))
-        configured = settings.get("execution_environment.owner_id", None)
+        configured = settings.get("execution_resource.owner_id", None)
         if isinstance(configured, str) and configured:
             return configured
         session_id = settings.get("runtime.session_id", None)
@@ -328,32 +328,32 @@ class ActionDispatcher:
             return session_id
         return self.registry.name or "Action"
 
-    def _prepare_execution_environment_requirements(
+    def _prepare_execution_resource_requirements(
         self,
         *,
         spec: ActionSpec,
         settings: Settings,
         policy: ActionPolicy,
     ):
-        requirements = spec.get("execution_environments", [])
+        requirements = spec.get("execution_resources", [])
         if not isinstance(requirements, list):
             return []
-        prepared: list[ExecutionEnvironmentRequirement] = []
-        action_policy = self._to_execution_environment_policy(policy)
+        prepared: list[ExecutionResourceRequirement] = []
+        action_policy = self._to_execution_resource_policy(policy)
         for requirement in requirements:
             if not isinstance(requirement, dict):
                 continue
-            prepared_requirement = cast(ExecutionEnvironmentRequirement, dict(requirement))
+            prepared_requirement = cast(ExecutionResourceRequirement, dict(requirement))
             requirement_policy = dict(prepared_requirement.get("policy", {}))
             requirement_policy.update(action_policy)
-            prepared_requirement["policy"] = cast(ExecutionEnvironmentPolicy, requirement_policy)
+            prepared_requirement["policy"] = cast(ExecutionResourcePolicy, requirement_policy)
             prepared_requirement.setdefault("scope", "action_call")
-            prepared_requirement.setdefault("owner_id", self._resolve_execution_environment_owner_id(settings, prepared_requirement))
+            prepared_requirement.setdefault("owner_id", self._resolve_execution_resource_owner_id(settings, prepared_requirement))
             prepared_requirement.setdefault("resource_key", str(spec.get("action_id", prepared_requirement.get("kind", ""))))
             prepared.append(prepared_requirement)
         return prepared
 
-    def _execution_environment_error_result(
+    def _execution_resource_error_result(
         self,
         *,
         spec: ActionSpec,
@@ -503,18 +503,18 @@ class ActionDispatcher:
                 "executor_type": str(spec.get("executor_type", "")),
             }
 
-        from agently.base import execution_environment
+        from agently.base import execution_resource
 
-        ensured_handles: list[ExecutionEnvironmentHandle] = []
+        ensured_handles: list[ExecutionResourceHandle] = []
         environment_resources: dict[str, Any] = {}
-        environment_handles: dict[str, ExecutionEnvironmentHandle] = {}
+        environment_handles: dict[str, ExecutionResourceHandle] = {}
         try:
-            for requirement in self._prepare_execution_environment_requirements(
+            for requirement in self._prepare_execution_resource_requirements(
                 spec=spec,
                 settings=execution_settings,
                 policy=policy,
             ):
-                handle = await execution_environment.async_ensure(
+                handle = await execution_resource.async_ensure(
                     requirement,
                     owner_id=str(requirement.get("owner_id", "")),
                 )
@@ -524,11 +524,11 @@ class ActionDispatcher:
                     environment_handles[resource_key] = handle
                     environment_resources[resource_key] = handle.get("resource")
             if environment_handles:
-                action_call["execution_environment_handles"] = environment_handles
-                action_call["execution_environment_resources"] = environment_resources
-        except ExecutionEnvironmentApprovalRequired as error:
+                action_call["execution_resource_handles"] = environment_handles
+                action_call["execution_resource_resources"] = environment_resources
+        except ExecutionResourceApprovalRequired as error:
             for handle in ensured_handles:
-                await execution_environment.async_release(handle)
+                await execution_resource.async_release(handle)
             approval: ActionApproval = {
                 "required": True,
                 "reason": error.code,
@@ -537,26 +537,26 @@ class ActionDispatcher:
                 "suggested_policy": cast(ActionPolicy, error.payload.get("policy", {})),
                 "message": str(error),
             }
-            return self._execution_environment_error_result(
+            return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
                 status="approval_required",
                 error=str(error),
                 approval=approval,
             )
-        except ExecutionEnvironmentApprovalDenied as error:
+        except ExecutionResourceApprovalDenied as error:
             for handle in ensured_handles:
-                await execution_environment.async_release(handle)
-            return self._execution_environment_error_result(
+                await execution_resource.async_release(handle)
+            return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
                 status="blocked",
                 error=str(error),
             )
-        except ExecutionEnvironmentError as error:
+        except ExecutionResourceError as error:
             for handle in ensured_handles:
-                await execution_environment.async_release(handle)
-            return self._execution_environment_error_result(
+                await execution_resource.async_release(handle)
+            return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
                 status="error",
@@ -564,8 +564,8 @@ class ActionDispatcher:
             )
         except Exception as error:
             for handle in ensured_handles:
-                await execution_environment.async_release(handle)
-            return self._execution_environment_error_result(
+                await execution_resource.async_release(handle)
+            return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
                 status="error",
@@ -595,7 +595,7 @@ class ActionDispatcher:
         except asyncio.TimeoutError:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":
-                    await execution_environment.async_release(handle)
+                    await execution_resource.async_release(handle)
             return {
                 "ok": False,
                 "status": "error",
@@ -616,7 +616,7 @@ class ActionDispatcher:
         except Exception as error:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":
-                    await execution_environment.async_release(handle)
+                    await execution_resource.async_release(handle)
             return {
                 "ok": False,
                 "status": "error",
@@ -637,7 +637,7 @@ class ActionDispatcher:
         finally:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":
-                    await execution_environment.async_release(handle)
+                    await execution_resource.async_release(handle)
 
         result = self._normalize_executor_output(
             spec=spec,

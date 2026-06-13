@@ -34,7 +34,7 @@ def main():
     pprint(result)
     assert result.get("status") == "success"
     assert '"sum":108' in str(result.get("data", {}).get("stdout", "")).replace(" ", "")
-    assert Agently.execution_environment.list(scope="action_call") == []
+    assert Agently.execution_resource.list(scope="action_call") == []
 
 
 if __name__ == "__main__":

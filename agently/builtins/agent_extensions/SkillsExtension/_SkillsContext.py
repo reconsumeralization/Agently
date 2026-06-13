@@ -15,7 +15,7 @@
 """Agent → Plugin context adapter for Skills Executor.
 
 ``AgentSkillsRuntimeContext`` bridges the Agent's internal API (settings, model
-requests, runtime stream emission, ExecutionEnvironment handle) to the
+requests, runtime stream emission, ExecutionResource handle) to the
 ``SkillsExecutor`` plugin protocols (``SkillsPlanningContext`` /
 ``SkillsExecutionContext`` / ``SkillsRuntimeContext``).
 
@@ -216,8 +216,8 @@ class AgentSkillsRuntimeContext:
     # ── Execution environment ──
 
     @property
-    def execution_environment(self) -> Any | None:
-        return getattr(self.agent, "execution_environment", None)
+    def execution_resource(self) -> Any | None:
+        return getattr(self.agent, "execution_resource", None)
 
 
 def create_agent_skills_runtime_context(

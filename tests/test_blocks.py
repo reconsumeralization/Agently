@@ -21,7 +21,7 @@ from agently.core.orchestration.TriggerFlow.BluePrint import TriggerFlowBlueprin
 class MockContext:
     """Minimal SkillsExecutionContext stub for unit tests."""
 
-    execution_environment: Any = None
+    execution_resource: Any = None
 
     def __init__(self):
         self.model_calls: list[dict[str, Any]] = []
@@ -29,7 +29,7 @@ class MockContext:
         self.stream_events: list[dict[str, Any]] = []
         self.tool_results: dict[str, Any] = {}
         self._model_response: Any = "mock result"
-        self.execution_environment = None
+        self.execution_resource = None
 
     async def async_request_model(self, **kwargs: Any) -> Any:
         self.model_calls.append(kwargs)
@@ -374,7 +374,7 @@ class TestActBlock:
             return {"status": "ok"}
 
         ctx.async_call_tool = _call_tool
-        ctx.execution_environment = None
+        ctx.execution_resource = None
 
         block = ActBlock(allowed_tools={"search"}, default_deny=True)
         result = await block.execute(
@@ -387,7 +387,7 @@ class TestActBlock:
     @pytest.mark.asyncio
     async def test_direct_execute_tool_denied(self):
         ctx = MockContext()
-        ctx.execution_environment = None
+        ctx.execution_resource = None
 
         block = ActBlock(allowed_tools={"read_file"}, default_deny=True)
         with pytest.raises(PermissionError, match="not in allowed_tools"):
@@ -399,7 +399,7 @@ class TestActBlock:
     @pytest.mark.asyncio
     async def test_direct_execute_default_deny_disabled(self):
         ctx = MockContext()
-        ctx.execution_environment = None
+        ctx.execution_resource = None
 
         async def _call_tool(name, **kwargs):
             return {"ok": True}
@@ -416,7 +416,7 @@ class TestActBlock:
     @pytest.mark.asyncio
     async def test_direct_execute_emits_events(self):
         ctx = MockContext()
-        ctx.execution_environment = None
+        ctx.execution_resource = None
 
         async def _call_tool(name, **kwargs):
             return {"result": "ok"}
@@ -433,12 +433,12 @@ class TestActBlock:
         assert len(act_events) == 2  # start + done
 
     @pytest.mark.asyncio
-    async def test_script_requires_execution_environment(self):
+    async def test_script_requires_execution_resource(self):
         ctx = MockContext()
-        ctx.execution_environment = None
+        ctx.execution_resource = None
 
         block = ActBlock(allow_scripts=True, default_deny=True)
-        with pytest.raises(RuntimeError, match="ExecutionEnvironment"):
+        with pytest.raises(RuntimeError, match="ExecutionResource"):
             await block.execute(
                 action_spec={"type": "script", "name": "setup.sh", "kwargs": {}},
                 context=ctx,

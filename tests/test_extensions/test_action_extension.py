@@ -189,7 +189,7 @@ def test_action_extension_enable_python_registers_run_python_action():
     )
     assert result.get("status") == "success"
     assert result.get("data", {}).get("result") == 6
-    assert Agently.execution_environment.list(scope="action_call") == []
+    assert Agently.execution_resource.list(scope="action_call") == []
 
 
 def test_action_extension_default_introspection_includes_agent_scoped_actions():
@@ -230,7 +230,7 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     )
     assert result.get("status") == "success"
     assert str(tmp_path) in str(result.get("data"))
-    assert Agently.execution_environment.list(scope="action_call") == []
+    assert Agently.execution_resource.list(scope="action_call") == []
 
 
 def test_action_extension_enable_shell_redacts_env_in_action_info(tmp_path):
@@ -247,7 +247,7 @@ def test_action_extension_enable_shell_redacts_env_in_action_info(tmp_path):
 
     raw_spec = agent.action.action_registry.get_spec("redacted_env_bash")
     assert raw_spec is not None
-    raw_environments = raw_spec.get("execution_environments", [])
+    raw_environments = raw_spec.get("execution_resources", [])
     assert isinstance(raw_environments, list)
     raw_config = raw_environments[0].get("config", {})
     assert isinstance(raw_config, dict)
@@ -256,7 +256,7 @@ def test_action_extension_enable_shell_redacts_env_in_action_info(tmp_path):
     assert raw_env["SECRET_TOKEN"] == "should-not-be-model-visible"
 
     action_info = agent.action.get_action_info()["redacted_env_bash"]
-    visible_environments = action_info.get("execution_environments", [])
+    visible_environments = action_info.get("execution_resources", [])
     assert isinstance(visible_environments, list)
     visible_config = visible_environments[0].get("config", {})
     assert isinstance(visible_config, dict)
@@ -414,12 +414,12 @@ def test_action_extension_shell_and_nodejs_inherit_foundation_workspace(tmp_path
 
     shell_spec = agent.action.action_registry.get_spec("workspace_shell")
     assert shell_spec is not None
-    shell_req = shell_spec.get("execution_environments", [])[0]
+    shell_req = shell_spec.get("execution_resources", [])[0]
     assert shell_req.get("config", {}).get("allowed_workdir_roots") == [str(workspace.files_root)]
 
     node_spec = agent.action.action_registry.get_spec("workspace_node")
     assert node_spec is not None
-    node_req = node_spec.get("execution_environments", [])[0]
+    node_req = node_spec.get("execution_resources", [])[0]
     assert node_req.get("config", {}).get("cwd") == str(workspace.files_root)
 
 

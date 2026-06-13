@@ -48,7 +48,7 @@ def main():
         {"title": "Execution environment health check", "priority": 1},
         {"title": "Action package examples", "priority": 2},
     ]
-    assert Agently.execution_environment.list(scope="action_call") == []
+    assert Agently.execution_resource.list(scope="action_call") == []
 
 
 if __name__ == "__main__":

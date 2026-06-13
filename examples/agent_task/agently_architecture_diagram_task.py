@@ -101,7 +101,7 @@ EXCERPT_TERMS = [
     "Action",
     "ActionRuntime",
     "SkillsExecutor",
-    "ExecutionEnvironment",
+    "ExecutionResource",
     "RuntimeEvent",
     "EventCenter",
     "goal",

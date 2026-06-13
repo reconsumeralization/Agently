@@ -25,7 +25,7 @@ def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():
 
 def test_v2_default_plugins_are_registered():
     action_executors = set(Agently.plugin_manager.get_plugin_list("ActionExecutor"))
-    environment_providers = set(Agently.plugin_manager.get_plugin_list("ExecutionEnvironmentProvider"))
+    environment_providers = set(Agently.plugin_manager.get_plugin_list("ExecutionResourceProvider"))
 
     assert {
         "SearchActionExecutor",
@@ -35,10 +35,10 @@ def test_v2_default_plugins_are_registered():
         "SQLiteActionExecutor",
     }.issubset(action_executors)
     assert {
-        "NodeExecutionEnvironmentProvider",
-        "DockerExecutionEnvironmentProvider",
-        "BrowserExecutionEnvironmentProvider",
-        "SQLiteExecutionEnvironmentProvider",
+        "NodeExecutionResourceProvider",
+        "DockerExecutionResourceProvider",
+        "BrowserExecutionResourceProvider",
+        "SQLiteExecutionResourceProvider",
     }.issubset(environment_providers)
 
 
@@ -210,7 +210,7 @@ def test_agent_enable_sqlite_registers_managed_sqlite_action(tmp_path):
 
     spec = agent.action.action_registry.get_spec("test_query_sqlite")
     assert spec is not None
-    environments = spec.get("execution_environments", [])
+    environments = spec.get("execution_resources", [])
     assert environments and environments[0].get("kind") == "sqlite"
 
     result = agent.action.execute_action(

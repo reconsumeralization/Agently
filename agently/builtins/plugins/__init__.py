@@ -20,10 +20,10 @@ from .ActionExecutor import (
     PythonSandboxActionExecutor,
 )
 from .ActionRuntime import AgentlyActionRuntime
-from .ExecutionEnvironmentProvider import (
-    BashExecutionEnvironmentProvider,
-    MCPExecutionEnvironmentProvider,
-    PythonExecutionEnvironmentProvider,
+from .ExecutionResourceProvider import (
+    BashExecutionResourceProvider,
+    MCPExecutionResourceProvider,
+    PythonExecutionResourceProvider,
 )
 from .PromptGenerator.AgentlyPromptGenerator import AgentlyPromptGenerator
 from .TaskDAGPlanner import AgentlyTaskDAGPlanner

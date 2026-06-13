@@ -57,7 +57,7 @@ TriggerFlowExternalWaitRequest: TypeAlias = ExecutionExchangeRequest
 
 
 class TriggerFlowResourceRequirement(TypedDict):
-    kind: Literal["runtime_resource", "managed_execution_environment", "execution_environment_requirement"]
+    kind: Literal["runtime_resource", "managed_execution_resource", "execution_resource_requirement"]
     key: str
     required: bool
     source: NotRequired[Literal["flow", "execution", "managed", "external"] | str]
@@ -134,7 +134,7 @@ class TriggerFlowExecutionSnapshot(TypedDict, total=False):
     resource_requirements: list[TriggerFlowResourceRequirement]
     resource_keys: list[str]
     managed_resource_keys: list[str]
-    execution_environment_requirement_ids: list[str]
+    execution_resource_requirement_ids: list[str]
     resume_ledger: dict[str, Any]
     compaction: TriggerFlowCompactionState
 
@@ -194,7 +194,7 @@ class TriggerFlowExecutionLoadReport(TypedDict):
     pending_environment_resource_keys: list[str]
     policy_blocked_resource_keys: list[str]
     resource_requirements: list[TriggerFlowResourceRequirement]
-    execution_environment_requirements: list[dict[str, Any]]
+    execution_resource_requirements: list[dict[str, Any]]
     compaction: TriggerFlowCompactionState
     diagnostics: list[TriggerFlowRecoveryDiagnostic]
 

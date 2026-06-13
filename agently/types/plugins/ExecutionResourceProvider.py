@@ -18,31 +18,31 @@ from .base import AgentlyPlugin
 
 if TYPE_CHECKING:
     from agently.types.data import (
-        ExecutionEnvironmentHandle,
-        ExecutionEnvironmentPolicy,
-        ExecutionEnvironmentRequirement,
-        ExecutionEnvironmentStatus,
+        ExecutionResourceHandle,
+        ExecutionResourcePolicy,
+        ExecutionResourceRequirement,
+        ExecutionResourceStatus,
     )
 
 
 @runtime_checkable
-class ExecutionEnvironmentProvider(AgentlyPlugin, Protocol):
+class ExecutionResourceProvider(AgentlyPlugin, Protocol):
     kind: str
 
     async def async_ensure(
         self,
         *,
-        requirement: "ExecutionEnvironmentRequirement",
-        policy: "ExecutionEnvironmentPolicy",
-        existing_handle: "ExecutionEnvironmentHandle | None" = None,
-    ) -> "ExecutionEnvironmentHandle": ...
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+        existing_handle: "ExecutionResourceHandle | None" = None,
+    ) -> "ExecutionResourceHandle": ...
 
     async def async_health_check(
         self,
-        handle: "ExecutionEnvironmentHandle",
-    ) -> "ExecutionEnvironmentStatus": ...
+        handle: "ExecutionResourceHandle",
+    ) -> "ExecutionResourceStatus": ...
 
     async def async_release(
         self,
-        handle: "ExecutionEnvironmentHandle",
+        handle: "ExecutionResourceHandle",
     ) -> None: ...

@@ -23,7 +23,7 @@ from agently.utils.RequestScheduler import RequestScheduler
 from agently.core import (
     Action,
     DynamicTask,
-    ExecutionEnvironmentManager,
+    ExecutionResourceManager,
     PolicyApprovalManager,
     PluginManager,
     EventCenter,
@@ -74,7 +74,7 @@ logging.getLogger("httpx").setLevel(httpx_level)
 logging.getLogger("httpcore").setLevel(httpx_level)
 action = Action(plugin_manager, settings)
 tool = action
-execution_environment = ExecutionEnvironmentManager(
+execution_resource = ExecutionResourceManager(
     plugin_manager=plugin_manager,
     settings=settings,
     event_center=event_center,
@@ -252,7 +252,7 @@ class AgentlyMain(Generic[A]):
         self.async_print = async_print
         self.action = action
         self.tool = tool
-        self.execution_environment = execution_environment
+        self.execution_resource = execution_resource
         self.policy_approval = policy_approval
         self.action_registry = action_registry
         self.action_dispatcher = action_dispatcher

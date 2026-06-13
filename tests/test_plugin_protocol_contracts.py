@@ -18,14 +18,14 @@ from agently.builtins.plugins.ActionExecutor import (
 from agently.builtins.plugins.ActionFlow import TriggerFlowActionFlow
 from agently.builtins.plugins.ActionRuntime import AgentlyActionRuntime
 from agently.builtins.plugins.AgentOrchestrator import AgentlyAgentOrchestrator
-from agently.builtins.plugins.ExecutionEnvironmentProvider import (
-    BashExecutionEnvironmentProvider,
-    BrowserExecutionEnvironmentProvider,
-    DockerExecutionEnvironmentProvider,
-    MCPExecutionEnvironmentProvider,
-    NodeExecutionEnvironmentProvider,
-    PythonExecutionEnvironmentProvider,
-    SQLiteExecutionEnvironmentProvider,
+from agently.builtins.plugins.ExecutionResourceProvider import (
+    BashExecutionResourceProvider,
+    BrowserExecutionResourceProvider,
+    DockerExecutionResourceProvider,
+    MCPExecutionResourceProvider,
+    NodeExecutionResourceProvider,
+    PythonExecutionResourceProvider,
+    SQLiteExecutionResourceProvider,
 )
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import AnthropicCompatible
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
@@ -38,7 +38,7 @@ from agently.types.plugins import (
     ActionRuntime,
     AgentExecution,
     AgentOrchestrator,
-    ExecutionEnvironmentProvider,
+    ExecutionResourceProvider,
     SkillsExecutor,
     SkillsRuntimeContext,
 )
@@ -84,21 +84,21 @@ def test_agent_skills_context_matches_runtime_protocol():
     assert isinstance(context, SkillsRuntimeContext)
 
 
-def test_builtin_execution_environment_providers_match_protocol():
+def test_builtin_execution_resource_providers_match_protocol():
     providers = [
-        BashExecutionEnvironmentProvider(),
-        BrowserExecutionEnvironmentProvider(),
-        DockerExecutionEnvironmentProvider(),
-        MCPExecutionEnvironmentProvider(),
-        NodeExecutionEnvironmentProvider(),
-        PythonExecutionEnvironmentProvider(),
-        SQLiteExecutionEnvironmentProvider(),
+        BashExecutionResourceProvider(),
+        BrowserExecutionResourceProvider(),
+        DockerExecutionResourceProvider(),
+        MCPExecutionResourceProvider(),
+        NodeExecutionResourceProvider(),
+        PythonExecutionResourceProvider(),
+        SQLiteExecutionResourceProvider(),
     ]
 
     for provider in providers:
-        assert isinstance(provider, ExecutionEnvironmentProvider)
+        assert isinstance(provider, ExecutionResourceProvider)
         assert provider.kind
-        for method_name in _method_names(ExecutionEnvironmentProvider):
+        for method_name in _method_names(ExecutionResourceProvider):
             assert callable(getattr(provider, method_name))
 
 

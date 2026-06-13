@@ -60,8 +60,8 @@ from agently.types.data import (
     ActionResult,
     ActionRunContext,
     ActionSpec,
-    ExecutionEnvironmentPolicy,
-    ExecutionEnvironmentRequirement,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirement,
 )
 from agently.types.plugins import (
     ActionExecutionHandler,
@@ -290,7 +290,7 @@ class Action:
         replay_safe: bool,
         expose_to_model: bool,
         executor_type: str,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None,
+        execution_resources: list[ExecutionResourceRequirement] | None,
         meta: dict[str, Any] | None,
     ) -> "ActionSpec":
         spec = cast(ActionSpec, {
@@ -306,7 +306,7 @@ class Action:
             "replay_safe": replay_safe,
             "expose_to_model": expose_to_model,
             "executor_type": executor_type,
-            "execution_environments": execution_environments if execution_environments is not None else [],
+            "execution_resources": execution_resources if execution_resources is not None else [],
             "meta": meta if meta is not None else {},
         })
         if returns is not None:
@@ -329,7 +329,7 @@ class Action:
         sandbox_required: bool = False,
         replay_safe: bool = True,
         expose_to_model: bool = True,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None = None,
+        execution_resources: list[ExecutionResourceRequirement] | None = None,
         meta: dict[str, Any] | None = None,
     ):
         if executor is None:
@@ -351,7 +351,7 @@ class Action:
             replay_safe=replay_safe,
             expose_to_model=expose_to_model,
             executor_type=executor_type,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
             meta=meta,
         )
         self.action_registry.register(spec, executor, func=func)

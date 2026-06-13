@@ -59,7 +59,7 @@ class ActionExtension(BaseAgent):
         self.settings.setdefault("tool.loop.concurrency", None, inherit=True)
         self.settings.setdefault("tool.loop.timeout", None, inherit=True)
         self.settings.setdefault("tool.loop.enabled", True, inherit=True)
-        self.settings.setdefault("execution_environment.owner_id", self.name, inherit=False)
+        self.settings.setdefault("execution_resource.owner_id", self.name, inherit=False)
 
         self.__action_logs: list[ActionResult] = []
         self.__prepared_action_results: dict[str, Any] | None = None
@@ -91,8 +91,8 @@ class ActionExtension(BaseAgent):
                 copied_spec[key] = dict(copied_spec[key])
         if isinstance(copied_spec.get("tags"), list):
             copied_spec["tags"] = list(copied_spec["tags"])
-        if isinstance(copied_spec.get("execution_environments"), list):
-            copied_spec["execution_environments"] = [dict(item) for item in copied_spec["execution_environments"]]
+        if isinstance(copied_spec.get("execution_resources"), list):
+            copied_spec["execution_resources"] = [dict(item) for item in copied_spec["execution_resources"]]
 
         self.action.register_action(
             action_id=str(copied_spec.get("action_id", action_id)),
@@ -108,7 +108,7 @@ class ActionExtension(BaseAgent):
             sandbox_required=bool(copied_spec.get("sandbox_required", False)),
             replay_safe=bool(copied_spec.get("replay_safe", True)),
             expose_to_model=bool(copied_spec.get("expose_to_model", True)),
-            execution_environments=copied_spec.get("execution_environments", []),
+            execution_resources=copied_spec.get("execution_resources", []),
             meta=copied_spec.get("meta", {}),
         )
 

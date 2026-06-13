@@ -2,8 +2,8 @@ from pprint import pprint
 from typing import Any, cast
 
 from agently import Agently
-from agently.core import ExecutionEnvironmentManager
-from agently.types.data import ExecutionEnvironmentHandle, ExecutionEnvironmentRequirement
+from agently.core import ExecutionResourceManager
+from agently.types.data import ExecutionResourceHandle, ExecutionResourceRequirement
 from agently.utils import Settings
 
 
@@ -19,7 +19,7 @@ class FlakySessionProvider:
     async def async_ensure(self, *, requirement, policy, existing_handle=None):
         _ = (requirement, policy, existing_handle)
         self.ensure_count += 1
-        return cast(ExecutionEnvironmentHandle, {
+        return cast(ExecutionResourceHandle, {
             "handle_id": f"flaky:{ self.ensure_count }",
             "resource": {"generation": self.ensure_count},
             "status": "ready",
@@ -38,7 +38,7 @@ class FlakySessionProvider:
 
 async def main_async():
     settings = Settings(name="HealthCheckExampleSettings", parent=Agently.settings)
-    manager = ExecutionEnvironmentManager(
+    manager = ExecutionResourceManager(
         plugin_manager=Agently.plugin_manager,
         settings=settings,
         event_center=Agently.event_center,
@@ -46,7 +46,7 @@ async def main_async():
     provider = FlakySessionProvider()
     manager.register_provider(cast(Any, provider))
 
-    requirement = cast(ExecutionEnvironmentRequirement, {
+    requirement = cast(ExecutionResourceRequirement, {
         "kind": provider.kind,
         "scope": "session",
         "owner_id": "health-check-example",

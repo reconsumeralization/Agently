@@ -17,33 +17,33 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 
 from agently.types.data import (
-    ExecutionEnvironmentHandle,
-    ExecutionEnvironmentPolicy,
-    ExecutionEnvironmentRequirement,
-    ExecutionEnvironmentScope,
-    ExecutionEnvironmentStatus,
+    ExecutionResourceHandle,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirement,
+    ExecutionResourceScope,
+    ExecutionResourceStatus,
 )
 from agently.utils import FunctionShifter
 
 if TYPE_CHECKING:
     from agently.core.runtime.EventCenter import EventCenter
     from agently.core.extension.PluginManager import PluginManager
-    from agently.types.plugins import ExecutionEnvironmentProvider
+    from agently.types.plugins import ExecutionResourceProvider
     from agently.utils import Settings
 
 
-class ExecutionEnvironmentError(RuntimeError):
+class ExecutionResourceError(RuntimeError):
     def __init__(self, message: str, *, code: str, payload: dict[str, Any] | None = None):
         super().__init__(message)
         self.code = code
         self.payload = payload if payload is not None else {}
 
 
-class ExecutionEnvironmentApprovalRequired(ExecutionEnvironmentError):
-    def __init__(self, requirement: ExecutionEnvironmentRequirement, policy: ExecutionEnvironmentPolicy):
+class ExecutionResourceApprovalRequired(ExecutionResourceError):
+    def __init__(self, requirement: ExecutionResourceRequirement, policy: ExecutionResourcePolicy):
         super().__init__(
             "Execution environment approval is required.",
-            code="execution_environment.approval_required",
+            code="execution_resource.approval_required",
             payload={
                 "requirement_id": requirement.get("requirement_id", ""),
                 "kind": requirement.get("kind", ""),
@@ -55,11 +55,11 @@ class ExecutionEnvironmentApprovalRequired(ExecutionEnvironmentError):
         )
 
 
-class ExecutionEnvironmentApprovalDenied(ExecutionEnvironmentError):
-    def __init__(self, requirement: ExecutionEnvironmentRequirement, reason: str):
+class ExecutionResourceApprovalDenied(ExecutionResourceError):
+    def __init__(self, requirement: ExecutionResourceRequirement, reason: str):
         super().__init__(
             reason or "Execution environment approval was denied.",
-            code="execution_environment.approval_denied",
+            code="execution_resource.approval_denied",
             payload={
                 "requirement_id": requirement.get("requirement_id", ""),
                 "kind": requirement.get("kind", ""),
@@ -70,7 +70,7 @@ class ExecutionEnvironmentApprovalDenied(ExecutionEnvironmentError):
         )
 
 
-class ExecutionEnvironmentManager:
+class ExecutionResourceManager:
     def __init__(
         self,
         *,
@@ -81,16 +81,16 @@ class ExecutionEnvironmentManager:
         self.plugin_manager = plugin_manager
         self.settings = settings
         self.event_center = event_center
-        self._requirements: dict[str, ExecutionEnvironmentRequirement] = {}
-        self._handles: dict[str, ExecutionEnvironmentHandle] = {}
+        self._requirements: dict[str, ExecutionResourceRequirement] = {}
+        self._handles: dict[str, ExecutionResourceHandle] = {}
         self._handles_by_reuse_key: dict[str, str] = {}
-        self._providers: dict[str, "ExecutionEnvironmentProvider"] = {}
+        self._providers: dict[str, "ExecutionResourceProvider"] = {}
 
         self.ensure = FunctionShifter.syncify(self.async_ensure)
         self.release = FunctionShifter.syncify(self.async_release)
         self.release_scope = FunctionShifter.syncify(self.async_release_scope)
 
-    def register_provider(self, provider: "ExecutionEnvironmentProvider"):
+    def register_provider(self, provider: "ExecutionResourceProvider"):
         self._providers[str(provider.kind)] = provider
         return self
 
@@ -98,18 +98,18 @@ class ExecutionEnvironmentManager:
         if kind in self._providers:
             return self._providers[kind]
         try:
-            plugin_names = self.plugin_manager.get_plugin_list("ExecutionEnvironmentProvider")
+            plugin_names = self.plugin_manager.get_plugin_list("ExecutionResourceProvider")
         except Exception:
             plugin_names = []
         for plugin_name in plugin_names:
-            plugin_class = cast(Any, self.plugin_manager.get_plugin("ExecutionEnvironmentProvider", plugin_name))
+            plugin_class = cast(Any, self.plugin_manager.get_plugin("ExecutionResourceProvider", plugin_name))
             provider = plugin_class()
             self.register_provider(provider)
             if provider.kind == kind:
                 return provider
-        raise ExecutionEnvironmentError(
-            f"Can not find ExecutionEnvironmentProvider for kind '{ kind }'.",
-            code="execution_environment.provider_missing",
+        raise ExecutionResourceError(
+            f"Can not find ExecutionResourceProvider for kind '{ kind }'.",
+            code="execution_resource.provider_missing",
             payload={"kind": kind},
         )
 
@@ -117,7 +117,7 @@ class ExecutionEnvironmentManager:
     def _stable_json(value: Any):
         return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
 
-    def _derive_reuse_key(self, requirement: ExecutionEnvironmentRequirement):
+    def _derive_reuse_key(self, requirement: ExecutionResourceRequirement):
         if requirement.get("reuse_key"):
             return str(requirement.get("reuse_key", ""))
         stable_parts = {
@@ -131,21 +131,21 @@ class ExecutionEnvironmentManager:
 
     def _normalize_requirement(
         self,
-        requirement: ExecutionEnvironmentRequirement,
+        requirement: ExecutionResourceRequirement,
         *,
-        scope: ExecutionEnvironmentScope | None = None,
+        scope: ExecutionResourceScope | None = None,
         owner_id: str | None = None,
     ):
-        normalized = cast(ExecutionEnvironmentRequirement, dict(requirement))
+        normalized = cast(ExecutionResourceRequirement, dict(requirement))
         kind = str(normalized.get("kind", "")).strip()
         if not kind:
-            raise ValueError("ExecutionEnvironmentRequirement.kind is required.")
+            raise ValueError("ExecutionResourceRequirement.kind is required.")
         normalized["kind"] = kind
-        normalized["scope"] = cast(ExecutionEnvironmentScope, scope or normalized.get("scope", "action_call"))
+        normalized["scope"] = cast(ExecutionResourceScope, scope or normalized.get("scope", "action_call"))
         normalized["owner_id"] = str(owner_id or normalized.get("owner_id", "Agently"))
         normalized["resource_key"] = str(normalized.get("resource_key", kind))
         normalized["config"] = dict(normalized.get("config", {}))
-        normalized["policy"] = cast(ExecutionEnvironmentPolicy, dict(normalized.get("policy", {})))
+        normalized["policy"] = cast(ExecutionResourcePolicy, dict(normalized.get("policy", {})))
         normalized["meta"] = dict(normalized.get("meta", {}))
         if not normalized.get("requirement_id"):
             normalized["requirement_id"] = f"{ normalized['kind'] }:{ uuid.uuid4().hex }"
@@ -154,10 +154,10 @@ class ExecutionEnvironmentManager:
 
     @staticmethod
     def _event_payload(
-        requirement: ExecutionEnvironmentRequirement | None = None,
-        handle: ExecutionEnvironmentHandle | None = None,
+        requirement: ExecutionResourceRequirement | None = None,
+        handle: ExecutionResourceHandle | None = None,
         *,
-        status: ExecutionEnvironmentStatus | None = None,
+        status: ExecutionResourceStatus | None = None,
         error: str | None = None,
     ):
         source = handle if handle is not None else requirement if requirement is not None else {}
@@ -179,29 +179,29 @@ class ExecutionEnvironmentManager:
         self,
         event_type: str,
         *,
-        requirement: ExecutionEnvironmentRequirement | None = None,
-        handle: ExecutionEnvironmentHandle | None = None,
-        status: ExecutionEnvironmentStatus | None = None,
+        requirement: ExecutionResourceRequirement | None = None,
+        handle: ExecutionResourceHandle | None = None,
+        status: ExecutionResourceStatus | None = None,
         message: str | None = None,
         error: str | None = None,
     ):
         await self.event_center.async_emit(
             {
                 "event_type": event_type,
-                "source": "ExecutionEnvironmentManager",
+                "source": "ExecutionResourceManager",
                 "level": "ERROR" if error else "INFO",
                 "message": message,
                 "payload": self._event_payload(requirement, handle, status=status, error=error),
             }
         )
 
-    def declare(self, requirement: ExecutionEnvironmentRequirement):
+    def declare(self, requirement: ExecutionResourceRequirement):
         normalized = self._normalize_requirement(requirement)
         self._requirements[str(normalized.get("requirement_id", ""))] = normalized
         self.event_center.emit(
             {
-                "event_type": "execution_environment.declared",
-                "source": "ExecutionEnvironmentManager",
+                "event_type": "execution_resource.declared",
+                "source": "ExecutionResourceManager",
                 "message": "Execution environment requirement declared.",
                 "payload": self._event_payload(normalized, status="declared"),
             }
@@ -210,26 +210,26 @@ class ExecutionEnvironmentManager:
 
     async def _resolve_approval(
         self,
-        requirement: ExecutionEnvironmentRequirement,
-        policy: ExecutionEnvironmentPolicy,
+        requirement: ExecutionResourceRequirement,
+        policy: ExecutionResourcePolicy,
     ):
         approval_mode = str(policy.get("approval_mode", "auto"))
         approval_required = bool(requirement.get("approval_required", False)) or approval_mode == "always"
         if not approval_required:
             return policy
         await self._emit(
-            "execution_environment.approval_required",
+            "execution_resource.approval_required",
             requirement=requirement,
             status="pending_approval",
             message="Execution environment approval is required.",
         )
         if approval_mode == "never":
-            raise ExecutionEnvironmentApprovalDenied(requirement, "Execution environment approval is disabled by policy.")
+            raise ExecutionResourceApprovalDenied(requirement, "Execution environment approval is disabled by policy.")
         from agently.base import policy_approval
 
         decision = await policy_approval.async_resolve(
             {
-                "source": "execution_environment",
+                "source": "execution_resource",
                 "capability": str(requirement.get("kind", "")),
                 "subject": str(requirement.get("resource_key") or requirement.get("kind") or ""),
                 "risk": "resource",
@@ -249,20 +249,20 @@ class ExecutionEnvironmentManager:
         )
         status = str(decision.get("status", "pending"))
         if status == "pending":
-            raise ExecutionEnvironmentApprovalRequired(requirement, policy)
+            raise ExecutionResourceApprovalRequired(requirement, policy)
         if status != "approved":
-            raise ExecutionEnvironmentApprovalDenied(requirement, str(decision.get("reason", "")))
+            raise ExecutionResourceApprovalDenied(requirement, str(decision.get("reason", "")))
         merged_policy = dict(policy)
         override = decision.get("policy_override", {})
         if isinstance(override, dict):
             merged_policy.update(override)
-        return cast(ExecutionEnvironmentPolicy, merged_policy)
+        return cast(ExecutionResourcePolicy, merged_policy)
 
     async def async_ensure(
         self,
-        requirement_or_id: ExecutionEnvironmentRequirement | str,
+        requirement_or_id: ExecutionResourceRequirement | str,
         *,
-        scope: ExecutionEnvironmentScope | None = None,
+        scope: ExecutionResourceScope | None = None,
         owner_id: str | None = None,
     ):
         if isinstance(requirement_or_id, str):
@@ -272,7 +272,7 @@ class ExecutionEnvironmentManager:
         else:
             requirement = self._normalize_requirement(requirement_or_id, scope=scope, owner_id=owner_id)
             self._requirements[str(requirement.get("requirement_id", ""))] = requirement
-        policy = cast(ExecutionEnvironmentPolicy, dict(requirement.get("policy", {})))
+        policy = cast(ExecutionResourcePolicy, dict(requirement.get("policy", {})))
         policy = await self._resolve_approval(requirement, policy)
         reuse_key = str(requirement.get("reuse_key", ""))
         provider = self._get_provider(str(requirement["kind"]))
@@ -284,14 +284,14 @@ class ExecutionEnvironmentManager:
                 try:
                     health_status = await provider.async_health_check(existing_handle)
                 except Exception as error:
-                    health_status = cast(ExecutionEnvironmentStatus, "unhealthy")
+                    health_status = cast(ExecutionResourceStatus, "unhealthy")
                     health_error = str(error)
                 if health_status == "ready":
                     existing_handle["ref_count"] = int(existing_handle.get("ref_count", 0)) + 1
                     return existing_handle
                 existing_handle["status"] = "unhealthy"
                 await self._emit(
-                    "execution_environment.unhealthy",
+                    "execution_resource.unhealthy",
                     handle=existing_handle,
                     status="unhealthy",
                     message="Execution environment health check failed before reuse.",
@@ -302,7 +302,7 @@ class ExecutionEnvironmentManager:
                 await self._async_release_handle(existing_id, force=True)
 
         await self._emit(
-            "execution_environment.ensuring",
+            "execution_resource.ensuring",
             requirement=requirement,
             status="ensuring",
             message="Execution environment ensuring started.",
@@ -315,14 +315,14 @@ class ExecutionEnvironmentManager:
             )
         except Exception as error:
             await self._emit(
-                "execution_environment.failed",
+                "execution_resource.failed",
                 requirement=requirement,
                 status="failed",
                 message="Execution environment ensure failed.",
                 error=str(error),
             )
             raise
-        normalized_handle = cast(ExecutionEnvironmentHandle, dict(handle))
+        normalized_handle = cast(ExecutionResourceHandle, dict(handle))
         normalized_handle.setdefault("handle_id", f"{ requirement.get('kind', '') }:{ uuid.uuid4().hex }")
         normalized_handle.setdefault("requirement_id", requirement.get("requirement_id", ""))
         normalized_handle.setdefault("kind", requirement.get("kind", ""))
@@ -339,7 +339,7 @@ class ExecutionEnvironmentManager:
         self._handles[handle_id] = normalized_handle
         self._handles_by_reuse_key[reuse_key] = handle_id
         await self._emit(
-            "execution_environment.ready",
+            "execution_resource.ready",
             handle=normalized_handle,
             status="ready",
             message="Execution environment is ready.",
@@ -357,7 +357,7 @@ class ExecutionEnvironmentManager:
         provider = self._get_provider(str(handle.get("kind", "")))
         handle["status"] = "releasing"
         await self._emit(
-            "execution_environment.releasing",
+            "execution_resource.releasing",
             handle=handle,
             status="releasing",
             message="Execution environment releasing started.",
@@ -367,7 +367,7 @@ class ExecutionEnvironmentManager:
         except Exception as error:
             handle["status"] = "failed"
             await self._emit(
-                "execution_environment.failed",
+                "execution_resource.failed",
                 handle=handle,
                 status="failed",
                 message="Execution environment release failed.",
@@ -380,18 +380,18 @@ class ExecutionEnvironmentManager:
             del self._handles_by_reuse_key[reuse_key]
         del self._handles[handle_id]
         await self._emit(
-            "execution_environment.released",
+            "execution_resource.released",
             handle=handle,
             status="released",
             message="Execution environment released.",
         )
         return None
 
-    async def async_release(self, handle_or_id: ExecutionEnvironmentHandle | str):
+    async def async_release(self, handle_or_id: ExecutionResourceHandle | str):
         handle_id = handle_or_id if isinstance(handle_or_id, str) else str(handle_or_id.get("handle_id", ""))
         return await self._async_release_handle(handle_id)
 
-    async def async_release_scope(self, scope: ExecutionEnvironmentScope, owner_id: str):
+    async def async_release_scope(self, scope: ExecutionResourceScope, owner_id: str):
         targets = [
             handle_id
             for handle_id, handle in self._handles.items()
@@ -408,9 +408,9 @@ class ExecutionEnvironmentManager:
     def list(
         self,
         *,
-        scope: ExecutionEnvironmentScope | None = None,
+        scope: ExecutionResourceScope | None = None,
         owner_id: str | None = None,
-        status: ExecutionEnvironmentStatus | None = None,
+        status: ExecutionResourceStatus | None = None,
     ):
         handles = list(self._handles.values())
         if scope is not None:

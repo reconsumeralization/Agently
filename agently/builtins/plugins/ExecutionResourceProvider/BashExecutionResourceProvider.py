@@ -17,15 +17,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agently.types.data import (
-        ExecutionEnvironmentHandle,
-        ExecutionEnvironmentPolicy,
-        ExecutionEnvironmentRequirement,
-        ExecutionEnvironmentStatus,
+        ExecutionResourceHandle,
+        ExecutionResourcePolicy,
+        ExecutionResourceRequirement,
+        ExecutionResourceStatus,
     )
 
 
-class BashExecutionEnvironmentProvider:
-    name = "BashExecutionEnvironmentProvider"
+class BashExecutionResourceProvider:
+    name = "BashExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
     kind = "bash"
 
@@ -40,10 +40,10 @@ class BashExecutionEnvironmentProvider:
     async def async_ensure(
         self,
         *,
-        requirement: "ExecutionEnvironmentRequirement",
-        policy: "ExecutionEnvironmentPolicy",
-        existing_handle: "ExecutionEnvironmentHandle | None" = None,
-    ) -> "ExecutionEnvironmentHandle":
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+        existing_handle: "ExecutionResourceHandle | None" = None,
+    ) -> "ExecutionResourceHandle":
         _ = existing_handle
         from agently.builtins.actions import Cmd
 
@@ -61,9 +61,9 @@ class BashExecutionEnvironmentProvider:
             "meta": {"provider": self.name},
         }
 
-    async def async_health_check(self, handle: "ExecutionEnvironmentHandle") -> "ExecutionEnvironmentStatus":
+    async def async_health_check(self, handle: "ExecutionResourceHandle") -> "ExecutionResourceStatus":
         return "ready" if handle.get("resource") is not None else "unhealthy"
 
-    async def async_release(self, handle: "ExecutionEnvironmentHandle") -> None:
+    async def async_release(self, handle: "ExecutionResourceHandle") -> None:
         _ = handle
         return None

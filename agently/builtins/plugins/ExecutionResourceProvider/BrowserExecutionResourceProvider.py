@@ -21,10 +21,10 @@ from agently.utils import LazyImport
 
 if TYPE_CHECKING:
     from agently.types.data import (
-        ExecutionEnvironmentHandle,
-        ExecutionEnvironmentPolicy,
-        ExecutionEnvironmentRequirement,
-        ExecutionEnvironmentStatus,
+        ExecutionResourceHandle,
+        ExecutionResourcePolicy,
+        ExecutionResourceRequirement,
+        ExecutionResourceStatus,
     )
 
 
@@ -192,8 +192,8 @@ class BrowserExecutionResource:
             await self._playwright.stop()
 
 
-class BrowserExecutionEnvironmentProvider:
-    name = "BrowserExecutionEnvironmentProvider"
+class BrowserExecutionResourceProvider:
+    name = "BrowserExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
     kind = "browser"
 
@@ -208,10 +208,10 @@ class BrowserExecutionEnvironmentProvider:
     async def async_ensure(
         self,
         *,
-        requirement: "ExecutionEnvironmentRequirement",
-        policy: "ExecutionEnvironmentPolicy",
-        existing_handle: "ExecutionEnvironmentHandle | None" = None,
-    ) -> "ExecutionEnvironmentHandle":
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+        existing_handle: "ExecutionResourceHandle | None" = None,
+    ) -> "ExecutionResourceHandle":
         _ = (policy, existing_handle)
         config = requirement.get("config", {})
         resource = BrowserExecutionResource(
@@ -231,11 +231,11 @@ class BrowserExecutionEnvironmentProvider:
             "meta": {"provider": self.name, "managed": True},
         }
 
-    async def async_health_check(self, handle: "ExecutionEnvironmentHandle") -> "ExecutionEnvironmentStatus":
+    async def async_health_check(self, handle: "ExecutionResourceHandle") -> "ExecutionResourceStatus":
         resource = handle.get("resource")
         return "ready" if resource is not None and hasattr(resource, "browse") else "unhealthy"
 
-    async def async_release(self, handle: "ExecutionEnvironmentHandle") -> None:
+    async def async_release(self, handle: "ExecutionResourceHandle") -> None:
         resource = handle.get("resource")
         if resource is not None and hasattr(resource, "close"):
             await resource.close()

@@ -45,7 +45,7 @@ class NodeJSActionExecutor:
             args = [str(args)]
         action_id = str(spec.get("action_id", "run_nodejs"))
         timeout = int(policy.get("timeout_seconds", self.timeout))
-        environment_resources = action_call.get("execution_environment_resources", {})
+        environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
             node_resource = environment_resources.get(action_id) or environment_resources.get("node")
             if node_resource is not None and hasattr(node_resource, "run"):

@@ -52,7 +52,7 @@ class BashSandboxActionExecutor:
         if not isinstance(action_input, dict):
             action_input = {}
         action_id = str(spec.get("action_id", "bash_sandbox"))
-        environment_resources = action_call.get("execution_environment_resources", {})
+        environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
             cmd_resource = environment_resources.get(action_id)
             if cmd_resource is not None and hasattr(cmd_resource, "run"):

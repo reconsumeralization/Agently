@@ -203,9 +203,9 @@ class Browse:
         environment_config = dict(self.browser_environment_config)
         if browser_environment_config:
             environment_config.update(browser_environment_config)
-        execution_environments = []
+        execution_resources = []
         if managed_browser:
-            execution_environments.append(
+            execution_resources.append(
                 {
                     "kind": "browser",
                     "scope": "action_call",
@@ -228,7 +228,7 @@ class Browse:
             default_policy=default_policy,
             side_effect_level="read",
             expose_to_model=expose_to_model,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
             meta={
                 "component": "builtins.actions.Browse",
                 "legacy_tool_facade": "agently.builtins.tools.Browse",

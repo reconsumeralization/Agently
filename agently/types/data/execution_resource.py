@@ -17,8 +17,8 @@ from typing import Any, Literal, TypeAlias
 from typing_extensions import TypedDict
 
 
-ExecutionEnvironmentKind: TypeAlias = Literal["mcp", "bash", "python"] | str
-ExecutionEnvironmentScope: TypeAlias = Literal[
+ExecutionResourceKind: TypeAlias = Literal["mcp", "bash", "python"] | str
+ExecutionResourceScope: TypeAlias = Literal[
     "global",
     "agent",
     "session",
@@ -26,7 +26,7 @@ ExecutionEnvironmentScope: TypeAlias = Literal[
     "execution",
     "action_call",
 ]
-ExecutionEnvironmentStatus: TypeAlias = Literal[
+ExecutionResourceStatus: TypeAlias = Literal[
     "declared",
     "pending_approval",
     "ensuring",
@@ -38,7 +38,7 @@ ExecutionEnvironmentStatus: TypeAlias = Literal[
 ]
 
 
-class ExecutionEnvironmentPolicy(TypedDict, total=False):
+class ExecutionResourcePolicy(TypedDict, total=False):
     approval_mode: Literal["auto", "always", "never"]
     policy_approval_handler: str
     workspace_roots: list[str]
@@ -55,36 +55,36 @@ class ExecutionEnvironmentPolicy(TypedDict, total=False):
     auto_release: bool
 
 
-class ExecutionEnvironmentRequirement(TypedDict, total=False):
+class ExecutionResourceRequirement(TypedDict, total=False):
     requirement_id: str
-    kind: ExecutionEnvironmentKind
-    scope: ExecutionEnvironmentScope
+    kind: ExecutionResourceKind
+    scope: ExecutionResourceScope
     owner_id: str
     resource_key: str
     config: dict[str, Any]
-    policy: ExecutionEnvironmentPolicy
+    policy: ExecutionResourcePolicy
     reuse_key: str
     approval_required: bool
     health_check: dict[str, Any]
     meta: dict[str, Any]
 
 
-class ExecutionEnvironmentHandle(TypedDict, total=False):
+class ExecutionResourceHandle(TypedDict, total=False):
     handle_id: str
     requirement_id: str
-    kind: ExecutionEnvironmentKind
-    scope: ExecutionEnvironmentScope
+    kind: ExecutionResourceKind
+    scope: ExecutionResourceScope
     owner_id: str
     resource_key: str
-    status: ExecutionEnvironmentStatus
+    status: ExecutionResourceStatus
     resource: Any
-    policy: ExecutionEnvironmentPolicy
+    policy: ExecutionResourcePolicy
     ref_count: int
     meta: dict[str, Any]
 
 
-class ExecutionEnvironmentDecision(TypedDict, total=False):
+class ExecutionResourceDecision(TypedDict, total=False):
     approved: bool
     reason: str
-    policy_override: ExecutionEnvironmentPolicy
+    policy_override: ExecutionResourcePolicy
     meta: dict[str, Any]

@@ -43,7 +43,7 @@ class MCPActionExecutor:
         action_input = action_call.get("action_input", {})
         if not isinstance(action_input, dict):
             action_input = {}
-        environment_resources = action_call.get("execution_environment_resources", {})
+        environment_resources = action_call.get("execution_resource_resources", {})
         transport = self.transport
         if isinstance(environment_resources, dict) and self.action_id in environment_resources:
             transport = environment_resources[self.action_id]

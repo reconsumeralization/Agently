@@ -23,7 +23,7 @@ AgentlyPluginType = Literal[
     "ActionRuntime",
     "ActionFlow",
     "ActionExecutor",
-    "ExecutionEnvironmentProvider",
+    "ExecutionResourceProvider",
     "TaskDAGPlanner",
     "SkillsExecutor",
     "AgentOrchestrator",

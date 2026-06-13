@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agently.types.data import (
     ActionPolicy,
-    ExecutionEnvironmentPolicy,
-    ExecutionEnvironmentRequirement,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirement,
 )
 from agently.utils import DataFormatter, LazyImport
 from agently.utils.MCP import normalize_mcp_transport
@@ -104,14 +104,14 @@ class ActionResourceRegistrar:
                     sandbox_required=sandbox_required,
                     replay_safe=replay_safe,
                     expose_to_model=expose_to_model,
-                    execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+                    execution_resources=cast(list[ExecutionResourceRequirement], [
                         {
                             "requirement_id": f"mcp:{ tool.name }",
                             "kind": "mcp",
                             "scope": "agent",
                             "resource_key": tool.name,
                             "config": {"transport": transport},
-                            "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                            "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                             "approval_required": approval_required,
                         }
                     ]),
@@ -156,7 +156,7 @@ class ActionResourceRegistrar:
             side_effect_level="exec",
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"python:{ action_id }",
                     "kind": "python",
@@ -167,7 +167,7 @@ class ActionResourceRegistrar:
                         "base_vars": base_vars,
                         "allowed_return_types": allowed_return_types,
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
             ]),
         )
@@ -213,7 +213,7 @@ class ActionResourceRegistrar:
             side_effect_level="exec",
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"bash:{ action_id }",
                     "kind": "bash",
@@ -225,7 +225,7 @@ class ActionResourceRegistrar:
                         "timeout": timeout,
                         "env": env,
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
             ]),
         )
@@ -258,7 +258,7 @@ class ActionResourceRegistrar:
             side_effect_level="exec",
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"node:{ action_id }",
                     "kind": "node",
@@ -270,7 +270,7 @@ class ActionResourceRegistrar:
                         "timeout": timeout,
                         "env": env,
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
             ]),
         )
@@ -306,7 +306,7 @@ class ActionResourceRegistrar:
             approval_required=True,
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"docker:{ action_id }",
                     "kind": "docker",
@@ -317,7 +317,7 @@ class ActionResourceRegistrar:
                         "timeout": timeout,
                         "default_args": default_args or [],
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                     "approval_required": True,
                 }
             ]),
@@ -351,7 +351,7 @@ class ActionResourceRegistrar:
             default_policy=merged_policy,
             side_effect_level="read" if read_only else "write",
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"sqlite:{ action_id }",
                     "kind": "sqlite",
@@ -361,7 +361,7 @@ class ActionResourceRegistrar:
                         "database": database,
                         "uri": uri,
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, merged_policy),
+                    "policy": cast(ExecutionResourcePolicy, merged_policy),
                 }
             ]),
         )

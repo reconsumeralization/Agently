@@ -3,25 +3,25 @@ from typing import Any, cast
 
 from agently import Agently
 from agently.core import (
-    ExecutionEnvironmentApprovalDenied,
-    ExecutionEnvironmentApprovalRequired,
-    ExecutionEnvironmentError,
-    ExecutionEnvironmentManager,
+    ExecutionResourceApprovalDenied,
+    ExecutionResourceApprovalRequired,
+    ExecutionResourceError,
+    ExecutionResourceManager,
 )
-from agently.types.data import ExecutionEnvironmentRequirement
+from agently.types.data import ExecutionResourceRequirement
 from agently.utils import Settings
 
 
 def _create_manager():
-    settings = Settings(name="ExecutionEnvironmentTestSettings", parent=Agently.settings)
-    return ExecutionEnvironmentManager(
+    settings = Settings(name="ExecutionResourceTestSettings", parent=Agently.settings)
+    return ExecutionResourceManager(
         plugin_manager=Agently.plugin_manager,
         settings=settings,
         event_center=Agently.event_center,
     )
 
 
-def test_execution_environment_declare_is_lazy():
+def test_execution_resource_declare_is_lazy():
     manager = _create_manager()
     requirement = manager.declare(
         {
@@ -36,9 +36,9 @@ def test_execution_environment_declare_is_lazy():
 
 
 @pytest.mark.asyncio
-async def test_execution_environment_ensure_reuses_and_releases_handle():
+async def test_execution_resource_ensure_reuses_and_releases_handle():
     manager = _create_manager()
-    requirement = cast(ExecutionEnvironmentRequirement, {
+    requirement = cast(ExecutionResourceRequirement, {
         "kind": "python",
         "scope": "session",
         "owner_id": "session-1",
@@ -59,7 +59,7 @@ async def test_execution_environment_ensure_reuses_and_releases_handle():
 
 
 @pytest.mark.asyncio
-async def test_execution_environment_rechecks_health_before_reuse():
+async def test_execution_resource_rechecks_health_before_reuse():
     manager = _create_manager()
 
     class FlakyProvider:
@@ -91,7 +91,7 @@ async def test_execution_environment_rechecks_health_before_reuse():
 
     provider = FlakyProvider()
     manager.register_provider(cast(Any, provider))
-    requirement = cast(ExecutionEnvironmentRequirement, {
+    requirement = cast(ExecutionResourceRequirement, {
         "kind": "flaky",
         "scope": "session",
         "owner_id": "session-health",
@@ -112,10 +112,10 @@ async def test_execution_environment_rechecks_health_before_reuse():
 
 
 @pytest.mark.asyncio
-async def test_execution_environment_default_policy_denies_and_does_not_start():
+async def test_execution_resource_default_policy_denies_and_does_not_start():
     manager = _create_manager()
 
-    with pytest.raises(ExecutionEnvironmentApprovalDenied):
+    with pytest.raises(ExecutionResourceApprovalDenied):
         await manager.async_ensure(
             {
                 "kind": "python",
@@ -128,7 +128,7 @@ async def test_execution_environment_default_policy_denies_and_does_not_start():
     assert manager.list() == []
 
 
-def test_action_python_sandbox_uses_execution_environment():
+def test_action_python_sandbox_uses_execution_resource():
     action_id = "python_env_action"
     Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)
 
@@ -137,10 +137,10 @@ def test_action_python_sandbox_uses_execution_environment():
     assert result.get("status") == "success"
     result_data = cast(dict[str, Any], result.get("data"))
     assert result_data["result"] == 42
-    assert Agently.execution_environment.list(scope="action_call") == []
+    assert Agently.execution_resource.list(scope="action_call") == []
 
 
-def test_action_bash_sandbox_uses_execution_environment(tmp_path):
+def test_action_bash_sandbox_uses_execution_resource(tmp_path):
     action_id = "bash_env_action"
     Agently.action.register_bash_sandbox_action(
         action_id=action_id,
@@ -155,7 +155,7 @@ def test_action_bash_sandbox_uses_execution_environment(tmp_path):
     result_data = cast(dict[str, Any], result.get("data"))
     assert result_data["ok"] is True
     assert str(tmp_path) in result_data["stdout"]
-    assert Agently.execution_environment.list(scope="action_call") == []
+    assert Agently.execution_resource.list(scope="action_call") == []
 
 
 def test_action_environment_default_policy_denies_as_blocked_action_result():
@@ -163,7 +163,7 @@ def test_action_environment_default_policy_denies_as_blocked_action_result():
     Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)
     spec = Agently.action.action_registry.get_spec(action_id)
     assert spec is not None
-    spec.get("execution_environments", [])[0]["approval_required"] = True
+    spec.get("execution_resources", [])[0]["approval_required"] = True
 
     result = Agently.action.execute_action(action_id, {"python_code": "result = 1"})
 
@@ -204,7 +204,7 @@ async def test_custom_action_executor_signature_still_works():
 
 
 @pytest.mark.asyncio
-async def test_execution_environment_release_scope_cleans_handles():
+async def test_execution_resource_release_scope_cleans_handles():
     manager = _create_manager()
     owner = "scope-test-owner"
 
@@ -232,51 +232,51 @@ async def test_execution_environment_release_scope_cleans_handles():
 
 
 @pytest.mark.asyncio
-async def test_execution_environment_missing_provider_raises_stable_error():
+async def test_execution_resource_missing_provider_raises_stable_error():
     manager = _create_manager()
 
-    with pytest.raises(ExecutionEnvironmentError) as exc_info:
+    with pytest.raises(ExecutionResourceError) as exc_info:
         await manager.async_ensure(
             {"kind": "nonexistent_provider_xyz", "scope": "action_call", "resource_key": "nope"},
         )
 
     error = exc_info.value
     assert hasattr(error, "code")
-    assert error.code == "execution_environment.provider_missing"
+    assert error.code == "execution_resource.provider_missing"
     assert manager.list() == []
 
 
 @pytest.mark.asyncio
-async def test_execution_environment_approval_denied_returns_blocked_action_result():
+async def test_execution_resource_approval_denied_returns_blocked_action_result():
     action_id = "denied_approval_env_action"
     Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)
     spec = Agently.action.action_registry.get_spec(action_id)
     assert spec is not None
-    spec.get("execution_environments", [])[0]["approval_required"] = True
+    spec.get("execution_resources", [])[0]["approval_required"] = True
 
     Agently.policy_approval.register_handler(
-        "deny_execution_environment_test",
+        "deny_execution_resource_test",
         lambda request: {"status": "denied", "reason": "Denied by test policy."},
         replace=True,
     )
-    Agently.configure_policy_approval(handler="deny_execution_environment_test")
+    Agently.configure_policy_approval(handler="deny_execution_resource_test")
     try:
         result = Agently.action.execute_action(action_id, {"python_code": "result = 1"})
     finally:
         Agently.configure_policy_approval(handler="input_timeout_fail")
-        Agently.policy_approval.unregister_handler("deny_execution_environment_test")
+        Agently.policy_approval.unregister_handler("deny_execution_resource_test")
 
     assert result.get("status") == "blocked"
-    assert Agently.execution_environment.list(scope="action_call") == []
+    assert Agently.execution_resource.list(scope="action_call") == []
 
 
 @pytest.mark.asyncio
-async def test_execution_environment_provider_failure_does_not_poison_registry():
-    from agently.core.operation.ExecutionEnvironment import ExecutionEnvironmentManager
+async def test_execution_resource_provider_failure_does_not_poison_registry():
+    from agently.core.operation.ExecutionResource import ExecutionResourceManager
     from agently.utils import Settings
 
     settings = Settings(name="FailProviderTestSettings", parent=Agently.settings)
-    manager = ExecutionEnvironmentManager(
+    manager = ExecutionResourceManager(
         plugin_manager=Agently.plugin_manager,
         settings=settings,
         event_center=Agently.event_center,
@@ -344,7 +344,7 @@ async def test_mcp_executor_transport_routing():
     with mock.patch("fastmcp.Client", fake_client):
         action_call_no_env: dict[str, Any] = {
             "action_input": {},
-            "execution_environment_resources": {},
+            "execution_resource_resources": {},
         }
         try:
             await executor.execute(spec=spec, action_call=action_call_no_env, policy=policy, settings=settings)
@@ -357,7 +357,7 @@ async def test_mcp_executor_transport_routing():
 
         action_call_with_env: dict[str, Any] = {
             "action_input": {},
-            "execution_environment_resources": {"my_tool": managed_transport},
+            "execution_resource_resources": {"my_tool": managed_transport},
         }
         try:
             await executor.execute(spec=spec, action_call=action_call_with_env, policy=policy, settings=settings)

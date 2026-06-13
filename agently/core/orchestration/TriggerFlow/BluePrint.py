@@ -35,7 +35,7 @@ if TYPE_CHECKING:
         TriggerFlowSubFlowCapture,
         TriggerFlowSubFlowWriteBack,
     )
-    from agently.types.data import ExecutionEnvironmentRequirement
+    from agently.types.data import ExecutionResourceRequirement
     from .TriggerFlow import TriggerFlow
 
 from agently.types.data import EMPTY
@@ -1253,7 +1253,7 @@ class TriggerFlowBlueprint:
         auto_close_timeout: float | None = 10.0,
         owner_id: str | None = None,
         lease_ttl: float | None = None,
-        execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        execution_resources: "list[ExecutionResourceRequirement] | None" = None,
         intervention_mode: Literal["planned", "auto"] | None = None,
         intervention_policy: Any = None,
         resume_handle_exposed: bool = True,
@@ -1274,7 +1274,7 @@ class TriggerFlowBlueprint:
             auto_close_timeout=auto_close_timeout,
             owner_id=owner_id,
             lease_ttl=lease_ttl,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
             intervention_mode=intervention_mode,
             intervention_policy=intervention_policy,
             resume_handle_exposed=resume_handle_exposed,

@@ -30,11 +30,11 @@ from .Action import (
     ToolPlanAnalysisHandler,
     ToolPlanDecision,
 )
-from .ExecutionEnvironment import (
-    ExecutionEnvironmentApprovalDenied,
-    ExecutionEnvironmentApprovalRequired,
-    ExecutionEnvironmentError,
-    ExecutionEnvironmentManager,
+from .ExecutionResource import (
+    ExecutionResourceApprovalDenied,
+    ExecutionResourceApprovalRequired,
+    ExecutionResourceError,
+    ExecutionResourceManager,
 )
 from .PolicyApproval import PolicyApprovalManager
 
@@ -45,10 +45,10 @@ __all__ = [
     "ActionPlanningHandler",
     "ActionRegistry",
     "ActionResult",
-    "ExecutionEnvironmentApprovalDenied",
-    "ExecutionEnvironmentApprovalRequired",
-    "ExecutionEnvironmentError",
-    "ExecutionEnvironmentManager",
+    "ExecutionResourceApprovalDenied",
+    "ExecutionResourceApprovalRequired",
+    "ExecutionResourceError",
+    "ExecutionResourceManager",
     "PolicyApprovalManager",
     "StandardActionExecutionHandler",
     "StandardActionPlanningHandler",

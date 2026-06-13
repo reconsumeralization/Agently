@@ -68,12 +68,12 @@ top to bottom, with the listed components:
    ConfigurePrompt, AutoFunc, KeyWaiter, StreamingPrint).
 3. Core Contracts (core colour, from agently/core): Agent, Session, Prompt,
    ModelRequest, ModelResponseResult, DynamicTask, TaskDAGExecutor, TriggerFlow,
-   ExecutionEnvironment, Action, Tool, SkillsExecutor, PluginManager, EventCenter.
+   ExecutionResource, Action, Tool, SkillsExecutor, PluginManager, EventCenter.
 4. Plugins / Providers (plugin colour, from agently/builtins/plugins):
    ModelRequester (OpenAICompatible), PromptGenerator, ResponseParser,
    AgentOrchestrator, SkillsExecutor (SKILL.md single_shot / staged / react),
    TaskDAGPlanner,
-   ActionExecutor, ActionFlow, ActionRuntime, ExecutionEnvironmentProvider,
+   ActionExecutor, ActionFlow, ActionRuntime, ExecutionResourceProvider,
    ToolManager.
 5. Execution Environment Manager & Capabilities (capability colour): Sandbox,
    Process, Filesystem, Network, Credentials, MCP, Resources.

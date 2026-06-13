@@ -131,14 +131,14 @@ from .action import (
     ActionStatus,
 )
 
-from .execution_environment import (
-    ExecutionEnvironmentDecision,
-    ExecutionEnvironmentHandle,
-    ExecutionEnvironmentKind,
-    ExecutionEnvironmentPolicy,
-    ExecutionEnvironmentRequirement,
-    ExecutionEnvironmentScope,
-    ExecutionEnvironmentStatus,
+from .execution_resource import (
+    ExecutionResourceDecision,
+    ExecutionResourceHandle,
+    ExecutionResourceKind,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirement,
+    ExecutionResourceScope,
+    ExecutionResourceStatus,
 )
 
 from .execution_exchange import (
