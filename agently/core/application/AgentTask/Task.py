@@ -112,6 +112,12 @@ class AgentTask:
         self._completed = False
         self._error: BaseException | None = None
         self._start_lock = asyncio.Lock()
+        # Required capabilities are satisfied cumulatively across iterations: a
+        # capability used by any bounded step counts as satisfied for the task,
+        # so a model_request step and a skills step in different iterations can
+        # together satisfy required actions and required skills.
+        self._satisfied_required_actions: set[str] = set()
+        self._satisfied_required_skills: set[str] = set()
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []
         self._background_stream_tasks: set[asyncio.Task[Any]] = set()
@@ -416,20 +422,33 @@ class AgentTask:
             return {"terminal": True, "status": self.status}
 
         if iteration_index >= self.max_iterations:
-            self.status = "max_iterations"
+            missing_capabilities = self._normalize_string_list(
+                verification.get("missing_required_capabilities")
+            )
+            if missing_capabilities:
+                self.status = "capability_unavailable"
+                reason = (
+                    "Task could not satisfy required capabilities before max_iterations: "
+                    f"{', '.join(missing_capabilities)}."
+                )
+            else:
+                self.status = "max_iterations"
+                reason = verification.get("reason") or "Task did not pass verification before max_iterations."
             self.result = {
-                "status": "max_iterations",
+                "status": self.status,
                 "accepted": False,
                 "artifact_status": "partial",
                 "task_id": self.id,
-                "reason": verification.get("reason") or "Task did not pass verification before max_iterations.",
+                "reason": reason,
                 "iterations": iteration_index,
                 "verification": verification,
             }
+            if missing_capabilities:
+                self.result["missing_required_capabilities"] = missing_capabilities
             await self._emit_progress(
                 iteration_index,
-                "max_iterations",
-                f"Iteration {iteration_index}: max_iterations reached before verification passed.",
+                self.status,
+                f"Iteration {iteration_index}: { reason }",
             )
             await self._record_phase(
                 "terminal",
@@ -666,6 +685,9 @@ class AgentTask:
             return {}
         return {
             "allowed_routes": [route],
+            # A bounded step that cannot honor its selected shape must not silently
+            # run model_request: block so the loop sees the mismatch and replans.
+            "on_violation": "block",
             "owner": "AgentTaskLoop",
             "step_execution_shape": effective_shape,
         }
@@ -760,8 +782,44 @@ class AgentTask:
         )
         result = await execution.async_get_data()
         meta = await execution.async_get_meta()
+        self._reconcile_effective_shape(plan, cast(dict[str, Any], meta))
         await self._emit(f"agent_task.iteration.{iteration_index}.execution.completed", meta)
         return result, cast(dict[str, Any], meta)
+
+    @staticmethod
+    def _shape_for_route(route: str) -> str:
+        return {
+            "model_request": "direct",
+            "skills": "skills",
+            "dynamic_task": "dynamic_task",
+            "agent_task": "dynamic_task",
+        }.get(str(route or "").strip(), "direct")
+
+    def _reconcile_effective_shape(self, plan: dict[str, Any], execution_meta: dict[str, Any]) -> None:
+        """Write the route actually taken back into the plan's effective shape.
+
+        Keeps effective_execution_shape consistent with the executed route so
+        diagnostics never report a shape the run did not actually take.
+        """
+        route_info = execution_meta.get("route")
+        if not isinstance(route_info, dict):
+            route_info = {}
+        actual_route = str(route_info.get("selected_route") or "")
+        if not actual_route:
+            return
+        requested_shape = str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "direct")
+        # "actions" and "direct" both run the model_request route; treat them as
+        # consistent so a normal actions step is not flagged as a mismatch.
+        consistent = {"direct", "actions"} if actual_route == "model_request" else {self._shape_for_route(actual_route)}
+        if requested_shape in consistent:
+            return
+        plan["effective_execution_shape"] = self._shape_for_route(actual_route)
+        plan["route_shape_reconciled"] = {
+            "requested_shape": requested_shape,
+            "actual_route": actual_route,
+            "effective_shape": plan["effective_execution_shape"],
+        }
+        self.diagnostics.setdefault("route_shape_reconciliations", []).append(plan["route_shape_reconciled"])
 
     async def _request_verification(
         self,
@@ -865,9 +923,19 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Unresolved execution risk actions: {', '.join(risky_actions)}",
             ]
+        # Accumulate satisfied required capabilities across iterations, then guard
+        # on what is still missing for the whole task rather than per-step.
+        self._satisfied_required_actions.update(
+            self._normalize_string_list(execution_evidence_summary.get("action_ids"))
+        )
+        self._satisfied_required_skills.update(
+            self._normalize_string_list(execution_evidence_summary.get("selected_skill_ids"))
+        )
+        required_actions = self._normalize_string_list(execution_evidence_summary.get("required_actions"))
+        required_skills = self._normalize_string_list(execution_evidence_summary.get("required_skills"))
         missing_required = [
-            *self._normalize_string_list(execution_evidence_summary.get("missing_required_actions")),
-            *self._normalize_string_list(execution_evidence_summary.get("missing_required_skills")),
+            *[action_id for action_id in required_actions if action_id not in self._satisfied_required_actions],
+            *[skill_id for skill_id in required_skills if skill_id not in self._satisfied_required_skills],
         ]
         if missing_required:
             normalized["is_complete"] = False
@@ -876,6 +944,7 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Missing required capability evidence: {', '.join(missing_required)}",
             ]
+        normalized["missing_required_capabilities"] = missing_required
         final_result_required = self._normalize_bool(
             verification.get("final_result_required"), default=False
         )
@@ -1390,9 +1459,12 @@ class AgentTask:
             for record in action_records
             if record.get("id")
         }
-        failed_actions = AgentTask._action_ids_by_status(action_records, {"failed", "failure", "error"})
-        blocked_actions = AgentTask._action_ids_by_status(action_records, {"blocked"})
-        approval_required_actions = AgentTask._action_ids_by_status(action_records, {"approval_required"})
+        # Risk status is judged by the final status per action id (last record
+        # wins), so an action that failed and then succeeded within the same step
+        # is treated as recovered and does not block verification.
+        failed_actions = AgentTask._action_ids_by_final_status(action_statuses, {"failed", "failure", "error"})
+        blocked_actions = AgentTask._action_ids_by_final_status(action_statuses, {"blocked"})
+        approval_required_actions = AgentTask._action_ids_by_final_status(action_statuses, {"approval_required"})
         required_actions, required_skills = AgentTask._required_capability_constraints(execution_meta)
         missing_required_actions = [action_id for action_id in required_actions if action_id not in action_ids]
         selected_skill_ids = AgentTask._selected_skill_ids(logs)
@@ -1508,6 +1580,14 @@ class AgentTask:
             if status in statuses and record.get("id"):
                 result.append(record["id"])
         return result
+
+    @staticmethod
+    def _action_ids_by_final_status(action_statuses: dict[str, str], statuses: set[str]) -> list[str]:
+        return [
+            action_id
+            for action_id, status in action_statuses.items()
+            if action_id and str(status).strip().lower() in statuses
+        ]
 
     async def _record_phase(
         self,

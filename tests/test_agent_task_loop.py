@@ -895,6 +895,85 @@ async def test_agent_task_loop_verification_guard_replans_on_failed_action_evide
 
 
 @pytest.mark.asyncio
+async def test_required_capabilities_satisfied_cumulatively_across_iterations(tmp_path):
+    """ISSUE-012: required actions and skills can be satisfied in different steps."""
+    class CumulativeRequester(MockAgentTaskRequester):
+        name = "CumulativeRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "evidence is present",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result_required": False,
+                    "final_result": "done",
+                }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {"step_instruction": "produce capability evidence", "expected_evidence": "x", "rationale": "y"}
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-cumulative-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-cumulative-plugins")
+    plugin_manager.register("ModelRequester", CumulativeRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-cumulative")
+
+    constraints = {"capability_constraints": {"actions": {"required": ["act_x"]}, "skills": {"required": ["skill_y"]}}}
+
+    async def step_with_capability(iteration_index, plan, context_pack):
+        # iteration 1 satisfies the required action, iteration 2 the required skill.
+        if iteration_index == 1:
+            logs = {"action_logs": {"act_x": {"name": "act_x", "status": "success"}}, "route_logs": {}}
+        else:
+            logs = {"action_logs": {}, "route_logs": {"plan": {"selected_skills": [{"skill_id": "skill_y"}]}}}
+        return (
+            {"step_result": f"iteration {iteration_index}", "evidence": ["ok"], "remaining_work": []},
+            {
+                "execution_id": f"exec-{iteration_index}",
+                "status": "completed",
+                "route": {"selected_route": "model_request" if iteration_index == 1 else "skills"},
+                "logs": logs,
+                "effective_options": constraints,
+            },
+        )
+
+    task = agent.create_task(
+        task_id="cumulative-capabilities",
+        goal="Satisfy required action and skill across steps.",
+        success_criteria=["The required action and skill are both used."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=3,
+        options={"capability_constraints": constraints["capability_constraints"]},
+    )
+    task._agent_task_step_overrides = {"_execute_step": step_with_capability}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    # Iteration 1 cannot complete (skill_y still missing); iteration 2 completes.
+    assert result["status"] == "completed"
+    assert result["iterations"] == 2
+    first = meta["iterations"][0]["verification"]
+    assert first["is_complete"] is False
+    assert "skill_y" in " ".join(first.get("missing_required_capabilities", []))
+
+
+def test_action_final_status_exempts_recovered_actions():
+    """ISSUE-012: an action that failed then succeeded is not a risk action."""
+    from agently.core.application.AgentTask.Task import AgentTask
+
+    statuses = {"act_a": "success", "act_b": "failed"}
+    failed = AgentTask._action_ids_by_final_status(statuses, {"failed", "failure", "error"})
+    assert failed == ["act_b"]
+    assert "act_a" not in failed
+
+
+@pytest.mark.asyncio
 async def test_interview_semantic_judge_returns_structured_rule_fields():
     class SemanticJudgeRequester(MockAgentTaskRequester):
         name = "SemanticJudgeRequester"

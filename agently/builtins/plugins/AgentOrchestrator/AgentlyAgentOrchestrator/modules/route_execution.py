@@ -54,6 +54,25 @@ async def async_execute_route(
         owner.route_info.setdefault("options", DataFormatter.sanitize(route_meta))
         owner.route_info.setdefault("reusable", True)
         await owner.emit_stream("route.selected", owner.route_plan, route=route)
+        if route == "route_policy_blocked":
+            reason = str(route_meta.get("route_policy_warning") or "Route policy could not be satisfied.")
+            owner.status = "blocked"
+            owner.close_snapshot = {"status": "blocked", "route": "route_policy_blocked", "route_meta": DataFormatter.sanitize(route_meta)}
+            owner.diagnostics.setdefault("route_policy_violations", []).append(DataFormatter.sanitize(route_meta))
+            await owner.emit_stream(
+                "route.policy.blocked",
+                DataFormatter.sanitize(route_meta),
+                route="route_policy_blocked",
+                source="agent_execution",
+                meta={"status": "blocked"},
+            )
+            return route, {
+                "status": "blocked",
+                "accepted": False,
+                "artifact_status": "blocked",
+                "reason": reason,
+                "route_policy": route_meta.get("route_policy"),
+            }
         if route == "skills":
             result = await run_skills_route(owner, route_meta)
         elif route == "dynamic_task":

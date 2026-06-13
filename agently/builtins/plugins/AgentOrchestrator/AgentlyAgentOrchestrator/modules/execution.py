@@ -772,7 +772,7 @@ class AgentExecution:
                 "success_criteria": list(self.success_criteria_items),
                 "generated_success_criteria": list(self.generated_success_criteria),
             }
-        elif self.required_action_ids():
+        elif self.required_action_ids() and self.route_planner.route_allowed("model_request"):
             route, route_meta = "model_request", {
                 "with_actions": True,
                 "required_actions": self.required_action_ids(),

@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -416,6 +416,45 @@ async def test_allow_create_task_false_blocks_goal_pursuit(tmp_path):
     assert result["status"] == "blocked"
     assert result["accepted"] is False
     assert meta["route"]["selected_route"] == "agent_task"
+
+
+@pytest.mark.asyncio
+async def test_route_policy_block_and_deterministic_fallback():
+    """ISSUE-017: on_violation='block' surfaces a blocked route; fallback is deterministic."""
+    from types import SimpleNamespace
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import (
+        HybridRoutePlanner,
+    )
+
+    blocked_exec = SimpleNamespace(
+        options={"route_policy": {"allowed_routes": ["skills"], "on_violation": "block"}},
+        effective_options={},
+        local_dynamic_task_candidates=[],
+        local_skill_selectors=[],
+        local_skills_pack_selectors=[],
+        local_action_ids=[],
+    )
+    planner = HybridRoutePlanner(cast(Any, None), execution=blocked_exec)
+    assert planner.allowed_routes() == {"skills"}
+    assert planner.route_allowed("model_request") is False
+    assert planner.on_violation() == "block"
+    route, meta = await planner.select_route()
+    assert route == "route_policy_blocked"
+    assert meta["selected_by"] == "route_policy_violation"
+
+    # Default on_violation is a fallback to model_request (backward compatible).
+    fallback_exec = SimpleNamespace(
+        options={"route_policy": {"allowed_routes": ["skills"]}},
+        effective_options={},
+        local_dynamic_task_candidates=[],
+        local_skill_selectors=[],
+        local_skills_pack_selectors=[],
+        local_action_ids=[],
+    )
+    fallback_planner = HybridRoutePlanner(cast(Any, None), execution=fallback_exec)
+    route, meta = await fallback_planner.select_route()
+    assert route == "model_request"
+    assert meta["selected_by"] == "route_policy_fallback"
 
 
 def test_agent_execution_context_enforces_nesting_budget():
