@@ -1,5 +1,6 @@
 import asyncio
 from numbers import Real
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -610,24 +611,20 @@ async def test_workspace_runtime_event_store_is_idempotent_and_bounded(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_workspace_prune_scope_removes_execution_partition(tmp_path):
+async def test_workspace_prune_scope_removes_only_matching_lineage_subtree(tmp_path):
     workspace = Agently.create_workspace(
         tmp_path / "shared",
         default_scope={"session_id": "issue-123"},
         default_search_scope={"session_id": "issue-123"},
     )
-    first = workspace.with_files_root(
-        workspace.root / "files" / "executions" / "exec-1",
-        default_scope={"execution_id": "exec-1"},
-        default_search_scope={"execution_id": "exec-1"},
-    )
-    second = workspace.with_files_root(
-        workspace.root / "files" / "executions" / "exec-2",
-        default_scope={"execution_id": "exec-2"},
-        default_search_scope={"execution_id": "exec-2"},
-    )
+    # Lineage-aware execution partitions, contained under files/lineage so a
+    # scoped prune removes only the matching subtree (spec sections 8.2 / 9).
+    first = workspace.with_scope_node("executions", "exec-1")
+    second = workspace.with_scope_node("executions", "exec-2")
     (first.files_root / "notes").mkdir(parents=True)
     (first.files_root / "notes" / "result.txt").write_text("temporary execution file", encoding="utf-8")
+    (second.files_root / "keep").mkdir(parents=True)
+    (second.files_root / "keep" / "result.txt").write_text("durable execution file", encoding="utf-8")
 
     first_ref = await first.ingest(content="first execution", collection="observations", kind="partition")
     second_ref = await second.ingest(content="second execution", collection="observations", kind="partition")
@@ -640,8 +637,11 @@ async def test_workspace_prune_scope_removes_execution_partition(tmp_path):
 
     assert result["records_deleted"] == 2
     assert result["runtime_events_deleted"] == 1
-    assert result["removed_files_root"] is True
+    assert result["removed_files"] is True
+    # Only the matching execution subtree is removed; the sibling is preserved.
     assert not first.files_root.exists()
+    assert second.files_root.exists()
+    assert (second.files_root / "keep" / "result.txt").read_text(encoding="utf-8") == "durable execution file"
     backend = cast(Any, workspace.backend)
     assert await backend.get_record(second_ref["id"]) == second_ref
     assert await backend.get_record(first_ref["id"]) is None
@@ -649,6 +649,49 @@ async def test_workspace_prune_scope_removes_execution_partition(tmp_path):
     assert await workspace.latest_checkpoint("exec-2") == second_checkpoint
     assert await workspace.query_runtime_events("exec-1") == []
     assert [event["event_type"] for event in await workspace.query_runtime_events("exec-2")] == ["second"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_scratch_lease_is_durable_and_recoverable(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "scratch-ws")
+    execution = workspace.with_scope_node("executions", "exec-1")
+
+    lease = await execution.open_scratch(purpose="unzip", ttl_seconds=-1)
+    local_path = Path(cast(str, lease["local_path"]))
+    assert local_path.exists()
+    assert lease["closed_at"] is None
+    assert lease["cleanup_policy"] == "on_close"
+    # The lease is a durable Workspace fact, not just an in-memory handle.
+    backend = cast(Any, workspace.backend)
+    stored = await backend.get_scratch_lease(lease["lease_id"])
+    assert stored is not None
+    assert stored["local_path"] == lease["local_path"]
+
+    (local_path / "tmp.txt").write_text("scratch", encoding="utf-8")
+
+    # Crash recovery: TTL/startup cleanup uses the durable lease record, not mtime.
+    result = await execution.cleanup_scratch_leases()
+    assert lease["lease_id"] in result["recovered_leases"]
+    assert not local_path.exists()
+    closed = await backend.get_scratch_lease(lease["lease_id"])
+    assert closed["closed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_workspace_scratch_lease_removed_with_scope_prune(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "scratch-prune-ws")
+    execution = workspace.with_scope_node("executions", "exec-1")
+
+    lease = await execution.open_scratch(purpose="hold", cleanup_policy="on_scope_prune")
+    local_path = Path(cast(str, lease["local_path"]))
+    assert local_path.exists()
+
+    await execution.prune_scope({"execution_id": "exec-1"})
+
+    assert not local_path.exists()
+    backend = cast(Any, workspace.backend)
+    # Pruning the owning scope also removes the durable lease record.
+    assert await backend.get_scratch_lease(lease["lease_id"]) is None
 
 
 def test_trigger_flow_runtime_event_recovery_diagnostics_and_projection_shape():

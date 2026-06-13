@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
@@ -29,6 +31,7 @@ from agently.types.data.workspace import (
     WorkspaceReferenceEnvelope,
     WorkspaceRetentionAnchor,
     WorkspaceRuntimeEventRecord,
+    WorkspaceScratchLease,
 )
 from agently.types.plugins import WorkspaceBackend
 from ._defaults import (
@@ -36,10 +39,12 @@ from ._defaults import (
     extend_lineage,
     extend_lineage_nodes,
     lineage_files_root,
+    lineage_scratch_root,
     merge_scope,
     normalize_lineage,
     scope_from_lineage,
 )
+from ._utils import utc_now
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -596,11 +601,121 @@ class Workspace:
         if not callable(prune):
             raise TypeError("Workspace backend does not support prune_scope(...).")
         prune_scope = cast(Callable[..., Awaitable[dict[str, Any]]], prune)
-        result = await prune_scope(scope, remove_files=False)
-        removed_files_root = False
-        if remove_files and self.files_root.exists():
+        # Physical cleanup is delegated to the backend so it removes only the
+        # lineage subtree(s) matching the scope, not the entire files_root
+        # (spec sections 8.2 / 9). The backend owns the lineage path layout.
+        return await prune_scope(scope, remove_files=remove_files)
+
+    def scratch_root(self) -> Path:
+        """Local lineage scratch root for this scope (no lease).
+
+        Local-only convenience for ephemeral, self-managed scratch. Durable
+        scratch that must survive a crash should use ``open_scratch(...)`` so its
+        lifecycle is tracked by a lease record and does not bypass the lease
+        lifecycle (spec sections 8.5 / A.1).
+        """
+
+        return lineage_scratch_root(self.root, self.scope_lineage)
+
+    async def open_scratch(
+        self,
+        *,
+        scope: dict[str, Any] | None = None,
+        purpose: str | None = None,
+        ttl_seconds: float | None = None,
+        cleanup_policy: Literal["on_close", "on_scope_prune", "ttl"] = "on_close",
+        read_only: bool = False,
+        policy_labels: list[str] | None = None,
+    ) -> WorkspaceScratchLease:
+        """Open a scratch working directory backed by a durable lease record.
+
+        The lease is registered as a durable Workspace fact so crashed runs can
+        be recovered by TTL/startup cleanup and scope prune, not only by on_close
+        cleanup (spec sections 8.5 / 11.1).
+        """
+
+        register_attr = getattr(self.backend, "register_scratch_lease", None)
+        if not callable(register_attr):
+            raise TypeError("Workspace backend does not support scratch leases.")
+        register = cast(
+            Callable[[WorkspaceScratchLease], Awaitable[WorkspaceScratchLease]], register_attr
+        )
+        lease_id = uuid.uuid4().hex
+        local_path = self.scratch_root() / lease_id
+        if not read_only:
+            local_path.mkdir(parents=True, exist_ok=True)
+        expires_at: str | None = None
+        if ttl_seconds is not None:
+            expires = datetime.now(timezone.utc) + timedelta(seconds=float(ttl_seconds))
+            expires_at = expires.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        lease: WorkspaceScratchLease = {
+            "lease_id": lease_id,
+            "scope": merge_scope(self.default_scope, scope),
+            "local_path": str(local_path),
+            "mount": None,
+            "purpose": purpose,
+            "cleanup_policy": cleanup_policy,
+            "expires_at": expires_at,
+            "read_only": read_only,
+            "policy_labels": list(policy_labels or []),
+            "created_at": utc_now(),
+            "closed_at": None,
+        }
+        return await register(lease)
+
+    async def close_scratch(
+        self,
+        lease_id: str,
+        *,
+        remove: bool | None = None,
+    ) -> WorkspaceScratchLease | None:
+        get_attr = getattr(self.backend, "get_scratch_lease", None)
+        close_attr = getattr(self.backend, "close_scratch_lease", None)
+        if not callable(get_attr) or not callable(close_attr):
+            raise TypeError("Workspace backend does not support scratch leases.")
+        get = cast(Callable[[str], Awaitable["WorkspaceScratchLease | None"]], get_attr)
+        close = cast(Callable[..., Awaitable["WorkspaceScratchLease | None"]], close_attr)
+        lease = await get(lease_id)
+        if lease is None:
+            return None
+        should_remove = remove if remove is not None else lease.get("cleanup_policy") in {"on_close", "ttl"}
+        local_path = lease.get("local_path")
+        if should_remove and local_path:
             import shutil
 
-            shutil.rmtree(self.files_root)
-            removed_files_root = True
-        return {**result, "removed_files_root": removed_files_root}
+            path = Path(str(local_path))
+            if path.exists():
+                shutil.rmtree(path)
+        return await close(lease_id)
+
+    async def cleanup_scratch_leases(self, *, now: str | None = None) -> dict[str, Any]:
+        """Recover crashed scratch leases using durable lease facts.
+
+        Removes the working directory of every expired lease and marks it closed,
+        so TTL/startup recovery does not rely on filesystem mtime heuristics
+        (spec section 8.5).
+        """
+
+        list_attr = getattr(self.backend, "list_scratch_leases", None)
+        close_attr = getattr(self.backend, "close_scratch_lease", None)
+        if not callable(list_attr) or not callable(close_attr):
+            raise TypeError("Workspace backend does not support scratch leases.")
+        list_leases = cast(Callable[..., Awaitable[list[WorkspaceScratchLease]]], list_attr)
+        close = cast(Callable[..., Awaitable["WorkspaceScratchLease | None"]], close_attr)
+        stamp = now or utc_now()
+        import shutil
+
+        removed_paths: list[str] = []
+        recovered: list[str] = []
+        expired = await list_leases(expired_before=stamp)
+        for lease in expired:
+            lease_id = cast(str, lease.get("lease_id"))
+            local_path = lease.get("local_path")
+            if local_path:
+                path = Path(str(local_path))
+                if path.exists():
+                    shutil.rmtree(path)
+                    removed_paths.append(str(path))
+            await close(lease_id, closed_at=stamp)
+            recovered.append(lease_id)
+        return {"recovered_leases": recovered, "removed_paths": removed_paths}

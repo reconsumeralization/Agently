@@ -192,6 +192,7 @@ from .workspace import (
     WorkspaceReferenceEnvelope,
     WorkspaceRetentionAnchor,
     WorkspaceRuntimeEventRecord,
+    WorkspaceScratchLease,
     WorkspaceSearchResult,
 )
 

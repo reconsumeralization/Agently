@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from typing_extensions import TypedDict
 
 
@@ -112,6 +112,27 @@ class WorkspaceLeaseRef(TypedDict, total=False):
     heartbeat_at: str
     released_at: str | None
     state_version: int | None
+
+
+class WorkspaceScratchLease(TypedDict, total=False):
+    """Durable record of a scratch lease.
+
+    Scratch leases are persisted as Workspace facts so crashed runs can be
+    recovered by TTL/startup cleanup and scope prune using lease records rather
+    than filesystem heuristics such as mtime (spec sections 8.5 / 11.1).
+    """
+
+    lease_id: str
+    scope: dict[str, Any]
+    local_path: str | None
+    mount: dict[str, Any] | None
+    purpose: str | None
+    cleanup_policy: Literal["on_close", "on_scope_prune", "ttl"]
+    expires_at: str | None
+    read_only: bool
+    policy_labels: list[str]
+    created_at: str
+    closed_at: str | None
 
 
 class WorkspaceFilePolicyMetadata(TypedDict):

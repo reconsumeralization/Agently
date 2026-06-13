@@ -34,6 +34,7 @@ from agently.types.data.workspace import (
     WorkspaceReferenceEnvelope,
     WorkspaceRetentionAnchor,
     WorkspaceRuntimeEventRecord,
+    WorkspaceScratchLease,
 )
 from agently.utils import DataFormatter
 
@@ -247,6 +248,29 @@ class LocalWorkspaceBackend:
                 meta_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scratch_leases (
+                lease_id TEXT PRIMARY KEY,
+                scope_json TEXT NOT NULL DEFAULT '{}',
+                local_path TEXT,
+                mount_json TEXT,
+                purpose TEXT,
+                cleanup_policy TEXT NOT NULL DEFAULT 'on_close',
+                expires_at TEXT,
+                read_only INTEGER NOT NULL DEFAULT 0,
+                policy_labels_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                closed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS scratch_leases_open_idx
+            ON scratch_leases(closed_at, expires_at)
             """
         )
         self._backfill_scope_index(conn)
@@ -1577,18 +1601,177 @@ class LocalWorkspaceBackend:
             if target.exists() and target.is_file():
                 target.unlink()
                 content_files_deleted += 1
-        removed_files_root = False
-        if remove_files and self.files_root.exists():
-            shutil.rmtree(self.files_root)
-            removed_files_root = True
+        removed_paths: list[str] = []
+        if remove_files:
+            removed_paths = self._prune_scope_subtrees(normalized_scope)
         return {
             "scope": normalized_scope,
             "records_deleted": len(record_ids),
             "content_files_deleted": content_files_deleted,
             "runtime_events_deleted": runtime_events_deleted,
             "retention_anchors_deleted": retention_anchors_deleted,
-            "removed_files_root": removed_files_root,
+            "removed_paths": removed_paths,
+            "removed_files": bool(removed_paths),
         }
+
+    def _prune_scope_subtrees(self, scope: dict[str, Any]) -> list[str]:
+        """Remove only the lineage subtree(s) matching the prune scope.
+
+        Each prunable scope value maps to a ``<kind>/<id>`` lineage node; the
+        matching directories under ``files/lineage`` and ``scratch/lineage`` are
+        removed as contained subtrees, leaving unrelated siblings intact. This
+        replaces the previous whole-``files_root`` deletion (spec sections 8.2 / 9).
+        """
+
+        from ._defaults import scope_filter_path_nodes
+
+        nodes = scope_filter_path_nodes(scope)
+        if not nodes:
+            return []
+        removed: list[str] = []
+        for area in ("files", "scratch"):
+            lineage_root = self.root / area / "lineage"
+            if not lineage_root.exists():
+                continue
+            for node in nodes:
+                kind = slug(node["kind"], "scope")
+                node_id = slug(node["id"], "default")
+                for candidate in list(lineage_root.rglob(node_id)):
+                    if not candidate.is_dir() or candidate.parent.name != kind:
+                        continue
+                    if candidate.exists():
+                        shutil.rmtree(candidate)
+                        removed.append(str(candidate))
+        if removed:
+            self._delete_scratch_leases_under(removed)
+        return removed
+
+    @staticmethod
+    def _row_to_scratch_lease(row: sqlite3.Row) -> WorkspaceScratchLease:
+        return cast(
+            WorkspaceScratchLease,
+            {
+                "lease_id": row["lease_id"],
+                "scope": json_loads(row["scope_json"], {}),
+                "local_path": row["local_path"],
+                "mount": json_loads(row["mount_json"], None),
+                "purpose": row["purpose"],
+                "cleanup_policy": row["cleanup_policy"],
+                "expires_at": row["expires_at"],
+                "read_only": bool(row["read_only"]),
+                "policy_labels": json_loads(row["policy_labels_json"], []),
+                "created_at": row["created_at"],
+                "closed_at": row["closed_at"],
+            },
+        )
+
+    async def register_scratch_lease(self, lease: WorkspaceScratchLease) -> WorkspaceScratchLease:
+        self._ensure_writable()
+        lease_id = str(lease.get("lease_id") or uuid.uuid4().hex)
+        record: WorkspaceScratchLease = {
+            "lease_id": lease_id,
+            "scope": dict(lease.get("scope") or {}),
+            "local_path": lease.get("local_path"),
+            "mount": lease.get("mount"),
+            "purpose": lease.get("purpose"),
+            "cleanup_policy": lease.get("cleanup_policy") or "on_close",
+            "expires_at": lease.get("expires_at"),
+            "read_only": bool(lease.get("read_only", False)),
+            "policy_labels": list(lease.get("policy_labels") or []),
+            "created_at": lease.get("created_at") or utc_now(),
+            "closed_at": lease.get("closed_at"),
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO scratch_leases(
+                    lease_id, scope_json, local_path, mount_json, purpose,
+                    cleanup_policy, expires_at, read_only, policy_labels_json,
+                    created_at, closed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease_id,
+                    json_dumps(record["scope"]),
+                    record["local_path"],
+                    json_dumps(record["mount"]) if record["mount"] is not None else None,
+                    record["purpose"],
+                    record["cleanup_policy"],
+                    record["expires_at"],
+                    1 if record["read_only"] else 0,
+                    json_dumps(record["policy_labels"]),
+                    record["created_at"],
+                    record["closed_at"],
+                ),
+            )
+        return record
+
+    async def get_scratch_lease(self, lease_id: str) -> WorkspaceScratchLease | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scratch_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+        return self._row_to_scratch_lease(row) if row is not None else None
+
+    async def list_scratch_leases(
+        self,
+        *,
+        include_closed: bool = False,
+        expired_before: str | None = None,
+    ) -> list[WorkspaceScratchLease]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if not include_closed:
+            clauses.append("closed_at IS NULL")
+        if expired_before is not None:
+            clauses.append("expires_at IS NOT NULL AND expires_at <= ?")
+            params.append(expired_before)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM scratch_leases {where} ORDER BY created_at",
+                params,
+            ).fetchall()
+        return [self._row_to_scratch_lease(row) for row in rows]
+
+    async def close_scratch_lease(
+        self,
+        lease_id: str,
+        *,
+        closed_at: str | None = None,
+    ) -> WorkspaceScratchLease | None:
+        self._ensure_writable()
+        stamp = closed_at or utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE scratch_leases SET closed_at = ? WHERE lease_id = ? AND closed_at IS NULL",
+                (stamp, lease_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM scratch_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+        return self._row_to_scratch_lease(row) if row is not None else None
+
+    def _delete_scratch_leases_under(self, removed_paths: list[str]) -> None:
+        if not removed_paths:
+            return
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT lease_id, local_path FROM scratch_leases WHERE local_path IS NOT NULL"
+            ).fetchall()
+            stale = [
+                str(row["lease_id"])
+                for row in rows
+                if any(str(row["local_path"]).startswith(prefix) for prefix in removed_paths)
+            ]
+            if stale:
+                placeholders = ",".join("?" for _ in stale)
+                conn.execute(
+                    f"DELETE FROM scratch_leases WHERE lease_id IN ({placeholders})",
+                    stale,
+                )
 
     def capabilities(self) -> WorkspaceBackendCapabilities:
         vector_index = self.vector_index
