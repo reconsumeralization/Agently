@@ -1,10 +1,13 @@
 import asyncio
 from numbers import Real
+from typing import Any, cast
 
 import pytest
 
 from agently import Agently
 from agently.core import LazyWorkspace, WorkspaceConfigurationError, WorkspacePolicyError
+from agently.core.application import AgentTask
+from agently.core.session.Workspace._defaults import script_scope
 from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
 from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPack, WorkspaceRecallPlan, WorkspaceRecordRef
 
@@ -17,7 +20,9 @@ async def test_agent_has_lazy_workspace_by_default(tmp_path, monkeypatch):
 
     assert isinstance(workspace, LazyWorkspace)
     assert workspace.is_materialized is False
-    assert workspace.root == (tmp_path / ".agently" / "workspaces" / f"lazy-workspace-{agent.id[:8]}").resolve()
+    expected_root = tmp_path / ".agently" / "workspaces" / "scripts" / script_scope(agent.settings)
+    assert workspace.root == expected_root.resolve()
+    assert workspace.files_root == (expected_root / "files" / "agents" / "lazy-workspace").resolve()
     assert agent.settings.get("workspace.lazy") is True
     assert agent.settings.get("workspace.root") == str(workspace.root)
     assert not workspace.root.exists()
@@ -33,6 +38,84 @@ async def test_agent_has_lazy_workspace_by_default(tmp_path, monkeypatch):
     assert workspace.root.exists()
     assert (workspace.root / "workspace.db").is_file()
     assert agent.settings.get("workspace.lazy") is False
+
+
+@pytest.mark.asyncio
+async def test_agent_default_workspace_rebinds_to_session_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    first = Agently.create_agent("session-worker")
+    second = Agently.create_agent("session-worker")
+
+    first.activate_session(session_id="issue-123")
+    second.activate_session(session_id="issue-123")
+
+    assert first.workspace.root == second.workspace.root
+    assert first.workspace.root == (tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123").resolve()
+    assert first.workspace.files_root == (
+        tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123" / "files" / "agents" / "session-worker"
+    ).resolve()
+
+    await first.workspace.put("first", collection="observations", kind="probe")
+    await second.workspace.put("second", collection="observations", kind="probe")
+
+    assert (first.workspace.root / "workspace.db").is_file()
+    assert first.workspace.root == second.workspace.root
+    assert len(list((tmp_path / ".agently" / "workspaces" / "sessions").glob("**/workspace.db"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_defaults_to_session_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    first = Agently.create_agent("scope-a").activate_session(session_id="scope-a")
+    second = Agently.create_agent("scope-b").activate_session(session_id="scope-b")
+
+    await first.workspace.ingest(
+        content="visible only to session a",
+        collection="observations",
+        kind="scoped",
+        summary="shared keyword",
+    )
+    await second.workspace.ingest(
+        content="visible only to session b",
+        collection="observations",
+        kind="scoped",
+        summary="shared keyword",
+    )
+
+    first_results = await first.workspace.search("shared keyword")
+    second_results = await second.workspace.search("shared keyword")
+
+    assert [item["scope"]["session_id"] for item in first_results] == ["scope-a"]
+    assert [item["scope"]["session_id"] for item in second_results] == ["scope-b"]
+
+
+@pytest.mark.asyncio
+async def test_agent_tasks_share_script_workspace_db_and_isolate_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = Agently.create_agent("task-worker")
+
+    first = AgentTask(
+        agent,
+        goal="Handle the first task.",
+        success_criteria=["The first task has a durable observation."],
+        task_id="task-one",
+    )
+    second = AgentTask(
+        agent,
+        goal="Handle the second task.",
+        success_criteria=["The second task has a durable observation."],
+        task_id="task-two",
+    )
+
+    assert first.workspace.root == second.workspace.root
+    assert first.workspace.files_root == (first.workspace.root / "files" / "tasks" / "task-one").resolve()
+    assert second.workspace.files_root == (second.workspace.root / "files" / "tasks" / "task-two").resolve()
+    assert first.workspace.files_root != second.workspace.files_root
+
+    await first.workspace.put("first task", collection="observations", kind="task_probe")
+    await second.workspace.put("second task", collection="observations", kind="task_probe")
+
+    assert len(list((tmp_path / ".agently" / "workspaces" / "scripts").glob("**/workspace.db"))) == 1
 
 
 @pytest.mark.asyncio
@@ -517,6 +600,48 @@ async def test_workspace_runtime_event_store_is_idempotent_and_bounded(tmp_path)
     assert [item["event_id"] for item in queried] == ["evt-resume"]
     by_event_id = await workspace.query_runtime_events("exec-1", event_id=first["event_id"])
     assert [item["id"] for item in by_event_id] == [first["id"]]
+
+
+@pytest.mark.asyncio
+async def test_workspace_prune_scope_removes_execution_partition(tmp_path):
+    workspace = Agently.create_workspace(
+        tmp_path / "shared",
+        default_scope={"session_id": "issue-123"},
+        default_search_scope={"session_id": "issue-123"},
+    )
+    first = workspace.with_files_root(
+        workspace.root / "files" / "executions" / "exec-1",
+        default_scope={"execution_id": "exec-1"},
+        default_search_scope={"execution_id": "exec-1"},
+    )
+    second = workspace.with_files_root(
+        workspace.root / "files" / "executions" / "exec-2",
+        default_scope={"execution_id": "exec-2"},
+        default_search_scope={"execution_id": "exec-2"},
+    )
+    (first.files_root / "notes").mkdir(parents=True)
+    (first.files_root / "notes" / "result.txt").write_text("temporary execution file", encoding="utf-8")
+
+    first_ref = await first.ingest(content="first execution", collection="observations", kind="partition")
+    second_ref = await second.ingest(content="second execution", collection="observations", kind="partition")
+    await first.put_checkpoint("exec-1", {"status": "first"}, step_id="phase-1")
+    second_checkpoint = await second.put_checkpoint("exec-2", {"status": "second"}, step_id="phase-1")
+    await first.append_runtime_event("exec-1", {"event_type": "first"})
+    await second.append_runtime_event("exec-2", {"event_type": "second"})
+
+    result = await first.prune_scope({"execution_id": "exec-1"})
+
+    assert result["records_deleted"] == 2
+    assert result["runtime_events_deleted"] == 1
+    assert result["removed_files_root"] is True
+    assert not first.files_root.exists()
+    backend = cast(Any, workspace.backend)
+    assert await backend.get_record(second_ref["id"]) == second_ref
+    assert await backend.get_record(first_ref["id"]) is None
+    assert await workspace.latest_checkpoint("exec-1") is None
+    assert await workspace.latest_checkpoint("exec-2") == second_checkpoint
+    assert await workspace.query_runtime_events("exec-1") == []
+    assert [event["event_type"] for event in await workspace.query_runtime_events("exec-2")] == ["second"]
 
 
 def test_trigger_flow_runtime_event_recovery_diagnostics_and_projection_shape():

@@ -38,6 +38,9 @@ class LazyWorkspace:
         mode: str = "read_write",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
+        files_root: str | Path | None = None,
+        default_scope: dict[str, Any] | None = None,
+        default_search_scope: dict[str, Any] | None = None,
         on_materialize: Callable[[Workspace], None] | None = None,
     ):
         self.manager = manager
@@ -46,6 +49,9 @@ class LazyWorkspace:
         self._mode = mode
         self._provider = provider
         self._provider_options = dict(provider_options or {})
+        self._files_root = Path(str(files_root)).expanduser().resolve() if files_root is not None else None
+        self._default_scope = dict(default_scope or {})
+        self._default_search_scope = dict(default_search_scope or self._default_scope)
         self._workspace: Workspace | None = None
         self._on_materialize = on_materialize
 
@@ -72,6 +78,8 @@ class LazyWorkspace:
         workspace = self._workspace
         if workspace is not None:
             return workspace.files_root
+        if self._files_root is not None:
+            return self._files_root
         return self.root / "files"
 
     @property
@@ -96,6 +104,34 @@ class LazyWorkspace:
     async def append_runtime_event(self, *args: Any, **kwargs: Any):
         return await self._materialize().append_runtime_event(*args, **kwargs)
 
+    def with_files_root(
+        self,
+        files_root: str | Path,
+        *,
+        default_scope: dict[str, Any] | None = None,
+        default_search_scope: dict[str, Any] | None = None,
+    ):
+        if self._workspace is not None:
+            return self._workspace.with_files_root(
+                files_root,
+                default_scope=default_scope,
+                default_search_scope=default_search_scope,
+            )
+        from ._defaults import merge_scope
+
+        return LazyWorkspace(
+            self.manager,
+            self._default_root,
+            create=self._create,
+            mode=self._mode,
+            provider=self._provider,
+            provider_options=self._provider_options,
+            files_root=files_root,
+            default_scope=merge_scope(self._default_scope, default_scope),
+            default_search_scope=merge_scope(self._default_search_scope, default_search_scope),
+            on_materialize=None,
+        )
+
     def _materialize(self) -> Workspace:
         if self._workspace is None:
             self._workspace = self.manager.create(
@@ -104,6 +140,9 @@ class LazyWorkspace:
                 mode=self._mode,
                 provider=self._provider,
                 provider_options=self._provider_options,
+                files_root=self._files_root,
+                default_scope=self._default_scope,
+                default_search_scope=self._default_search_scope,
             )
             if self._on_materialize is not None:
                 self._on_materialize(self._workspace)

@@ -142,19 +142,53 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             return None
         return intervention_mode
 
-    def _default_execution_workspace_root(self, execution_id: str) -> Path:
-        from agently.core.session.Workspace._utils import slug
+    def _default_execution_workspace_root(self, run_context: "RunContext | None" = None) -> Path:
+        from agently.core.session.Workspace._defaults import default_physical_root
 
-        workspace_slug = slug(str(self.name), "triggerflow")
-        return Path(".agently") / "workspaces" / f"{workspace_slug}-{execution_id[:8]}"
+        session_id = getattr(run_context, "session_id", None)
+        return default_physical_root(session_id=str(session_id) if session_id else None)
 
-    def _create_execution_workspace_resource(self, execution_id: str):
+    def _default_execution_workspace_scope(
+        self,
+        execution_id: str,
+        run_context: "RunContext | None" = None,
+    ) -> dict[str, Any]:
+        from agently.core.session.Workspace._defaults import script_scope
+
+        scope: dict[str, Any] = {
+            "execution_id": execution_id,
+            "flow_name": self.name,
+        }
+        session_id = getattr(run_context, "session_id", None)
+        if session_id:
+            scope["session_id"] = str(session_id)
+        else:
+            scope["script_scope"] = script_scope()
+        return scope
+
+    def _default_execution_workspace_search_scope(
+        self,
+        run_context: "RunContext | None" = None,
+    ) -> dict[str, Any]:
+        from agently.core.session.Workspace._defaults import script_scope
+
+        session_id = getattr(run_context, "session_id", None)
+        if session_id:
+            return {"session_id": str(session_id)}
+        return {"script_scope": script_scope()}
+
+    def _create_execution_workspace_resource(self, execution_id: str, run_context: "RunContext | None" = None):
         from agently.base import workspace as global_workspace
         from agently.core.session.Workspace import LazyWorkspace
+        from agently.core.session.Workspace._defaults import scoped_files_root
 
+        root = self._default_execution_workspace_root(run_context)
         return LazyWorkspace(
             global_workspace,
-            self._default_execution_workspace_root(execution_id),
+            root,
+            files_root=scoped_files_root(root, "executions", execution_id),
+            default_scope=self._default_execution_workspace_scope(execution_id, run_context),
+            default_search_scope=self._default_execution_workspace_search_scope(run_context),
         )
 
     def _coerce_execution_workspace_resource(self, workspace: Any):
@@ -170,12 +204,13 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         execution_id: str,
         runtime_resources: dict[str, Any] | None,
         workspace: Any,
+        run_context: "RunContext | None" = None,
     ) -> dict[str, Any]:
         resolved = dict(runtime_resources or {})
         if workspace is False:
             resolved.pop("workspace", None)
         elif workspace is None:
-            resolved.setdefault("workspace", self._create_execution_workspace_resource(execution_id))
+            resolved.setdefault("workspace", self._create_execution_workspace_resource(execution_id, run_context))
         else:
             resolved["workspace"] = self._coerce_execution_workspace_resource(workspace)
         return resolved
@@ -262,6 +297,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             execution_id,
             runtime_resources,
             workspace,
+            execution_run_context,
         )
         if execution_runtime_resources:
             execution.update_runtime_resources(execution_runtime_resources)

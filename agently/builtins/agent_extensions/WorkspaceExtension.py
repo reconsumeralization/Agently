@@ -18,28 +18,59 @@ from pathlib import Path
 from typing import Any
 
 from agently.core import BaseAgent, LazyWorkspace, Workspace
-from agently.core.session.Workspace._utils import slug
+from agently.core.session.Workspace._defaults import default_physical_root, scoped_files_root, script_scope, slug
 
 
 class WorkspaceExtension(BaseAgent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._workspace_explicit = False
         self.workspace: Workspace | LazyWorkspace = self._create_lazy_workspace()
         self._sync_workspace_settings(self.workspace, mode="read_write", lazy=True)
 
     def _default_workspace_root(self) -> str | Path:
-        configured = self.settings.get("workspace.default_root", None)
-        if configured is not None:
-            return str(configured)
-        workspace_slug = slug(str(self.name), "agent")
-        return Path(".agently") / "workspaces" / f"{workspace_slug}-{self.id[:8]}"
+        return default_physical_root(self.settings)
+
+    def _default_workspace_files_root(self, root: str | Path) -> Path:
+        return scoped_files_root(root, "agents", slug(str(self.name), "agent"))
+
+    def _default_workspace_scope(self) -> dict[str, Any]:
+        scope: dict[str, Any] = {
+            "agent_id": self.id,
+            "agent_name": self.name,
+        }
+        session_id = self.settings.get("runtime.session_id", None)
+        if session_id is not None:
+            scope["session_id"] = str(session_id)
+        else:
+            scope["script_scope"] = script_scope(self.settings)
+        project_id = self.settings.get("workspace.project_id", None)
+        if project_id is not None:
+            scope["project_id"] = str(project_id)
+        return scope
+
+    def _default_workspace_search_scope(self) -> dict[str, Any]:
+        scope: dict[str, Any] = {}
+        session_id = self.settings.get("runtime.session_id", None)
+        if session_id is not None:
+            scope["session_id"] = str(session_id)
+        else:
+            scope["script_scope"] = script_scope(self.settings)
+        project_id = self.settings.get("workspace.project_id", None)
+        if project_id is not None:
+            scope["project_id"] = str(project_id)
+        return scope
 
     def _create_lazy_workspace(self) -> LazyWorkspace:
         from agently.base import workspace as global_workspace
 
+        root = self._default_workspace_root()
         return LazyWorkspace(
             global_workspace,
-            self._default_workspace_root(),
+            root,
+            files_root=self._default_workspace_files_root(root),
+            default_scope=self._default_workspace_scope(),
+            default_search_scope=self._default_workspace_search_scope(),
             on_materialize=lambda workspace: self._sync_workspace_settings(workspace, lazy=False),
         )
 
@@ -61,6 +92,14 @@ class WorkspaceExtension(BaseAgent):
         if lazy is not None:
             self.settings.set("workspace.lazy", lazy)
 
+    def _refresh_default_workspace_binding(self) -> None:
+        if self._workspace_explicit:
+            return
+        workspace = getattr(self, "workspace", None)
+        if isinstance(workspace, LazyWorkspace) and not workspace.is_materialized:
+            self.workspace = self._create_lazy_workspace()
+            self._sync_workspace_settings(self.workspace, mode="read_write", lazy=True)
+
     def use_workspace(
         self,
         path_or_backend: str | Path | Any = None,
@@ -72,6 +111,7 @@ class WorkspaceExtension(BaseAgent):
     ):
         from agently.base import workspace as global_workspace
 
+        self._workspace_explicit = True
         self.workspace = global_workspace.create(
             path_or_backend,
             create=create,

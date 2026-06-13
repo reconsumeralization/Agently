@@ -61,6 +61,9 @@ class WorkspaceManager:
         mode: str = "read_write",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
+        files_root: str | Path | None = None,
+        default_scope: dict[str, Any] | None = None,
+        default_search_scope: dict[str, Any] | None = None,
     ) -> Workspace:
         if provider is not None:
             backend = self._create_backend_from_provider(
@@ -76,7 +79,13 @@ class WorkspaceManager:
             if path_or_backend is None:
                 path_or_backend = Path(".agently") / "workspaces" / "default"
             backend = LocalWorkspaceBackend(path_or_backend, create=create, mode=mode)  # type: ignore[arg-type]
-        return Workspace(backend, self)
+        return Workspace(
+            backend,
+            self,
+            files_root=files_root,
+            default_scope=default_scope,
+            default_search_scope=default_search_scope,
+        )
 
     def _validate_backend(self, backend: Any, *, provider: str | None = None) -> WorkspaceBackend:
         required = ("put", "search", "get_data", "capabilities")

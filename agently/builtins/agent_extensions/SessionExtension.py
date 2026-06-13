@@ -108,6 +108,9 @@ class SessionExtension(BaseAgent):
 
         self.__bind_session_resize_pipeline(self.activated_session)
         self.settings.set("runtime.session_id", self.activated_session.id)
+        refresh_workspace = getattr(self, "_refresh_default_workspace_binding", None)
+        if callable(refresh_workspace):
+            refresh_workspace()
         self._emit_session_runtime_observation(
             "activated",
             message=f"Session '{ self.activated_session.id }' activated.",
@@ -122,6 +125,9 @@ class SessionExtension(BaseAgent):
         previous_session_id = self.activated_session.id if self.activated_session is not None else None
         self.activated_session = None
         self.settings.set("runtime.session_id", None)
+        refresh_workspace = getattr(self, "_refresh_default_workspace_binding", None)
+        if callable(refresh_workspace):
+            refresh_workspace()
         if "chat_history" in self.agent_prompt:
             del self.agent_prompt["chat_history"]
         self.agent_prompt.set("chat_history", [])

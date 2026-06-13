@@ -49,6 +49,7 @@ from .Workspace import (
     RefResolver,
     RetentionPolicy,
     RuntimeEventStore,
+    ScopePruner,
     TextIndex,
     VectorIndex,
     WorkspaceBackend,

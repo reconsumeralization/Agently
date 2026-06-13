@@ -400,6 +400,9 @@ class AgentlyMain(Generic[A]):
         mode: str = "read_write",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
+        files_root: "str | Path | None" = None,
+        default_scope: dict[str, Any] | None = None,
+        default_search_scope: dict[str, Any] | None = None,
     ) -> "Workspace":
         return self.workspace.create(
             path_or_backend,
@@ -407,6 +410,9 @@ class AgentlyMain(Generic[A]):
             mode=mode,
             provider=provider,
             provider_options=provider_options,
+            files_root=files_root,
+            default_scope=default_scope,
+            default_search_scope=default_search_scope,
         )
 
     def create_observation_bridge(self, *watch_targets: Any, **bridge_options: Any):

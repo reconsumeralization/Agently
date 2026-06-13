@@ -249,16 +249,19 @@ shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` creates an execution-scoped lazy Workspace by default.
-Pass `workspace=False` to opt out, or pass a Workspace instance, path, or backend
-when the execution should use an application-owned shared Workspace. The
-resolved execution-local Workspace is available to TriggerFlow chunks as
-`runtime_resources["workspace"]` / `data.require_resource("workspace")`.
+`flow.create_execution()` binds the current session/script default Workspace by
+default and assigns the execution its own scoped file root under
+`files/executions/<execution-id>`. Pass `workspace=False` to opt out, or pass a
+Workspace instance, path, or backend when the execution should use an explicitly
+selected Workspace. The resolved execution-local Workspace facade is available
+to TriggerFlow chunks as `runtime_resources["workspace"]` /
+`data.require_resource("workspace")`.
 
 It is a live resource, not serialized state. If a chunk needs an Agent to use
-the same information scope, bind that Agent or the single AgentExecution to the
-same Workspace in application code. If a flow needs to move data between two
-isolated Workspaces, do it explicitly in the flow's business logic with
+the same explicit information scope, bind that Agent or the single
+AgentExecution to the same Workspace in application code. If a flow needs to
+move data between two isolated Workspaces, do it explicitly in the flow's
+business logic with
 Workspace `search(...)`, `get(...)`, `get_data(...)`, `put(...)`, `ingest(...)`,
 and `link(...)`. Workspace itself does not provide a cross-space communication
 or replication protocol.

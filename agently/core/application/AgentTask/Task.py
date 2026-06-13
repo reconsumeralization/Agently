@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
 from agently.core.orchestration import TriggerFlow
+from agently.core.session.Workspace._defaults import scoped_files_root
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter, FunctionShifter
 
@@ -103,7 +104,16 @@ class AgentTask:
                 "pass workspace=... or call agent.use_workspace(...) only when you need an explicit "
                 "root, mode, or provider."
             )
-        self.workspace = agent_with_workspace.workspace
+        bound_workspace = agent_with_workspace.workspace
+        with_files_root = getattr(bound_workspace, "with_files_root", None)
+        if callable(with_files_root):
+            self.workspace: Any = with_files_root(
+                scoped_files_root(bound_workspace.root, "tasks", self.id),
+                default_scope={"task_id": self.id},
+                default_search_scope={"task_id": self.id},
+            )
+        else:
+            self.workspace = bound_workspace
         self.status: AgentTaskStatus = "created"
         self.result: Any = None
         self.diagnostics: dict[str, Any] = {}

@@ -33,6 +33,7 @@ from agently.core.application.AgentExecution import (
     normalize_execution_limits,
     normalize_execution_lineage,
 )
+from agently.core.session.Workspace._defaults import scoped_files_root
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter, FunctionShifter
 
@@ -141,7 +142,14 @@ class AgentExecution:
         self.strategy_name: str | None = None
         self.effective_options: dict[str, Any] = {}
         self.consumed_options: dict[str, Any] = {}
-        self.workspace = getattr(self.agent, "workspace", None)
+        self.workspace: Any = getattr(self.agent, "workspace", None)
+        with_files_root = getattr(self.workspace, "with_files_root", None)
+        if callable(with_files_root):
+            self.workspace = with_files_root(
+                scoped_files_root(self.workspace.root, "executions", self.id),
+                default_scope={"execution_id": self.id},
+                default_search_scope={"execution_id": self.id},
+            )
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,

@@ -18,6 +18,13 @@ available without setup. The default local backend is materialized only when
 code first writes, reads, checkpoints, records evidence, or exposes the
 Workspace file area.
 
+Default local Workspaces are scoped to a longer-lived information domain, not
+to each execution. With an active `runtime.session_id`, the physical root is
+`.agently/workspaces/sessions/<session-id>`; without a session it is
+`.agently/workspaces/scripts/<script-scope>`. Agent, task, and execution
+records are logical partitions inside that shared backend, and editable files
+use scoped subdirectories under `files/`.
+
 ```python
 agent = Agently.create_agent("repo-worker")
 
@@ -72,15 +79,17 @@ agent = Agently.create_agent("repo-worker").use_workspace(shared_workspace)
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` creates an execution-scoped lazy Workspace by default.
-Pass `workspace=False` to opt out, or pass a Workspace instance, path, or backend
-when the execution should use an application-owned shared Workspace.
+`flow.create_execution()` binds the current session/script default Workspace by
+default and gives the execution its own scoped file root under
+`files/executions/<execution-id>`. Pass `workspace=False` to opt out, or pass a
+Workspace instance, path, or backend when the execution should use an explicitly
+selected Workspace.
 
-Do not rely on separate default Workspaces to communicate with each other. If a
-TriggerFlow execution needs to move information between isolated Workspaces,
-make that transfer explicit in application logic: search or read from the source
-Workspace, write or ingest into the destination Workspace, then link the
-resulting refs. Workspace does not provide a cross-space messaging or
+Do not rely on separate explicitly isolated Workspaces to communicate with each
+other. If a TriggerFlow execution needs to move information between isolated
+Workspaces, make that transfer explicit in application logic: search or read
+from the source Workspace, write or ingest into the destination Workspace, then
+link the resulting refs. Workspace does not provide a cross-space messaging or
 replication protocol.
 
 ## What It Stores
@@ -246,10 +255,13 @@ required flags or the matching provider methods.
 ## Action Boundary
 
 `agent.workspace.files_root` defines an ordinary editable working tree for
-shell, Node.js, and file actions. Filesystem-like action helpers inherit that
-boundary when no explicit root or cwd is passed, including when the Agent is
-still using its lazy default Workspace. `agent.workspace.content_root` remains
-the managed record-content store used by Workspace records.
+shell, Node.js, and file actions. In shared default Workspaces this is a scoped
+subdirectory such as `files/agents/<agent-scope>`,
+`files/executions/<execution-id>`, or `files/tasks/<task-id>`. Filesystem-like
+action helpers inherit that boundary when no explicit root or cwd is passed,
+including when the Agent is still using its lazy default Workspace.
+`agent.workspace.content_root` remains the shared managed record-content store
+used by Workspace records.
 
 ```python
 agent.enable_workspace_file_actions(write=True)
@@ -311,13 +323,13 @@ agent = (
 Provider factories receive `root`, `create`, `mode`, and any
 `provider_options`, then return a `WorkspaceBackend`. Unregistered provider
 names fail fast instead of falling back to the local backend. If no explicit
-provider is selected, the Agent's lazy default Workspace uses the local backend
-under `.agently/workspaces/<agent-name>-<agent-id>`. The test suite includes a
-protocol-level remote audit provider proof that exercises the same checkpoint,
-RuntimeEvent, evidence link, and capability paths as the local backend. That
-proof is not a public Redis, Postgres, or object-storage adapter; production
-providers must still report their real capabilities and fail closed when
-distributed recovery requirements are missing.
+provider is selected, the Agent's lazy default Workspace uses the current
+session or script scoped local backend. The test suite includes a protocol-level
+remote audit provider proof that exercises the same checkpoint, RuntimeEvent,
+evidence link, and capability paths as the local backend. That proof is not a
+public Redis, Postgres, or object-storage adapter; production providers must
+still report their real capabilities and fail closed when distributed recovery
+requirements are missing.
 TriggerFlow tests also read Workspace-backed execution snapshots through the provider and
 load pause/continue, policy-approval waits, and `when(..., mode="and")`
 join progress through TriggerFlow, so Workspace remains storage rather than a
@@ -326,6 +338,10 @@ workflow control plane.
 See `examples/workspace/workspace_loop_foundation.py` for an explicit
 TriggerFlow loop that stores structured observations, links decisions to
 evidence, checkpoints compact state, and recalls a ContextPack.
+
+See `examples/workspace/workspace_shared_default_management.py` for the default
+session-scoped Workspace behavior: multiple Agents and TriggerFlow executions
+share one physical `workspace.db` while execution file roots stay isolated.
 
 See `examples/workspace/workspace_with_action_output.py` for the Action
 boundary: a file action writes into `workspace.files_root`, a shell action reads

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, cast
 
@@ -30,6 +31,7 @@ from agently.types.data.workspace import (
     WorkspaceRuntimeEventRecord,
 )
 from agently.types.plugins import WorkspaceBackend
+from ._defaults import merge_scope
 
 if TYPE_CHECKING:
     from .Manager import WorkspaceManager
@@ -47,6 +49,9 @@ class Workspace:
         mode: str = "read_write",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
+        files_root: str | Path | None = None,
+        default_scope: dict[str, Any] | None = None,
+        default_search_scope: dict[str, Any] | None = None,
     ):
         if manager is None:
             from .Manager import WorkspaceManager
@@ -57,6 +62,9 @@ class Workspace:
                 mode=mode,
                 provider=provider,
                 provider_options=provider_options,
+                files_root=files_root,
+                default_scope=default_scope,
+                default_search_scope=default_search_scope,
             )
             self.__dict__.update(workspace.__dict__)
             return
@@ -66,7 +74,52 @@ class Workspace:
         self.manager = manager
         self.root = Path(str(getattr(self.backend, "root")))
         self.content_root = Path(str(getattr(self.backend, "content_root")))
-        self.files_root = Path(str(getattr(self.backend, "files_root", self.content_root)))
+        if files_root is None:
+            self.files_root = Path(str(getattr(self.backend, "files_root", self.content_root)))
+        else:
+            self.files_root = Path(str(files_root)).expanduser().resolve()
+            if mode not in {"read", "read_only", "readonly"}:
+                self.files_root.mkdir(parents=True, exist_ok=True)
+        self.default_scope = dict(default_scope or {})
+        self.default_search_scope = dict(default_search_scope or self.default_scope)
+
+    def with_files_root(
+        self,
+        files_root: str | Path,
+        *,
+        default_scope: dict[str, Any] | None = None,
+        default_search_scope: dict[str, Any] | None = None,
+    ) -> "Workspace":
+        return Workspace(
+            self.backend,
+            self.manager,
+            files_root=files_root,
+            mode="read_only" if self.capabilities().get("read_only") else "read_write",
+            default_scope=merge_scope(self.default_scope, default_scope),
+            default_search_scope=merge_scope(self.default_search_scope, default_search_scope),
+        )
+
+    def _scoped_record_scope(self, scope: dict[str, Any] | None) -> dict[str, Any]:
+        return merge_scope(self.default_scope, scope)
+
+    def _scoped_filters(self, filters: dict[str, Any] | None) -> dict[str, Any]:
+        scoped = dict(filters or {})
+        for key, value in self.default_search_scope.items():
+            filter_key = f"scope.{key}"
+            scoped.setdefault(filter_key, value)
+        return scoped
+
+    async def _scope_record_ref(self, ref: WorkspaceRecordRef) -> WorkspaceRecordRef:
+        if not self.default_scope:
+            return ref
+        scoped_ref = dict(ref)
+        existing_scope = scoped_ref.get("scope")
+        scoped_ref["scope"] = merge_scope(self.default_scope, existing_scope if isinstance(existing_scope, dict) else {})
+        put_record = getattr(self.backend, "put_record", None)
+        if not callable(put_record):
+            return cast(WorkspaceRecordRef, scoped_ref)
+        put_record_callable = cast(Callable[[WorkspaceRecordRef], Awaitable[WorkspaceRecordRef]], put_record)
+        return await put_record_callable(cast(WorkspaceRecordRef, scoped_ref))
 
     async def put(
         self,
@@ -77,6 +130,8 @@ class Workspace:
         meta: dict[str, Any] | None = None,
         **kwargs,
     ):
+        if self.default_scope:
+            kwargs["scope"] = self._scoped_record_scope(kwargs.get("scope"))
         return await self.backend.put(record_or_content, collection=collection, kind=kind, meta=meta, **kwargs)
 
     async def get(self, ref_or_path: WorkspaceRecordRef | str):
@@ -113,7 +168,7 @@ class Workspace:
         )
 
     async def search(self, query: str | None = None, filters: dict[str, Any] | None = None):
-        return await self.backend.search(query, filters)
+        return await self.backend.search(query, self._scoped_filters(filters))
 
     async def link(
         self,
@@ -162,7 +217,8 @@ class Workspace:
         )
 
     async def checkpoint(self, run_id: str, state: dict[str, Any], *, step_id: str | None = None):
-        return await self.backend.checkpoint(run_id, state, step_id=step_id)
+        ref = await self.backend.checkpoint(run_id, state, step_id=step_id)
+        return await self._scope_record_ref(ref)
 
     async def put_checkpoint(
         self,
@@ -172,12 +228,13 @@ class Workspace:
         step_id: str | None = None,
         expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef:
-        return await self.backend.put_checkpoint(
+        ref = await self.backend.put_checkpoint(
             run_id,
             state,
             step_id=step_id,
             expected_state_version=expected_state_version,
         )
+        return await self._scope_record_ref(ref)
 
     async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
         return await self.backend.get_checkpoint(run_id)
@@ -190,12 +247,13 @@ class Workspace:
         step_id: str | None = None,
         expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef:
-        return await self.backend.put_snapshot(
+        ref = await self.backend.put_snapshot(
             run_id,
             state,
             step_id=step_id,
             expected_state_version=expected_state_version,
         )
+        return await self._scope_record_ref(ref)
 
     async def get_snapshot(self, run_id: str) -> dict[str, Any] | None:
         return await self.backend.get_snapshot(run_id)
@@ -330,8 +388,8 @@ class Workspace:
         links: dict[str, str] | None = None,
     ) -> WorkspaceFilePolicyMetadata:
         return await self.backend.record_file_policy(
-            action_file_root=action_file_root,
-            allowed_roots=allowed_roots,
+            action_file_root=action_file_root or str(self.files_root),
+            allowed_roots=allowed_roots or [str(self.files_root)],
             root_source=root_source,
             path_normalization=path_normalization,
             symlink_policy=symlink_policy,
@@ -341,7 +399,10 @@ class Workspace:
         )
 
     async def get_file_policy(self) -> WorkspaceFilePolicyMetadata:
-        return await self.backend.get_file_policy()
+        metadata = dict(await self.backend.get_file_policy())
+        metadata["action_file_root"] = metadata.get("action_file_root") or str(self.files_root)
+        metadata["allowed_roots"] = metadata.get("allowed_roots") or [str(self.files_root)]
+        return cast(WorkspaceFilePolicyMetadata, metadata)
 
     async def add_retention_anchor(
         self,
@@ -374,7 +435,9 @@ class Workspace:
         return await self.backend.retention_anchors(execution_id, anchor_type=anchor_type, limit=limit)
 
     def capabilities(self) -> WorkspaceBackendCapabilities:
-        return self.backend.capabilities()
+        capabilities = dict(self.backend.capabilities())
+        capabilities["files_root"] = str(self.files_root)
+        return cast(WorkspaceBackendCapabilities, capabilities)
 
     def enable_file_actions(
         self,
@@ -425,7 +488,7 @@ class Workspace:
             content=content,
             collection=collection,
             kind=kind,
-            scope=scope or {},
+            scope=self._scoped_record_scope(scope),
             source=source or {},
             summary=summary,
             meta=meta,
@@ -442,7 +505,26 @@ class Workspace:
         return await self.manager.build_context(
             self,
             goal=goal,
-            scope=scope,
+            scope=merge_scope(self.default_search_scope, scope),
             budget=budget,
             profile=profile,
         )
+
+    async def prune_scope(
+        self,
+        scope: dict[str, Any],
+        *,
+        remove_files: bool = True,
+    ) -> dict[str, Any]:
+        prune = getattr(self.backend, "prune_scope", None)
+        if not callable(prune):
+            raise TypeError("Workspace backend does not support prune_scope(...).")
+        prune_scope = cast(Callable[..., Awaitable[dict[str, Any]]], prune)
+        result = await prune_scope(scope, remove_files=False)
+        removed_files_root = False
+        if remove_files and self.files_root.exists():
+            import shutil
+
+            shutil.rmtree(self.files_root)
+            removed_files_root = True
+        return {**result, "removed_files_root": removed_files_root}

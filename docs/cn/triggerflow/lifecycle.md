@@ -238,14 +238,14 @@ shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` 默认创建 execution 专属 lazy Workspace。传
-`workspace=False` 可以显式关闭；传 Workspace 实例、路径或 backend 时，execution
-会使用应用自己管理的共享 Workspace。解析后的 execution-local Workspace 会作为
-`runtime_resources["workspace"]` 暴露给 TriggerFlow chunks，也可以通过
-`data.require_resource("workspace")` 读取。
+`flow.create_execution()` 默认绑定当前 session/script 的默认 Workspace，并给 execution
+分配 `files/executions/<execution-id>` 下的独立文件 root。传 `workspace=False` 可以显式
+关闭；传 Workspace 实例、路径或 backend 时，execution 会使用显式选择的 Workspace。
+解析后的 execution-local Workspace facade 会作为 `runtime_resources["workspace"]`
+暴露给 TriggerFlow chunks，也可以通过 `data.require_resource("workspace")` 读取。
 
 它是 live resource，不会被序列化进 execution state。如果某个 chunk 需要 Agent
-使用同一个信息范围，应在业务代码里把该 Agent 或单次 AgentExecution 绑定到同一个
+使用同一个显式信息范围，应在业务代码里把该 Agent 或单次 AgentExecution 绑定到同一个
 Workspace。如果 flow 需要在两个隔离 Workspace 之间移动数据，应在业务逻辑里显式用
 Workspace `search(...)`、`get(...)`、`get_data(...)`、`put(...)`、`ingest(...)` 和
 `link(...)` 完成。Workspace 本身不提供跨空间 communication 或 replication 协议。

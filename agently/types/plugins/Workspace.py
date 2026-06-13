@@ -216,6 +216,16 @@ class RetentionPolicy(Protocol):
 
 
 @runtime_checkable
+class ScopePruner(Protocol):
+    async def prune_scope(
+        self,
+        scope: dict[str, Any],
+        *,
+        remove_files: bool = True,
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
 class EvidenceLinker(Protocol):
     async def link_evidence(
         self,

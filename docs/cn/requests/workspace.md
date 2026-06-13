@@ -13,8 +13,14 @@ Workspace V1 是底层能力。它负责存储和索引 record；它不决定模
 也不决定下一步要执行什么。默认 Agent 和 TriggerFlow execution 都内置 lazy Workspace
 binding，因此标准 Agent facade 上始终可以访问 `agent.workspace`，默认
 `flow.create_execution()` 也可以通过 `data.require_resource("workspace")` 使用
-execution 专属 Workspace。默认 local backend 只会在代码第一次写入、读取、
-checkpoint、记录 evidence 或暴露 Workspace 文件区时 materialize。
+Workspace。默认 local backend 只会在代码第一次写入、读取、checkpoint、记录
+evidence 或暴露 Workspace 文件区时 materialize。
+
+默认 local Workspace 绑定到较长生命周期的信息域，而不是每次 execution 都创建一个
+物理 Workspace。有活动的 `runtime.session_id` 时，物理 root 是
+`.agently/workspaces/sessions/<session-id>`；没有 session 时，物理 root 是
+`.agently/workspaces/scripts/<script-scope>`。Agent、task 和 execution records 是这个
+共享 backend 内的逻辑分区，可编辑文件则放在 `files/` 下的作用域子目录里。
 
 ```python
 agent = Agently.create_agent("repo-worker")
@@ -68,11 +74,11 @@ agent = Agently.create_agent("repo-worker").use_workspace(shared_workspace)
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` 默认创建 execution 专属 lazy Workspace。传
-`workspace=False` 可以显式关闭；传 Workspace 实例、路径或 backend 时，execution
-会使用应用自己管理的共享 Workspace。
+`flow.create_execution()` 默认绑定当前 session/script 的默认 Workspace，并给 execution
+分配 `files/executions/<execution-id>` 下的独立文件 root。传 `workspace=False` 可以显式
+关闭；传 Workspace 实例、路径或 backend 时，execution 会使用显式选择的 Workspace。
 
-不要依赖多个默认 Workspace 之间自动通讯。如果 TriggerFlow execution 过程中需要在
+不要依赖多个显式隔离的 Workspace 之间自动通讯。如果 TriggerFlow execution 过程中需要在
 隔离 Workspace 之间移动信息，应在业务逻辑里显式完成：从源 Workspace search/read，
 再写入或 ingest 到目标 Workspace，并把生成的 refs link 起来。Workspace 本身不提供
 跨空间 messaging 或 replication 协议。
@@ -233,9 +239,11 @@ index 组件。它也会报告 `supports_event_sequence`、`supports_range_read`
 ## Action 边界
 
 `agent.workspace.files_root` 是给 shell、Node.js 和文件 action 使用的普通可编辑作业区。
+在共享默认 Workspace 中，它是 `files/agents/<agent-scope>`、
+`files/executions/<execution-id>` 或 `files/tasks/<task-id>` 这类带作用域的子目录。
 类文件系统的 Action helper 在没有显式 root 或 cwd 时会继承这个边界，包括 Agent 仍在
 使用 lazy default Workspace 时。`agent.workspace.content_root` 仍然是 Workspace records
-使用的受管内容存储。
+使用的共享受管内容存储。
 
 ```python
 agent.enable_workspace_file_actions(write=True)
@@ -290,8 +298,8 @@ agent = (
 
 Provider factory 会收到 `root`、`create`、`mode` 和所有 `provider_options`，
 并返回一个 `WorkspaceBackend`。未注册的 provider name 会 fail fast，而不是回落到
-local backend。没有显式选择 provider 时，Agent 的 lazy default Workspace 会使用
-`.agently/workspaces/<agent-name>-<agent-id>` 下的 local backend。测试套件已经包含一个
+local backend。没有显式选择 provider 时，Agent 的 lazy default Workspace 会使用当前
+session 或 script 作用域的 local backend。测试套件已经包含一个
 协议级 remote audit provider proof，覆盖与本地 backend 相同的 checkpoint、RuntimeEvent、
 evidence link 和 capability 路径。这个 proof 不等于公开 Redis、Postgres 或
 object-storage adapter；生产 provider 仍必须报告真实能力，并在缺少分布式恢复要求时
@@ -304,6 +312,10 @@ workflow control plane。
 `examples/workspace/workspace_loop_foundation.py` 展示了一个显式 TriggerFlow
 loop：写入结构化 observations，把 decisions link 到 evidence，checkpoint 紧凑状态，
 并通过 Recall 生成 ContextPack。
+
+`examples/workspace/workspace_shared_default_management.py` 展示默认 session 作用域的
+Workspace 行为：多个 Agent 和 TriggerFlow execution 共享一个物理 `workspace.db`，
+但 execution 文件 root 仍然彼此隔离。
 
 `examples/workspace/workspace_with_action_output.py` 展示 Action 边界：file action
 写入 `workspace.files_root`，shell action 读取该文件，应用代码把 action output 显式

@@ -7,6 +7,8 @@ import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowEventData, TriggerFlowRuntimeData
 from agently.base import execution_environment
+from agently.core.session.Workspace._defaults import script_scope
+from agently.types.data import RunContext
 from agently.types.plugins import ExecutionSnapshotStore, RuntimeEventStore
 from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY
 from agently.types.trigger_flow import TRIGGER_FLOW_EXECUTION_SNAPSHOT_KIND
@@ -72,12 +74,46 @@ def test_trigger_flow_execution_binds_lazy_default_workspace(tmp_path, monkeypat
     execution = flow.create_execution()
     workspace = cast(Any, execution.require_runtime_resource("workspace"))
     state = execution.save()
+    expected_root = tmp_path / ".agently" / "workspaces" / "scripts" / script_scope()
 
     assert getattr(workspace, "is_materialized") is False
-    assert workspace.root.parent == (tmp_path / ".agently" / "workspaces").resolve()
-    assert workspace.root.name.startswith("execution-workspace-default-")
+    assert workspace.root == expected_root.resolve()
+    assert workspace.files_root == (expected_root / "files" / "executions" / execution.id).resolve()
     assert not workspace.root.exists()
     assert "workspace" in state["resource_keys"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_default_executions_share_physical_workspace_db_and_isolate_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-workspace-shared-default")
+
+    first = flow.create_execution()
+    second = flow.create_execution()
+    first_workspace = cast(Any, first.require_runtime_resource("workspace"))
+    second_workspace = cast(Any, second.require_runtime_resource("workspace"))
+
+    assert first_workspace.root == second_workspace.root
+    assert first_workspace.files_root != second_workspace.files_root
+    assert first_workspace.files_root.name == first.id
+    assert second_workspace.files_root.name == second.id
+
+    await first_workspace.put("first execution", collection="observations", kind="execution_probe")
+    await second_workspace.put("second execution", collection="observations", kind="execution_probe")
+
+    assert len(list((tmp_path / ".agently" / "workspaces" / "scripts").glob("**/workspace.db"))) == 1
+
+
+def test_trigger_flow_default_workspace_uses_parent_session_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-workspace-session-default")
+    parent = RunContext.create(run_kind="agent_execution", session_id="issue-123")
+
+    execution = flow.create_execution(parent_run_context=parent)
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    assert workspace.root == (tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123").resolve()
+    assert workspace.files_root == (workspace.root / "files" / "executions" / execution.id).resolve()
 
 
 def test_trigger_flow_execution_can_disable_default_workspace(tmp_path, monkeypatch):

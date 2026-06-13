@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import sqlite3
 import time
 import uuid
@@ -99,6 +100,7 @@ class LocalWorkspaceBackend:
         meta.setdefault("created_at", utc_now())
         meta_path.write_text(json_dumps(meta), encoding="utf-8")
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             self._create_schema(conn)
 
     def _default_workspace_id(self):
@@ -112,7 +114,8 @@ class LocalWorkspaceBackend:
         return json_loads(meta_path.read_text(encoding="utf-8"), {})
 
     def _connect(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -174,6 +177,22 @@ class LocalWorkspaceBackend:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS record_scope_index (
+                record_id TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                scope_value TEXT NOT NULL,
+                PRIMARY KEY(record_id, scope_key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS record_scope_index_lookup_idx
+            ON record_scope_index(scope_key, scope_value, record_id)
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS runtime_events (
                 id TEXT PRIMARY KEY,
                 execution_id TEXT NOT NULL,
@@ -230,6 +249,7 @@ class LocalWorkspaceBackend:
             )
             """
         )
+        self._backfill_scope_index(conn)
         conn.commit()
 
     def _ensure_runtime_event_schema(self, conn: sqlite3.Connection):
@@ -491,6 +511,34 @@ class LocalWorkspaceBackend:
             "meta": json_loads(row["meta_json"], {}),
         }
 
+    @staticmethod
+    def _scope_index_value(value: Any) -> str:
+        return json_dumps(value)
+
+    @staticmethod
+    def _replace_scope_index_on_conn(conn: sqlite3.Connection, record_id: str, scope: dict[str, Any]) -> None:
+        conn.execute("DELETE FROM record_scope_index WHERE record_id = ?", (record_id,))
+        for key, value in scope.items():
+            if value is None:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO record_scope_index(record_id, scope_key, scope_value)
+                VALUES (?, ?, ?)
+                """,
+                (record_id, str(key), LocalWorkspaceBackend._scope_index_value(value)),
+            )
+
+    def _backfill_scope_index(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute("SELECT COUNT(*) AS count FROM record_scope_index").fetchone()
+        if row is not None and int(row["count"] or 0) > 0:
+            return
+        rows = conn.execute("SELECT id, scope_json FROM records").fetchall()
+        for record in rows:
+            scope = json_loads(record["scope_json"], {})
+            if isinstance(scope, dict):
+                self._replace_scope_index_on_conn(conn, str(record["id"]), scope)
+
     def _get_manifest(self, key: str, default: Any = None) -> Any:
         with self._connect() as conn:
             row = conn.execute("SELECT value_json FROM manifests WHERE key = ?", (key,)).fetchone()
@@ -632,6 +680,7 @@ class LocalWorkspaceBackend:
                     1 if collection == "checkpoints" else 0,
                 ),
             )
+            self._replace_scope_index_on_conn(conn, record_id, scope or {})
             conn.execute(
                 "INSERT INTO records_fts(record_id, summary, content) VALUES (?, ?, ?)",
                 (record_id, record_summary, content_text),
@@ -679,6 +728,7 @@ class LocalWorkspaceBackend:
                     1 if ref["collection"] == "checkpoints" or ref["meta"].get("checkpoint") else 0,
                 ),
             )
+            self._replace_scope_index_on_conn(conn, ref["id"], ref["scope"])
             conn.commit()
         return ref
 
@@ -779,6 +829,26 @@ class LocalWorkspaceBackend:
         if filters.get("kind") is not None:
             clauses.append("r.kind = ?")
             params.append(str(filters["kind"]))
+        scope_filter_keys: set[str] = set()
+        scope_index = 0
+        for key, value in filters.items():
+            if not key.startswith("scope."):
+                continue
+            scope_key = key.split(".", 1)[1]
+            scope_filter_keys.add(key)
+            alias = f"s{scope_index}"
+            scope_index += 1
+            clauses.append(
+                f"""
+                EXISTS (
+                    SELECT 1 FROM record_scope_index {alias}
+                    WHERE {alias}.record_id = r.id
+                    AND {alias}.scope_key = ?
+                    AND {alias}.scope_value = ?
+                )
+                """
+            )
+            params.extend([scope_key, self._scope_index_value(value)])
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as conn:
             if query:
@@ -800,7 +870,7 @@ class LocalWorkspaceBackend:
                 rows = conn.execute(f"SELECT r.* FROM records r { where } ORDER BY created_at DESC", params).fetchall()
         refs = [self._row_to_ref(row) for row in rows]
         for key, value in filters.items():
-            if key in {"collection", "kind"}:
+            if key in {"collection", "kind"} or key in scope_filter_keys:
                 continue
             if key.startswith("scope."):
                 path = key.split(".", 1)[1]
@@ -1445,6 +1515,80 @@ class LocalWorkspaceBackend:
                 params,
             ).fetchall()
         return [self._row_to_retention_anchor(row) for row in rows]
+
+    async def prune_scope(
+        self,
+        scope: dict[str, Any],
+        *,
+        remove_files: bool = True,
+    ) -> dict[str, Any]:
+        self._ensure_writable()
+        normalized_scope = {str(key): value for key, value in dict(scope or {}).items() if value is not None}
+        if not normalized_scope:
+            raise ValueError("Workspace prune_scope requires at least one scope value.")
+        with self._connect() as conn:
+            clauses: list[str] = []
+            params: list[Any] = []
+            for index, (key, value) in enumerate(normalized_scope.items()):
+                alias = f"s{index}"
+                clauses.append(
+                    f"""
+                    EXISTS (
+                        SELECT 1 FROM record_scope_index {alias}
+                        WHERE {alias}.record_id = r.id
+                        AND {alias}.scope_key = ?
+                        AND {alias}.scope_value = ?
+                    )
+                    """
+                )
+                params.extend([key, self._scope_index_value(value)])
+            rows = conn.execute(
+                f"SELECT r.id, r.path FROM records r WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchall()
+            record_ids = [str(row["id"]) for row in rows]
+            content_paths = [str(row["path"]) for row in rows if row["path"]]
+            placeholders = ",".join("?" for _ in record_ids)
+            if record_ids:
+                conn.execute(
+                    f"DELETE FROM links WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                    [*record_ids, *record_ids],
+                )
+                conn.execute(f"DELETE FROM checkpoints WHERE record_id IN ({placeholders})", record_ids)
+                conn.execute(f"DELETE FROM records_fts WHERE record_id IN ({placeholders})", record_ids)
+                conn.execute(f"DELETE FROM record_scope_index WHERE record_id IN ({placeholders})", record_ids)
+                conn.execute(f"DELETE FROM records WHERE id IN ({placeholders})", record_ids)
+            runtime_events_deleted = 0
+            retention_anchors_deleted = 0
+            execution_id = normalized_scope.get("execution_id")
+            if isinstance(execution_id, str) and execution_id:
+                runtime_events_deleted = conn.execute(
+                    "DELETE FROM runtime_events WHERE execution_id = ?",
+                    (execution_id,),
+                ).rowcount
+                retention_anchors_deleted = conn.execute(
+                    "DELETE FROM retention_anchors WHERE execution_id = ?",
+                    (execution_id,),
+                ).rowcount
+            conn.commit()
+        content_files_deleted = 0
+        for path in content_paths:
+            target = self.content_root / path
+            if target.exists() and target.is_file():
+                target.unlink()
+                content_files_deleted += 1
+        removed_files_root = False
+        if remove_files and self.files_root.exists():
+            shutil.rmtree(self.files_root)
+            removed_files_root = True
+        return {
+            "scope": normalized_scope,
+            "records_deleted": len(record_ids),
+            "content_files_deleted": content_files_deleted,
+            "runtime_events_deleted": runtime_events_deleted,
+            "retention_anchors_deleted": retention_anchors_deleted,
+            "removed_files_root": removed_files_root,
+        }
 
     def capabilities(self) -> WorkspaceBackendCapabilities:
         vector_index = self.vector_index
