@@ -225,6 +225,26 @@ results = await asyncio.gather(
 
 这是标准 async 模式，Agently 没有特别封装。
 
+### 可选的请求调度
+
+当大量并发请求（或长程任务）有触发供应商并发/速率上限的风险时，可以按 provider
+限制模型请求的下发。调度是可选的；不配置时请求立即下发、重试立即重发（行为不变）。
+
+```python
+# 限制所有 provider 的在途并发与每秒下发数，可对单个 provider 覆盖。
+agent.set_settings("model_request.scheduler.max_concurrency", 8)
+agent.set_settings("model_request.scheduler.rate_per_second", 5)
+agent.set_settings("model_request.scheduler.providers",
+                   {"OpenAICompatible": {"max_concurrency": 2}})
+
+# 重试之间退避而非立即重发（指数 + 抖动）。
+agent.set_settings("model_request.retry_backoff_base", 0.5)  # 秒
+agent.set_settings("model_request.retry_backoff_max", 30)
+```
+
+由于重试也走同一个 per-provider 槽位，速率限制同样会拉开重试调用的间隔，从而抑制
+供应商错误风暴。
+
 ## 能复用就别重发
 
 ```python

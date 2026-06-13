@@ -231,6 +231,29 @@ results = await asyncio.gather(
 
 This is a standard async pattern; nothing in Agently is special about it.
 
+### Optional request scheduling
+
+When many concurrent requests (or long-running tasks) risk hitting a provider's
+concurrency or rate limits, you can bound model request dispatch per provider.
+Scheduling is opt-in; with no configuration, requests dispatch immediately and
+retries re-issue immediately (unchanged behavior).
+
+```python
+# Cap concurrent in-flight requests and starts/second for all providers,
+# with an optional per-provider override.
+agent.set_settings("model_request.scheduler.max_concurrency", 8)
+agent.set_settings("model_request.scheduler.rate_per_second", 5)
+agent.set_settings("model_request.scheduler.providers",
+                   {"OpenAICompatible": {"max_concurrency": 2}})
+
+# Back off between retries instead of re-issuing immediately (exponential + jitter).
+agent.set_settings("model_request.retry_backoff_base", 0.5)  # seconds
+agent.set_settings("model_request.retry_backoff_max", 30)
+```
+
+Because retries re-issue through the same per-provider slot, the rate limit also
+spaces out retried calls, which dampens provider error storms.
+
 ## Don't re-issue when you can re-read
 
 ```python

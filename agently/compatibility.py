@@ -500,6 +500,10 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'AgentExecution.strategy("task")',
                                                              'AgentExecution.strategy("task_loop")',
                                                              'AgentExecution.use_dynamic_task',
+                                                             'Agent.resume',
+                                                             'Agent.async_resume',
+                                                             'Agent.resume_task',
+                                                             'Agent.async_resume_task',
                                                              'AgentExecutionResult.task_refs',
                                                              'AgentExecutionResult.get_async_generator',
                                                              'AgentExecutionResult.async_get_meta',
@@ -543,8 +547,15 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'strategy writes Workspace checkpoints through the '
                                                              'checkpoint-store port and records task evidence '
                                                              'relationships with Workspace evidence links. '
-                                                             'AgentExecutionResult resume is reserved and reports '
-                                                             'supported=false until a resumable strategy lands.',
+                                                             'agent.resume(task_id) and '
+                                                             'agent.async_resume(task_id) rebuild resumable '
+                                                             'AgentTaskLoop snapshots as task-strategy '
+                                                             'AgentExecution drafts; AgentExecutionResult resume '
+                                                             'delegates to the same Agent facade when task_refs '
+                                                             'carry a resumable task id. Agent.resume_task and '
+                                                             'Agent.async_resume_task are compatibility aliases only '
+                                                             'and should not be promoted as the recommended '
+                                                             'lifecycle.',
                                                  'scope': {'current_slice': ['one Agent-owned business task',
                                                                              'bounded 2-5 iteration task-loop guidance',
                                                                              'explicitly enabled Actions, Skills, or '
@@ -559,18 +570,22 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                              'facade consumption, and provider-backed '
                                                                              'Workspace evidence links'],
                                                            'deferred': ['multi-task scheduling',
-                                                                        'background autonomous scheduler',
-                                                                        'distributed lease or cross-worker ownership',
-                                                                        'durable pause/resume beyond the reserved '
-                                                                        'result surface',
-                                                                        'TriggerFlow-backed AdaptiveLoop or '
-                                                                        'BootstrapLoop packaging']},
+                                                                       'background autonomous scheduler',
+                                                                       'distributed lease or cross-worker ownership',
+                                                                       'distributed pause/resume beyond the '
+                                                                       'single-task agent.resume(...) snapshot slice',
+                                                                       'TriggerFlow-backed AdaptiveLoop or '
+                                                                       'BootstrapLoop packaging']},
                                                  'compatibility_policy': 'New documentation and examples should keep '
                                                                          'AgentExecutionResult as the common '
-                                                                         'consumption surface. Task-style '
-                                                                         'compatibility readers may remain callable, '
-                                                                         'but they should not be promoted as a second '
-                                                                         'recommended public lifecycle. Future '
+                                                                         'consumption surface and use '
+                                                                         'agent.resume(task_id) / await '
+                                                                         'agent.async_resume(task_id) for '
+                                                                         'task-strategy recovery. Task-style '
+                                                                         'compatibility readers and resume_task '
+                                                                         'aliases may remain callable, but they should '
+                                                                         'not be promoted as a second recommended '
+                                                                         'public lifecycle. Future '
                                                                          'AgentTaskLoop hardening must strengthen the '
                                                                          'task strategy behind AgentExecution without '
                                                                          'changing this public ownership boundary.'},

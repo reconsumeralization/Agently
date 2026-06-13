@@ -280,6 +280,60 @@ async def test_task_dag_executor_runs_roots_concurrently_and_joins_dependencies(
 
 
 @pytest.mark.asyncio
+async def test_task_dag_node_retry_recovers_from_transient_failure():
+    """ISSUE-018: on_error='retry' retries a node and recovers."""
+    attempts = {"n": 0}
+
+    async def flaky_task(context):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RuntimeError("transient failure")
+        return f"ok-after-{ attempts['n'] }"
+
+    graph = {
+        "graph_id": "retry-recover",
+        "tasks": [
+            {
+                "id": "flaky",
+                "kind": "local",
+                "fallback": {"on_error": "retry", "max_attempts": 3, "backoff_base": 0.001},
+            }
+        ],
+        "semantic_outputs": {"final": "flaky"},
+    }
+
+    snapshot = await TaskDAGExecutor({"local": flaky_task}).async_run(graph, timeout=2)
+    assert snapshot["task_results"]["flaky"] == "ok-after-3"
+    assert attempts["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_task_dag_node_retry_exhausted_then_skip():
+    """ISSUE-018: retries exhausted apply the terminal action (then='skip')."""
+    attempts = {"n": 0}
+
+    async def always_fail(context):
+        attempts["n"] += 1
+        raise RuntimeError("permanent failure")
+
+    graph = {
+        "graph_id": "retry-skip",
+        "tasks": [
+            {
+                "id": "broken",
+                "kind": "local",
+                "fallback": {"on_error": "retry", "max_attempts": 2, "backoff_base": 0.001, "then": "skip"},
+            }
+        ],
+        "semantic_outputs": {"final": "broken"},
+    }
+
+    snapshot = await TaskDAGExecutor({"local": always_fail}).async_run(graph, timeout=2)
+    assert attempts["n"] == 2
+    assert snapshot["task_results"]["broken"]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
 async def test_task_dag_executor_preserves_artifact_refs():
     async def artifact_task(context):
         return {

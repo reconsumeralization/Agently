@@ -469,6 +469,18 @@ class ModelResponse:
             .replace("\\\"", "\""),
         }
 
+    def _scheduler_slot(self, provider: str):
+        """Return the model request scheduling slot for this provider.
+
+        Reads ``model_request.scheduler`` config into the process scheduler and
+        returns its ``slot(provider)`` context manager. When no concurrency or
+        rate limit is configured the slot is a no-op and behavior is unchanged.
+        """
+        from agently.base import request_scheduler
+
+        request_scheduler.configure_from_settings(provider, self.settings)
+        return request_scheduler.slot(provider)
+
     def _build_full_provider_request_data(self, request_data: Any) -> dict[str, Any]:
         data = DataFormatter.to_str_key_dict(
             getattr(request_data, "data", {}),
@@ -506,7 +518,12 @@ class ModelResponse:
                     "run": self.request_run_context,
                 }
             )
+            provider_name = str(self.settings.get("plugins.ModelRequester.activate", ""))
+            scheduler_slot = self._scheduler_slot(provider_name)
+            scheduler_slot_entered = False
             try:
+                await scheduler_slot.__aenter__()
+                scheduler_slot_entered = True
                 ModelRequester = cast(
                     type["ModelRequester"],
                     self.plugin_manager.get_plugin(
@@ -785,3 +802,6 @@ class ModelResponse:
                         }
                     )
                 raise
+            finally:
+                if scheduler_slot_entered:
+                    await scheduler_slot.__aexit__(None, None, None)

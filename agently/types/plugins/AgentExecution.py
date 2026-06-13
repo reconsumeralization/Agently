@@ -47,6 +47,8 @@ class AgentExecution(Protocol):
     stream: Any
     execution_context: Any
     workspace: Any
+    task_refs: dict[str, Any]
+    task_record: Any
 
     def __getattr__(self, name: str) -> Any: ...
 

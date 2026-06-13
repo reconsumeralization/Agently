@@ -79,8 +79,11 @@ host policy.
 - `AgentTurn`, `create_turn(...)`, `set_turn_prompt(...)`,
   `set_request_prompt(...)`, `one_turn`, `task_step`, and `task_scope` are not
   current 4.1.3.7 recommended surfaces.
-- `AgentExecutionResult.resume()` remains reserved and reports
-  `supported=false` until a resumable strategy lands.
+- `agent.resume(task_id)` / `await agent.async_resume(task_id)` resume a
+  checkpointed AgentTaskLoop as a task-strategy `AgentExecution`.
+  `AgentExecutionResult.resume()` delegates to the same Agent facade when the
+  result carries resumable `task_refs`; `resume_task(...)` remains a
+  compatibility alias, not the recommended lifecycle.
 
 ## Validation Summary
 

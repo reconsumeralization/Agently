@@ -26,7 +26,7 @@ from agently.core.model.AttachmentInput import ImageDetail, build_image_attachme
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
 from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
-from agently.utils import DataFormatter, Settings
+from agently.utils import DataFormatter, FunctionShifter, Settings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
@@ -956,6 +956,71 @@ class BaseAgent:
         execution.goal(goal, success_criteria)
         execution.workspace = getattr(self, "workspace", None)
         return execution
+
+    async def async_resume(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        """Resume a previously checkpointed Agent task as an AgentExecution.
+
+        Reads the task's latest durable snapshot from the Workspace and returns
+        a task-strategy AgentExecution draft. The returned execution continues
+        from the iteration after the last completed one (or exposes the stored
+        terminal result) through the normal AgentExecution result/meta/stream
+        surface.
+        """
+        from agently.core.application import AgentTask
+
+        normalized_task_id = str(task_id)
+        task = await AgentTask.async_resume(cast(Any, self), normalized_task_id, workspace=workspace)
+        execution = self.create_execution(
+            lineage={"task_id": normalized_task_id},
+            options={
+                "strategy": "task",
+                "task": {
+                    "task_id": normalized_task_id,
+                    "workspace": workspace,
+                    "resume": True,
+                },
+            },
+        )
+        execution.goal(task.goal, list(task.success_criteria))
+        execution.workspace = getattr(self, "workspace", None)
+        execution.task_record = task
+        execution.task_refs = {
+            "task_id": task.id,
+            "strategy": "task",
+            "resume": True,
+            "resumed_from_iteration": getattr(task, "_resumed_from_iteration", 0),
+        }
+        return execution
+
+    def resume(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        return FunctionShifter.syncify(self.async_resume)(task_id, workspace=workspace)
+
+    async def async_resume_task(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        """Compatibility alias for async_resume(...)."""
+        return await self.async_resume(task_id, workspace=workspace)
+
+    def resume_task(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        return self.resume(task_id, workspace=workspace)
 
     def create_task_loop(
         self,

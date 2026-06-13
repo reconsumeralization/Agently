@@ -142,6 +142,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "Agent.create_task" in task_loop_contract["surface"]
     assert "Agent.create_task_loop" in task_loop_contract["surface"]
     assert "AgentExecution.use_dynamic_task" in task_loop_contract["surface"]
+    assert "Agent.resume" in task_loop_contract["surface"]
+    assert "Agent.async_resume" in task_loop_contract["surface"]
     assert "AgentExecution.success_criteria" not in task_loop_contract["surface"]
     assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
     assert "agent.goal(goal_or_goals, success_criteria=None)" in task_loop_contract["contract"]
@@ -156,8 +158,13 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "not a separate recommended AgentTask execution owner" in task_loop_contract["contract"]
     assert "accepted=true" in task_loop_contract["contract"]
     assert "artifact_status=partial" in task_loop_contract["contract"]
-    assert "supported=false" in task_loop_contract["contract"]
+    assert "agent.resume(task_id)" in task_loop_contract["contract"]
+    assert "compatibility aliases only" in task_loop_contract["contract"]
     assert "multi-task scheduling" in task_loop_contract["scope"]["deferred"]
+    assert (
+        "distributed pause/resume beyond the single-task agent.resume(...) snapshot slice"
+        in task_loop_contract["scope"]["deferred"]
+    )
     assert "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging" in task_loop_contract["scope"]["deferred"]
     assert "AgentExecutionResult as the common consumption surface" in task_loop_contract["compatibility_policy"]
     assert in_development["companions"]["skills"]["archived_catalog_generations"] == [

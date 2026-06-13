@@ -156,7 +156,9 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     result = await result_facade.async_get_data()
     execution_meta = await result_facade.async_get_meta()
     meta = await task.meta()
-    resume = await result_facade.async_resume()
+    resumed_execution = await result_facade.async_resume()
+    resumed_result = await resumed_execution.async_start()
+    resumed_meta = await resumed_execution.async_get_meta()
 
     assert result["status"] == "completed"
     assert result["iterations"] == 2
@@ -164,8 +166,11 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert result_facade.task_refs["status"] == "completed"
     assert execution_meta["task_refs"]["task_id"] == "legacy-script-upgrade"
     assert execution_meta["task_refs"]["status"] == "completed"
-    assert resume["supported"] is False
-    assert resume["reason"] == "AgentExecution resume is reserved for resumable strategies."
+    assert resumed_execution.task_refs["task_id"] == "legacy-script-upgrade"
+    assert resumed_execution.task_refs["resume"] is True
+    assert resumed_result["status"] == "completed"
+    assert resumed_result["resumed"] is True
+    assert resumed_meta["task_refs"]["status"] == "completed"
     assert meta["status"] == "completed"
     assert len(meta["iterations"]) == 2
     assert MockAgentTaskRequester.verification_calls == 2
@@ -961,6 +966,76 @@ async def test_required_capabilities_satisfied_cumulatively_across_iterations(tm
     first = meta["iterations"][0]["verification"]
     assert first["is_complete"] is False
     assert "skill_y" in " ".join(first.get("missing_required_capabilities", []))
+
+
+@pytest.mark.asyncio
+async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
+    """ISSUE-005: a task continues from its last durable snapshot in a fresh task object."""
+    MockAgentTaskRequester.reset()
+    workspace_dir = tmp_path / "task-workspace"
+
+    # First run: iteration 1 replans (verifier incomplete), then a simulated crash
+    # before iteration 2 by raising inside the step of iteration 2.
+    agent = _create_agent("agent-task-resume-1").use_workspace(workspace_dir)
+    task = agent.create_task(
+        task_id="resumable-task",
+        goal="Repair a legacy Agently script so it runs on the current API.",
+        success_criteria=["The script runs successfully."],
+        workspace=workspace_dir,
+        max_iterations=3,
+    )
+
+    async def crash_on_second_iteration(iteration_index, plan, context_pack):
+        if iteration_index >= 2:
+            raise RuntimeError("simulated process crash")
+        return (
+            {"step_result": "iteration 1 partial", "evidence": ["progress"], "remaining_work": ["finish"]},
+            {"execution_id": "exec-1", "status": "completed", "route": {"selected_route": "model_request"}, "logs": {}},
+        )
+
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": crash_on_second_iteration}
+    with pytest.raises(RuntimeError):
+        await task.async_run()
+
+    # A resume snapshot for iteration 1 must have been persisted (namespaced so
+    # it does not mix with the task's per-step observation checkpoints).
+    snapshot = await agent.workspace.get_snapshot("resumable-task::resume")
+    assert snapshot is not None
+    assert snapshot["iteration"] == 1
+    assert snapshot["manifest"]["goal"].startswith("Repair a legacy")
+    # The bare task_id checkpoint history is unaffected by resume snapshots.
+    assert len(await agent.workspace.checkpoint_history("resumable-task")) == 1
+
+    # Second run: a fresh AgentExecution resumes from the snapshot and completes.
+    MockAgentTaskRequester.reset()
+    agent2 = _create_agent("agent-task-resume-2").use_workspace(workspace_dir)
+    resumed = await agent2.async_resume("resumable-task", workspace=workspace_dir)
+
+    async def finish_step(iteration_index, plan, context_pack):
+        return (
+            {"step_result": "completed", "evidence": ["done"], "remaining_work": []},
+            {"execution_id": f"exec-{iteration_index}", "status": "completed", "route": {"selected_route": "model_request"}, "logs": {}},
+        )
+
+    cast(Any, resumed)._agent_task_step_overrides = {"_execute_step": finish_step}
+    result = await resumed.async_start()
+    execution_meta = await resumed.async_get_meta()
+    meta = execution_meta["logs"]["route_logs"]["agent_task"]
+
+    assert resumed.task_refs["resume"] is True
+    assert resumed.task_refs["resumed_from_iteration"] == 1
+    assert meta["resumed_from_iteration"] == 1
+    # Continued from iteration 2 (did not re-run iteration 1).
+    assert meta["iterations"][0]["iteration"] == 2
+    assert result["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_agent_task_resume_without_snapshot_raises(tmp_path):
+    """ISSUE-005: resuming an unknown task id is an explicit error."""
+    agent = _create_agent("agent-task-resume-missing").use_workspace(tmp_path / "task-workspace")
+    with pytest.raises(ValueError):
+        await agent.async_resume("does-not-exist", workspace=tmp_path / "task-workspace")
 
 
 @pytest.mark.asyncio

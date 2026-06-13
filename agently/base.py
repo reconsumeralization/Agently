@@ -19,6 +19,7 @@ from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
 from agently.utils import DeprecationWarnings, LazyImport, Settings, create_logger
+from agently.utils.RequestScheduler import RequestScheduler
 from agently.core import (
     Action,
     DynamicTask,
@@ -82,6 +83,7 @@ policy_approval = PolicyApprovalManager(
     settings=settings,
     event_center=event_center,
 )
+request_scheduler = RequestScheduler()
 action_registry = action.action_registry
 _load_default_actions(action_registry)
 action_dispatcher = action.action_dispatcher

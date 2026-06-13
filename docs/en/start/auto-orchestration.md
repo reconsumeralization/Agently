@@ -231,10 +231,32 @@ The first public slice is intentionally narrow: single task, one Agent owner,
 roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps
 may use Actions, Skills, or DAG candidates that the host already enabled on the
 Agent or attached to the current execution. AgentTask does not provide
-multi-task coordination, background autonomy, distributed leases, full durable
-pause/resume, or long-term memory management. `AgentExecutionResult.resume()`
-is a reserved surface for future resumable strategies and reports
-`supported=False` in this slice.
+multi-task coordination, background autonomy, distributed leases, mid-step
+pause/resume, or long-term memory management. Crash recovery for this slice is
+exposed through `agent.resume(...)` / `agent.async_resume(...)`, which rebuild a
+task-strategy `AgentExecution` instead of exposing AgentTask as a second public
+lifecycle.
+
+### Resume a task after a crash
+
+AgentTaskLoop persists a resumable snapshot after every completed iteration. If
+the process crashes, resume the task as a fresh `AgentExecution` and continue
+from the next iteration. Completed iterations are not re-executed:
+
+```python
+execution = await agent.async_resume("issue-123")   # or agent.resume("issue-123")
+result = await execution.async_start()              # continues from iteration N+1
+meta = await execution.async_get_meta()
+```
+
+Resume reads the task's latest snapshot from the Workspace, restores its
+iteration history and cumulative required-capability progress, and raises
+`ValueError` if no resumable snapshot exists. An iteration that was in flight at
+crash time is re-planned, so non-replay-safe step side effects are the host's
+responsibility. `AgentExecutionResult.resume()` delegates to the same Agent
+resume facade when the result carries resumable `task_refs`; otherwise it
+returns an unsupported resume response. `resume_task(...)` remains only as a
+compatibility alias for `resume(...)`.
 
 For examples that validate model-owned semantic content, combine deterministic
 smoke checks with a second Agently model-judge request. Structural checks such
