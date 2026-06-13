@@ -150,8 +150,8 @@ policy-forbidden resource 会出现在 `inspect_load(...)` diagnostics 中；
 ### 托管 execution resources
 
 当你向 `flow.create_execution(...)`、`flow.start_execution(...)` 或
-`flow.async_start(...)` 传入 `execution_environments=[...]` 时，
-`runtime_resources` 也可以接收来自 `Agently.execution_environment` 的托管资源。
+`flow.async_start(...)` 传入 `execution_resources=[...]` 时，
+`runtime_resources` 也可以接收来自 `Agently.execution_resource` 的托管资源。
 
 chunk 内仍然通过 `data.require_resource(...)` 读取。差异在 ownership：
 Execution Environment Manager 负责启动/复用资源，并在 execution close 时释放。

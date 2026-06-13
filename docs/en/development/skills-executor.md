@@ -516,10 +516,10 @@ running `effort="normal"`.
 
 Skill applicability comes from `SKILL.md`; Agently's `.agently/` files are
 descriptive install metadata only. Multi-step Skills execution composes
-Agently's existing TriggerFlow, Action, and ExecutionEnvironment boundaries;
+Agently's existing TriggerFlow, Action, and ExecutionResource boundaries;
 human approval or durable wait/resume flows should be modeled through
 TriggerFlow `pause_for(...)` / `continue_with(...)` or Action /
-ExecutionEnvironment approval policies, not by mutating a closed
+ExecutionResource approval policies, not by mutating a closed
 `SkillExecution` snapshot.
 
 Framework-level `skills.*` settings may still tune host behavior, such as

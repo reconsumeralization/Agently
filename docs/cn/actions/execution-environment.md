@@ -1,15 +1,20 @@
 ---
-title: Execution Environment
-description: Action 与 TriggerFlow 的托管执行依赖。
-keywords: Agently, ExecutionEnvironment, Action, TriggerFlow, sandbox, MCP, runtime_resources
+title: Execution Resource
+description: Action 与 TriggerFlow 的托管执行资源。
+keywords: Agently, ExecutionResource, Action, TriggerFlow, sandbox, MCP, runtime_resources
 ---
 
-# Execution Environment
+# Execution Resource
 
 > 语言：[English](../../en/actions/execution-environment.md) · **中文**
 
-Execution Environment 是框架级执行环境层，用来在 action 或 workflow step
-真正执行前准备、复用和释放托管执行依赖。
+> 在 4.1.3.8 的 Workspace/ActionRuntime 边界重构中更名：托管的活动资源接缝现在
+> 称为 **ExecutionResource**（`ExecutionResourceManager`、
+> `ExecutionResourceProvider`、`Agently.execution_resource`），旧的
+> `ExecutionEnvironment*` 名称已移除。本页保留原 URL 以保持链接稳定。
+
+Execution Resource 是框架级执行资源层，用来在 action 或 workflow step
+真正执行前准备、复用和释放托管执行资源。
 
 它负责 MCP transport、命令 runner、sandbox、browser、SQLite connection 和外部进程
 runner 等资源的生命周期和 policy。Action 与 TriggerFlow 可以声明需要这些环境，但不拥有环境生命周期。
@@ -23,11 +28,11 @@ vector store 或 coding workspace 能力。
 在这些情况下阅读本页：
 
 - 你在写依赖托管 live resource 的自定义 `ActionExecutor`
-- 你在写 `ExecutionEnvironmentProvider` 插件
+- 你在写 `ExecutionResourceProvider` 插件
 - 你在 review Action 或 TriggerFlow 如何接收托管资源
 - 你在设计需要 sandbox、process、MCP、client、credential 或 cleanup 生命周期的新 built-in capability
 
-不要把 `Agently.execution_environment` 暴露成默认应用开发心智。它是更高层能力背后的 core lifecycle 层。
+不要把 `Agently.execution_resource` 暴露成默认应用开发心智。它是更高层能力背后的 core lifecycle 层。
 
 ## 所在位置
 
@@ -35,13 +40,13 @@ vector store 或 coding workspace 能力。
 Agent Component / built-in Action / custom Action / TriggerFlow / Skills plan
         |
         v
-ActionSpec.execution_environments or TriggerFlow execution requirements
+ActionSpec.execution_resources or TriggerFlow execution requirements
         |
         v
-ExecutionEnvironmentManager
+ExecutionResourceManager
         |
         v
-ExecutionEnvironmentProvider
+ExecutionResourceProvider
         |
         v
 managed handle / live resource
@@ -52,7 +57,7 @@ V1 全局 manager 暴露为：
 ```python
 from agently import Agently
 
-Agently.execution_environment
+Agently.execution_resource
 ```
 
 多数业务代码不需要直接调用 manager。内置 MCP、Bash、Python、Node.js、Docker、
@@ -86,15 +91,15 @@ Action 执行流：
 ```text
 ActionCall
   -> resolve ActionSpec
-  -> ensure ActionSpec.execution_environments
-  -> 把 execution_environment_resources 注入 action_call
+  -> ensure ActionSpec.execution_resources
+  -> 把 execution_resource_resources 注入 action_call
   -> ActionExecutor.execute(...)
   -> 释放 action_call scope 的 handles
 ```
 
 自定义 `ActionExecutor.execute(...)` 签名不变。托管 handle 会通过
-`action_call["execution_environment_handles"]` 传入，live resource 会通过
-`action_call["execution_environment_resources"]` 传入。
+`action_call["execution_resource_handles"]` 传入，live resource 会通过
+`action_call["execution_resource_resources"]` 传入。
 
 ## TriggerFlow
 
@@ -105,7 +110,7 @@ Execution Environment 不重命名也不替代这个 API。
 
 ```python
 execution = flow.create_execution(
-    execution_environments=[
+    execution_resources=[
         {
             "kind": "python",
             "scope": "execution",
@@ -126,13 +131,13 @@ manager 会 ensure 资源，把它注入 execution-local resources，并在 exec
 manager 支持：
 
 ```python
-Agently.execution_environment.declare(requirement)
-Agently.execution_environment.ensure(requirement_or_id)
-await Agently.execution_environment.async_ensure(requirement_or_id)
-Agently.execution_environment.release(handle_or_id)
-Agently.execution_environment.release_scope("session", owner_id)
-Agently.execution_environment.inspect(id)
-Agently.execution_environment.list(scope="execution")
+Agently.execution_resource.declare(requirement)
+Agently.execution_resource.ensure(requirement_or_id)
+await Agently.execution_resource.async_ensure(requirement_or_id)
+Agently.execution_resource.release(handle_or_id)
+Agently.execution_resource.release_scope("session", owner_id)
+Agently.execution_resource.inspect(id)
+Agently.execution_resource.list(scope="execution")
 Agently.policy_approval.register_handler("my_handler", handler)
 Agently.configure_policy_approval(handler="my_handler")
 ```
@@ -144,30 +149,30 @@ Agently.configure_policy_approval(handler="my_handler")
 的服务应注册自己的 handler，例如写入 pending approval 后用 `continue_with(...)` 恢复。
 复用 ready handle 前，manager 会调用
 `provider.async_health_check(handle)`。健康则 `ref_count + 1` 后复用；不健康则发出
-`execution_environment.unhealthy`，释放旧 handle，再 ensure 一个新 handle。V2 不加入后台
+`execution_resource.unhealthy`，释放旧 handle，再 ensure 一个新 handle。V2 不加入后台
 health scheduler、lease TTL 或自动 reconnect loop。
 
 如果你在开发应用，应该先检查是否已有 built-in action 或 Agent Component 暴露了你需要的能力。
 
 ## Observation
 
-manager 发出 `execution_environment.*` 事件：
+manager 发出 `execution_resource.*` 事件：
 
-- `execution_environment.declared`
-- `execution_environment.approval_required`
-- `execution_environment.ensuring`
-- `execution_environment.ready`
-- `execution_environment.unhealthy`
-- `execution_environment.releasing`
-- `execution_environment.released`
-- `execution_environment.failed`
+- `execution_resource.declared`
+- `execution_resource.approval_required`
+- `execution_resource.ensuring`
+- `execution_resource.ready`
+- `execution_resource.unhealthy`
+- `execution_resource.releasing`
+- `execution_resource.released`
+- `execution_resource.failed`
 
 payload 只包含稳定 id 与状态元信息，不能包含原始凭证、环境变量、命令 secret 或 live resource 对象。
 
 ## Examples
 
 可运行示例见
-[`examples/execution_environment`](../../../examples/execution_environment/README.md)。
+[`examples/execution_resource`](../../../examples/execution_resource/README.md)。
 建议先看本地 `agent.enable_python(...)` quickstart，再看 Ollama 和 DeepSeek
 驱动的模型决策示例。TriggerFlow 示例面向需要托管 execution-local resource 的
 workflow 或框架开发者。

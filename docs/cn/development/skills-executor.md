@@ -473,8 +473,8 @@ action calls 取得真实天气观测；Skills Executor 在命中后懒安装选
 
 Skill 的适用性来自 `SKILL.md`；Agently 的 `.agently/` 文件只是描述性的安装元数据。
 多步 Skills 执行应组合 Agently 已有的 TriggerFlow、Action 和
-ExecutionEnvironment 边界；人工审批或持久 wait/resume 应通过 TriggerFlow
-`pause_for(...)` / `continue_with(...)`，或 Action / ExecutionEnvironment
+ExecutionResource 边界；人工审批或持久 wait/resume 应通过 TriggerFlow
+`pause_for(...)` / `continue_with(...)`，或 Action / ExecutionResource
 审批策略表达，不应通过修改已关闭的 `SkillExecution` snapshot 来伪装恢复。
 
 框架级 `skills.*` 配置仍可调整宿主行为，例如普通 prompt 是否披露可选 Skill

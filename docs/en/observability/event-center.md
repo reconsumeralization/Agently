@@ -86,7 +86,7 @@ net, not a replacement for explicit flush before CLI/script shutdown.
 
 Agently-owned event types such as `model.*`, `request.*`, `action.*`,
 `tool.*`, `session.*`, `agent_execution.*`, `triggerflow.*`, and
-`execution_environment.*` are produced by core runtime coordinators. Custom
+`execution_resource.*` are produced by core runtime coordinators. Custom
 plugins and applications may emit their own Event Center messages, but they
 should use an application/plugin-owned namespace and must not rely on official
 Agently modules consuming those custom messages.
@@ -178,7 +178,7 @@ may be `"tool"`; that does not change the event family.
 
 ## Execution environment events
 
-Execution Environment lifecycle uses `execution_environment.*`. Providers and
+Execution Environment lifecycle uses `execution_resource.*`. Providers and
 DevTools consumers should treat this namespace as extensible. Current manager
 events include `declared`, `approval_required`, `ensuring`, `ready`,
 `unhealthy`, `releasing`, `released`, and `failed`. `unhealthy` means a ready

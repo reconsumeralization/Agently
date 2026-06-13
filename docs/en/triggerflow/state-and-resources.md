@@ -153,7 +153,7 @@ warning, while the default `fail_closed` blocks strict load.
 ### Managed execution resources
 
 `runtime_resources` can also receive managed resources from
-`Agently.execution_environment` when you pass `execution_environments=[...]` to
+`Agently.execution_resource` when you pass `execution_resources=[...]` to
 `flow.create_execution(...)`, `flow.start_execution(...)`, or
 `flow.async_start(...)`.
 

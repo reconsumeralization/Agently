@@ -28,7 +28,7 @@ Agently 的 action 栈在编排层之下有三个可替换插件层：
 | `ActionRuntime` | 规划协议、action 调用归一化、默认执行编排 | `AgentlyActionRuntime` |
 | `ActionFlow` | `ActionRuntime` 与 flow 表示之间的桥 | `TriggerFlowActionFlow` |
 | `ActionExecutor` | 单个 action 实际怎么跑 | local function、MCP、Python/Bash sandbox、Search/Browse、Node.js、Docker、SQLite executors |
-| `ExecutionEnvironment` | executor 调用前需要准备的托管执行依赖 | MCP、Bash、Python、Node、Docker、Browser、SQLite providers |
+| `ExecutionResource` | executor 调用前需要准备的托管执行依赖 | MCP、Bash、Python、Node、Docker、Browser、SQLite providers |
 
 `Action` 是 `agently.core` 根导出的执行门面，连线：
 
@@ -121,7 +121,7 @@ agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 
 应用代码要给模型开放 Python、shell、workspace 等常见能力时，优先使用
 `enable_*` helpers。只有在开发自定义 Action 后端时，才需要使用
-`register_action(..., executor=..., execution_environments=[...])`。
+`register_action(..., executor=..., execution_resources=[...])`。
 
 内置能力 package 位于 `agently.builtins.actions`。例如：
 
@@ -271,7 +271,7 @@ observation 映射到官方事件流。
 | 规划协议或调用归一化 | `ActionRuntime` |
 | runtime 与 flow 之间的编排形态 | `ActionFlow` |
 | 多个 action 调用之上的更高层流控 | 用 `TriggerFlow` 在 runtime 之上 —— 不要把它塞进 executor |
-| MCP/sandbox/process 类依赖的生命周期 | 声明 `ExecutionEnvironment` requirement —— 不要把生命周期藏进 executor |
+| MCP/sandbox/process 类依赖的生命周期 | 声明 `ExecutionResource` requirement —— 不要把生命周期藏进 executor |
 
 ## 另见
 

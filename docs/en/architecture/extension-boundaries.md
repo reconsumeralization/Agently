@@ -31,8 +31,8 @@ the user-facing shortcut.
 | Audience | What to use first | What to avoid |
 |---|---|---|
 | App developers | `agent.use_actions(...)`, `agent.use_mcp(...)`, built-in actions, future `agent.enable_*` helpers | Direct manager/provider APIs unless the app owns the environment lifecycle |
-| Action developers | `register_action(...)`, custom `ActionExecutor`, `execution_environments=[...]` | Starting long-lived sandboxes, MCP clients, processes, or services inside an executor |
-| Plugin developers | `ExecutionEnvironmentProvider`, `ActionExecutor`, `ActionRuntime`, `ActionFlow` plugin contracts | Coupling plugin code to one app-level shortcut |
+| Action developers | `register_action(...)`, custom `ActionExecutor`, `execution_resources=[...]` | Starting long-lived sandboxes, MCP clients, processes, or services inside an executor |
+| Plugin developers | `ExecutionResourceProvider`, `ActionExecutor`, `ActionRuntime`, `ActionFlow` plugin contracts | Coupling plugin code to one app-level shortcut |
 | Framework maintainers | Core data types, managers, dispatch paths, compatibility rules | Putting product-specific behavior into core |
 
 ## Layer Responsibilities
@@ -50,7 +50,7 @@ Core owns:
 - observation event contracts
 
 Core should not directly become the feature catalog. For example,
-`ExecutionEnvironmentManager` should know how to manage an environment
+`ExecutionResourceManager` should know how to manage an environment
 requirement, but it should not be the user-facing API for "do coding work in my
 repo".
 
@@ -65,7 +65,7 @@ Plugins implement replaceable backend behavior behind core contracts.
 
 Examples:
 
-- `ExecutionEnvironmentProvider` for Python, Bash, Node.js, Docker, MCP, SQLite,
+- `ExecutionResourceProvider` for Python, Bash, Node.js, Docker, MCP, SQLite,
   vector stores, browsers, or remote runners.
 - `ActionExecutor` for one atomic action call.
 - `ActionRuntime` for action planning and loop behavior.
@@ -78,7 +78,7 @@ that environment.
 Do not introduce parallel nouns such as `ActionProvider`,
 `CapabilityProvider`, or a standalone capability dispatcher for this layer.
 Callable ability remains `Action`; execution variation belongs to
-`ActionExecutor`; live resource lifecycle belongs to `ExecutionEnvironmentProvider`.
+`ActionExecutor`; live resource lifecycle belongs to `ExecutionResourceProvider`.
 
 ### Built-in Capability Actions
 
@@ -125,7 +125,7 @@ agent.enable_coding_workspace(...)
 ```
 
 These APIs should describe developer intent. They should not force app
-developers to understand `ExecutionEnvironmentHandle`, provider lifecycle, or
+developers to understand `ExecutionResourceHandle`, provider lifecycle, or
 executor internals.
 
 ### Typing And IDE Assistance
@@ -153,8 +153,8 @@ appropriate only when the capability is genuinely small and splitting it would
 be over-design.
 
 Landed examples include `core/Action`, `core/TriggerFlow`,
-`core/orchestration/TaskDAG`, `core/session/Workspace`,
-`builtins/plugins/ExecutionEnvironmentProvider`, and
+`core/orchestration/TaskDAG`, `core/workspace`,
+`builtins/plugins/ExecutionResourceProvider`, and
 `builtins/plugins/SkillsExecutor`. Keep public imports stable through package
 `__init__.py` files and top-level re-exports.
 

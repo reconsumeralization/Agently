@@ -28,7 +28,7 @@ Agently's action stack has three replaceable plugin layers below the orchestrati
 | `ActionRuntime` | planning protocol, action call normalization, default execution orchestration | `AgentlyActionRuntime` |
 | `ActionFlow` | bridge between an `ActionRuntime` and a flow representation | `TriggerFlowActionFlow` |
 | `ActionExecutor` | how one action actually runs | local function, MCP, Python/Bash sandbox, Search/Browse, Node.js, Docker, SQLite executors |
-| `ExecutionEnvironment` | managed execution dependencies required before an executor call | MCP, Bash, Python, Node, Docker, Browser, SQLite providers |
+| `ExecutionResource` | managed execution dependencies required before an executor call | MCP, Bash, Python, Node, Docker, Browser, SQLite providers |
 
 `Action` in `agently.core` is a façade that wires:
 
@@ -123,7 +123,7 @@ raw env only through the execution path.
 
 For application code, prefer `enable_*` helpers when the goal is to give the
 model a common capability such as Python, shell, or workspace access. Use
-`register_action(..., executor=..., execution_environments=[...])` when you are
+`register_action(..., executor=..., execution_resources=[...])` when you are
 building a custom Action backend.
 
 Built-in capability packages live under `agently.builtins.actions`. For example:
@@ -285,7 +285,7 @@ There is no legacy positional handler signature — the public contract is `(con
 | The planning protocol or how calls are normalized | `ActionRuntime` |
 | The orchestration shape between runtime and flow | `ActionFlow` |
 | Higher-level flow control over many action calls | use `TriggerFlow` above the runtime — don't embed it inside an executor |
-| Lifecycle for MCP/sandbox/process-like dependencies | declare an `ExecutionEnvironment` requirement — don't hide lifecycle inside an executor |
+| Lifecycle for MCP/sandbox/process-like dependencies | declare an `ExecutionResource` requirement — don't hide lifecycle inside an executor |
 
 ## See also
 
