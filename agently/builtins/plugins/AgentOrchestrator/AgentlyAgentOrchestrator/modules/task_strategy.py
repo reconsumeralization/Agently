@@ -45,17 +45,33 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         }
 
     task_options = execution.task_strategy_options()
-    generated_before = list(getattr(execution, "generated_success_criteria", []) or [])
-    goal = execution.task_goal()
-    success_criteria = execution.task_success_criteria()
-    generated_after = list(getattr(execution, "generated_success_criteria", []) or [])
-    if generated_after and generated_after != generated_before:
-        await execution.emit_stream(
-            "success_criteria.generated",
-            {"goal": goal, "success_criteria": generated_after},
-            route="agent_task",
-            source="agent_execution",
+    resume_task_id = task_options.get("resume_task_id")
+    if resume_task_id is None and task_options.get("resume"):
+        resume_task_id = task_options.get("task_id") or execution.lineage.get("task_id")
+    task = getattr(execution, "task_record", None)
+    if not isinstance(task, AgentTask) and resume_task_id is not None:
+        task = await AgentTask.async_resume(
+            execution.agent,
+            str(resume_task_id),
+            workspace=cast(Any, task_options.get("workspace")),
         )
+        execution.task_record = task
+
+    if isinstance(task, AgentTask):
+        goal = task.goal
+        success_criteria = list(task.success_criteria)
+    else:
+        generated_before = list(getattr(execution, "generated_success_criteria", []) or [])
+        goal = execution.task_goal()
+        success_criteria = execution.task_success_criteria()
+        generated_after = list(getattr(execution, "generated_success_criteria", []) or [])
+        if generated_after and generated_after != generated_before:
+            await execution.emit_stream(
+                "success_criteria.generated",
+                {"goal": goal, "success_criteria": generated_after},
+                route="agent_task",
+                source="agent_execution",
+            )
 
     effort_strategy = execution.effective_options.get("effort_strategy")
     effort_strategy = dict(effort_strategy) if isinstance(effort_strategy, dict) else {}
@@ -86,19 +102,20 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
                 constraints["skills"]["required"] = required_skills
         agent_task_options["capability_constraints"] = constraints
 
-    task = AgentTask(
-        execution.agent,
-        goal=goal,
-        success_criteria=success_criteria,
-        workspace=task_options.get("workspace"),
-        max_iterations=int(max_iterations or 3),
-        verify=cast(Any, task_options.get("verify", "before_done")),
-        recall_profile=str(task_options.get("recall_profile", "auto")),
-        context_budget=cast(Any, task_options.get("context_budget")),
-        limits=cast(Any, task_options.get("limits", execution.limits)),
-        options=cast(Any, agent_task_options),
-        task_id=cast(Any, task_options.get("task_id") or execution.lineage.get("task_id")),
-    )
+    if not isinstance(task, AgentTask):
+        task = AgentTask(
+            execution.agent,
+            goal=goal,
+            success_criteria=success_criteria,
+            workspace=task_options.get("workspace"),
+            max_iterations=int(max_iterations or 3),
+            verify=cast(Any, task_options.get("verify", "before_done")),
+            recall_profile=str(task_options.get("recall_profile", "auto")),
+            context_budget=cast(Any, task_options.get("context_budget")),
+            limits=cast(Any, task_options.get("limits", execution.limits)),
+            options=cast(Any, agent_task_options),
+            task_id=cast(Any, task_options.get("task_id") or execution.lineage.get("task_id")),
+        )
     # Advanced/test step-stage override channel. Callers may set an explicit
     # `execution._agent_task_step_overrides = {"_request_plan": ..., ...}` before
     # running to drive the plan/execute/verify stages deterministically. This is
@@ -114,6 +131,8 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     execution.task_refs = {
         "task_id": task.id,
         "strategy": route_meta.get("strategy") or execution.strategy_name or "task",
+        "resume": bool(resume_task_id is not None or task_options.get("resume")),
+        "resumed_from_iteration": getattr(task, "_resumed_from_iteration", 0),
     }
     await execution.emit_stream(
         "agent_task.created",

@@ -44,6 +44,27 @@ async def test_concurrency_limit_caps_in_flight_requests():
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_rebuilds_loop_primitives_for_provider():
+    scheduler = RequestScheduler().configure("p", max_concurrency=2)
+    async with scheduler.slot("p"):
+        pass
+    scheduler.configure("p", max_concurrency=1)
+    in_flight = 0
+    peak = 0
+
+    async def worker():
+        nonlocal in_flight, peak
+        async with scheduler.slot("p"):
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.02)
+            in_flight -= 1
+
+    await asyncio.gather(*[worker() for _ in range(3)])
+    assert peak <= 1
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_spaces_request_starts():
     scheduler = RequestScheduler().configure("p", rate_per_second=50)  # 20ms min interval
     starts = []

@@ -957,30 +957,70 @@ class BaseAgent:
         execution.workspace = getattr(self, "workspace", None)
         return execution
 
+    async def async_resume(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        """Resume a previously checkpointed Agent task as an AgentExecution.
+
+        Reads the task's latest durable snapshot from the Workspace and returns
+        a task-strategy AgentExecution draft. The returned execution continues
+        from the iteration after the last completed one (or exposes the stored
+        terminal result) through the normal AgentExecution result/meta/stream
+        surface.
+        """
+        from agently.core.application import AgentTask
+
+        normalized_task_id = str(task_id)
+        task = await AgentTask.async_resume(cast(Any, self), normalized_task_id, workspace=workspace)
+        execution = self.create_execution(
+            lineage={"task_id": normalized_task_id},
+            options={
+                "strategy": "task",
+                "task": {
+                    "task_id": normalized_task_id,
+                    "workspace": workspace,
+                    "resume": True,
+                },
+            },
+        )
+        execution.goal(task.goal, list(task.success_criteria))
+        execution.workspace = getattr(self, "workspace", None)
+        execution.task_record = task
+        execution.task_refs = {
+            "task_id": task.id,
+            "strategy": "task",
+            "resume": True,
+            "resumed_from_iteration": getattr(task, "_resumed_from_iteration", 0),
+        }
+        return execution
+
+    def resume(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        return FunctionShifter.syncify(self.async_resume)(task_id, workspace=workspace)
+
     async def async_resume_task(
         self,
         task_id: str,
         *,
         workspace: str | os.PathLike[str] | None = None,
-    ):
-        """Rebuild a previously checkpointed AgentTask and continue it.
-
-        Reads the task's latest durable snapshot from the Workspace and returns
-        an AgentTask that continues from the iteration after the last completed
-        one (or exposes the stored terminal result). Run it with
-        ``await task.async_run()`` / ``task.stream()`` like a fresh task.
-        """
-        from agently.core.application import AgentTask
-
-        return await AgentTask.async_resume(cast(Any, self), str(task_id), workspace=workspace)
+    ) -> "AgentExecution":
+        """Compatibility alias for async_resume(...)."""
+        return await self.async_resume(task_id, workspace=workspace)
 
     def resume_task(
         self,
         task_id: str,
         *,
         workspace: str | os.PathLike[str] | None = None,
-    ):
-        return FunctionShifter.syncify(self.async_resume_task)(task_id, workspace=workspace)
+    ) -> "AgentExecution":
+        return self.resume(task_id, workspace=workspace)
 
     def create_task_loop(
         self,

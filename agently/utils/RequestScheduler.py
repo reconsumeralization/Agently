@@ -89,6 +89,7 @@ class RequestScheduler:
             max_concurrency=_positive_int_or_none(max_concurrency),
             rate_per_second=_positive_float_or_none(rate_per_second),
         )
+        self._clear_cached_primitives(provider)
         return self
 
     def configure_from_settings(self, provider: str, settings: Any) -> "RequestScheduler":
@@ -152,6 +153,11 @@ class RequestScheduler:
             state = _LoopState()
             self._loop_states[key] = state
         return state
+
+    def _clear_cached_primitives(self, provider: str) -> None:
+        for state in self._loop_states.values():
+            state.semaphores.pop(provider, None)
+            state.buckets.pop(provider, None)
 
     @staticmethod
     def backoff_delay(

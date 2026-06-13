@@ -156,7 +156,9 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     result = await result_facade.async_get_data()
     execution_meta = await result_facade.async_get_meta()
     meta = await task.meta()
-    resume = await result_facade.async_resume()
+    resumed_execution = await result_facade.async_resume()
+    resumed_result = await resumed_execution.async_start()
+    resumed_meta = await resumed_execution.async_get_meta()
 
     assert result["status"] == "completed"
     assert result["iterations"] == 2
@@ -164,8 +166,11 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert result_facade.task_refs["status"] == "completed"
     assert execution_meta["task_refs"]["task_id"] == "legacy-script-upgrade"
     assert execution_meta["task_refs"]["status"] == "completed"
-    assert resume["supported"] is False
-    assert resume["reason"] == "AgentExecution resume is reserved for resumable strategies."
+    assert resumed_execution.task_refs["task_id"] == "legacy-script-upgrade"
+    assert resumed_execution.task_refs["resume"] is True
+    assert resumed_result["status"] == "completed"
+    assert resumed_result["resumed"] is True
+    assert resumed_meta["task_refs"]["status"] == "completed"
     assert meta["status"] == "completed"
     assert len(meta["iterations"]) == 2
     assert MockAgentTaskRequester.verification_calls == 2
@@ -1001,10 +1006,10 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
     # The bare task_id checkpoint history is unaffected by resume snapshots.
     assert len(await agent.workspace.checkpoint_history("resumable-task")) == 1
 
-    # Second run: a fresh agent/task resumes from the snapshot and completes.
+    # Second run: a fresh AgentExecution resumes from the snapshot and completes.
     MockAgentTaskRequester.reset()
     agent2 = _create_agent("agent-task-resume-2").use_workspace(workspace_dir)
-    resumed = await agent2.async_resume_task("resumable-task", workspace=workspace_dir)
+    resumed = await agent2.async_resume("resumable-task", workspace=workspace_dir)
 
     async def finish_step(iteration_index, plan, context_pack):
         return (
@@ -1013,10 +1018,12 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
         )
 
     cast(Any, resumed)._agent_task_step_overrides = {"_execute_step": finish_step}
-    result = await resumed.async_run()
-    meta = await resumed.async_meta()
+    result = await resumed.async_start()
+    execution_meta = await resumed.async_get_meta()
+    meta = execution_meta["logs"]["route_logs"]["agent_task"]
 
-    assert resumed._resumed_from_iteration == 1
+    assert resumed.task_refs["resume"] is True
+    assert resumed.task_refs["resumed_from_iteration"] == 1
     assert meta["resumed_from_iteration"] == 1
     # Continued from iteration 2 (did not re-run iteration 1).
     assert meta["iterations"][0]["iteration"] == 2
@@ -1028,7 +1035,7 @@ async def test_agent_task_resume_without_snapshot_raises(tmp_path):
     """ISSUE-005: resuming an unknown task id is an explicit error."""
     agent = _create_agent("agent-task-resume-missing").use_workspace(tmp_path / "task-workspace")
     with pytest.raises(ValueError):
-        await agent.async_resume_task("does-not-exist", workspace=tmp_path / "task-workspace")
+        await agent.async_resume("does-not-exist", workspace=tmp_path / "task-workspace")
 
 
 @pytest.mark.asyncio

@@ -91,18 +91,34 @@ class AgentExecutionResult:
         self.get_meta()
         return str(self.execution.status)
 
-    async def async_resume(self, *_: Any, **__: Any) -> dict[str, Any]:
+    async def async_resume(self, *args: Any, **kwargs: Any) -> Any:
+        task_id = kwargs.pop("task_id", None)
+        remaining_args = args
+        if task_id is None and remaining_args:
+            task_id = remaining_args[0]
+            remaining_args = remaining_args[1:]
+        task_id = task_id or self.task_refs.get("task_id")
+        if task_id:
+            return await self.execution.agent.async_resume(str(task_id), *remaining_args, **kwargs)
         return {
             "execution_id": self.execution_id,
             "status": self.status,
             "supported": False,
-            "reason": "AgentExecution resume is reserved for resumable strategies.",
+            "reason": "AgentExecutionResult has no resumable task_refs.",
         }
 
-    def resume(self, *_: Any, **__: Any) -> dict[str, Any]:
+    def resume(self, *args: Any, **kwargs: Any) -> Any:
+        task_id = kwargs.pop("task_id", None)
+        remaining_args = args
+        if task_id is None and remaining_args:
+            task_id = remaining_args[0]
+            remaining_args = remaining_args[1:]
+        task_id = task_id or self.task_refs.get("task_id")
+        if task_id:
+            return self.execution.agent.resume(str(task_id), *remaining_args, **kwargs)
         return {
             "execution_id": self.execution_id,
             "status": self.status,
             "supported": False,
-            "reason": "AgentExecution resume is reserved for resumable strategies.",
+            "reason": "AgentExecutionResult has no resumable task_refs.",
         }
