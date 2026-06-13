@@ -437,9 +437,26 @@ agent.configure_skill_capabilities(
     search={
         "backend": "auto",
     },
+    # Reverse one-time capability mounts after each Skills execution instead of
+    # leaving them on the agent. Default "agent" keeps mounts for reuse.
+    capability_scope="execution",
+    # Only auto-mount capability needs at or above this confidence; lower-
+    # confidence needs inferred from SKILL.md prose are advisory. Default: no floor.
+    min_auto_mount_confidence=0.8,
+    # The built-in HTTP capability default-denies private/loopback/link-local
+    # targets; allow specific internal hosts explicitly when needed.
+    http_request={"allow_hosts": ["internal.api.example.com"]},
 )
 agent.configure_policy_approval(handler="input_timeout_fail")
 ```
+
+The built-in read-only HTTP capability blocks private, loopback, and
+link-local hosts by default (an SSRF guard); use
+`http_request={"allow_hosts": [...]}` or `{"allow_private": true}` to allow
+internal targets. The default script allowlist contains local interpreters
+(`bash`, `sh`, `python`, `node`) but not package runners (`npx`/`npm`), which
+fetch and execute arbitrary remote code; add them through policy only when
+required.
 
 For search-oriented Skills, Agently mounts the framework Search package backed
 by the `ddgs` Python package. Keep `ddgs` upgraded in the host environment

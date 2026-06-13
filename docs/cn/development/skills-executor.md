@@ -406,9 +406,22 @@ agent.configure_skill_capabilities(
     search={
         "backend": "auto",
     },
+    # 每次 Skills 执行后回收一次性挂载的能力，而不是把它们留在 agent 上。
+    # 默认 "agent" 保留挂载以便复用。
+    capability_scope="execution",
+    # 仅自动挂载置信度达到该阈值的能力需求；从 SKILL.md 正文推断的低置信
+    # 需求仅作提示。默认不设阈值。
+    min_auto_mount_confidence=0.8,
+    # 内置 HTTP 能力默认拒绝私网/环回/链路本地目标；需要时显式放行内部主机。
+    http_request={"allow_hosts": ["internal.api.example.com"]},
 )
 agent.configure_policy_approval(handler="input_timeout_fail")
 ```
+
+内置只读 HTTP 能力默认拒绝私网、环回与链路本地主机（SSRF 防护）；如需访问内部
+目标，用 `http_request={"allow_hosts": [...]}` 或 `{"allow_private": true}` 显式放行。
+默认脚本白名单只包含本地解释器（`bash`、`sh`、`python`、`node`），不含会拉取并执行
+任意远端代码的包运行器（`npx`/`npm`）；确有需要时再通过 policy 显式加入。
 
 面向搜索的 Skills，Agently 会装载由 `ddgs` Python package 支撑的框架 Search
 能力。请在宿主环境中预先保持 `ddgs` 最新（`python -m pip install --upgrade ddgs`）；
