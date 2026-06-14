@@ -54,6 +54,11 @@ class MockAgentTaskRequester:
             payload = {
                 "message": "Progress model summarized the current snapshot.",
             }
+            payload_text = json.dumps(payload, ensure_ascii=False)
+            midpoint = max(1, len(payload_text) // 2)
+            yield "message", payload_text[:midpoint]
+            yield "message", payload_text[midpoint:]
+            return
         elif "Verify the task against every success criterion" in text:
             MockAgentTaskRequester.verification_calls += 1
             if MockAgentTaskRequester.verification_calls == 1:
@@ -134,6 +139,84 @@ async def test_agent_goal_success_criteria_uses_task_execution_path(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_agent_task_loop_receives_execution_prompt_snapshot(tmp_path):
+    MockAgentTaskRequester.reset()
+    agent = _create_agent("agent-task-loop-execution-prompt").use_workspace(tmp_path / "task-workspace")
+
+    execution = (
+        agent
+        .goal(
+            "Prepare an operator summary from caller-provided facts.",
+            ["The summary uses the supplied incident id."],
+        )
+        .effort("low", budget={"iteration_limit": 2})
+        .input({"incident_id": "INC-4242", "severity": "SEV2"})
+        .output({"summary": (str, "Operator summary that includes the incident id.", True)}, format="json")
+        .strategy("task", max_iterations=2)
+    )
+
+    result = await execution.async_start()
+    meta = await execution.async_get_meta()
+    calls = "\n".join(MockAgentTaskRequester.calls)
+    task = cast(Any, execution).task_record
+
+    assert result["status"] == "completed"
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert "INC-4242" in calls
+    assert "severity" in calls
+    assert "summary" in calls
+    assert task.options["execution_prompt_snapshot"]["input"]["incident_id"] == "INC-4242"
+
+
+@pytest.mark.asyncio
+async def test_public_task_strategy_spellings_share_agent_task_lifecycle(tmp_path):
+    for label, build in (
+        (
+            "create_task_loop",
+            lambda agent, workspace: agent.create_task_loop(
+                task_id="task-loop-spelling",
+                goal="Repair a legacy Agently script so it runs on the current API.",
+                success_criteria=["The script runs successfully."],
+                workspace=workspace,
+                max_iterations=2,
+                limits={"max_model_requests": 1},
+            ),
+        ),
+        (
+            "strategy_task_loop",
+            lambda agent, workspace: (
+                agent.create_execution(
+                    options={
+                        "task": {
+                            "task_id": "strategy-task-loop-spelling",
+                            "workspace": workspace,
+                            "max_iterations": 2,
+                            "limits": {"max_model_requests": 1},
+                        }
+                    }
+                )
+                .goal(
+                    "Repair a legacy Agently script so it runs on the current API.",
+                    ["The script runs successfully."],
+                )
+                .strategy("task_loop")
+            ),
+        ),
+    ):
+        MockAgentTaskRequester.reset()
+        agent = _create_agent(f"agent-{label}").use_workspace(tmp_path / label)
+        execution = build(agent, tmp_path / label)
+
+        result = await execution.async_start()
+        meta = await execution.async_get_meta()
+
+        assert result["status"] == "completed"
+        assert meta["route"]["selected_route"] == "agent_task"
+        assert meta["route"]["options"]["strategy"] == "task_loop"
+        assert meta["task_refs"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     MockAgentTaskRequester.reset()
     agent = _create_agent()
@@ -174,6 +257,12 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert resumed_meta["task_refs"]["status"] == "completed"
     assert meta["status"] == "completed"
     assert len(meta["iterations"]) == 2
+    for iteration in meta["iterations"]:
+        blocks = iteration["execution_meta"]["blocks"]
+        assert blocks["execution_plan"]["plan_blocks"][0]["kind"] == "agent_step"
+        assert blocks["execution_block_graph"]["execution_blocks"][0]["kind"] == "agent_step"
+        assert blocks["evidence"]["execution_block_results"][0]["kind"] == "agent_step"
+        assert blocks["result"]["semantic_outputs"]
     assert MockAgentTaskRequester.verification_calls == 2
     assert any(item.path == "agent_task.started" for item in stream_items)
     assert any((item.meta or {}).get("stream_kind") == "progress" for item in stream_items)
@@ -268,12 +357,55 @@ async def test_agent_task_loop_progress_model_uses_snapshot_background(tmp_path)
         for item in stream_items
         if (item.meta or {}).get("stream_kind") == "progress"
     ]
+    progress_delta_items = [
+        item
+        for item in stream_items
+        if (item.meta or {}).get("stream_kind") == "progress_delta"
+    ]
 
     assert progress_items
     assert all((item.meta or {}).get("progress_source") == "model" for item in progress_items)
     assert any("Progress model summarized" in item.value.get("message", "") for item in progress_items)
+    assert progress_delta_items
+    assert all(item.event_type == "delta" for item in progress_delta_items)
+    assert all(item.is_complete is False for item in progress_delta_items)
+    assert "Progress model summarized" in "".join(item.delta or "" for item in progress_delta_items)
     assert not any("building a Workspace context pack" in item.value.get("message", "") for item in progress_items)
     assert any("Summarize AgentTask progress" in call for call in MockAgentTaskRequester.calls)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_loop_progress_model_uses_configured_language(tmp_path):
+    MockAgentTaskRequester.reset()
+    agent = _create_agent("agent-task-loop-progress-language")
+    agent.settings.set("agent_task.progress.language", "zh-CN")
+
+    task = agent.create_task(
+        task_id="progress-language",
+        goal="Repair a legacy Agently script so it runs on the current API.",
+        success_criteria=["The script runs successfully."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        limits={"max_model_requests": 1},
+        options={
+            "agent_task": {
+                "stream_progress": True,
+                "progress_model_key": "progress-narrator",
+                "progress_timeout_seconds": 5,
+            },
+        },
+    )
+
+    stream_items = [item async for item in task.stream()]
+    progress_items = [
+        item
+        for item in stream_items
+        if (item.meta or {}).get("stream_kind") == "progress"
+    ]
+
+    assert any("progress_language: zh-CN" in call for call in MockAgentTaskRequester.calls)
+    assert progress_items
+    assert all((item.meta or {}).get("progress_language") == "zh-CN" for item in progress_items)
 
 
 @pytest.mark.asyncio
@@ -477,6 +609,10 @@ async def test_agent_task_loop_executes_dag_shaped_step_without_global_candidate
     assert first_iteration["plan"]["effective_execution_shape"] == "dynamic_task"
     assert first_iteration["plan"]["step_execution"]["dynamic_task_candidate_added"] is True
     assert first_iteration["execution_meta"]["route_plan"]["selected_route"] == "dynamic_task"
+    blocks = first_iteration["execution_meta"]["blocks"]
+    assert blocks["execution_plan"]["plan_blocks"][0]["kind"] == "flow_segment"
+    assert blocks["execution_plan"]["plan_blocks"][0]["bound_inputs"]["step_plan"] == "dag"
+    assert blocks["execution_block_graph"]["execution_blocks"][0]["kind"] == "flow_segment"
     assert first_iteration["execution_meta"]["logs"]["route_logs"]["task_dag"]["semantic_outputs"]["final"]["result"][
         "value"
     ] == "ok"
@@ -898,6 +1034,90 @@ async def test_agent_task_loop_verification_guard_replans_on_failed_action_evide
     assert "execution_risk_actions_present" in first_verification["guard_reasons"]
     second_logs = meta["iterations"][1]["execution_meta"]["logs"]["action_logs"]
     assert second_logs["run_task_command"]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_agent_task_loop_replans_on_structured_blocks_replan_signal(tmp_path):
+    class AlwaysCompleteRequester(MockAgentTaskRequester):
+        name = "AlwaysCompleteForReplanSignalRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "model thinks the task is complete",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result_required": True,
+                    "final_result": "final report",
+                }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {
+                    "step_instruction": "collect structured evidence",
+                    "expected_evidence": "valid upstream evidence",
+                    "rationale": "the step needs trusted evidence",
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-replan-signal-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-replan-signal-plugins")
+    plugin_manager.register("ModelRequester", AlwaysCompleteRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-replan-signal")
+    task = agent.create_task(
+        task_id="structured-replan-signal",
+        goal="Produce a final report only after structured execution evidence is valid.",
+        success_criteria=["The upstream evidence is valid.", "The final report is returned."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=2,
+    )
+
+    async def fake_execute(iteration_index, plan, context_pack):
+        _ = (plan, context_pack)
+        replan_diagnostics = []
+        if iteration_index == 1:
+            replan_diagnostics.append(
+                {
+                    "kind": "replan_signal",
+                    "status": "replan_goal",
+                    "reason": "upstream evidence invalidates the current goal plan",
+                    "affected_plan_block_ids": ["collect"],
+                    "affected_execution_block_ids": ["collect:model_request"],
+                }
+            )
+        return (
+            {"step_result": f"iteration {iteration_index}", "evidence": ["candidate"], "remaining_work": []},
+            {
+                "execution_id": f"exec-{iteration_index}",
+                "status": "completed",
+                "route": {"selected_route": "model_request"},
+                "logs": {"action_logs": {}},
+                "blocks": {
+                    "evidence": {"diagnostics": replan_diagnostics},
+                    "snapshot": {"blocks": {"replan_signals": replan_diagnostics}},
+                },
+            },
+        )
+
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": fake_execute}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] == "completed"
+    assert result["iterations"] == 2
+    first_verification = meta["iterations"][0]["verification"]
+    assert first_verification["is_complete"] is False
+    assert first_verification["replan_signals"][0]["status"] == "replan_goal"
+    assert "structured_replan_signal" in first_verification["guard_reasons"]
+    assert any(
+        phase["phase"] == "replanned"
+        and phase["diagnostics"]["replan_signals"][0]["status"] == "replan_goal"
+        for phase in meta["diagnostics"]["phases"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1548,6 +1768,46 @@ def test_auto_step_plan_suppresses_dag_after_prior_dag_failure(tmp_path):
     assert step_execution["warning"] == "dag_shape_failed_previously"
     assert step_execution["policy"]["allow_dag_steps"] is False
     assert step_execution["policy"]["suppressed_execution_shapes"] == ["dynamic_task"]
+    assert execution.added_candidates == []
+
+
+def test_direct_step_plan_rejects_model_generated_dynamic_task_candidate(tmp_path):
+    from agently.core.application import AgentTask
+
+    agent = _capability_gate_agent("agent-task-direct-dag-rejected")
+    task = AgentTask(
+        agent,
+        goal="Run one bounded AgentExecution step.",
+        success_criteria=["The result is produced."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={"agent_task": {"effort": {"execution": {"step_plan": "direct"}}}},
+    )
+
+    class _FakeExecution:
+        def __init__(self):
+            self.local_action_ids: list[str] = []
+            self.local_dynamic_task_candidates: list[Any] = []
+            self.added_candidates: list[Any] = []
+
+        def _add_dynamic_task_candidate(self, candidate):
+            self.added_candidates.append(candidate)
+
+    execution = _FakeExecution()
+    plan = cast(Any, task)._normalize_step_plan(
+        {
+            "execution_shape": "execution_dag",
+            "step_instruction": "try a DAG anyway",
+            "expected_evidence": "result",
+            "rationale": "model proposed a DAG",
+            "dynamic_task": {"plan": {"tasks": []}},
+        }
+    )
+
+    step_execution = cast(Any, task)._configure_step_execution(execution, plan)
+
+    assert step_execution["effective_shape"] == "direct"
+    assert step_execution["warning"] == "dag_shape_not_enabled"
     assert execution.added_candidates == []
 
 

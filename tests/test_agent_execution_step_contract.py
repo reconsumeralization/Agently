@@ -1061,7 +1061,7 @@ async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_record_uses_lazy_default_workspace(tmp_path, monkeypatch):
+async def test_agent_execution_workspace_record_uses_execution_scoped_lazy_default_workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     agent = _create_agent("task-step-workspace-missing")
     workspace = agent.workspace
@@ -1075,9 +1075,10 @@ async def test_agent_execution_workspace_record_uses_lazy_default_workspace(tmp_
 
     workspace_record = await execution.async_record_workspace()
 
-    assert getattr(workspace, "is_materialized") is True
+    assert getattr(workspace, "is_materialized") is False
+    assert getattr(execution.workspace, "is_materialized") is True
     assert workspace_record["record"]["collection"] == "observations"
-    assert workspace.root.exists()
+    assert execution.workspace.root.exists()
 
 
 def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp_path):

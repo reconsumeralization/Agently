@@ -17,6 +17,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, TYPE_CHECKING, cast
 
+from agently.utils import DataFormatter
+
 if TYPE_CHECKING:
     from .execution import AgentExecution
 
@@ -114,6 +116,12 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         capability_snapshot = _planner_capability_snapshot(execution)
         if capability_snapshot:
             agent_task_options["planner_capabilities"] = capability_snapshot
+    prompt_snapshot = getattr(execution, "prompt_snapshot", {})
+    if isinstance(prompt_snapshot, dict) and prompt_snapshot:
+        agent_task_options.setdefault(
+            "execution_prompt_snapshot",
+            DataFormatter.sanitize(dict(prompt_snapshot)),
+        )
 
     if not isinstance(task, AgentTask):
         task = AgentTask(

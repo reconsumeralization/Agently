@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
 from agently.core.orchestration import TriggerFlow
-from agently.types.data import AgentExecutionStreamData
+from agently.types.data import AgentExecutionStreamData, ReplanSignal
 from agently.utils import DataFormatter, FunctionShifter
 
 if TYPE_CHECKING:
@@ -638,6 +638,7 @@ class AgentTask:
             {
                 "reason": verification.get("reason"),
                 "replan_instruction": verification.get("replan_instruction"),
+                "replan_signals": verification.get("replan_signals", []),
             },
         )
         await self._record_phase(
@@ -646,6 +647,7 @@ class AgentTask:
             diagnostics={
                 "reason": verification.get("reason"),
                 "replan_instruction": verification.get("replan_instruction"),
+                "replan_signals": verification.get("replan_signals", []),
             },
         )
         return {"terminal": False, "status": "continue"}
@@ -718,6 +720,12 @@ class AgentTask:
             policy["allow_dag_steps"] = False
             policy["suppressed_execution_shapes"] = failed_dag_shapes
         return policy
+
+    def _execution_prompt_context(self) -> dict[str, Any]:
+        raw = self.options.get("execution_prompt_snapshot")
+        if not isinstance(raw, Mapping):
+            return {}
+        return cast(dict[str, Any], DataFormatter.sanitize(dict(raw)))
 
     def _normalize_step_plan(self, plan: Any) -> dict[str, Any]:
         normalized: dict[str, Any]
@@ -800,22 +808,28 @@ class AgentTask:
                 policy.get("step_plan") == "auto"
                 and bool(self._failed_execution_shapes.intersection(_DAG_STEP_EXECUTION_SHAPES))
             )
+            dag_policy_allows = (
+                policy.get("step_plan") != "direct"
+                and bool(policy.get("allow_dag_steps") or policy.get("step_plan") in {"auto", "dag"})
+            )
             candidate = self._step_dynamic_task_candidate(plan)
             has_dynamic_candidates = bool(
                 getattr(self.agent, "_dynamic_task_candidates", []) or getattr(execution, "local_dynamic_task_candidates", [])
             )
             dag_allowed = bool(
                 not dag_suppressed
+                and dag_policy_allows
                 and (
                     candidate
                     or has_dynamic_candidates
-                    or policy.get("allow_dag_steps")
-                    or policy.get("step_plan") in {"auto", "dag"}
                 )
             )
             if dag_suppressed:
                 effective_shape = "direct"
                 warning = "dag_shape_failed_previously"
+            elif not dag_policy_allows:
+                effective_shape = "direct"
+                warning = "dag_shape_not_enabled"
             elif candidate is not None:
                 add_candidate = getattr(execution, "_add_dynamic_task_candidate", None)
                 if callable(add_candidate):
@@ -1033,6 +1047,7 @@ class AgentTask:
     async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         request = self.agent.create_temp_request()
         planner_capabilities = self._planner_capabilities()
+        execution_prompt = self._execution_prompt_context()
         request.input(
             {
                 "task_id": self.id,
@@ -1041,6 +1056,7 @@ class AgentTask:
                 "iteration": iteration_index,
                 "previous_iterations": self._iteration_prompt_summaries(),
                 "context_pack": DataFormatter.sanitize(context_pack),
+                "execution_prompt": execution_prompt,
                 "execution_policy": self._step_execution_policy(),
                 "planner_capabilities": planner_capabilities,
             }
@@ -1060,6 +1076,7 @@ class AgentTask:
         )
         request.instruct(
             "Plan the next bounded AgentExecution step for this AgentTask. "
+            "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
             "Set execution_shape to direct, actions, skills, dynamic_task, or execution_dag. "
             "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
@@ -1099,6 +1116,129 @@ class AgentTask:
         plan: dict[str, Any],
         context_pack: "WorkspaceContextPackage",
     ) -> tuple[Any, dict[str, Any]]:
+        override = self._step_stage_override("_execute_step")
+        if override is not None:
+            result = override(iteration_index, plan, context_pack)
+            if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
+                result = await result
+            return cast(tuple[Any, dict[str, Any]], result)
+
+        plan = self._normalize_step_plan(plan)
+        execution_plan = self._build_blocks_execution_plan(iteration_index, plan, context_pack)
+        blocks_entrypoint = self._resolve_blocks()
+        execution_graph = blocks_entrypoint.compile(
+            {
+                "execution_id": f"{self.id}:iter-{iteration_index}",
+                "task_frame_id": execution_plan.task_frame_id,
+                "plan_id": execution_plan.plan_id,
+                "plan_blocks": [block.to_dict() for block in execution_plan.plan_blocks],
+                "edges": [edge.to_dict() for edge in execution_plan.edges],
+                "capability_resolution": self._blocks_capability_resolution(plan).to_dict(),
+                "evidence_requirements": [dict(item) for item in execution_plan.evidence_requirements],
+                "result_contracts": [dict(item) for item in execution_plan.result_contracts],
+                "runtime_policy": {"checkpoint_policy": dict(execution_plan.checkpoint_policy)},
+                "budget": dict(plan.get("budget", {})) if isinstance(plan.get("budget"), Mapping) else {},
+            }
+        )
+        flow = blocks_entrypoint.bind_runtime(execution_graph)
+
+        async def run_agent_step(_context: Mapping[str, Any]) -> Mapping[str, Any]:
+            execution_result, execution_meta = await self._run_bounded_agent_execution_step(
+                iteration_index,
+                plan,
+                context_pack,
+            )
+            return {
+                "execution_result": DataFormatter.sanitize(execution_result),
+                "execution_meta": DataFormatter.sanitize(execution_meta),
+            }
+
+        blocks_execution = flow.create_execution(
+            auto_close=False,
+            workspace=False,
+            runtime_resources={"blocks.handlers": {"agent_task_bounded_step": run_agent_step}},
+        )
+        try:
+            await blocks_execution.async_start(
+                {
+                    "task_id": self.id,
+                    "iteration": iteration_index,
+                    "plan": DataFormatter.sanitize(plan),
+                    "context_pack": DataFormatter.sanitize(context_pack),
+                }
+            )
+            snapshot = await blocks_execution.async_close()
+        except Exception as error:
+            result, failed_meta = self._failed_execution_result(
+                iteration_index,
+                plan=plan,
+                error=error,
+                execution_id=f"{self.id}:iter-{iteration_index}:blocks-step",
+            )
+            failed_meta["blocks"] = {
+                "execution_plan": execution_plan.to_dict(),
+                "execution_block_graph": execution_graph.to_dict(),
+                "diagnostics": [
+                    {
+                        "type": error.__class__.__name__,
+                        "message": str(error),
+                        "stage": "blocks_execution",
+                    }
+                ],
+            }
+            await self._emit(
+                f"agent_task.iteration.{iteration_index}.execution.failed",
+                {"execution_meta": failed_meta},
+            )
+            await self._record_phase(
+                "execution_failed",
+                iteration=iteration_index,
+                diagnostics={
+                    "execution_id": failed_meta.get("execution_id"),
+                    "route": failed_meta.get("route"),
+                    "error": failed_meta.get("diagnostics", {}).get("execution_error"),
+                    "blocks": DataFormatter.sanitize(failed_meta.get("blocks")),
+                },
+            )
+            return result, failed_meta
+
+        evidence = blocks_entrypoint.map_evidence(execution_graph, snapshot)
+        block_result = dict(blocks_entrypoint.map_result(execution_graph, snapshot))
+        agent_step_output = self._extract_agent_step_block_output(snapshot)
+        execution_result = agent_step_output.get("execution_result")
+        raw_meta = agent_step_output.get("execution_meta")
+        execution_meta = dict(raw_meta) if isinstance(raw_meta, Mapping) else {}
+        if not execution_meta:
+            execution_meta = {
+                "execution_id": f"{self.id}:iter-{iteration_index}:missing-agent-step-meta",
+                "status": "failed",
+                "route": {"selected_route": "agent_step", "status": "failed"},
+                "logs": {
+                    "action_logs": {},
+                    "route_logs": {},
+                    "errors": [{"message": "agent_step block returned no execution_meta"}],
+                },
+            }
+        self._attach_blocks_evidence(
+            execution_meta,
+            execution_plan=execution_plan,
+            execution_graph=execution_graph,
+            evidence=evidence,
+            block_result=block_result,
+            snapshot=snapshot,
+        )
+        self._reconcile_effective_shape(plan, execution_meta)
+        status = str(execution_meta.get("status") or "").strip().lower()
+        if status not in {"failed", "error", "timed_out", "blocked"}:
+            await self._emit(f"agent_task.iteration.{iteration_index}.execution.completed", execution_meta)
+        return execution_result, cast(dict[str, Any], execution_meta)
+
+    async def _run_bounded_agent_execution_step(
+        self,
+        iteration_index: int,
+        plan: dict[str, Any],
+        context_pack: "WorkspaceContextPackage",
+    ) -> tuple[Any, dict[str, Any]]:
         plan = self._normalize_step_plan(plan)
         execution = self.agent.create_execution(
             lineage={
@@ -1120,12 +1260,14 @@ class AgentTask:
                 "plan": DataFormatter.sanitize(plan),
                 "step_execution": step_execution,
                 "context_pack": DataFormatter.sanitize(context_pack),
+                "execution_prompt": self._execution_prompt_context(),
             }
         )
         execution.instruct(
             (
                 "Execute exactly one bounded step for the AgentTask. "
                 f"Use the selected execution shape: {step_execution.get('effective_shape', 'direct')}. "
+                "Respect the caller-provided execution_prompt context and output contract when present. "
                 "Return concrete evidence for the verifier. Do not claim final completion unless evidence supports it."
             )
         )
@@ -1165,9 +1307,146 @@ class AgentTask:
                 },
             )
             return result, failed_meta
-        self._reconcile_effective_shape(plan, cast(dict[str, Any], meta))
-        await self._emit(f"agent_task.iteration.{iteration_index}.execution.completed", meta)
         return result, cast(dict[str, Any], meta)
+
+    def _step_stage_override(self, stage_name: str):
+        overrides = getattr(self, "_agent_task_step_overrides", None)
+        if not isinstance(overrides, dict):
+            return None
+        handler = overrides.get(stage_name)
+        return handler if callable(handler) else None
+
+    def _build_blocks_execution_plan(
+        self,
+        iteration_index: int,
+        plan: dict[str, Any],
+        context_pack: "WorkspaceContextPackage",
+    ):
+        from agently.types.data import ExecutionPlan, PlanBlockInstance
+
+        effective_shape = str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "direct")
+        execution_policy = self._step_execution_policy()
+        plan_block_kind = "flow_segment" if effective_shape in _DAG_STEP_EXECUTION_SHAPES else "agent_step"
+        plan_block_id = plan_block_kind
+        plan_block_label = "dag-segment" if plan_block_kind == "flow_segment" else "agent-step"
+        step_scope = plan.get("step_scope")
+        if not isinstance(step_scope, dict):
+            step_scope = {}
+        budget = plan.get("budget")
+        return ExecutionPlan(
+            plan_id=f"{self.id}:iter-{iteration_index}:execution-plan",
+            task_frame_id=f"{self.id}:iter-{iteration_index}:task-frame",
+            plan_blocks=(
+                PlanBlockInstance(
+                    id=f"iter-{iteration_index}:{plan_block_label}",
+                    plan_block_id=plan_block_id,
+                    kind=plan_block_kind,
+                    intent=str(plan.get("step_instruction") or ""),
+                    bound_inputs={
+                        "task_id": self.id,
+                        "iteration": iteration_index,
+                        "goal": self.goal,
+                        "success_criteria": self.success_criteria,
+                        "preferred_execution_shape": effective_shape,
+                        "step_plan": execution_policy.get("step_plan", "direct"),
+                        "plan": DataFormatter.sanitize(plan),
+                        "execution_prompt": self._execution_prompt_context(),
+                        "context_summary": {
+                            "item_count": len(context_pack.get("items", [])),
+                            "profile": context_pack.get("profile"),
+                        },
+                    },
+                    output_contract={
+                        "execution_result": "bounded AgentExecution step result",
+                        "execution_meta": "bounded AgentExecution route metadata and evidence",
+                    },
+                    evidence_contract={
+                        "expected_evidence": str(plan.get("expected_evidence") or ""),
+                        "effective_execution_shape": effective_shape,
+                        "step_plan": execution_policy.get("step_plan", "direct"),
+                    },
+                    runtime_preferences={"handler": "agent_task_bounded_step"},
+                    budget=dict(budget) if isinstance(budget, Mapping) else {},
+                ),
+            ),
+            semantic_outputs={"step": f"iter-{iteration_index}:{plan_block_label}"},
+            evidence_requirements=tuple(
+                {"capability_id": capability_id, "source": "step_scope"}
+                for capability_id in self._normalize_string_list(step_scope.get("allowed_capability_ids"))
+            ),
+            result_contracts=(
+                {
+                    "name": "agent_task_step",
+                    "requires": ["execution_result", "execution_meta"],
+                },
+            ),
+            checkpoint_policy={"scope": "agent_task_iteration", "iteration": iteration_index},
+        )
+
+    @staticmethod
+    def _extract_agent_step_block_output(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        blocks_state = snapshot.get("blocks", {})
+        if not isinstance(blocks_state, Mapping):
+            return {}
+        results = blocks_state.get("execution_block_results", ())
+        if not isinstance(results, (list, tuple)):
+            return {}
+        for item in results:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("kind") or "") in {"agent_step", "flow_segment"}:
+                output = item.get("output")
+                return dict(output) if isinstance(output, Mapping) else {}
+        return {}
+
+    def _blocks_capability_resolution(self, plan: dict[str, Any]):
+        from agently.types.data import CapabilityResolution
+
+        step_scope = plan.get("step_scope")
+        if not isinstance(step_scope, dict):
+            step_scope = {}
+        scoped_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
+        return CapabilityResolution(
+            allowed_capabilities=tuple(scoped_ids),
+            scoped_action_candidates=tuple(
+                {"action_id": capability_id, "capability_id": capability_id, "source": "AgentTaskLoop.step_scope"}
+                for capability_id in scoped_ids
+            ),
+            diagnostics=(
+                {
+                    "source": "AgentTaskLoop",
+                    "step_execution_shape": str(
+                        plan.get("effective_execution_shape") or plan.get("execution_shape") or "direct"
+                    ),
+                    "grants_capability": False,
+                },
+            ),
+        )
+
+    @staticmethod
+    def _attach_blocks_evidence(
+        execution_meta: dict[str, Any],
+        *,
+        execution_plan: Any,
+        execution_graph: Any,
+        evidence: Any,
+        block_result: Mapping[str, Any],
+        snapshot: Mapping[str, Any],
+    ) -> None:
+        blocks_state = snapshot.get("blocks", {}) if isinstance(snapshot, Mapping) else {}
+        execution_meta["blocks"] = {
+            "execution_plan": execution_plan.to_dict(),
+            "execution_block_graph": execution_graph.to_dict(),
+            "evidence": evidence.to_dict(),
+            "result": dict(block_result),
+            "snapshot": DataFormatter.sanitize({"blocks": blocks_state}),
+        }
+
+    @staticmethod
+    def _resolve_blocks():
+        from agently.base import blocks
+
+        return blocks
 
     def _record_failed_execution_shape(self, plan: dict[str, Any], execution_meta: dict[str, Any]) -> None:
         route = execution_meta.get("route", {})
@@ -1291,11 +1570,13 @@ class AgentTask:
                 "execution_evidence_summary": self._execution_log_summary(execution_meta),
                 "capability_evidence_requirements": self._capability_evidence_requirements(),
                 "context_pack": DataFormatter.sanitize(context_pack),
+                "execution_prompt": self._execution_prompt_context(),
                 "previous_iterations": self._iteration_prompt_summaries(),
             }
         )
         request.instruct(
             "Verify the task against every success criterion. "
+            "Also consider caller-provided execution_prompt constraints when they are present. "
             "Treat numeric criteria such as 'at least N' as exact counting rules and fail verification when the "
             "evidence does not meet the count. "
             "Require source/evidence references when the criteria ask for evidence. "
@@ -1377,6 +1658,43 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Execution step status is {execution_status}{detail}.",
             ]
+        replan_signals = [
+            dict(signal)
+            for signal in execution_evidence_summary.get("replan_signals", [])
+            if isinstance(signal, dict)
+        ]
+        if replan_signals:
+            normalized["replan_signals"] = replan_signals
+        blocking_signal = next(
+            (signal for signal in replan_signals if str(signal.get("status") or "") == "blocked"),
+            None,
+        )
+        if blocking_signal is not None:
+            normalized["is_complete"] = False
+            normalized["requires_block"] = True
+            guard_reasons.append("structured_replan_signal_blocked")
+            normalized["missing_criteria"] = [
+                *normalized["missing_criteria"],
+                str(blocking_signal.get("reason") or "Execution emitted a blocked ReplanSignal."),
+            ]
+        actionable_signals = [
+            signal
+            for signal in replan_signals
+            if str(signal.get("status") or "") in {"repair", "replan_segment", "replan_goal", "clarify"}
+        ]
+        if actionable_signals:
+            normalized["is_complete"] = False
+            guard_reasons.append("structured_replan_signal")
+            if not normalized["replan_instruction"]:
+                reasons = [
+                    str(signal.get("reason") or signal.get("status") or "")
+                    for signal in actionable_signals
+                    if str(signal.get("reason") or signal.get("status") or "").strip()
+                ]
+                normalized["replan_instruction"] = (
+                    "Handle structured ReplanSignal before accepting completion"
+                    + (f": {'; '.join(reasons)}." if reasons else ".")
+                )
         risky_actions = [
             *self._normalize_string_list(execution_evidence_summary.get("failed_actions")),
             *self._normalize_string_list(execution_evidence_summary.get("blocked_actions")),
@@ -2023,6 +2341,7 @@ class AgentTask:
     ) -> AgentExecutionStreamData | None:
         try:
             request = self.agent.create_temp_request(model_key=model_key)
+            progress_language = self._progress_language()
             request.set_settings("runtime.side_channel", True)
             request.set_settings("model_request.side_channel", True)
             request.input(
@@ -2033,12 +2352,14 @@ class AgentTask:
                     "iteration": iteration,
                     "stage": stage,
                     "status": self.status,
+                    "progress_language": progress_language,
                     "snapshot": snapshot,
                 }
             )
             request.instruct(
                 "Summarize AgentTask progress for a human operator using only the provided snapshot and task metadata. "
-                "Do not add new facts, do not infer hidden results, and keep the message concise."
+                "Do not add new facts, do not infer hidden results, and keep the message concise. "
+                f"Write the message in this language: { progress_language }."
             )
             request.output(
                 {
@@ -2046,12 +2367,50 @@ class AgentTask:
                 },
                 format="json",
             )
-            raw = await asyncio.wait_for(request.async_get_data(), timeout=self._progress_timeout_seconds())
+            result = request.get_result()
+            streamed_message = ""
+            final_stream_value = ""
+            async for item in result.get_async_generator(type="instant"):
+                raw_path = str(getattr(item, "path", "") or getattr(item, "wildcard_path", "") or "")
+                if raw_path != "message" and not raw_path.endswith(".message"):
+                    continue
+                delta = getattr(item, "delta", None)
+                value = getattr(item, "value", None)
+                event_type = getattr(item, "event_type", None)
+                if isinstance(delta, str) and delta:
+                    streamed_message += delta
+                    await self._emit_progress_delta(
+                        iteration=iteration,
+                        stage=stage,
+                        delta=delta,
+                        message_so_far=streamed_message,
+                        model_key=model_key,
+                        language=progress_language,
+                    )
+                elif event_type == "delta" and isinstance(value, str) and value:
+                    suffix = value[len(streamed_message):] if value.startswith(streamed_message) else value
+                    if suffix:
+                        streamed_message += suffix
+                        await self._emit_progress_delta(
+                            iteration=iteration,
+                            stage=stage,
+                            delta=suffix,
+                            message_so_far=streamed_message,
+                            model_key=model_key,
+                            language=progress_language,
+                        )
+                elif bool(getattr(item, "is_complete", False)) and isinstance(value, str):
+                    final_stream_value = value
+            raw = await asyncio.wait_for(result.async_get_data(), timeout=self._progress_timeout_seconds())
             message = ""
             if isinstance(raw, dict):
                 message = str(raw.get("message") or "")
             else:
                 message = str(raw or "")
+            if not message.strip() and final_stream_value.strip():
+                message = final_stream_value
+            if not message.strip() and streamed_message.strip():
+                message = streamed_message
             if not message.strip():
                 return None
             return await self._emit(
@@ -2061,6 +2420,7 @@ class AgentTask:
                     "iteration": iteration,
                     "stage": stage,
                     "status": self.status,
+                    "language": progress_language,
                 },
                 meta={
                     "task_id": self.id,
@@ -2070,6 +2430,7 @@ class AgentTask:
                     "stream_kind": "progress",
                     "progress_source": "model",
                     "progress_model_key": model_key,
+                    "progress_language": progress_language,
                 },
             )
         except Exception as error:
@@ -2083,6 +2444,52 @@ class AgentTask:
                 }
             )
             return None
+
+    async def _emit_progress_delta(
+        self,
+        *,
+        iteration: int,
+        stage: str,
+        delta: str,
+        message_so_far: str,
+        model_key: str,
+        language: str,
+    ) -> AgentExecutionStreamData:
+        return await self._emit(
+            f"agent_task.iteration.{iteration}.progress.{stage}.message",
+            {
+                "message": message_so_far,
+                "iteration": iteration,
+                "stage": stage,
+                "status": self.status,
+                "language": language,
+            },
+            event_type="delta",
+            delta=delta,
+            is_complete=False,
+            meta={
+                "task_id": self.id,
+                "status": self.status,
+                "iteration": iteration,
+                "stage": stage,
+                "stream_kind": "progress_delta",
+                "progress_source": "model",
+                "progress_model_key": model_key,
+                "progress_language": language,
+            },
+        )
+
+    def _progress_language(self) -> str:
+        language = (
+            self._agent_task_option("progress_language", None)
+            or self._agent_task_option("stream_progress_language", None)
+        )
+        if language is None:
+            getter = getattr(getattr(self.agent, "settings", None), "get", None)
+            if callable(getter):
+                language = getter("agent_task.progress.language", "auto")
+        normalized = str(language or "auto").strip()
+        return normalized or "auto"
 
     @staticmethod
     def _normalize_bool(value: Any, *, default: bool) -> bool:
@@ -2198,6 +2605,7 @@ class AgentTask:
         diagnostics = execution_meta.get("diagnostics", {})
         if isinstance(diagnostics, dict) and diagnostics.get("execution_error"):
             execution_errors.append(diagnostics["execution_error"])
+        replan_signals = AgentTask._collect_replan_signals(execution_meta)
         # Unified capability-evidence view (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
         # one capability id space across kinds plus per-kind evidence buckets. A
         # capability is "used" when it ran (action) or was selected (skill). The
@@ -2233,7 +2641,57 @@ class AgentTask:
             "route": DataFormatter.sanitize(route),
             "status": str(execution_meta.get("status") or ""),
             "errors": DataFormatter.sanitize(execution_errors),
+            "replan_signals": DataFormatter.sanitize(replan_signals),
         }
+
+    @staticmethod
+    def _collect_replan_signals(execution_meta: Mapping[str, Any]) -> list[dict[str, Any]]:
+        raw_values: list[Any] = []
+        direct_signal = execution_meta.get("replan_signal")
+        if direct_signal is not None:
+            raw_values.append(direct_signal)
+        direct_signals = execution_meta.get("replan_signals")
+        if isinstance(direct_signals, (list, tuple)):
+            raw_values.extend(direct_signals)
+        blocks = execution_meta.get("blocks")
+        if isinstance(blocks, Mapping):
+            evidence = blocks.get("evidence")
+            if isinstance(evidence, Mapping):
+                diagnostics = evidence.get("diagnostics")
+                if isinstance(diagnostics, (list, tuple)):
+                    raw_values.extend(
+                        item
+                        for item in diagnostics
+                        if isinstance(item, Mapping) and item.get("kind") == "replan_signal"
+                    )
+            snapshot = blocks.get("snapshot")
+            snapshot_blocks = snapshot.get("blocks") if isinstance(snapshot, Mapping) else None
+            if isinstance(snapshot_blocks, Mapping):
+                replan_signals = snapshot_blocks.get("replan_signals")
+                if isinstance(replan_signals, (list, tuple)):
+                    raw_values.extend(replan_signals)
+
+        signals: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for value in raw_values:
+            if not isinstance(value, Mapping):
+                continue
+            candidate = dict(value)
+            if candidate.get("kind") == "replan_signal":
+                candidate.pop("kind", None)
+            try:
+                normalized = ReplanSignal.from_value(candidate).to_dict()
+            except Exception as error:
+                normalized = {
+                    "status": "blocked",
+                    "reason": f"Invalid ReplanSignal payload: { error }",
+                    "diagnostics": [{"type": error.__class__.__name__, "message": str(error)}],
+                }
+            key = (str(normalized.get("status") or ""), str(normalized.get("reason") or ""))
+            if key not in seen:
+                seen.add(key)
+                signals.append(normalized)
+        return signals
 
     @staticmethod
     def _required_capability_constraints(execution_meta: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -2366,12 +2824,18 @@ class AgentTask:
         value: Any,
         *,
         event_type: Literal["delta", "done"] = "done",
+        delta: str | None = None,
+        is_complete: bool | None = None,
         meta: dict[str, Any] | None = None,
     ) -> AgentExecutionStreamData:
+        completed = event_type == "done"
+        if is_complete is not None:
+            completed = is_complete
         item = AgentExecutionStreamData(
             path=path,
             value=DataFormatter.sanitize(value),
-            is_complete=True,
+            delta=delta,
+            is_complete=completed,
             event_type=event_type,
             source="agent_task",
             task_id=self.id,

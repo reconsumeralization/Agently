@@ -45,6 +45,9 @@ session:
 response:
   streaming_parse: False
   streaming_parse_path_style: dot
+agent_task:
+  progress:
+    language: auto
 runtime:
   raise_error: True
   raise_critical: True
