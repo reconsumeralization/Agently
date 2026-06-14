@@ -200,4 +200,3 @@ def _settings_get(settings: Any, key: str) -> Any:
     if isinstance(settings, dict):
         return settings.get(key)
     return None
-
