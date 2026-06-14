@@ -106,6 +106,31 @@ async def test_trigger_flow_default_executions_share_physical_workspace_db_and_i
     assert len(list((tmp_path / ".agently" / "workspaces" / "scripts").glob("**/workspace.db"))) == 1
 
 
+@pytest.mark.asyncio
+async def test_trigger_flow_default_execution_search_is_execution_isolated(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-workspace-search-isolation")
+
+    first = flow.create_execution()
+    second = flow.create_execution()
+    first_workspace = cast(Any, first.require_runtime_resource("workspace"))
+    second_workspace = cast(Any, second.require_runtime_resource("workspace"))
+
+    await first_workspace.put("record from first execution", collection="observations", kind="iso_probe")
+    await second_workspace.put("record from second execution", collection="observations", kind="iso_probe")
+
+    # Default search is execution-isolated even though both executions share the
+    # same physical workspace.db (spec: explicit cross-scope search).
+    first_hits = await first_workspace.search("record")
+    assert [hit.get("summary") for hit in first_hits] == ["record from first execution"]
+    second_hits = await second_workspace.search("record")
+    assert [hit.get("summary") for hit in second_hits] == ["record from second execution"]
+
+    # Explicit cross-execution scope can still reach the sibling execution.
+    cross_hits = await first_workspace.search("record", filters={"scope.execution_id": second.id})
+    assert [hit.get("summary") for hit in cross_hits] == ["record from second execution"]
+
+
 def test_trigger_flow_default_workspace_uses_parent_session_scope(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     flow = TriggerFlow(name="execution-workspace-session-default")

@@ -81,9 +81,9 @@ execution = flow.create_execution(workspace=shared_workspace)
 
 `flow.create_execution()` binds the current session/script default Workspace by
 default and gives the execution its own scoped file root under
-`files/executions/<execution-id>`. Pass `workspace=False` to opt out, or pass a
-Workspace instance, path, or backend when the execution should use an explicitly
-selected Workspace.
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`.
+Pass `workspace=False` to opt out, or pass a Workspace instance, path, or
+backend when the execution should use an explicitly selected Workspace.
 
 Do not rely on separate explicitly isolated Workspaces to communicate with each
 other. If a TriggerFlow execution needs to move information between isolated
@@ -256,10 +256,13 @@ required flags or the matching provider methods.
 
 `agent.workspace.files_root` defines an ordinary editable working tree for
 shell, Node.js, and file actions. In shared default Workspaces this is a scoped
-subdirectory such as `files/agents/<agent-scope>`,
-`files/executions/<execution-id>`, or `files/tasks/<task-id>`. Filesystem-like
-action helpers inherit that boundary when no explicit root or cwd is passed,
-including when the Agent is still using its lazy default Workspace.
+lineage subdirectory such as
+`files/lineage/<root-kind>/<root-id>/.../agent/<agent-scope>/files`,
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`, or
+`files/lineage/<root-kind>/<root-id>/.../task/<task-id>/files`.
+Filesystem-like action helpers inherit that boundary when no explicit root or
+cwd is passed, including when the Agent is still using its lazy default
+Workspace.
 `agent.workspace.content_root` remains the shared managed record-content store
 used by Workspace records.
 
@@ -289,20 +292,21 @@ await agent.workspace.record_file_policy(
 
 Workspace V1 intentionally does not expose model-callable memory verbs such as
 `remember(...)`, `observe(...)`, or `decide(...)`. Those are higher-level
-affordances for future Action, Recall, or WorkLoop layers. In V1, application
-code decides what to write, and the Recall skeleton packages stored records into
-a `ContextPack` through pluggable planner, retriever, and context-builder
-profiles.
+affordances for future Action, ContextBuilder, or WorkLoop layers. In V1,
+application code decides what to write, and `workspace.build_context(...)`
+packages stored records into a `ContextPackage` through pluggable planner,
+retriever, and packager profiles. Legacy implementation names still contain
+`Recall*` until the breaking rename lands.
 
 ## Plugin Seams
 
 Workspace exposes low-level backend seams for content, metadata, checkpoints,
 RuntimeEvent storage, ref resolution, retention, evidence links, text index,
 policy, and vector index. The default local backend is filesystem content plus
-SQLite metadata/FTS and `NoopVectorIndex`. Recall exposes `RecallPlanner`,
-`Retriever`, and `ContextBuilder`; advanced model-assisted planning, vector
-retrieval, reranking, compression, and remote backends are expected to arrive as
-plugins over this foundation.
+SQLite metadata/FTS and `NoopVectorIndex`. ContextBuilder exposes
+`ContextPlanner`, `WorkspaceContextRetriever`, and `ContextPackager`; advanced
+model-assisted planning, vector retrieval, reranking, compression, and remote
+backends are expected to arrive as plugins over this foundation.
 
 Custom backends can be passed directly to `agent.use_workspace(...)` or
 registered by name when they implement the Workspace backend protocol:
@@ -337,7 +341,7 @@ workflow control plane.
 
 See `examples/workspace/workspace_loop_foundation.py` for an explicit
 TriggerFlow loop that stores structured observations, links decisions to
-evidence, checkpoints compact state, and recalls a ContextPack.
+evidence, checkpoints compact state, and builds a ContextPackage.
 
 See `examples/workspace/workspace_shared_default_management.py` for the default
 session-scoped Workspace behavior: multiple Agents and TriggerFlow executions
@@ -346,4 +350,4 @@ share one physical `workspace.db` while execution file roots stay isolated.
 See `examples/workspace/workspace_with_action_output.py` for the Action
 boundary: a file action writes into `workspace.files_root`, a shell action reads
 that file, application code explicitly ingests the action output as a Workspace
-observation, and Recall packages it into a ContextPack.
+observation, and ContextBuilder packages it into a ContextPackage.

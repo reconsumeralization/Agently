@@ -76,4 +76,4 @@ if __name__ == "__main__":
 # This infrastructure-only probe does not call a model. It demonstrates the
 # default Workspace management contract: an active session maps default Agents
 # and TriggerFlow executions to one physical Workspace database, while each
-# execution receives an isolated editable file root under files/executions/.
+# execution receives an isolated editable file root under files/lineage/.../execution/.

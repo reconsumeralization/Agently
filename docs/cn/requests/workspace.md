@@ -75,8 +75,10 @@ execution = flow.create_execution(workspace=shared_workspace)
 ```
 
 `flow.create_execution()` 默认绑定当前 session/script 的默认 Workspace，并给 execution
-分配 `files/executions/<execution-id>` 下的独立文件 root。传 `workspace=False` 可以显式
-关闭；传 Workspace 实例、路径或 backend 时，execution 会使用显式选择的 Workspace。
+分配
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`
+下的独立文件 root。传 `workspace=False` 可以显式关闭；传 Workspace 实例、路径或
+backend 时，execution 会使用显式选择的 Workspace。
 
 不要依赖多个显式隔离的 Workspace 之间自动通讯。如果 TriggerFlow execution 过程中需要在
 隔离 Workspace 之间移动信息，应在业务逻辑里显式完成：从源 Workspace search/read，
@@ -239,11 +241,13 @@ index 组件。它也会报告 `supports_event_sequence`、`supports_range_read`
 ## Action 边界
 
 `agent.workspace.files_root` 是给 shell、Node.js 和文件 action 使用的普通可编辑作业区。
-在共享默认 Workspace 中，它是 `files/agents/<agent-scope>`、
-`files/executions/<execution-id>` 或 `files/tasks/<task-id>` 这类带作用域的子目录。
-类文件系统的 Action helper 在没有显式 root 或 cwd 时会继承这个边界，包括 Agent 仍在
-使用 lazy default Workspace 时。`agent.workspace.content_root` 仍然是 Workspace records
-使用的共享受管内容存储。
+在共享默认 Workspace 中，它是
+`files/lineage/<root-kind>/<root-id>/.../agent/<agent-scope>/files`、
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files` 或
+`files/lineage/<root-kind>/<root-id>/.../task/<task-id>/files` 这类带 lineage
+作用域的子目录。类文件系统的 Action helper 在没有显式 root 或 cwd 时会继承这个边界，
+包括 Agent 仍在使用 lazy default Workspace 时。`agent.workspace.content_root`
+仍然是 Workspace records 使用的共享受管内容存储。
 
 ```python
 agent.enable_workspace_file_actions(write=True)
@@ -268,17 +272,19 @@ await agent.workspace.record_file_policy(
 ## 不是记忆策略
 
 Workspace V1 不暴露 `remember(...)`、`observe(...)`、`decide(...)` 这类可被模型调用
-的记忆动词。这些属于未来 Action、Recall 或 WorkLoop 层的高阶接口。V1 中，应用代码
-决定写入什么；Recall 骨架通过可插拔 planner、retriever 和 context-builder profile
-把已存 records 打包成 `ContextPack`。
+的记忆动词。这些属于未来 Action、ContextBuilder 或 WorkLoop 层的高阶接口。V1 中，
+应用代码决定写入什么；`workspace.build_context(...)` 通过可插拔 planner、retriever
+和 packager profile 把已存 records 打包成 `ContextPackage`。当前实现里仍有
+`Recall*` legacy 名称，等待 breaking rename 闭合。
 
 ## 插件边界
 
 Workspace 暴露 content、metadata、checkpoint、RuntimeEvent storage、ref
 resolution、retention、evidence links、text index、policy 和 vector index 等底层
 backend seam。默认本地 backend 是 filesystem content + SQLite metadata/FTS +
-`NoopVectorIndex`。Recall 暴露 `RecallPlanner`、`Retriever` 和 `ContextBuilder`；
-高级模型辅助规划、向量检索、rerank、compression 和 remote backends 预期作为插件叠加在这个底座上。
+`NoopVectorIndex`。ContextBuilder 暴露 `ContextPlanner`、
+`WorkspaceContextRetriever` 和 `ContextPackager`；高级模型辅助规划、向量检索、
+rerank、compression 和 remote backends 预期作为插件叠加在这个底座上。
 
 只要实现 Workspace backend protocol，自定义 backend 可以直接传给
 `agent.use_workspace(...)`，也可以按名称注册：
@@ -311,7 +317,7 @@ workflow control plane。
 
 `examples/workspace/workspace_loop_foundation.py` 展示了一个显式 TriggerFlow
 loop：写入结构化 observations，把 decisions link 到 evidence，checkpoint 紧凑状态，
-并通过 Recall 生成 ContextPack。
+并通过 ContextBuilder 生成 ContextPackage。
 
 `examples/workspace/workspace_shared_default_management.py` 展示默认 session 作用域的
 Workspace 行为：多个 Agent 和 TriggerFlow execution 共享一个物理 `workspace.db`，
@@ -319,4 +325,4 @@ Workspace 行为：多个 Agent 和 TriggerFlow execution 共享一个物理 `wo
 
 `examples/workspace/workspace_with_action_output.py` 展示 Action 边界：file action
 写入 `workspace.files_root`，shell action 读取该文件，应用代码把 action output 显式
-ingest 为 Workspace observation，再通过 Recall 打包成 ContextPack。
+ingest 为 Workspace observation，再通过 ContextBuilder 打包成 ContextPackage。

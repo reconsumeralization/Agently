@@ -168,14 +168,15 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
 
     def _default_execution_workspace_search_scope(
         self,
+        execution_id: str,
         run_context: "RunContext | None" = None,
     ) -> dict[str, Any]:
-        from agently.core.workspace._defaults import script_scope
-
-        session_id = getattr(run_context, "session_id", None)
-        if session_id:
-            return {"session_id": str(session_id)}
-        return {"script_scope": script_scope()}
+        # Default search is execution-isolated: a default execution Workspace
+        # search / context build only sees its own execution's records, even
+        # though sibling executions in the same session/script share the physical
+        # workspace.db. Cross-execution recall requires an explicit scope (spec:
+        # explicit cross-scope search/read/link/Recall).
+        return {"execution_id": execution_id}
 
     def _create_execution_workspace_resource(self, execution_id: str, run_context: "RunContext | None" = None):
         from agently.base import workspace as global_workspace
@@ -192,7 +193,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
             root,
             files_root=lineage_files_root(root, execution_lineage),
             default_scope=self._default_execution_workspace_scope(execution_id, run_context),
-            default_search_scope=self._default_execution_workspace_search_scope(run_context),
+            default_search_scope=self._default_execution_workspace_search_scope(execution_id, run_context),
             scope_lineage=execution_lineage,
         )
 
