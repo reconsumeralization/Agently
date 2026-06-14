@@ -7,7 +7,7 @@ model: a Skill is guidance plus optional execution metadata in frontmatter
 `staged` and `react` run on TriggerFlow and tool/action calls delegate through
 Action / ActionRuntime. Side effects such as file writes, network calls, package
 installation, and durable approvals remain owned by host code, Action,
-ExecutionEnvironment, or TriggerFlow.
+ExecutionResource, or TriggerFlow.
 
 Self-authored example Skills live as real standard Skill directories under
 `examples/skills_executor/skills/<skill-id>/SKILL.md`. Example scripts install
