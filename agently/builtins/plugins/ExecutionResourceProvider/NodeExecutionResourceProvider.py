@@ -50,6 +50,18 @@ class NodeExecutionResource:
                 "ok": False,
                 "error": f"Node.js binary not found: { self.node_binary }",
             }
+        if self.cwd is None:
+            # No Workspace-issued working directory: fail closed rather than
+            # running in the process cwd (spec sections 8.6 / 9).
+            return {
+                "ok": False,
+                "need_approval": True,
+                "reason": "workspace_boundary_required",
+                "detail": (
+                    "No Workspace-issued working directory for Node.js. Bind a Workspace and "
+                    "enable a Workspace-bound runner (agent.use_workspace(...) + agent.enable_nodejs(...))."
+                ),
+            }
         result = subprocess.run(
             [self.node_binary, "-e", js_code, *(args or [])],
             cwd=self.cwd,
@@ -87,10 +99,19 @@ class NodeExecutionResourceProvider:
         existing_handle: "ExecutionResourceHandle | None" = None,
     ) -> "ExecutionResourceHandle":
         _ = existing_handle
+        from ._boundary import materialize_workspace_boundary
+
         config = requirement.get("config", {})
+        # Materialize the Workspace-issued file boundary in the provider context
+        # so the executor receives a ready working directory and never falls back
+        # to the process cwd (spec section 8.6).
+        boundary = materialize_workspace_boundary(
+            [config.get("cwd"), policy.get("workspace_roots")],
+            label="node execution resource",
+        )
         resource = NodeExecutionResource(
             node_binary=str(config.get("node_binary", "node")),
-            cwd=config.get("cwd"),
+            cwd=boundary,
             env=config.get("env"),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 20))),
         )

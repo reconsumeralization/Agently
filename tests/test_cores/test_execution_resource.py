@@ -158,6 +158,29 @@ def test_action_bash_sandbox_uses_execution_resource(tmp_path):
     assert Agently.execution_resource.list(scope="action_call") == []
 
 
+def test_bash_execution_resource_materializes_workspace_boundary(tmp_path):
+    # Provider-side file-boundary materialization: a Workspace-issued root that
+    # does not yet exist is created by the provider before the executor runs
+    # (spec section 8.6).
+    boundary = tmp_path / "lineage" / "executions" / "exec-mat" / "files"
+    assert not boundary.exists()
+    action_id = "bash_boundary_materialize"
+    Agently.action.register_bash_sandbox_action(
+        action_id=action_id,
+        expose_to_model=False,
+        allowed_cmd_prefixes=["pwd"],
+        allowed_workdir_roots=[str(boundary)],
+    )
+
+    result = Agently.action.execute_action(action_id, {"cmd": "pwd"})
+
+    assert result.get("status") == "success"
+    assert boundary.is_dir()
+    result_data = cast(dict[str, Any], result.get("data"))
+    assert result_data["ok"] is True
+    assert str(boundary.resolve()) in result_data["stdout"]
+
+
 def test_action_environment_default_policy_denies_as_blocked_action_result():
     action_id = "approval_env_action"
     Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)

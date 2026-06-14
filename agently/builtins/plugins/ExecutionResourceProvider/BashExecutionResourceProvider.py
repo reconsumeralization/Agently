@@ -47,10 +47,19 @@ class BashExecutionResourceProvider:
         _ = existing_handle
         from agently.builtins.actions import Cmd
 
+        from ._boundary import materialize_workspace_boundary
+
         config = requirement.get("config", {})
+        # Materialize the Workspace-issued file boundary in the provider context
+        # before the executor runs; fail closed here if a supplied boundary cannot
+        # be materialized, rather than inside the executor (spec section 8.6).
+        boundary = materialize_workspace_boundary(
+            [policy.get("workspace_roots"), config.get("allowed_workdir_roots")],
+            label="bash execution resource",
+        )
         resource = Cmd(
             allowed_cmd_prefixes=policy.get("allowed_cmd_prefixes", config.get("allowed_cmd_prefixes")),
-            allowed_workdir_roots=policy.get("workspace_roots", config.get("allowed_workdir_roots")),
+            allowed_workdir_roots=[boundary] if boundary is not None else None,
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 20))),
             env=config.get("env", None),
         )
