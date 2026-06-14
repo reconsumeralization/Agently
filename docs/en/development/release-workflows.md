@@ -146,7 +146,7 @@ the target contract.
 Foundation-layer capabilities are release-critical framework substrate, not
 application-level use cases. Examples include ModelRequest/ModelResponse,
 TriggerFlow, Dynamic Task/TaskDAG, ActionRuntime, ExecutionResource,
-Workspace/Recall, RuntimeEvent/EventCenter, and provider protocols. When a
+Workspace/ContextBuilder/ContextPackage, RuntimeEvent/EventCenter, and provider protocols. When a
 release touches or claims one of these substrate capabilities, tests are not
 enough by themselves: the release reviewer must also run the corresponding core
 example under `examples/` and confirm the real effect still works through the

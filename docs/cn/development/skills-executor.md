@@ -125,7 +125,7 @@ decision cards、资源摘要和任务放进一次模型请求。多步策略由
 frontmatter 声明执行策略。
 当可用 action 存在时，`react` 会把 tool/action 规划和执行委托给 Agent
 ActionRuntime，因此 kwargs schema、MCP tools、policy、approval、concurrency 和
-Execution Environment 处理仍由 Action 层拥有，而不是由 Skills 重新实现。
+ExecutionResource 处理仍由 Action 层拥有，而不是由 Skills 重新实现。
 
 ```python
 execution = await agent.async_run_skills_task(

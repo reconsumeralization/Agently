@@ -167,7 +167,7 @@ task_refs = result.task_refs
 每轮会把 planning decision、execution observation、verification evidence、
 evidence links 和 checkpoint 写入 Workspace。checkpoint 通过 Workspace
 checkpoint-store port 写入，task evidence 关系通过 `workspace.link_evidence(...)`
-记录。下一轮通过 `workspace.build_context(...)` 取得 ContextPack，因此 loop
+记录。下一轮通过 `workspace.build_context(...)` 取得 ContextPackage，因此 loop
 可以把证据带入下一轮，但 Workspace 不会变成自主规划器。
 
 AgentTask 的验证仍由模型判断拥有，但最终验收采用保守 guard。loop 会规范化

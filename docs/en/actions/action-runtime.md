@@ -135,11 +135,11 @@ agent.use_actions(Search(timeout=15, backend="auto"))
 agent.use_actions(Browse())
 ```
 
-Search is an Action-native package and does not use Execution Environment;
+Search is an Action-native package and does not use ExecutionResource;
 proxy, timeout, backend, and region are package/executor configuration. Browse
 is also Action-native; its default path is Playwright + BS4, while pyautogui is
 kept as legacy/advanced configuration. If a Browse action needs a managed
-browser/page/session, register it with Browser Execution Environment enabled.
+browser/page/session, register it with a Browser ExecutionResource provider enabled.
 
 The `desc=` argument on `enable_*` helpers is optional. By default it is appended
 as additional guidance so the model still sees the baseline usage and safety
@@ -290,7 +290,7 @@ There is no legacy positional handler signature — the public contract is `(con
 ## See also
 
 - [Actions Overview](overview.md) — where Action Runtime stops and orchestration starts
-- [Execution Environment](execution-environment.md) — managed MCP/sandbox dependencies
+- [ExecutionResource](execution-environment.md) — managed MCP/sandbox dependencies
 - [Tools](tools.md) — the compat surface in more detail
 - [MCP](mcp.md) — `agent.use_mcp(...)`
 - [TriggerFlow Overview](../triggerflow/overview.md) — orchestration above actions

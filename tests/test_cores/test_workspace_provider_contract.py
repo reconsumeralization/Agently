@@ -22,6 +22,7 @@ from agently.types.data import (
     WorkspaceReferenceEnvelope,
     WorkspaceRetentionAnchor,
     WorkspaceRuntimeEventRecord,
+    WorkspaceScratchLease,
 )
 from agently.utils import DataFormatter, Settings
 
@@ -101,6 +102,7 @@ class RemoteAuditWorkspaceBackend:
         self._checkpoints: dict[str, list[WorkspaceRecordRef]] = {}
         self._checkpoint_states: dict[str, list[dict[str, Any]]] = {}
         self._leases: dict[str, WorkspaceLeaseRef] = {}
+        self._scratch_leases: dict[str, WorkspaceScratchLease] = {}
         self._runtime_events: dict[str, list[WorkspaceRuntimeEventRecord]] = {}
         self._runtime_event_idempotency: dict[tuple[str, str], WorkspaceRuntimeEventRecord] = {}
         self._retention_anchors: list[WorkspaceRetentionAnchor] = []
@@ -127,6 +129,8 @@ class RemoteAuditWorkspaceBackend:
             return f"remote_link_{ len(self._links) + 1 }"
         if prefix == "anchor":
             return f"remote_anchor_{ len(self._retention_anchors) + 1 }"
+        if prefix == "scratch":
+            return f"remote_scratch_{ len(self._scratch_leases) + 1 }"
         events = self._runtime_events.get(str(collection or "default"), [])
         return f"remote_event_{ len(events) + 1 }"
 
@@ -622,6 +626,62 @@ class RemoteAuditWorkspaceBackend:
         lease["released_at"] = self._now()
         lease["lease_until"] = time.time()
         self._leases[run_id] = lease
+        return lease
+
+    async def register_scratch_lease(self, lease: WorkspaceScratchLease) -> WorkspaceScratchLease:
+        lease_id = str(lease.get("lease_id") or self._next_id("scratch"))
+        record: WorkspaceScratchLease = {
+            "lease_id": lease_id,
+            "scope": dict(lease.get("scope") or {}),
+            "local_path": lease.get("local_path"),
+            "mount": lease.get("mount"),
+            "purpose": lease.get("purpose"),
+            "cleanup_policy": lease.get("cleanup_policy") or "on_close",
+            "expires_at": lease.get("expires_at"),
+            "read_only": bool(lease.get("read_only", False)),
+            "policy_labels": list(lease.get("policy_labels") or []),
+            "created_at": lease.get("created_at") or self._now(),
+            "closed_at": lease.get("closed_at"),
+        }
+        self._scratch_leases[lease_id] = record
+        self.operations.append("register_scratch_lease")
+        return record
+
+    async def get_scratch_lease(self, lease_id: str) -> WorkspaceScratchLease | None:
+        self.operations.append("get_scratch_lease")
+        return self._scratch_leases.get(lease_id)
+
+    async def list_scratch_leases(
+        self,
+        *,
+        include_closed: bool = False,
+        expired_before: str | None = None,
+    ) -> list[WorkspaceScratchLease]:
+        self.operations.append("list_scratch_leases")
+        leases = list(self._scratch_leases.values())
+        if not include_closed:
+            leases = [lease for lease in leases if lease.get("closed_at") is None]
+        if expired_before is not None:
+            leases = [
+                lease
+                for lease in leases
+                if lease.get("expires_at") is not None and str(lease.get("expires_at")) <= expired_before
+            ]
+        return leases
+
+    async def close_scratch_lease(
+        self,
+        lease_id: str,
+        *,
+        closed_at: str | None = None,
+    ) -> WorkspaceScratchLease | None:
+        self.operations.append("close_scratch_lease")
+        lease = self._scratch_leases.get(lease_id)
+        if lease is None:
+            return None
+        if lease.get("closed_at") is None:
+            lease = cast(WorkspaceScratchLease, {**lease, "closed_at": closed_at or self._now()})
+            self._scratch_leases[lease_id] = lease
         return lease
 
     async def append_runtime_event(

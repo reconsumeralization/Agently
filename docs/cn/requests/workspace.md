@@ -274,8 +274,7 @@ await agent.workspace.record_file_policy(
 Workspace V1 不暴露 `remember(...)`、`observe(...)`、`decide(...)` 这类可被模型调用
 的记忆动词。这些属于未来 Action、ContextBuilder 或 WorkLoop 层的高阶接口。V1 中，
 应用代码决定写入什么；`workspace.build_context(...)` 通过可插拔 planner、retriever
-和 packager profile 把已存 records 打包成 `ContextPackage`。当前实现里仍有
-`Recall*` legacy 名称，等待 breaking rename 闭合。
+和 packager profile 把已存 records 打包成 `ContextPackage`。
 
 ## 插件边界
 

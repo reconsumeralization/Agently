@@ -121,8 +121,8 @@ async def main():
     observation_ref = first_workspace_record["record"]
 
     context_pack = await agent.workspace.build_context(
-        # Scope owns this recall in the example; an empty goal exercises
-        # ContextPack construction without invoking FTS query syntax.
+        # Scope owns context selection in the example; an empty goal exercises
+        # ContextPackage construction without invoking FTS query syntax.
         goal="",
         scope={"task_id": task_id},
         budget={"chars": 1200},
@@ -139,7 +139,7 @@ async def main():
             }
         )
         .instruct(
-            "Use the ContextPack as explicit prior evidence. Choose the next concrete action and "
+            "Use the ContextPackage as explicit prior evidence. Choose the next concrete action and "
             "state a verification check. Do not invent Workspace writes; the host owns them."
         )
         .output(

@@ -33,10 +33,10 @@ This handbook is organized as a learning path. If you have not run a single requ
    - [Context Engineering](requests/context-engineering.md)
    - [Workspace](requests/workspace.md)
 
-3. **Actions** — model-callable actions, built-in capability packages, MCP, managed execution environments, and compatibility surfaces
+3. **Actions** — model-callable actions, built-in capability packages, MCP, managed execution resources, and compatibility surfaces
    - [Actions Overview](actions/overview.md)
    - [Action Runtime](actions/action-runtime.md)
-   - [Execution Environment](actions/execution-environment.md)
+   - [ExecutionResource](actions/execution-environment.md)
    - [Tools Compatibility](actions/tools.md)
    - [MCP](actions/mcp.md)
 

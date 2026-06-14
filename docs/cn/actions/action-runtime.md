@@ -132,10 +132,10 @@ agent.use_actions(Search(timeout=15, backend="auto"))
 agent.use_actions(Browse())
 ```
 
-Search 是 Action-native package，不进入 Execution Environment；proxy、timeout、
+Search 是 Action-native package，不进入 ExecutionResource；proxy、timeout、
 backend、region 都属于 package/executor 配置。Browse 也是 Action-native；默认主线是
 Playwright + BS4，pyautogui 保留为 legacy/advanced 配置。如果 Browse action 需要托管
-browser/page/session，可以启用 Browser Execution Environment。
+browser/page/session，可以启用 Browser ExecutionResource provider。
 
 `enable_*` helpers 的 `desc=` 是可选项。默认会作为补充说明追加，确保模型仍然看到基础用法和安全边界。
 如果你确实要替换默认描述，使用 `desc_mode="override"`；如果要忽略传入描述、只保留内置描述，使用
@@ -276,7 +276,7 @@ observation 映射到官方事件流。
 ## 另见
 
 - [Actions 概览](overview.md) —— Action Runtime 到哪里停止、编排从哪里开始
-- [Execution Environment](execution-environment.md) —— 托管 MCP/sandbox 执行依赖
+- [ExecutionResource](execution-environment.md) —— 托管 MCP/sandbox 执行依赖
 - [工具](tools.md) —— 兼容入口详细
 - [MCP](mcp.md) —— `agent.use_mcp(...)`
 - [TriggerFlow 概览](../triggerflow/overview.md) —— action 之上的编排

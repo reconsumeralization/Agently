@@ -143,7 +143,7 @@ class AgentExecution:
         self.consumed_options: dict[str, Any] = {}
         self.workspace: Any = getattr(self.agent, "workspace", None)
         # Bind the execution file root from the full resolved scope chain instead
-        # of a flat ``files/executions/<id>`` root. The effective parent scope is
+        # of a lineage-scoped execution file root. The effective parent scope is
         # known at construction via ``self.lineage`` (parent task and/or parent
         # execution), so the execution nests under its real ancestors and shares
         # a single prunable lineage subtree with them (spec sections 8.2 / 9).

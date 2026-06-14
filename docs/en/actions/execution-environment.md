@@ -88,7 +88,7 @@ The built-in providers are:
 
 Search intentionally is not listed here. It is a stateless Action-native
 capability package; proxy, timeout, backend, and region belong to the Search
-package/executor configuration rather than Execution Environment.
+package/executor configuration rather than ExecutionResource.
 
 These providers are low-level environment implementations. User-facing
 capabilities should normally be exposed as Actions, and scenario shortcuts
@@ -112,7 +112,7 @@ resources through `action_call["execution_resource_resources"]`.
 ## TriggerFlow
 
 TriggerFlow still uses `runtime_resources` as the compatibility surface for
-live execution-local resources. Execution Environment does not rename or replace
+live execution-local resources. ExecutionResource does not rename or replace
 that API.
 
 You can pass managed requirements at execution creation or start:

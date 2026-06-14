@@ -75,7 +75,7 @@ top to bottom, with the listed components:
    TaskDAGPlanner,
    ActionExecutor, ActionFlow, ActionRuntime, ExecutionResourceProvider,
    ToolManager.
-5. Execution Environment Manager & Capabilities (capability colour): Sandbox,
+5. ExecutionResourceManager & Capabilities (capability colour): Sandbox,
    Process, Filesystem, Network, Credentials, MCP, Resources.
 6. External Dependencies & Integrations (external colour): Model Providers
    (DeepSeek, Ollama, any OpenAI-compatible endpoint), ChromaDB, FastAPI.

@@ -145,7 +145,7 @@ asyncio.run(main())
 # TriggerFlow owns the explicit loop, while the Agent's default lazy Workspace
 # materializes only when durable provider ports are used. Workspace owns durable
 # structured observations, decisions, links, checkpoints, RuntimeEvent records,
-# and ContextPack recall.
+# and ContextPackage construction.
 #
 # Flow:
 # async_start({"task_id": "issue-123"})

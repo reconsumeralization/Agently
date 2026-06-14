@@ -38,7 +38,7 @@ The companion repo does not become a runtime dependency of your Agently app. It 
 |---|---|
 | `agently` | starting fresh — picking the right structure for a new Agently project |
 | `agently-request` | model setup, prompt management, structured output, response reuse, session memory, embeddings, retrieval |
-| `agently-runtime` | Action Runtime, built-in actions, MCP, Execution Environment, FastAPI exposure, DevTools wiring |
+| `agently-runtime` | Action Runtime, built-in actions, MCP, ExecutionResource, FastAPI exposure, DevTools wiring |
 | `agently-dynamic-task` | model-generated or app-submitted DAG planning, validation, and execution |
 | `agently-triggerflow` | needing branching, concurrency, pause/resume, save/load |
 | `agently-migration` | migrating from LangChain, LangGraph, LlamaIndex, CrewAI, or similar systems |

@@ -657,24 +657,29 @@ async def test_workspace_scratch_lease_is_durable_and_recoverable(tmp_path):
     execution = workspace.with_scope_node("executions", "exec-1")
 
     lease = await execution.open_scratch(purpose="unzip", ttl_seconds=-1)
-    local_path = Path(cast(str, lease["local_path"]))
+    lease_id = lease.get("lease_id")
+    local_path_value = lease.get("local_path")
+    assert isinstance(lease_id, str)
+    assert isinstance(local_path_value, str)
+    local_path = Path(local_path_value)
     assert local_path.exists()
-    assert lease["closed_at"] is None
-    assert lease["cleanup_policy"] == "on_close"
+    assert lease.get("closed_at") is None
+    assert lease.get("cleanup_policy") == "on_close"
     # The lease is a durable Workspace fact, not just an in-memory handle.
     backend = cast(Any, workspace.backend)
-    stored = await backend.get_scratch_lease(lease["lease_id"])
+    stored = await backend.get_scratch_lease(lease_id)
     assert stored is not None
-    assert stored["local_path"] == lease["local_path"]
+    assert stored.get("local_path") == local_path_value
 
     (local_path / "tmp.txt").write_text("scratch", encoding="utf-8")
 
     # Crash recovery: TTL/startup cleanup uses the durable lease record, not mtime.
     result = await execution.cleanup_scratch_leases()
-    assert lease["lease_id"] in result["recovered_leases"]
+    assert lease_id in result["recovered_leases"]
     assert not local_path.exists()
-    closed = await backend.get_scratch_lease(lease["lease_id"])
-    assert closed["closed_at"] is not None
+    closed = await backend.get_scratch_lease(lease_id)
+    assert closed is not None
+    assert closed.get("closed_at") is not None
 
 
 @pytest.mark.asyncio
@@ -683,7 +688,11 @@ async def test_workspace_scratch_lease_removed_with_scope_prune(tmp_path):
     execution = workspace.with_scope_node("executions", "exec-1")
 
     lease = await execution.open_scratch(purpose="hold", cleanup_policy="on_scope_prune")
-    local_path = Path(cast(str, lease["local_path"]))
+    lease_id = lease.get("lease_id")
+    local_path_value = lease.get("local_path")
+    assert isinstance(lease_id, str)
+    assert isinstance(local_path_value, str)
+    local_path = Path(local_path_value)
     assert local_path.exists()
 
     await execution.prune_scope({"execution_id": "exec-1"})
@@ -691,7 +700,7 @@ async def test_workspace_scratch_lease_removed_with_scope_prune(tmp_path):
     assert not local_path.exists()
     backend = cast(Any, workspace.backend)
     # Pruning the owning scope also removes the durable lease record.
-    assert await backend.get_scratch_lease(lease["lease_id"]) is None
+    assert await backend.get_scratch_lease(lease_id) is None
 
 
 def test_trigger_flow_runtime_event_recovery_diagnostics_and_projection_shape():

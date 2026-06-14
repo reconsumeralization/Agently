@@ -38,7 +38,7 @@ skill **不是**纯文档。它为 coding agent 结构化：每个 skill 告诉 
 |---|---|
 | `agently` | 从零开始 —— 选合适的项目结构 |
 | `agently-request` | 模型接入、Prompt 管理、结构化输出、响应复用、session memory、embedding、检索 |
-| `agently-runtime` | Action Runtime、内置 actions、MCP、Execution Environment、FastAPI 暴露、DevTools 接入 |
+| `agently-runtime` | Action Runtime、内置 actions、MCP、ExecutionResource、FastAPI 暴露、DevTools 接入 |
 | `agently-dynamic-task` | 模型生成或应用提交的 DAG 规划、校验和执行 |
 | `agently-triggerflow` | 需要分支、并发、pause/resume、save/load |
 | `agently-migration` | 从 LangChain、LangGraph、LlamaIndex、CrewAI 或类似系统迁移 |

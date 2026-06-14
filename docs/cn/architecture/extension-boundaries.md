@@ -72,7 +72,7 @@ live resource 生命周期属于 `ExecutionResourceProvider`。
 
 ### Built-in Capability Actions
 
-Built-in 是 Agently 随框架提供的默认能力目录。它们以 Action 的形式暴露模型可调用操作，并且可以依赖 Execution Environment。
+Built-in 是 Agently 随框架提供的默认能力目录。它们以 Action 的形式暴露模型可调用操作，并且可以依赖 ExecutionResource。
 
 适合作为 built-in 的能力：
 
@@ -86,7 +86,7 @@ Built-in 是 Agently 随框架提供的默认能力目录。它们以 Action 的
 - 调用预注册 Python 函数
 - 调用 MCP tools
 
-Action 是模型可见的调用面。只有当 action 需要托管 live dependency、隔离边界、可复用 client 或 cleanup policy 时，才需要 Execution Environment。
+Action 是模型可见的调用面。只有当 action 需要托管 live dependency、隔离边界、可复用 client 或 cleanup policy 时，才需要 ExecutionResource。
 
 内置 capability package 的主 authoring/import path 与实现归属是
 `agently.builtins.actions`。`agently.builtins.tools` 是既有代码的薄 legacy facade，
@@ -134,9 +134,9 @@ manager、默认实现、registry、adapter、policy 或 validation 等多个架
 `builtins/plugins/SkillsExecutor`。公开 import 通过 package `__init__.py`
 和顶层 re-export 保持稳定。
 
-## Action 与 Execution Environment
+## Action 与 ExecutionResource
 
-Action 和 Execution Environment 是两个独立层。
+Action 和 ExecutionResource 是两个独立层。
 
 Action 回答：
 
@@ -144,13 +144,13 @@ Action 回答：
 - 输入 schema 是什么？
 - 一次调用如何归一化成 `ActionResult`？
 
-Execution Environment 回答：
+ExecutionResource 回答：
 
 - 执行前必须存在什么 live dependency？
 - 是否被 policy 和 approval 允许？
 - 如何启动、复用、健康检查、按 scope 管理和释放？
 
-不是所有 Action 都需要 Execution Environment。文件 policy 检查、纯本地函数和简单无状态操作可以只是普通 Action。当涉及生命周期、隔离、健康检查、凭证或 cleanup 时，再使用 Execution Environment。
+不是所有 Action 都需要 ExecutionResource。文件 policy 检查、纯本地函数和简单无状态操作可以只是普通 Action。当涉及生命周期、隔离、健康检查、凭证或 cleanup 时，再使用 ExecutionResource。
 
 ## Skills 边界
 

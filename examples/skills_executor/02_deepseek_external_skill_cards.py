@@ -82,7 +82,7 @@ CASES = [
         "relative_path": "skills/agently-runtime",
         "task": (
             "I am building an Agently assistant that needs a Python capability, "
-            "action logs, and managed execution environment boundaries. Recommend "
+            "action logs, and managed execution resource boundaries. Recommend "
             "the native Agently implementation path."
         ),
     },

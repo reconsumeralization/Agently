@@ -295,8 +295,7 @@ Workspace V1 intentionally does not expose model-callable memory verbs such as
 affordances for future Action, ContextBuilder, or WorkLoop layers. In V1,
 application code decides what to write, and `workspace.build_context(...)`
 packages stored records into a `ContextPackage` through pluggable planner,
-retriever, and packager profiles. Legacy implementation names still contain
-`Recall*` until the breaking rename lands.
+retriever, and packager profiles.
 
 ## Plugin Seams
 

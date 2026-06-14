@@ -133,7 +133,7 @@ single-shot Skill + host orchestration pattern.
   4.1.3.7 AgentExecution lineage/limits contract. The host owns a two-step loop, runs two
   real model-backed `create_execution(lineage=..., limits=...)`
   calls, explicitly persists observations/checkpoints through the execution's
-  bound Workspace helper, builds a ContextPack between steps, and verifies
+  bound Workspace helper, builds a ContextPackage between steps, and verifies
   stream/meta lineage correlation.
 
 - **21 — GitHub Issue Intake.** Business-scenario example for the 4.1.3.7
@@ -142,7 +142,7 @@ single-shot Skill + host orchestration pattern.
   official repo from real command output, then runs `gh issue list` through the
   same ActionRuntime path. Host code reads AgentExecution action logs/artifact
   refs, validates the real `gh` stdout, stores the latest open issues through
-  the execution's bound Workspace helper, and builds a ContextPack for
+  the execution's bound Workspace helper, and builds a ContextPackage for
   downstream maintainer work. Runtime stall diagnostics use
   `RuntimeStageStallError`, provider stream-idle settings, and AgentExecution
   `limits.max_no_progress_seconds`; expensive RuntimeEvent outlets should use

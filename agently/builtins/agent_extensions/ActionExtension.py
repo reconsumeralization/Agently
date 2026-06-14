@@ -356,7 +356,7 @@ class ActionExtension(BaseAgent):
         workspace = getattr(self, "workspace", None)
         if cwd is None and workspace is not None:
             cwd = str(getattr(workspace, "files_root", getattr(workspace, "content_root")))
-        default_desc = "Run JavaScript with Node.js inside a managed execution environment."
+        default_desc = "Run JavaScript with Node.js inside a managed execution resource."
         self.action.register_nodejs_action(
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
@@ -380,7 +380,7 @@ class ActionExtension(BaseAgent):
         expose_to_model: bool = True,
         uri: bool = False,
     ):
-        default_desc = "Query a SQLite database through a managed execution environment."
+        default_desc = "Query a SQLite database through a managed execution resource."
         self.action.register_sqlite_action(
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
@@ -404,7 +404,7 @@ class ActionExtension(BaseAgent):
         docker_binary: str = "docker",
         default_args: list[str] | None = None,
     ):
-        default_desc = "Run a command in a Docker container through a managed execution environment."
+        default_desc = "Run a command in a Docker container through a managed execution resource."
         self.action.register_docker_action(
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),

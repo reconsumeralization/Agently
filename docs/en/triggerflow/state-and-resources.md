@@ -158,7 +158,7 @@ warning, while the default `fail_closed` blocks strict load.
 `flow.async_start(...)`.
 
 Those resources are still read inside chunks through `data.require_resource(...)`.
-The difference is ownership: the Execution Environment Manager starts/reuses the
+The difference is ownership: the ExecutionResourceManager starts/reuses the
 resource and releases it when the execution closes. Manually passed
 `runtime_resources={...}` remain unmanaged.
 
@@ -184,7 +184,7 @@ resource and releases it when the execution closes. Manually passed
 ## See also
 
 - [Lifecycle](lifecycle.md) — what `close()` returns
-- [Execution Environment](../actions/execution-environment.md) — managed live resource lifecycle
+- [ExecutionResource](../actions/execution-environment.md) — managed live resource lifecycle
 - [Persistence and Blueprint](persistence-and-blueprint.md) — `save` / `load` semantics
 - [Distributed Pause and Resume Boundaries](distributed-pause-resume.md) — host-managed recovery and live object ownership
 - [Compatibility](compatibility.md) — `runtime_data` is the deprecated alias of `state`

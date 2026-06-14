@@ -176,9 +176,9 @@ execution use `action.approval_required` or `action.blocked` instead of being
 reported as ordinary failures. For tool-backed actions, `payload.action_type`
 may be `"tool"`; that does not change the event family.
 
-## Execution environment events
+## ExecutionResource events
 
-Execution Environment lifecycle uses `execution_resource.*`. Providers and
+ExecutionResource lifecycle uses `execution_resource.*`. Providers and
 DevTools consumers should treat this namespace as extensible. Current manager
 events include `declared`, `approval_required`, `ensuring`, `ready`,
 `unhealthy`, `releasing`, `released`, and `failed`. `unhealthy` means a ready

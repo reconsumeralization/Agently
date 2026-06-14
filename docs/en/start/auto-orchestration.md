@@ -180,7 +180,7 @@ task_refs = result.task_refs
 Each iteration writes planning decisions, execution observations, verification
 evidence, evidence links, and checkpoints to Workspace. Checkpoints use the
 Workspace checkpoint-store port, and task evidence relationships use
-`workspace.link_evidence(...)`. The next iteration receives a ContextPack from
+`workspace.link_evidence(...)`. The next iteration receives a ContextPackage from
 `workspace.build_context(...)`, so the loop can carry evidence forward without
 turning Workspace into an autonomous planner.
 

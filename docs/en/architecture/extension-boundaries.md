@@ -83,7 +83,7 @@ Callable ability remains `Action`; execution variation belongs to
 ### Built-in Capability Actions
 
 Built-ins are the default capability catalog shipped by Agently. They expose
-model-callable operations as Actions and may depend on Execution Environment.
+model-callable operations as Actions and may depend on ExecutionResource.
 
 Good built-in candidates:
 
@@ -97,7 +97,7 @@ Good built-in candidates:
 - call pre-registered Python functions
 - call MCP tools
 
-Action is the model-visible callable surface. Execution Environment is only used
+Action is the model-visible callable surface. ExecutionResource is only used
 when the action needs a managed live dependency, isolation boundary, reusable
 client, or cleanup policy.
 
@@ -158,9 +158,9 @@ Landed examples include `core/Action`, `core/TriggerFlow`,
 `builtins/plugins/SkillsExecutor`. Keep public imports stable through package
 `__init__.py` files and top-level re-exports.
 
-## Action And Execution Environment
+## Action And ExecutionResource
 
-Action and Execution Environment are separate layers.
+Action and ExecutionResource are separate layers.
 
 Action answers:
 
@@ -168,15 +168,15 @@ Action answers:
 - What input schema does it use?
 - How is one call normalized into `ActionResult`?
 
-Execution Environment answers:
+ExecutionResource answers:
 
 - What live dependency must exist before execution?
 - Is it allowed under policy and approval?
 - How is it started, reused, health-checked, scoped, and released?
 
-Not every Action needs Execution Environment. File policy checks, pure local
-functions, and simple stateless operations can be plain Actions. Use Execution
-Environment when lifecycle, isolation, health, credentials, or cleanup matters.
+Not every Action needs ExecutionResource. File policy checks, pure local
+functions, and simple stateless operations can be plain Actions. Use
+ExecutionResource when lifecycle, isolation, health, credentials, or cleanup matters.
 
 ## Skills Boundary
 
