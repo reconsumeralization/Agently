@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Workspace and its Recall substrate now live in the Foundation package
+# Workspace and its ContextBuilder substrate now live in the Foundation package
 # `agently.core.workspace`. Session is a Workspace consumer, not the owner
 # namespace for the storage substrate, so it no longer re-exports those
-# surfaces. Import Workspace/Recall from `agently.core.workspace`.
+# surfaces. Import Workspace/ContextBuilder from `agently.core.workspace`.
 from .Session import Session
 
 __all__ = [

@@ -166,7 +166,7 @@ class WorkspaceSearchResult(TypedDict, total=False):
     reason: str | None
 
 
-class WorkspaceRecallPlan(TypedDict):
+class WorkspaceContextPlan(TypedDict):
     goal: str
     profile: str
     queries: list[str]
@@ -189,7 +189,7 @@ class WorkspaceContextOmission(TypedDict):
     count: int
 
 
-class WorkspaceContextPack(TypedDict):
+class WorkspaceContextPackage(TypedDict):
     goal: str
     profile: str
     items: list[WorkspaceContextItem]

@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .Defaults import DefaultContextBuilder, RuleRecallPlanner, WorkspaceRetriever
-from .Profile import RecallProfile
+from __future__ import annotations
 
-__all__ = [
-    "DefaultContextBuilder",
-    "RecallProfile",
-    "RuleRecallPlanner",
-    "WorkspaceRetriever",
-]
+from dataclasses import dataclass
+
+from agently.types.plugins import ContextBuilder, ContextPlanner, Retriever
+
+
+@dataclass(frozen=True)
+class ContextProfile:
+    name: str
+    planner: ContextPlanner
+    retriever: Retriever
+    context_builder: ContextBuilder

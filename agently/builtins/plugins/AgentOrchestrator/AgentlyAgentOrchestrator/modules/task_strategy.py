@@ -123,7 +123,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             workspace=task_options.get("workspace"),
             max_iterations=int(max_iterations or 3),
             verify=cast(Any, task_options.get("verify", "before_done")),
-            recall_profile=str(task_options.get("recall_profile", "auto")),
+            context_profile=str(task_options.get("context_profile", "auto")),
             context_budget=cast(Any, task_options.get("context_budget")),
             limits=cast(Any, task_options.get("limits", execution.limits)),
             options=cast(Any, agent_task_options),

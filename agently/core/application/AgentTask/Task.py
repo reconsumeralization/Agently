@@ -28,7 +28,7 @@ from agently.utils import DataFormatter, FunctionShifter
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
-    from agently.types.data import WorkspaceContextPack, WorkspaceRecordRef
+    from agently.types.data import WorkspaceContextPackage, WorkspaceRecordRef
 
 
 AgentTaskStatus = Literal[
@@ -74,7 +74,7 @@ class AgentTask:
         workspace: str | os.PathLike[str] | None = None,
         max_iterations: int = 3,
         verify: Literal["before_done"] = "before_done",
-        recall_profile: str = "auto",
+        context_profile: str = "auto",
         context_budget: dict[str, Any] | None = None,
         limits: dict[str, Any] | None = None,
         options: dict[str, Any] | None = None,
@@ -90,7 +90,7 @@ class AgentTask:
         self.success_criteria = [str(item) for item in success_criteria if str(item).strip()]
         self.max_iterations = max(1, int(max_iterations))
         self.verify = verify
-        self.recall_profile = recall_profile
+        self.context_profile = context_profile
         self.context_budget = dict(context_budget or {"chars": 6000})
         self.limits = dict(limits or {"max_model_requests": 3})
         self.options = dict(options or {})
@@ -650,13 +650,13 @@ class AgentTask:
         )
         return {"terminal": False, "status": "continue"}
 
-    async def _build_context(self) -> "WorkspaceContextPack":
+    async def _build_context(self) -> "WorkspaceContextPackage":
         try:
             return await self.workspace.build_context(
                 goal=self.goal,
                 scope={"task_id": self.id},
                 budget=self.context_budget,
-                profile=self.recall_profile,
+                profile=self.context_profile,
             )
         except Exception as error:
             fallback_reason: dict[str, Any] = {
@@ -670,7 +670,7 @@ class AgentTask:
                     goal="",
                     scope={"task_id": self.id},
                     budget=self.context_budget,
-                    profile=self.recall_profile,
+                    profile=self.context_profile,
                 )
             except Exception as fallback_error:
                 # A failing recall backend must not break the task loop. Return an
@@ -680,10 +680,10 @@ class AgentTask:
                     "message": str(fallback_error),
                 }
                 return cast(
-                    "WorkspaceContextPack",
+                    "WorkspaceContextPackage",
                     {
                         "goal": self.goal,
-                        "profile": self.recall_profile,
+                        "profile": self.context_profile,
                         "items": [],
                         "omitted": [],
                         "diagnostics": {"fallback_reason": fallback_reason},
@@ -1030,7 +1030,7 @@ class AgentTask:
                 deduped.append(capability_id)
         return deduped, unenforced
 
-    async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPack") -> dict[str, Any]:
+    async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         request = self.agent.create_temp_request()
         planner_capabilities = self._planner_capabilities()
         request.input(
@@ -1097,7 +1097,7 @@ class AgentTask:
         self,
         iteration_index: int,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPack",
+        context_pack: "WorkspaceContextPackage",
     ) -> tuple[Any, dict[str, Any]]:
         plan = self._normalize_step_plan(plan)
         execution = self.agent.create_execution(
@@ -1276,7 +1276,7 @@ class AgentTask:
         plan: dict[str, Any],
         execution_result: Any,
         execution_meta: dict[str, Any],
-        context_pack: "WorkspaceContextPack",
+        context_pack: "WorkspaceContextPackage",
     ) -> dict[str, Any]:
         request = self.agent.create_temp_request()
         request.input(
@@ -1573,7 +1573,7 @@ class AgentTask:
             "success_criteria": list(self.success_criteria),
             "max_iterations": self.max_iterations,
             "verify": self.verify,
-            "recall_profile": self.recall_profile,
+            "context_profile": self.context_profile,
             "context_budget": DataFormatter.sanitize(self.context_budget),
             "limits": DataFormatter.sanitize(self.limits),
             "options": DataFormatter.sanitize(self.options),
@@ -1656,7 +1656,7 @@ class AgentTask:
             workspace=workspace,
             max_iterations=int(manifest.get("max_iterations") or 3),
             verify=cast(Any, manifest.get("verify", "before_done")),
-            recall_profile=str(manifest.get("recall_profile", "auto")),
+            context_profile=str(manifest.get("context_profile", "auto")),
             context_budget=cast(Any, manifest.get("context_budget")),
             limits=cast(Any, manifest.get("limits")),
             options=cast(Any, manifest.get("options")),
@@ -1725,7 +1725,7 @@ class AgentTask:
         self,
         iteration_index: int,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPack",
+        context_pack: "WorkspaceContextPackage",
     ) -> "WorkspaceRecordRef":
         record_ref = await self.workspace.ingest(
             content={

@@ -55,7 +55,7 @@ from .Workspace import (
     WorkspaceBackend,
     WorkspaceBackendProvider,
 )
-from .Recall import ContextBuilder, RecallPlanner, Retriever
+from .ContextBuilder import ContextBuilder, ContextPlanner, Retriever
 from .ResponseParser import ResponseParser
 from .ToolManager import ToolManager
 from .BuiltInTool import BuiltInTool

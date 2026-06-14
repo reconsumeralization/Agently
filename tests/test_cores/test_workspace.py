@@ -10,7 +10,7 @@ from agently.core import LazyWorkspace, WorkspaceConfigurationError, WorkspacePo
 from agently.core.application import AgentTask
 from agently.core.workspace._defaults import script_scope
 from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
-from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPack, WorkspaceRecallPlan, WorkspaceRecordRef
+from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPackage, WorkspaceContextPlan, WorkspaceRecordRef
 
 
 @pytest.mark.asyncio
@@ -287,7 +287,7 @@ async def test_workspace_rejects_path_traversal_and_read_only_writes(tmp_path):
 def test_workspace_manager_registers_builtin_profiles():
     assert "fast" in Agently.workspace.list_profiles()
     assert "checkpoint" in Agently.workspace.list_profiles()
-    assert "auto" in Agently.workspace.list_recall_profiles()
+    assert "auto" in Agently.workspace.list_context_profiles()
 
 
 @pytest.mark.asyncio
@@ -850,7 +850,7 @@ async def test_workspace_file_policy_evidence_links_retention_and_capabilities(t
 
 
 @pytest.mark.asyncio
-async def test_workspace_registers_custom_recall_profile(tmp_path):
+async def test_workspace_registers_custom_context_profile(tmp_path):
     class StaticPlanner:
         name = "static"
 
@@ -862,7 +862,7 @@ async def test_workspace_registers_custom_recall_profile(tmp_path):
             scope: dict,
             budget: dict,
             profile: str,
-        ) -> WorkspaceRecallPlan:
+        ) -> WorkspaceContextPlan:
             _ = (workspace, budget)
             return {
                 "goal": goal,
@@ -877,7 +877,7 @@ async def test_workspace_registers_custom_recall_profile(tmp_path):
     class StaticRetriever:
         name = "static"
 
-        async def retrieve(self, *, workspace, plan: WorkspaceRecallPlan) -> list[WorkspaceRecordRef]:
+        async def retrieve(self, *, workspace, plan: WorkspaceContextPlan) -> list[WorkspaceRecordRef]:
             return await workspace.search(None, filters=plan["filters"])
 
     class StaticBuilder:
@@ -892,7 +892,7 @@ async def test_workspace_registers_custom_recall_profile(tmp_path):
             records: list[WorkspaceRecordRef],
             budget: dict,
             diagnostics: dict,
-        ) -> WorkspaceContextPack:
+        ) -> WorkspaceContextPackage:
             _ = (workspace, budget)
             return {
                 "goal": goal,
@@ -911,7 +911,7 @@ async def test_workspace_registers_custom_recall_profile(tmp_path):
                 "diagnostics": diagnostics,
             }
 
-    Agently.workspace.register_recall_profile(
+    Agently.workspace.register_context_profile(
         "custom-test",
         planner=StaticPlanner(),
         retriever=StaticRetriever(),

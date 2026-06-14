@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from agently.types.data.workspace import WorkspaceContextPack, WorkspaceRecallPlan, WorkspaceRecordRef
+from agently.types.data.workspace import WorkspaceContextPackage, WorkspaceContextPlan, WorkspaceRecordRef
 
 
 @runtime_checkable
-class RecallPlanner(Protocol):
+class ContextPlanner(Protocol):
     name: str
 
     async def plan(
@@ -31,7 +31,7 @@ class RecallPlanner(Protocol):
         scope: dict[str, Any],
         budget: dict[str, Any],
         profile: str,
-    ) -> WorkspaceRecallPlan: ...
+    ) -> WorkspaceContextPlan: ...
 
 
 @runtime_checkable
@@ -42,7 +42,7 @@ class Retriever(Protocol):
         self,
         *,
         workspace: Any,
-        plan: WorkspaceRecallPlan,
+        plan: WorkspaceContextPlan,
     ) -> list[WorkspaceRecordRef]: ...
 
 
@@ -59,4 +59,4 @@ class ContextBuilder(Protocol):
         records: list[WorkspaceRecordRef],
         budget: dict[str, Any],
         diagnostics: dict[str, Any],
-    ) -> WorkspaceContextPack: ...
+    ) -> WorkspaceContextPackage: ...

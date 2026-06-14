@@ -20,13 +20,13 @@ from typing import Any
 from agently.types.data.workspace import (
     WorkspaceContextItem,
     WorkspaceContextOmission,
-    WorkspaceContextPack,
-    WorkspaceRecallPlan,
+    WorkspaceContextPackage,
+    WorkspaceContextPlan,
     WorkspaceRecordRef,
 )
 
 
-class RuleRecallPlanner:
+class RuleContextPlanner:
     name = "rule"
 
     async def plan(
@@ -37,7 +37,7 @@ class RuleRecallPlanner:
         scope: dict[str, Any],
         budget: dict[str, Any],
         profile: str,
-    ) -> WorkspaceRecallPlan:
+    ) -> WorkspaceContextPlan:
         _ = workspace
         filters = {f"scope.{key}": value for key, value in scope.items()}
         return {
@@ -58,7 +58,7 @@ class WorkspaceRetriever:
         self,
         *,
         workspace,
-        plan: WorkspaceRecallPlan,
+        plan: WorkspaceContextPlan,
     ) -> list[WorkspaceRecordRef]:
         seen: set[str] = set()
         records: list[WorkspaceRecordRef] = []
@@ -93,7 +93,7 @@ class DefaultContextBuilder:
         records: list[WorkspaceRecordRef],
         budget: dict[str, Any],
         diagnostics: dict[str, Any],
-    ) -> WorkspaceContextPack:
+    ) -> WorkspaceContextPackage:
         char_budget = _char_budget(budget)
         used_chars = 0
         omitted_count = 0

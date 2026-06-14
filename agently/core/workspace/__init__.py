@@ -18,7 +18,7 @@ from .Workspace import Workspace
 from .LocalBackend import LocalWorkspaceBackend
 from .Manager import WorkspaceManager
 from .Profiles import CheckpointIngestionProfile, FastIngestionProfile
-from .Recall import DefaultContextBuilder, RecallProfile, RuleRecallPlanner, WorkspaceRetriever
+from .ContextBuilder import DefaultContextBuilder, ContextProfile, RuleContextPlanner, WorkspaceRetriever
 from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
 
 __all__ = [
@@ -30,8 +30,8 @@ __all__ = [
     "LazyWorkspace",
     "LocalWorkspacePolicyEngine",
     "NoopVectorIndex",
-    "RecallProfile",
-    "RuleRecallPlanner",
+    "ContextProfile",
+    "RuleContextPlanner",
     "Workspace",
     "WorkspaceConfigurationError",
     "WorkspaceError",

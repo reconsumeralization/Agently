@@ -35,7 +35,7 @@ AgentlyPluginType = Literal[
     "TextIndex",
     "PolicyEngine",
     "VectorIndex",
-    "RecallPlanner",
+    "ContextPlanner",
     "Retriever",
     "ContextBuilder",
 ]

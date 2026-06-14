@@ -175,7 +175,7 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         # search / context build only sees its own execution's records, even
         # though sibling executions in the same session/script share the physical
         # workspace.db. Cross-execution recall requires an explicit scope (spec:
-        # explicit cross-scope search/read/link/Recall).
+        # explicit cross-scope search/read/link/context build).
         return {"execution_id": execution_id}
 
     def _create_execution_workspace_resource(self, execution_id: str, run_context: "RunContext | None" = None):

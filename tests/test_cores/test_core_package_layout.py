@@ -75,7 +75,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.model import AttemptRunner
     from agently.core.runtime import EventCenter, RuntimeEvent, bind_runtime_context
     from agently.core.session import Session
-    from agently.core.workspace import RecallProfile, Workspace
+    from agently.core.workspace import ContextProfile, Workspace
 
     assert importlib.import_module("agently.core.Agent").BaseAgent is BaseAgent
     assert importlib.import_module("agently.core.application.AgentExecution.Stream").AgentExecutionStream is AgentExecutionStream
@@ -98,7 +98,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.operation.Action").Tool is Tool
     assert importlib.import_module("agently.core.application.SkillsExecutor.SkillsExecutor").SkillsExecutor is SkillsExecutor
     assert importlib.import_module("agently.core.workspace.Workspace").Workspace is Workspace
-    assert importlib.import_module("agently.core.workspace.Recall").RecallProfile is RecallProfile
+    assert importlib.import_module("agently.core.workspace.ContextBuilder").ContextProfile is ContextProfile
 
 
 def test_core_layout_keeps_only_classified_root_packages():
@@ -123,7 +123,8 @@ def test_core_layout_keeps_only_classified_root_packages():
     assert (core_root / "operation" / "Action").is_dir()
     assert (core_root / "operation" / "ExecutionResource").is_dir()
     assert (core_root / "workspace").is_dir()
-    assert (core_root / "workspace" / "Recall").is_dir()
+    assert (core_root / "workspace" / "ContextBuilder").is_dir()
+    assert not (core_root / "workspace" / "Recall").exists()
     assert not (core_root / "session" / "Workspace").exists()
     assert not (core_root / "session" / "Recall").exists()
     assert (core_root / "orchestration" / "TriggerFlow").is_dir()
