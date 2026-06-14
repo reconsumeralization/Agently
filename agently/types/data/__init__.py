@@ -147,6 +147,44 @@ from .execution_resource import (
     ExecutionResourceStatus,
 )
 
+from .execution_plan import (
+    PREFERRED_EXECUTION_SHAPES,
+    PLAN_BLOCK_INSTANCE_KINDS,
+    EXECUTION_PLAN_SCHEMA_VERSION,
+    REPLAN_STATUSES,
+    CapabilityResolution,
+    EvidenceEnvelope,
+    ExecutionPlanEdge,
+    ExecutionPlan,
+    PlanBlockInstance,
+    PlanBlockInstanceKind,
+    PreferredExecutionShape,
+    ReplanSignal,
+    ReplanStatus,
+    SkillActivation,
+    TaskFrame,
+)
+
+from .blocks import (
+    BLOCKS_SCHEMA_VERSION,
+    BLOCK_COMPOSITIONS,
+    EXECUTION_BLOCK_KINDS,
+    PLAN_BLOCK_KINDS,
+    STANDARD_BLOCK_SIGNALS,
+    BlockCompileRequest,
+    BlockComposition,
+    BlockSignal,
+    EvidenceMapper,
+    ExecutionBlock,
+    ExecutionBlockEdge,
+    ExecutionBlockGraph,
+    ExecutionBlockKind,
+    PlanBlock,
+    PlanBlockKind,
+    ResultAdapter,
+    StandardBlockSignal,
+)
+
 from .execution_exchange import (
     ExecutionExchangeDispatchState,
     ExecutionExchangeProviderResult,

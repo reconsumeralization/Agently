@@ -32,6 +32,7 @@ from agently.core import (
     Prompt,
     ModelRequest,
     BaseAgent,
+    Blocks,
     SkillsExecutor,
     WorkspaceManager,
 )
@@ -90,6 +91,7 @@ action_dispatcher = action.action_dispatcher
 action_runtime = action.action_runtime
 action_flow = action.action_flow
 skills_executor = SkillsExecutor(plugin_manager, settings)
+blocks = Blocks(plugin_manager, settings)
 workspace = WorkspaceManager()
 _agently_emitter = event_center.create_emitter("Agently")
 
@@ -259,6 +261,7 @@ class AgentlyMain(Generic[A]):
         self.action_runtime = action_runtime
         self.action_flow = action_flow
         self.skills_executor = skills_executor
+        self.blocks = blocks
         self.workspace = workspace
         self.AgentType = AgentType
 

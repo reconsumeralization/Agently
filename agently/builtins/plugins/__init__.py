@@ -27,6 +27,7 @@ from .ExecutionResourceProvider import (
 )
 from .PromptGenerator.AgentlyPromptGenerator import AgentlyPromptGenerator
 from .TaskDAGPlanner import AgentlyTaskDAGPlanner
+from .Blocks import AgentlyBlocks
 from .AgentOrchestrator import AgentlyAgentOrchestrator
 from .ModelRequester.AnthropicCompatible import AnthropicCompatible
 from .ModelRequester.OpenAICompatible import OpenAICompatible
