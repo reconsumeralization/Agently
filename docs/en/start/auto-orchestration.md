@@ -160,6 +160,8 @@ execution = agent.create_task(
             # Optional: use a separate model key to narrate progress from snapshots.
             # Omit this key to use template progress with no model requests.
             # "progress_model_key": "cheap-progress-model",
+            # Optional: override the global agent_task.progress.language setting.
+            # "progress_language": "en",
         },
     },
 )
@@ -167,7 +169,9 @@ execution = agent.create_task(
 result = execution.get_result()
 
 async for item in result.get_async_generator():
-    if (item.meta or {}).get("stream_kind") == "progress":
+    if (item.meta or {}).get("stream_kind") == "progress_delta":
+        print(item.delta or "", end="", flush=True)
+    elif (item.meta or {}).get("stream_kind") == "progress":
         print("[PROGRESS]", item.value["message"])
     elif (item.meta or {}).get("stream_kind") == "snapshot":
         print("[SNAPSHOT]", item.path, item.value["snapshot"])
@@ -198,8 +202,14 @@ items are opt-in with
 are template-based when no `progress_model_key` is configured, so they do not
 add model requests or token usage. When `progress_model_key` is set, AgentTask
 uses that separate model key in a background task to summarize the already
-emitted snapshot and task metadata. The main loop does not produce extra fields
-for progress narration and does not wait for progress narration to finish.
+emitted snapshot and task metadata. Model-generated progress is streamed as
+`stream_kind="progress_delta"` delta events while the sentence is being written,
+then emitted once as a complete `stream_kind="progress"` item for stable logs
+and UI state. Set `options={"agent_task": {"progress_language": "zh-CN"}}` to
+control one execution, or set the global default with
+`Agently.set_settings("agent_task.progress.language", "zh-CN")`; `auto` keeps
+the framework default. The main loop does not produce extra fields for progress
+narration and does not wait for progress narration to finish.
 Progress narrator failures are side-channel diagnostics and warning-level
 runtime events; they do not turn the main execution into `model.request_failed`.
 Model progress narration receives an operator-safe snapshot; developer
@@ -213,13 +223,25 @@ the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`)
 is a partial artifact (`accepted=False`, `artifact_status="partial"`), not a
 completed business result.
 
-`examples/agent_task/goal_pursuit_acceptance_matrix.py` is the lightweight
-real-model smoke for this contract. It runs one accepted Goal Pursuit case and
-one non-accepted evidence-guard case with model-owned planning and verification,
-then prints the verifier and host-guard terminal evidence. Force
-`AGENT_TASK_MODEL_PROVIDER=ollama` to reproduce the documented
-`max_iterations` / partial output; stricter providers may classify the same
-missing Action evidence as `blocked`.
+`examples/agent_task/goal_effort_public_stream.py` is the public-chain
+streaming proof for this contract. It runs
+`.goal(...).effort(...).input(...).output(...).strategy("task")`, consumes
+`get_async_generator()`, streams model-generated progress deltas, and checks
+that the execution prompt snapshot reaches AgentTaskLoop planning, execution,
+and verification. `examples/agent_task/goal_pursuit_acceptance_matrix.py`
+remains a smaller matrix script for accepted and non-accepted terminal states.
+
+`examples/agent_task/real_complex_bundle_goal_stream.py` is the high-level real
+complex proof for the same path. It mounts Search, AMap MCP, Workspace file
+actions, and the CocoonAI `architecture-diagram` Skill through public Agent
+capability APIs, then asks the task loop to produce an operator daily report, a
+Hangzhou business travelogue, and an HTML/SVG architecture diagram while
+streaming natural-language progress deltas. It uses multi-round bounded direct
+steps so the proof stays on the current public AgentTask lifecycle instead of
+depending on mixed DynamicTask/DAG execution. The lower-level
+`examples/blocks/07_real_complex_bundle_stream.py` remains a Blocks
+external-capability substrate probe rather than the recommended business entry
+point.
 
 `examples/agent_task/agently_architecture_diagram_task.py` is the longer
 design-document experiment for the same path. It uses

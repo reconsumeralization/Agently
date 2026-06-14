@@ -118,14 +118,18 @@ plan = await agent.async_resolve_skills_plan(
 
 ## 执行
 
-当任务必须通过 selected Skills 回答时，用 `run_skills_task(...)`。默认执行策略是
-`single_shot`：Agently 会把 selected Skills 的 `SKILL.md` guidance、
-decision cards、资源摘要和任务放进一次模型请求。多步策略由宿主侧执行选项
-选择，例如 `effort="react"` 或 route options；Skill 不能通过 Agently 私有
-frontmatter 声明执行策略。
+当任务必须通过 selected Skills 回答时，用 `run_skills_task(...)`。它是 Blocks
+生命周期上的兼容 facade：内部会构造包含 `skill_activation` PlanBlock 和具体策略
+PlanBlock 的 ExecutionPlan，再降低为 TriggerFlow-backed ExecutionBlockGraph。默认
+`single_shot` route label 会降低为 `model_request` block；`runtime_chain`、`staged`
+和 `react` 等多步 label 会降低为可信 `flow_segment` block。Skill 不能通过
+Agently 私有 frontmatter 声明执行策略。
+
 当可用 action 存在时，`react` 会把 tool/action 规划和执行委托给 Agent
 ActionRuntime，因此 kwargs schema、MCP tools、policy、approval、concurrency 和
-ExecutionResource 处理仍由 Action 层拥有，而不是由 Skills 重新实现。
+ExecutionResource 处理仍由 Action 层拥有，而不是由 Skills 重新实现。Skill
+activation evidence 只证明 guidance 和资源上下文已加载；side-effect evidence
+必须来自下游 Actions、Workspace operations、waits 或其他具体 execution blocks。
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -137,6 +141,7 @@ execution = await agent.async_run_skills_task(
 print(execution.status)
 print(execution.output)
 print(execution.skill_logs)
+print(execution.close_snapshot["blocks"]["evidence"])
 ```
 
 `output=` 使用和 `.output(...)` 相同的 schema grammar；它就是本次
@@ -222,8 +227,10 @@ judge。
 - `skills.prompt_only.done`
 - `effort="normal"` 或 `effort="max"` 选中内置 planner chain 时，会收到
   `skills.runtime_chain.*`
-- 选中多步策略时，还会收到 `skills.staged.*`、`skills.react.*` 和 `block.*`
-  事件
+- 选中多步兼容 label 时，还会收到 `skills.staged.*` 和 `skills.react.*`
+
+Blocks lowering evidence、ExecutionBlockGraph、ResultAdapter output 和
+TriggerFlow close snapshot 可从 `execution.close_snapshot["blocks"]` 读取。
 
 直接 Skills `stream_handler` 回调可用 `agently.types.data` 里的
 `SkillRuntimeStreamHandler` 标注。如果你在自定义 Skills effort strategy 里调用
@@ -231,10 +238,11 @@ judge。
 `StreamingData`，可用 `ModelStreamingHandler` 标注。两个类型都可以从根入口导入：
 `from agently import StreamingData, ModelStreamingHandler`。
 
-`effort="fast"` 使用低开销 single-shot 路径。`effort="normal"` 固定走完整
+`effort="fast"` 使用低开销 single-shot 兼容 label。`effort="normal"` 固定走完整
 preflight -> research -> plan -> execute -> verify -> reflect -> finalize
-链路。`effort="max"` 使用同一链路，但提高 retry 预算，并作为后续 Dynamic Task
-升级的挂接点。
+兼容链路。`effort="max"` 使用同一链路，但提高 retry 预算，并作为后续 Dynamic Task
+升级的挂接点。每个 label 都会在 close snapshot 中留下 Blocks plan/evidence
+metadata。
 
 需要覆盖内置档位时，可以用 `agent.set_settings("effort_presets", {...})` 把调用方
 看到的质量/成本档位映射到策略、model key、step budget、retry count 和 artifact
@@ -286,12 +294,13 @@ def handler(
 ) -> Awaitable[Any] | Any: ...
 ```
 
-内置 handler 也注册在同一张 strategy 表里：`single_shot`、`runtime_chain`、
-`staged` 和 `react`。可以用
+内置兼容 route label 也注册在同一张 strategy 表里：`single_shot`、
+`runtime_chain`、`staged` 和 `react`。可以用
 `Agently.skills_executor.list_effort_strategies()` 查看当前可用策略名。自定义
 handler 只有显式传入 `replace=True` 时才能替换内置策略；否则重名会 fail closed。
 内置参考实现位于
-`agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/effort_strategies/`。
+`agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/effort_strategies/`，
+并作为可信 Blocks runtime handler 被调用，不是另一套 Skills-owned lifecycle。
 
 ```python
 async def audit_plus_strategy(*, context, task, plan, effort_config, **_):

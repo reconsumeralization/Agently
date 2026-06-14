@@ -21,14 +21,17 @@ flowchart TD
     model_request["ModelRequest\n单次模型请求"]
     agent_execution["AgentExecution\n统一 Agent run"]
     task_dag["TaskDAG / DAG substrate\nplanner, validator, resolver, executor, handlers"]
+    blocks["Blocks\nExecutionPlan, PlanBlocks, ExecutionBlocks"]
     triggerflow["TriggerFlow\nworkflow execution substrate"]
     workspace["Workspace / Evidence\nrecords, checkpoints, context packs"]
 
     business -->|"单个答案"| model_request
     business -->|"Agent run、工具、Skills、目标、stream"| agent_execution
     agent_execution -->|"direct route"| model_request
+    agent_execution -->|"bounded task frame"| blocks
     agent_execution -->|"DAG-shaped route 或 bounded step"| task_dag
-    task_dag -->|"编译执行"| triggerflow
+    task_dag -->|"validated DAG segment"| blocks
+    blocks -->|"compiled execution block graph"| triggerflow
     agent_execution -->|"任务证据"| workspace
     task_dag -->|"结果与运行事实"| agent_execution
     triggerflow -->|"runtime events、state、pause/resume"| task_dag
@@ -40,6 +43,9 @@ flowchart TD
 - `AgentExecution` 负责用户侧 Agent run，以及 result/stream/meta facade。
 - `TaskDAG` 负责图形任务逻辑：Planner、Validator、Resolver、Executor、handlers、
   dependency results、semantic outputs 和 runtime placeholders。
+- `Blocks` 负责把有边界的 ExecutionPlan / PlanBlock instances 或已校验的
+  TaskDAG nodes 降低为 TriggerFlow-backed ExecutionBlocks，并做 evidence/result
+  mapping。
 - `TriggerFlow` 负责更底层的 workflow substrate：execution state、signals、
   concurrency、stream、pause/resume、persistence 和 lifecycle。
 - `Workspace` 保存 evidence 和 context；它不负责判断任务是否完成。
@@ -65,6 +71,7 @@ owner 是 `TaskDAG`。
 | `ModelRequest` | 精确 prompt、output schema、模型设置和一次响应 | 工具路由、长任务完成、workflow state |
 | `AgentExecution` | 用户侧 Agent run、路线诊断、stream/meta/result、execution-local candidates | 自定义图校验细节或 workflow 持久化细节 |
 | `TaskDAG` | 图 schema、planner contract、validator rules、handlers、dependency data、semantic outputs | 面向人的任务验收或完整 workflow lifecycle |
+| `Blocks` | ExecutionPlan lowering、PlanBlock/ExecutionBlock contracts、标准 block signals、result/evidence mapping | 任务生命周期 owner、capability grant 或原始 TriggerFlow dispatch |
 | `TriggerFlow` | Runtime state、signals、joins、concurrency、pause/resume、save/load | 模型 prompt/output 行为或 DAG task 语义 |
 | `Workspace` | Evidence records、checkpoints、context packs、后续步骤 recall | Planning、verification 或自动记忆决策 |
 
@@ -126,15 +133,18 @@ sequenceDiagram
     participant App as Application
     participant AE as AgentExecution
     participant DAG as TaskDAG
+    participant Blocks as Blocks
     participant TF as TriggerFlow
     participant WS as Workspace
     participant V as Verifier/Guard
 
     App->>AE: 配置 prompt, skills, actions, goal, effort
     AE->>DAG: 可选 DAG-shaped route 或 bounded step
-    DAG->>TF: 编译为 runtime execution
-    TF-->>DAG: task events, dependency results, semantic outputs
-    DAG-->>AE: snapshot, logs, route metadata, result
+    DAG->>Blocks: validated DAG segment
+    AE->>Blocks: bounded ExecutionPlan segment
+    Blocks->>TF: ExecutionBlockGraph
+    TF-->>Blocks: block signals, dependency results, snapshots
+    Blocks-->>AE: EvidenceEnvelope and result views
     AE->>WS: 可选 evidence/checkpoint records
     AE->>V: Goal Pursuit 激活时验证目标完成
     V-->>AE: accepted, blocked, replan, or partial
@@ -146,6 +156,8 @@ sequenceDiagram
 - 除非问题明显需要更低层 owner，否则从 `AgentExecution` 开始。
 - 只有一次模型调用时，用 `ModelRequest`。
 - 当计划本身是数据，需要校验、依赖执行、handler 和结果收集时，用 `TaskDAG`。
+- 需要理解 bounded AgentTask step、Skill activation 或 TaskDAG segment 如何降低到
+  TriggerFlow 并映射回 evidence 时，看 [Blocks 生命周期](blocks-lifecycle.md)。
 - 当应用拥有稳定 workflow topology、等待、join、并发或 durable execution 时，用
   `TriggerFlow`。
 - 用 `Workspace` 持久化 evidence 和 context，不要让它决定下一步做什么。
@@ -153,4 +165,3 @@ sequenceDiagram
   task lifecycle。
 - Goal Pursuit 激活时，DAG 完成只代表 evidence 可用。最终验收仍需要 model
   verifier 加 host guard。
-
