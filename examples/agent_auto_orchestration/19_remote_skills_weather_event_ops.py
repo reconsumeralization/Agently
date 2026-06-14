@@ -21,6 +21,7 @@ Expected key output from a real DeepSeek + weather MCP run:
     selected_remote_skills=['computer-use-agents', 'docx', 'mcp-builder', 'webapp-testing']
     source_discovered=4 source_installed=4
     execution_mode=runtime_chain
+    skills_block_kind=flow_segment
     decision=go
     weather_observation_count=8
     webapp_qa_count=16
@@ -326,6 +327,7 @@ async def main() -> None:
     _validate_lazy_remote_install(agent, execution)
     output = cast(dict[str, Any], execution.output or {})
     print(f"execution_mode={execution.close_snapshot.get('execution_mode')}")
+    print(f"skills_block_kind={execution.close_snapshot['blocks']['execution_graph']['execution_blocks'][-1]['kind']}")
     print(f"decision={output.get('decision')}")
     print(f"weather_observation_count={len(output.get('weather_observations', []))}")
     print(f"webapp_qa_count={len(output.get('webapp_qa_checklist', []))}")

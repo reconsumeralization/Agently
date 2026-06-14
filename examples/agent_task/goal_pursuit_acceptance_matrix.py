@@ -140,26 +140,7 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 
-# Expected key output from one real local Ollama run with qwen2.5:7b on 2026-06-12
-# using AGENT_TASK_MODEL_PROVIDER=ollama:
-# accepted.provider="ollama"
-# accepted.status="completed"
-# accepted.accepted=true
-# accepted.artifact_status="accepted"
-# accepted.iterations=1
-# accepted.final_result_mentions_agent_execution=true
-# accepted.final_result_mentions_effort=true
-# partial.provider="ollama"
-# partial.status="max_iterations"
-# partial.accepted=false
-# partial.artifact_status="partial"
-# partial.iterations=1
-# partial.missing_criteria includes "Execution evidence includes a read_file Action record for outputs/site.md."
-# partial.guard_reasons includes "missing_criteria_present"
-#
-# The accepted and partial verdicts come from model-owned task planning and
-# verification plus host guards. Stricter providers such as DeepSeek may classify
-# the same missing Action evidence as blocked instead of max_iterations/partial;
-# that is still a verifier-owned terminal decision. The example does not use
-# keyword or substring checks as the task acceptance mechanism; the printed
-# booleans are only post-run smoke evidence for the documented real run.
+# This matrix prints the actual run summary for one accepted task and one
+# non-accepted evidence-guard task. Treat provider-specific terminal status as
+# run evidence, not as a stable expected-output fixture: the task verdict comes
+# from model-owned planning/verification plus host guards.

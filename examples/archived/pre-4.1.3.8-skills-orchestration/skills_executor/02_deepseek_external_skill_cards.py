@@ -49,8 +49,8 @@ Flow:
     planner discovers SKILL.md card, then materializes selected Skill
       |
       v
-    async_run_skills_task(..., effort="fast") injects full guidance and returns
-    structured task guidance
+    async_run_skills_task(..., effort="fast") builds skill_activation +
+    model_request Blocks and returns structured task guidance
 """
 
 from __future__ import annotations
