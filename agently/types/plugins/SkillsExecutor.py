@@ -42,6 +42,7 @@ from agently.types.data import (
     SkillContextPack,
     SkillContextPackIncludeMode,
     SkillExecutionPlan,
+    SkillActivation,
     SkillMode,
     SkillsPackRecord,
 )
@@ -187,6 +188,18 @@ class SkillsExecutor(Protocol):
     def inspect_skills_pack(self, skills_pack_id: str) -> SkillsPackRecord: ...
 
     def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 262144) -> str: ...
+
+    def capability_adapter(self) -> Any: ...
+
+    def discover_skill_capabilities(self, *, limit: int | None = None) -> list[dict[str, Any]]: ...
+
+    def activate_skill(
+        self,
+        skill_id: str,
+        *,
+        task: str | None = None,
+        budget_chars: int = 4000,
+    ) -> SkillActivation: ...
 
     def build_context_pack(
         self,

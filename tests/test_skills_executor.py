@@ -924,6 +924,14 @@ Run scripts/helper.sh when the host permits script execution.
         and "run_script_skill_script" in item.get("action_ids", [])
         for item in execution.runtime_stream
     )
+    scoped_action_candidates = execution.close_snapshot["blocks"]["execution_plan"]["capability_resolution"][
+        "scoped_action_candidates"
+    ]
+    assert any(
+        candidate.get("need") == "script_run"
+        and "run_script_skill_script" in candidate.get("action_ids", [])
+        for candidate in scoped_action_candidates
+    )
 
 
 @pytest.mark.asyncio
@@ -1331,6 +1339,49 @@ async def test_effort_normal_runs_full_runtime_chain(tmp_path):
     assert phases == ["preflight", "research", "plan", "execute", "verify", "reflect", "finalize"]
     assert isinstance(execution.output, dict)
     assert execution.output["response"] == "Finalized through the Skills runtime chain."
+    blocks = execution.close_snapshot["blocks"]
+    assert blocks["compatibility_route_label"] == "runtime_chain"
+    assert [block["kind"] for block in blocks["execution_plan"]["plan_blocks"]] == [
+        "skill_activation",
+        "flow_segment",
+    ]
+    assert [block["kind"] for block in blocks["execution_graph"]["execution_blocks"]] == [
+        "skill_activation",
+        "flow_segment",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skills_blocks_route_uses_active_blocks_plugin(tmp_path):
+    from agently.builtins.plugins.Blocks import AgentlyBlocks
+
+    calls: list[str] = []
+
+    class TracingBlocks(AgentlyBlocks):
+        name = "TracingBlocks"
+        DEFAULT_SETTINGS: dict[str, Any] = {}
+
+        def compile(self, request: Any):
+            calls.append("compile")
+            return super().compile(request)
+
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    previous_active = Agently.settings.get("plugins.Blocks.activate", "AgentlyBlocks")
+    Agently.plugin_manager.register("Blocks", TracingBlocks, activate=True)
+    try:
+        execution = await _create_agent().async_run_skills_task(
+            "handle release",
+            skills=["alpha-skill"],
+            mode="required",
+            effort="normal",
+        )
+    finally:
+        Agently.settings.set("plugins.Blocks.activate", previous_active)
+        Agently.plugin_manager.unregister("Blocks", "TracingBlocks")
+
+    assert execution.status == "success"
+    assert calls == ["compile"]
 
 
 @pytest.mark.asyncio
@@ -1691,6 +1742,39 @@ def test_run_skills_task_uses_full_skill_guidance_not_only_decision_card(tmp_pat
     assert output["response"] == "Applied selected SKILL.md guidance."
     assert "Alpha guidance full sentence with detailed operating procedure." in MockSkillsRequester.requests[-1]
     assert execution.skill_logs[0]["execution_mode"] == "prompt_only"
+
+
+def test_run_skills_task_compatibility_route_is_lowered_to_blocks(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill", body="Alpha guidance full sentence.")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    execution = _create_agent().run_skills_task(
+        "handle release",
+        skills=["alpha-skill"],
+        mode="required",
+    )
+
+    blocks = execution.close_snapshot["blocks"]
+    strategy_records = [
+        item
+        for item in blocks["evidence"]["execution_block_results"]
+        if item.get("source_plan_block_id") == "skills_strategy"
+    ]
+
+    assert execution.status == "success"
+    assert [block["kind"] for block in blocks["execution_plan"]["plan_blocks"]] == [
+        "skill_activation",
+        "model_request",
+    ]
+    assert [block["kind"] for block in blocks["execution_graph"]["execution_blocks"]] == [
+        "skill_activation",
+        "model_request",
+    ]
+    assert blocks["compatibility_route_label"] == "single_shot"
+    assert strategy_records[0]["kind"] == "model_request"
+    assert blocks["evidence"]["skill_evidence"][0]["skill_id"] == "alpha-skill"
+    assert blocks["evidence"]["skill_evidence"][0]["evidence_kind"] == "skill_context"
+    assert blocks["evidence"]["skill_evidence"][0]["proves_side_effect"] is False
 
 
 def test_run_skills_task_passes_output_format_to_model_request(tmp_path):

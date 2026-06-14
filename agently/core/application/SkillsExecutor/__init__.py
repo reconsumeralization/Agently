@@ -13,5 +13,29 @@
 # limitations under the License.
 
 from .SkillsExecutor import SkillsExecutor
+from .adapter import (
+    DictSkillSource,
+    RegistrySkillSource,
+    SkillActivationLoader,
+    SkillCapabilityAdapter,
+    SkillCapabilityResolver,
+    SkillContextPackager,
+    SkillDiscovery,
+    SkillEvidenceRecorder,
+    SkillPlanBlockAdvisor,
+    SkillSource,
+)
 
-__all__ = ["SkillsExecutor"]
+__all__ = [
+    "DictSkillSource",
+    "RegistrySkillSource",
+    "SkillActivationLoader",
+    "SkillCapabilityAdapter",
+    "SkillCapabilityResolver",
+    "SkillContextPackager",
+    "SkillDiscovery",
+    "SkillEvidenceRecorder",
+    "SkillPlanBlockAdvisor",
+    "SkillSource",
+    "SkillsExecutor",
+]

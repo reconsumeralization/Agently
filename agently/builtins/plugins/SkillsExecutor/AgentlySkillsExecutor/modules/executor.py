@@ -19,7 +19,7 @@ import socket
 import uuid
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any, Callable, Literal, cast
+from typing import Any, Callable, Literal, Mapping, cast
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -27,6 +27,7 @@ from agently.types.data import SkillExecutionDict, SkillExecutionPlan, SkillExec
 from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
 
+from agently.core.application.SkillsExecutor.adapter import RegistrySkillSource, SkillCapabilityAdapter
 from .registry import SkillRegistry
 from .effort_strategies import create_builtin_effort_strategy_handlers
 from .contexts import RuntimeStreamCaptureContext
@@ -193,7 +194,7 @@ class SkillExecutor:
                 execution_mode=strategy_name,
             )
         try:
-            return await strategy_handler(
+            return await self._execute_strategy_as_blocks(
                 context=context,
                 task=task,
                 plan=plan,
@@ -204,6 +205,8 @@ class SkillExecutor:
                 effort_config=effort_config,
                 effort=effort,
                 strategy_name=strategy_name,
+                strategy_handler=strategy_handler,
+                capability_result=capability_result,
             )
         finally:
             # capability_scope="execution" reverses one-time capability mounts so
@@ -270,6 +273,353 @@ class SkillExecutor:
         for name, handler in self.effort_strategy_handlers.items():
             handlers[name] = self._custom_strategy_adapter(name, handler)
         return handlers
+
+    async def _execute_strategy_as_blocks(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        task: str,
+        plan: SkillExecutionPlan,
+        execution_id: str,
+        runtime_stream: list[dict[str, Any]],
+        skill_logs: list[dict[str, Any]],
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None,
+        effort_config: dict[str, Any],
+        effort: str | None,
+        strategy_name: str,
+        strategy_handler: Any,
+        capability_result: dict[str, Any],
+    ) -> SkillExecution:
+        from agently.base import blocks
+
+        handler_key = f"skills.strategy.{ execution_id }"
+        blocks_plan = self._build_skills_blocks_plan(
+            task=task,
+            plan=plan,
+            execution_id=execution_id,
+            strategy_name=strategy_name,
+            handler_key=handler_key,
+            effort=effort,
+            effort_config=effort_config,
+            capability_result=capability_result,
+        )
+        graph = blocks.compile(blocks_plan["compile_request"])
+        strategy_plan_block_id = str(blocks_plan["strategy_plan_block_id"])
+
+        async def run_strategy(_block_context: dict[str, Any]) -> dict[str, Any]:
+            strategy_execution = await strategy_handler(
+                context=context,
+                task=task,
+                plan=plan,
+                execution_id=execution_id,
+                runtime_stream=runtime_stream,
+                skill_logs=skill_logs,
+                output_format=output_format,
+                effort_config=effort_config,
+                effort=effort,
+                strategy_name=strategy_name,
+            )
+            if isinstance(strategy_execution, SkillExecution):
+                strategy_execution_dict = strategy_execution.to_dict()
+                return {
+                    "strategy": strategy_name,
+                    "execution_mode": strategy_execution.close_snapshot.get("execution_mode", strategy_name),
+                    "status": strategy_execution.status,
+                    "output": _copy_public(strategy_execution.output),
+                    "result": _copy_public(strategy_execution.result),
+                    "skill_execution": strategy_execution_dict,
+                    "action_evidence": self._action_evidence_from_execution(strategy_execution),
+                }
+            copied_result = _copy_public(strategy_execution)
+            return {
+                "strategy": strategy_name,
+                "execution_mode": strategy_name,
+                "status": "success",
+                "output": copied_result,
+                "result": copied_result,
+                "skill_execution": None,
+                "action_evidence": self._action_evidence_from_output(copied_result),
+            }
+
+        runtime_resources: dict[str, Any] = {
+            "blocks.handlers": {handler_key: run_strategy},
+            "skills.capability_adapter": SkillCapabilityAdapter(RegistrySkillSource(self.registry)),
+            "skills.executor": self,
+        }
+        agent = getattr(context, "agent", None)
+        workspace = getattr(agent, "workspace", False) or False
+        execution = blocks.bind_runtime(graph).create_execution(
+            auto_close=False,
+            workspace=workspace,
+            runtime_resources=runtime_resources,
+        )
+        try:
+            await execution.async_start({"task": task, "plan_id": str(plan.get("plan_id", ""))})
+            blocks_close_snapshot = await execution.async_close()
+        except Exception as error:
+            return self._build_execution(
+                execution_id=execution_id,
+                status="error",
+                plan=plan,
+                runtime_stream=runtime_stream,
+                skill_logs=skill_logs,
+                output={"error": str(error)},
+                effort=effort,
+                execution_mode=strategy_name,
+                blocks_meta={
+                    "execution_plan": _copy_public(blocks_plan["execution_plan"]),
+                    "execution_graph": graph.to_dict(),
+                    "error": str(error),
+                },
+            )
+
+        evidence = blocks.map_evidence(graph, blocks_close_snapshot)
+        result = blocks.map_result(graph, blocks_close_snapshot)
+        blocks_meta = {
+            "execution_plan": _copy_public(blocks_plan["execution_plan"]),
+            "execution_graph": graph.to_dict(),
+            "triggerflow_execution_id": execution.id,
+            "close_snapshot": _copy_public(blocks_close_snapshot),
+            "evidence": evidence.to_dict(),
+            "result": _copy_public(result),
+            "compatibility_route_label": strategy_name,
+        }
+        strategy_payload = self._strategy_execution_payload(
+            blocks_close_snapshot,
+            strategy_plan_block_id=strategy_plan_block_id,
+        )
+        skill_execution_payload = _ensure_dict(strategy_payload.get("skill_execution"))
+        if skill_execution_payload:
+            return self._attach_blocks_meta(
+                SkillExecution.load(skill_execution_payload),
+                blocks_meta=blocks_meta,
+            )
+        return self._build_execution(
+            execution_id=execution_id,
+            status=cast(SkillExecutionStatus, str(strategy_payload.get("status") or "success")),
+            plan=plan,
+            runtime_stream=runtime_stream,
+            skill_logs=skill_logs,
+            output=strategy_payload.get("output"),
+            effort=effort,
+            execution_mode=str(strategy_payload.get("execution_mode") or strategy_name),
+            blocks_meta=blocks_meta,
+        )
+
+    def _build_skills_blocks_plan(
+        self,
+        *,
+        task: str,
+        plan: SkillExecutionPlan,
+        execution_id: str,
+        strategy_name: str,
+        handler_key: str,
+        effort: str | None,
+        effort_config: dict[str, Any],
+        capability_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        selected = [_ensure_dict(item) for item in _ensure_list(plan.get("selected_skills"))]
+        plan_id = str(plan.get("plan_id") or f"skills:{ execution_id }")
+        blocks_plan_id = f"{ plan_id }:blocks:{ execution_id[:8] }"
+        activation_blocks: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        for index, selection in enumerate(selected):
+            skill_id = str(selection.get("skill_id") or f"skill_{ index }")
+            block_id = f"skill_activation_{ index }_{ self._safe_id(skill_id) }"
+            activation_blocks.append(
+                {
+                    "id": block_id,
+                    "plan_block_id": "skill_activation",
+                    "kind": "skill_activation",
+                    "intent": "load selected Skill guidance and scoped capability recommendations",
+                    "bound_inputs": {
+                        "skill_id": skill_id,
+                        "task": task,
+                        "budget_chars": 4000,
+                    },
+                    "evidence_contract": {
+                        "evidence_kind": "skill_context",
+                        "proves_side_effect": False,
+                    },
+                }
+            )
+            edges.append({"from": block_id, "to": "skills_strategy", "kind": "context"})
+        strategy_kind = self._strategy_plan_block_kind(strategy_name)
+        strategy_block = {
+            "id": "skills_strategy",
+            "plan_block_id": strategy_kind,
+            "kind": strategy_kind,
+            "intent": "run the selected Skills compatibility route through a concrete execution block",
+            "bound_inputs": {
+                "task": task,
+                "strategy": strategy_name,
+                "effort": effort,
+                "selected_skill_ids": [str(item.get("skill_id")) for item in selected],
+            },
+            "runtime_preferences": {
+                "handler": handler_key,
+                "compatibility_route_label": strategy_name,
+            },
+            "output_contract": {
+                "skill_execution": "legacy SkillExecution payload",
+                "compatibility_route_label": strategy_name,
+            },
+            "evidence_contract": {
+                "requires_real_strategy_output": True,
+                "skill_activation_is_not_side_effect_evidence": True,
+            },
+            "budget": {
+                "effort": effort,
+                **{key: value for key, value in effort_config.items() if key in {"step_budget", "retry_count"}},
+            },
+        }
+        capability_resolution = self._capability_resolution_from_result(capability_result)
+        execution_plan = {
+            "plan_id": blocks_plan_id,
+            "task_frame_id": f"skills:{ execution_id }",
+            "plan_blocks": [*activation_blocks, strategy_block],
+            "edges": edges,
+            "semantic_outputs": {"result": "skills_strategy"},
+            "evidence_requirements": [
+                {
+                    "kind": "skill_context",
+                    "required": bool(activation_blocks),
+                    "proves_side_effect": False,
+                },
+                {
+                    "kind": "strategy_result",
+                    "required": True,
+                    "route_label": strategy_name,
+                },
+            ],
+            "diagnostics": [
+                {
+                    "code": "skills.compatibility_route_lowered_to_blocks",
+                    "route_label": strategy_name,
+                    "strategy_plan_block_kind": strategy_kind,
+                }
+            ],
+            "capability_resolution": capability_resolution,
+        }
+        compile_request = {
+            "execution_id": execution_id,
+            "task_frame_id": execution_plan["task_frame_id"],
+            "plan_id": blocks_plan_id,
+            "plan_blocks": execution_plan["plan_blocks"],
+            "edges": execution_plan["edges"],
+            "capability_resolution": capability_resolution,
+            "evidence_requirements": execution_plan["evidence_requirements"],
+            "runtime_policy": {"compatibility_route_label": strategy_name},
+        }
+        return {
+            "execution_plan": execution_plan,
+            "compile_request": compile_request,
+            "strategy_plan_block_id": "skills_strategy",
+        }
+
+    @staticmethod
+    def _strategy_plan_block_kind(strategy_name: str) -> str:
+        if strategy_name == "single_shot":
+            return "model_request"
+        return "flow_segment"
+
+    @staticmethod
+    def _safe_id(value: str) -> str:
+        safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(value))
+        return safe.strip("._-") or "skill"
+
+    @staticmethod
+    def _capability_resolution_from_result(capability_result: dict[str, Any]) -> dict[str, Any]:
+        diagnostics = [
+            _copy_public(item)
+            for item in _ensure_list(capability_result.get("diagnostics"))
+            if isinstance(item, dict)
+        ]
+        allowed: list[str] = []
+        scoped_action_candidates: list[dict[str, Any]] = []
+        for item in diagnostics:
+            if item.get("code") != "capability_mounted":
+                continue
+            need = str(item.get("need") or "")
+            if need and need not in allowed:
+                allowed.append(need)
+            action_ids = [
+                str(action_id)
+                for action_id in _ensure_list(item.get("action_ids"))
+                if str(action_id).strip()
+            ]
+            if action_ids:
+                scoped_action_candidates.append(
+                    {
+                        "need": need,
+                        "skill_id": item.get("skill_id"),
+                        "action_ids": action_ids,
+                    }
+                )
+        return {
+            "allowed_capabilities": allowed,
+            "scoped_action_candidates": scoped_action_candidates,
+            "diagnostics": diagnostics,
+        }
+
+    @staticmethod
+    def _strategy_execution_payload(
+        close_snapshot: Mapping[str, Any],
+        *,
+        strategy_plan_block_id: str,
+    ) -> dict[str, Any]:
+        blocks_state = close_snapshot.get("blocks", {})
+        if not isinstance(blocks_state, dict):
+            return {}
+        for item in reversed(_ensure_list(blocks_state.get("execution_block_results"))):
+            if not isinstance(item, dict):
+                continue
+            if item.get("source_plan_block_id") == strategy_plan_block_id:
+                output = item.get("output")
+                return dict(output) if isinstance(output, dict) else {"output": output}
+        return {}
+
+    @staticmethod
+    def _action_evidence_from_execution(execution: SkillExecution) -> list[dict[str, Any]]:
+        data = execution.to_dict()
+        evidence = SkillExecutor._action_evidence_from_output(data.get("output"))
+        for item in _ensure_list(data.get("action_logs")):
+            if isinstance(item, dict):
+                evidence.append({"source": "skills.action_log", **_copy_public(item)})
+        return evidence
+
+    @staticmethod
+    def _action_evidence_from_output(output: Any) -> list[dict[str, Any]]:
+        if not isinstance(output, dict):
+            return []
+        raw_history = output.get("history") or output.get("observation_history") or []
+        evidence: list[dict[str, Any]] = []
+        for item in _ensure_list(raw_history):
+            if not isinstance(item, dict):
+                continue
+            action_id = str(item.get("action_id") or item.get("name") or "")
+            if not action_id:
+                continue
+            evidence.append(
+                {
+                    "source": "skills.strategy_output",
+                    "action_id": action_id,
+                    "status": item.get("status"),
+                    "result": _copy_public(item.get("result")),
+                    "error": item.get("error"),
+                    "proves_side_effect": item.get("status") == "success" or item.get("error") is None,
+                }
+            )
+        return evidence
+
+    @staticmethod
+    def _attach_blocks_meta(execution: SkillExecution, *, blocks_meta: dict[str, Any]) -> SkillExecution:
+        data = cast(dict[str, Any], execution.to_dict())
+        close_snapshot = _ensure_dict(data.get("close_snapshot"))
+        close_snapshot["blocks"] = _copy_public(blocks_meta)
+        data["close_snapshot"] = close_snapshot
+        data["blocks"] = _copy_public(blocks_meta)
+        return SkillExecution(cast(SkillExecutionDict, data))
 
     def _resolve_strategy_name(
         self,
@@ -974,6 +1324,7 @@ class SkillExecutor:
         output: Any,
         effort: str | None = None,
         execution_mode: str | None = None,
+        blocks_meta: dict[str, Any] | None = None,
     ) -> SkillExecution:
         strategy = execution_mode or str(plan.get("execution_strategy", "single_shot"))
         close_snapshot = {
@@ -983,6 +1334,8 @@ class SkillExecutor:
             "plan_id": str(plan.get("plan_id", "")),
             "effort": effort,
         }
+        if blocks_meta is not None:
+            close_snapshot["blocks"] = _copy_public(blocks_meta)
         data = SkillExecutionDict({
             "execution_id": execution_id,
             "plan_id": str(plan.get("plan_id", "")),
@@ -997,4 +1350,6 @@ class SkillExecutor:
             "close_snapshot": close_snapshot,
             "effort": effort,
         })
+        if blocks_meta is not None:
+            cast(dict[str, Any], data)["blocks"] = _copy_public(blocks_meta)
         return SkillExecution(data)
