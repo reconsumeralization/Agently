@@ -115,6 +115,18 @@ from .task_dag import (
     TaskDAGNode,
 )
 
+from .task_board import (
+    TASK_BOARD_SCHEMA_VERSION,
+    TaskBoardCard,
+    TaskBoardCardResult,
+    TaskBoardCardStatus,
+    TaskBoardGraph,
+    TaskBoardPatch,
+    TaskBoardRevision,
+    TaskBoardSchedulePlan,
+    TaskBoardStatus,
+)
+
 from .action import (
     ActionApproval,
     ActionArtifact,

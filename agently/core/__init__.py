@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from agently.types.data import TaskDAG, TaskDAGNode
+from agently.types.data import TaskBoardCard, TaskBoardGraph, TaskBoardPatch, TaskBoardRevision, TaskDAG, TaskDAGNode
 
 from .Agent import BaseAgent
 from .application import (
@@ -55,6 +55,12 @@ from .orchestration import (
     TaskDAGExecutor,
     TaskDAGValidation,
     TaskDAGValidator,
+    TaskBoard,
+    TaskBoardContext,
+    TaskBoardHandler,
+    TaskBoardTickResult,
+    TaskBoardValidation,
+    TaskBoardValidator,
     TriggerFlow,
     TriggerFlowBlueprint,
     TriggerFlowChunk,
@@ -128,6 +134,16 @@ __all__ = [
     "TaskDAGNode",
     "TaskDAGValidation",
     "TaskDAGValidator",
+    "TaskBoard",
+    "TaskBoardCard",
+    "TaskBoardContext",
+    "TaskBoardGraph",
+    "TaskBoardHandler",
+    "TaskBoardPatch",
+    "TaskBoardRevision",
+    "TaskBoardTickResult",
+    "TaskBoardValidation",
+    "TaskBoardValidator",
     "Tool",
     "TriggerFlow",
     "TriggerFlowBlueprint",

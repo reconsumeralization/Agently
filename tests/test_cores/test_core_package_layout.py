@@ -22,6 +22,8 @@ def test_core_root_exports_remain_stable():
         RuntimeEvent,
         Session,
         SkillsExecutor,
+        TaskBoard,
+        TaskBoardValidator,
         Tool,
         TriggerFlow,
         Workspace,
@@ -43,6 +45,8 @@ def test_core_root_exports_remain_stable():
     assert RuntimeEvent.__name__ == "RuntimeEvent"
     assert Session.__name__ == "Session"
     assert SkillsExecutor.__name__ == "SkillsExecutor"
+    assert TaskBoard.__name__ == "TaskBoard"
+    assert TaskBoardValidator.__name__ == "TaskBoardValidator"
     assert Action.__name__ == "Action"
     assert Tool is Action
     assert TriggerFlow.__name__ == "TriggerFlow"
@@ -70,6 +74,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.extension import ExtensionHandlers, PluginManager
     from agently.core.model import ModelRequest, ModelResponse, ModelResponseResult, Prompt
     from agently.core.application.DynamicTask import DynamicTask
+    from agently.core.orchestration.TaskBoard import TaskBoard
     from agently.core.orchestration.TaskDAG import TaskDAGExecutor
     from agently.core.orchestration.TriggerFlow import TriggerFlow
     from agently.core.model import AttemptRunner
@@ -92,6 +97,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.extension.ExtensionHandlers").ExtensionHandlers is ExtensionHandlers
     assert importlib.import_module("agently.core.session.Session").Session is Session
     assert importlib.import_module("agently.core.application.DynamicTask.DynamicTask").DynamicTask is DynamicTask
+    assert importlib.import_module("agently.core.orchestration.TaskBoard.TaskBoardRuntime").TaskBoard is TaskBoard
     assert importlib.import_module("agently.core.orchestration.TaskDAG.TaskDAGExecutor").TaskDAGExecutor is TaskDAGExecutor
     assert importlib.import_module("agently.core.orchestration.TriggerFlow.TriggerFlow").TriggerFlow is TriggerFlow
     assert importlib.import_module("agently.core.operation.Action.Action").Action is Action
@@ -129,6 +135,7 @@ def test_core_layout_keeps_only_classified_root_packages():
     assert not (core_root / "session" / "Recall").exists()
     assert (core_root / "orchestration" / "TriggerFlow").is_dir()
     assert (core_root / "orchestration" / "TaskDAG").is_dir()
+    assert (core_root / "orchestration" / "TaskBoard").is_dir()
     assert (core_root / "application" / "DynamicTask").is_dir()
     assert not (core_root / "orchestration" / "TaskDAGExecutor").exists()
     assert not (core_root / "orchestration" / "DynamicTask").exists()
