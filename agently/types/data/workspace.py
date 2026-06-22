@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class WorkspaceRecordRef(TypedDict):
@@ -74,6 +74,89 @@ class WorkspaceContentSegment(TypedDict):
     eof: bool
     digest: str | None
     content_type: str | None
+
+
+WorkspaceFileOperation = Literal["read", "write", "export"]
+
+
+class WorkspaceFileDiagnostic(TypedDict):
+    code: str
+    message: str
+    handler_id: NotRequired[str | None]
+    dependency: NotRequired[str | None]
+    detail: NotRequired[dict[str, Any]]
+
+
+class WorkspaceFileRef(TypedDict):
+    path: str
+    bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    role: str
+
+
+class WorkspaceFileInfo(TypedDict):
+    path: str
+    extension: str
+    media_type: str | None
+    content_kind: str
+    bytes: int
+    sha256: str
+    signatures: list[str]
+    readable: bool
+    writable: bool
+    exists: bool
+
+
+class WorkspaceFileReadResult(TypedDict):
+    ok: bool
+    readable: bool
+    path: str
+    content: str
+    truncated: bool
+    bytes: int
+    offset: int
+    read_bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    encoding: str | None
+    handler_id: str
+    extraction_method: str
+    diagnostics: list[WorkspaceFileDiagnostic]
+    file_refs: list[WorkspaceFileRef]
+    attachments: NotRequired[list[dict[str, Any]]]
+
+
+class WorkspaceFileWriteResult(TypedDict):
+    ok: bool
+    writable: bool
+    path: str
+    bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    encoding: str | None
+    mode: str
+    handler_id: str
+    diagnostics: list[WorkspaceFileDiagnostic]
+    file_refs: list[WorkspaceFileRef]
+
+
+class WorkspaceFileExportResult(TypedDict):
+    ok: bool
+    exported: bool
+    source_path: str
+    output_path: str
+    export_kind: str
+    bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    handler_id: str
+    diagnostics: list[WorkspaceFileDiagnostic]
+    file_refs: list[WorkspaceFileRef]
 
 
 class WorkspaceRuntimeEventRecord(TypedDict):

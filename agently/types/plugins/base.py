@@ -39,6 +39,7 @@ AgentlyPluginType = Literal[
     "ContextPlanner",
     "Retriever",
     "ContextBuilder",
+    "WorkspaceFileIOHandler",
 ]
 
 

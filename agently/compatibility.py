@@ -388,6 +388,20 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                            'selection, approval decisions, DAG readiness, DevTools '
                                                            'projection truth, live resource serialization, or '
                                                            'cross-space messaging/replication.',
+                              'file_io_handler_contract': 'Workspace exposes WorkspaceFileIOHandler as the public '
+                                                          'plugin seam for file read/write/export behavior. '
+                                                          'Workspace owns path containment, deterministic file info, '
+                                                          'handler dispatch, sha256/file refs, and structured '
+                                                          'diagnostics; handlers own format-specific parsing, '
+                                                          'rendering, optional dependencies, MCP-backed adapters, '
+                                                          'and image preparation. Built-in text read/write is '
+                                                          'default; PDF, Office, image/VLM preparation, and '
+                                                          'HTML/Markdown export are optional fail-closed handlers. '
+                                                          'enable_workspace_file_actions(...) delegates to the bound '
+                                                          'Workspace when roots match, keeps isolated-root '
+                                                          'compatibility through the same handler registry, does not '
+                                                          'overwrite user Actions, and registers export_file only '
+                                                          'with export=True and write=True.',
                               'provider_capability_flags': ['supports_cas',
                                                             'supports_lease',
                                                             'supports_artifact_refs',

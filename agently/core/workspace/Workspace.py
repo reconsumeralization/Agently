@@ -24,6 +24,9 @@ from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
     WorkspaceBackendCapabilities,
     WorkspaceContentSegment,
+    WorkspaceFileExportResult,
+    WorkspaceFileReadResult,
+    WorkspaceFileWriteResult,
     WorkspaceFilePolicyMetadata,
     WorkspaceLeaseRef,
     WorkspaceLinkRef,
@@ -485,6 +488,86 @@ class Workspace:
         metadata["allowed_roots"] = metadata.get("allowed_roots") or [str(self.files_root)]
         return cast(WorkspaceFilePolicyMetadata, metadata)
 
+    def resolve_file_path(self, path: str | Path = ".") -> Path:
+        """Resolve a Workspace-relative file path within this Workspace root."""
+
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self.files_root / candidate
+        resolved = candidate.expanduser().resolve()
+        try:
+            resolved.relative_to(self.files_root)
+        except ValueError as error:
+            raise ValueError(f"Path is outside workspace file root: { path }") from error
+        return resolved
+
+    async def read_file(
+        self,
+        path: str | Path,
+        *,
+        max_bytes: int = 20000,
+        offset: int = 0,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileReadResult:
+        target = self.resolve_file_path(path)
+        if not target.is_file():
+            raise FileNotFoundError(f"Workspace file not found: { path }")
+        return await self.manager.read_file_path(
+            target,
+            relative_path=str(target.relative_to(self.files_root)),
+            max_bytes=max_bytes,
+            offset=offset,
+            handler=handler,
+            options=options,
+        )
+
+    async def write_file(
+        self,
+        path: str | Path,
+        content: str,
+        *,
+        append: bool = False,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileWriteResult:
+        if self.capabilities().get("read_only"):
+            raise PermissionError("Workspace is read-only; write_file(...) is blocked.")
+        target = self.resolve_file_path(path)
+        return await self.manager.write_file_path(
+            target,
+            relative_path=str(target.relative_to(self.files_root)),
+            content=content,
+            append=append,
+            handler=handler,
+            options=options,
+        )
+
+    async def export_file(
+        self,
+        source_path: str | Path,
+        output_path: str | Path,
+        *,
+        export_kind: str,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileExportResult:
+        if self.capabilities().get("read_only"):
+            raise PermissionError("Workspace is read-only; export_file(...) is blocked.")
+        source = self.resolve_file_path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Workspace source file not found: { source_path }")
+        output = self.resolve_file_path(output_path)
+        return await self.manager.export_file_path(
+            source,
+            output,
+            source_relative_path=str(source.relative_to(self.files_root)),
+            output_relative_path=str(output.relative_to(self.files_root)),
+            export_kind=export_kind,
+            handler=handler,
+            options=options,
+        )
+
     async def add_retention_anchor(
         self,
         execution_id: str,
@@ -528,6 +611,7 @@ class Workspace:
         read: bool = True,
         search: bool = True,
         list_files: bool = True,
+        export: bool = False,
         action_prefix: str = "",
         expose_to_model: bool = True,
         **kwargs: Any,
@@ -546,6 +630,7 @@ class Workspace:
             write=write,
             search=search,
             list_files=list_files,
+            export=export,
             action_prefix=action_prefix,
             expose_to_model=expose_to_model,
             **kwargs,

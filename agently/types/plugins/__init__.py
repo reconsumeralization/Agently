@@ -56,6 +56,7 @@ from .Workspace import (
     WorkspaceBackend,
     WorkspaceBackendProvider,
 )
+from .WorkspaceFileIOHandler import WorkspaceFileIOHandler
 from .ContextBuilder import ContextBuilder, ContextPlanner, Retriever
 from .ResponseParser import ResponseParser
 from .ToolManager import ToolManager

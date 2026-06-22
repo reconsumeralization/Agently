@@ -108,7 +108,7 @@ print(calculate("3333+6666=?"))
 | `agent.enable_shell(...)` | mount a managed `run_bash` action with workspace and command allowlists |
 | `agent.enable_nodejs(...)` | mount a managed `run_nodejs` action |
 | `agent.enable_sqlite(...)` | mount a managed `query_sqlite` action |
-| `agent.enable_workspace_file_actions(...)` | expose the current Workspace file area as list/search/read/write actions |
+| `agent.enable_workspace_file_actions(...)` | expose the current Workspace file area as handler-backed list/search/read/write actions, plus `export_file` when `export=True` and `write=True` |
 | `@agent.auto_func` | turn a Python function signature + docstring into a model-backed implementation that uses the agent's actions |
 | `agent.get_action_result(prompt=turn.prompt)` | retrieve action call records for a request-scoped turn |
 | `extra.action_logs` | structured logs produced during the action loop |

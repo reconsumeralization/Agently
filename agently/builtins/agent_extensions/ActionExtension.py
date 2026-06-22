@@ -426,6 +426,7 @@ class ActionExtension(BaseAgent):
         write: bool = False,
         search: bool = True,
         list_files: bool = True,
+        export: bool = False,
         action_prefix: str = "",
         expose_to_model: bool = True,
         max_file_bytes: int = 20000,
@@ -450,9 +451,22 @@ class ActionExtension(BaseAgent):
         root_path = Path(str(root)).expanduser().resolve()
         agent_tag = f"agent-{ self.name }"
         prefix = action_prefix.strip()
+        workspace_for_actions = None
+        if workspace is not None:
+            workspace_root = Path(str(getattr(workspace, "files_root", ""))).expanduser().resolve()
+            if workspace_root == root_path:
+                workspace_for_actions = workspace
+
+        from agently.base import workspace as global_workspace
+
+        manager = getattr(workspace_for_actions, "manager", global_workspace)
 
         def action_name(name: str):
             return f"{ prefix }{ name }" if prefix else name
+
+        def has_action(name: str):
+            registry = getattr(self.action, "action_registry", None)
+            return bool(registry is not None and registry.has(action_name(name)))
 
         def resolve_workspace_path(path: str | Path = "."):
             candidate = Path(path)
@@ -496,7 +510,68 @@ class ActionExtension(BaseAgent):
                 collected.append(candidate)
             return collected
 
-        if read and list_files:
+        def relative_path(path: Path):
+            return str(path.relative_to(root_path))
+
+        def file_result_action_output(result: Any):
+            return {
+                "status": "success",
+                "ok": True,
+                "data": result,
+                "result": result,
+            }
+
+        async def manager_read_file(path: str, max_bytes: int = max_file_bytes, offset: int = 0):
+            if workspace_for_actions is not None:
+                return await workspace_for_actions.read_file(path, max_bytes=max_bytes, offset=offset)
+            target = resolve_workspace_path(path)
+            if not target.is_file():
+                raise FileNotFoundError(f"Workspace file not found: { path }")
+            return await manager.read_file_path(
+                target,
+                relative_path=relative_path(target),
+                max_bytes=max_bytes,
+                offset=offset,
+            )
+
+        async def manager_write_file(path: str, content: str, append: bool = False):
+            if workspace_for_actions is not None:
+                return await workspace_for_actions.write_file(path, content, append=append)
+            target = resolve_workspace_path(path)
+            return await manager.write_file_path(
+                target,
+                relative_path=relative_path(target),
+                content=content,
+                append=append,
+            )
+
+        async def manager_export_file(
+            source_path: str,
+            output_path: str,
+            export_kind: str,
+            options: dict[str, Any] | None = None,
+        ):
+            if workspace_for_actions is not None:
+                return await workspace_for_actions.export_file(
+                    source_path,
+                    output_path,
+                    export_kind=export_kind,
+                    options=options,
+                )
+            source = resolve_workspace_path(source_path)
+            if not source.is_file():
+                raise FileNotFoundError(f"Workspace source file not found: { source_path }")
+            output = resolve_workspace_path(output_path)
+            return await manager.export_file_path(
+                source,
+                output,
+                source_relative_path=relative_path(source),
+                output_relative_path=relative_path(output),
+                export_kind=export_kind,
+                options=options,
+            )
+
+        if read and list_files and not has_action("list_files"):
 
             def list_workspace_files(
                 path: str = ".",
@@ -527,32 +602,22 @@ class ActionExtension(BaseAgent):
                 meta={"component": "workspace", "root": str(root_path)},
             )
 
-        if read:
+        if read and not has_action("read_file"):
 
-            def read_file(path: str, max_bytes: int = max_file_bytes):
-                target = resolve_workspace_path(path)
-                if not target.is_file():
-                    raise FileNotFoundError(f"Workspace file not found: { path }")
-                content_bytes = target.read_bytes()
-                truncated = len(content_bytes) > max_bytes
-                content = content_bytes[:max_bytes].decode("utf-8", errors="replace")
-                return {
-                    "path": str(target.relative_to(root_path)),
-                    "content": content,
-                    "truncated": truncated,
-                    "bytes": len(content_bytes),
-                }
+            async def read_file(path: str, max_bytes: int = max_file_bytes, offset: int = 0):
+                return file_result_action_output(await manager_read_file(path, max_bytes=max_bytes, offset=offset))
 
             self.action.register_action(
                 action_id=action_name("read_file"),
                 desc=self._build_capability_desc(
-                    f"Read a UTF-8 text file under the workspace root { root_path }.",
+                    f"Read a file under the workspace root { root_path } through registered Workspace file IO handlers.",
                     desc,
                     mode=desc_mode,
                 ),
                 kwargs={
                     "path": (str, "Workspace-relative file path."),
                     "max_bytes": (int, f"Maximum bytes to read. Default: { max_file_bytes }."),
+                    "offset": (int, "Byte offset to start reading from. Default: 0."),
                 },
                 func=read_file,
                 tags=[agent_tag],
@@ -561,9 +626,9 @@ class ActionExtension(BaseAgent):
                 meta={"component": "workspace", "root": str(root_path)},
             )
 
-        if read and search:
+        if read and search and not has_action("search_files"):
 
-            def search_files_action(
+            async def search_files_action(
                 query: str,
                 path: str = ".",
                 pattern: str = "*",
@@ -575,18 +640,20 @@ class ActionExtension(BaseAgent):
                 for file in files:
                     if len(results) >= max_results:
                         break
-                    try:
-                        content_bytes = file.read_bytes()
-                    except OSError:
+                    if file.stat().st_size > max_search_file_bytes:
                         continue
-                    if len(content_bytes) > max_search_file_bytes:
+                    result = await manager_read_file(
+                        relative_path(file),
+                        max_bytes=max_search_file_bytes,
+                    )
+                    if not result.get("readable") or result.get("content_kind") != "text":
                         continue
-                    text = content_bytes.decode("utf-8", errors="ignore")
+                    text = str(result.get("content", ""))
                     for line_no, line in enumerate(text.splitlines(), start=1):
                         if query in line:
                             results.append(
                                 {
-                                    "path": str(file.relative_to(root_path)),
+                                    "path": relative_path(file),
                                     "line": line_no,
                                     "text": line,
                                 }
@@ -615,26 +682,15 @@ class ActionExtension(BaseAgent):
                 meta={"component": "workspace", "root": str(root_path)},
             )
 
-        if write:
+        if write and not has_action("write_file"):
 
-            def write_file(path: str, content: str, append: bool = False):
-                target = resolve_workspace_path(path)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if append:
-                    with target.open("a", encoding="utf-8") as file:
-                        file.write(content)
-                else:
-                    target.write_text(content, encoding="utf-8")
-                return {
-                    "path": str(target.relative_to(root_path)),
-                    "bytes": len(content.encode("utf-8")),
-                    "mode": "append" if append else "write",
-                }
+            async def write_file(path: str, content: str, append: bool = False):
+                return file_result_action_output(await manager_write_file(path, content, append=append))
 
             self.action.register_action(
                 action_id=action_name("write_file"),
                 desc=self._build_capability_desc(
-                    f"Write a UTF-8 text file under the workspace root { root_path }.",
+                    f"Write a plain text file under the workspace root { root_path } through registered Workspace file IO handlers.",
                     desc,
                     mode=desc_mode,
                 ),
@@ -650,6 +706,46 @@ class ActionExtension(BaseAgent):
                 meta={"component": "workspace", "root": str(root_path), "write": True},
             )
 
+        if write and export and not has_action("export_file"):
+
+            async def export_file(
+                source_path: str,
+                output_path: str,
+                export_kind: str,
+                options: dict[str, Any] | None = None,
+            ):
+                return file_result_action_output(
+                    await manager_export_file(
+                        source_path,
+                        output_path,
+                        export_kind,
+                        options=options,
+                    )
+                )
+
+            self.action.register_action(
+                action_id=action_name("export_file"),
+                desc=self._build_capability_desc(
+                    f"Export a Workspace file under { root_path } using registered Workspace file IO handlers.",
+                    desc,
+                    mode=desc_mode,
+                ),
+                kwargs={
+                    "source_path": (str, "Workspace-relative source file path."),
+                    "output_path": (str, "Workspace-relative output file path."),
+                    "export_kind": (
+                        str,
+                        "Export kind such as 'html_pdf', 'markdown_pdf', or 'html_screenshot'.",
+                    ),
+                    "options": (dict, "Optional handler-specific export options. Default: None."),
+                },
+                func=export_file,
+                tags=[agent_tag],
+                side_effect_level="write",
+                expose_to_model=expose_to_model,
+                meta={"component": "workspace", "root": str(root_path), "write": True, "export": True},
+            )
+
         return self
 
     def enable_workspace(
@@ -661,6 +757,7 @@ class ActionExtension(BaseAgent):
         write: bool = False,
         search: bool = True,
         list_files: bool = True,
+        export: bool = False,
         action_prefix: str = "",
         expose_to_model: bool = True,
         max_file_bytes: int = 20000,
@@ -684,6 +781,7 @@ class ActionExtension(BaseAgent):
             write=write,
             search=search,
             list_files=list_files,
+            export=export,
             action_prefix=action_prefix,
             expose_to_model=expose_to_model,
             max_file_bytes=max_file_bytes,

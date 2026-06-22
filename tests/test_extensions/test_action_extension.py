@@ -338,8 +338,9 @@ def test_action_extension_enable_workspace_file_actions_registers_file_actions(t
     spec = agent.action.action_registry.get_spec("read_file")
     assert spec is not None
     spec_desc = str(spec.get("desc", ""))
-    assert "Read a UTF-8 text file" in spec_desc
+    assert "registered Workspace file IO handlers" in spec_desc
     assert "Project notes workspace." in spec_desc
+    assert agent.action.action_registry.get_spec("export_file") is None
 
     listed = agent.action.execute_action("list_files", {"path": "notes"})
     assert listed.get("status") == "success"
@@ -352,6 +353,13 @@ def test_action_extension_enable_workspace_file_actions_registers_file_actions(t
     read = agent.action.execute_action("read_file", {"path": "notes/todo.txt"})
     assert read.get("status") == "success"
     assert "ship examples" in read.get("data", {}).get("content", "")
+    assert read.get("data", {}).get("sha256")
+
+    (tmp_path / "notes" / "payload.bin").write_bytes(b"\x00\xffbinary")
+    binary_read = agent.action.execute_action("read_file", {"path": "notes/payload.bin"})
+    assert binary_read.get("status") == "success"
+    assert binary_read.get("data", {}).get("readable") is False
+    assert binary_read.get("data", {}).get("diagnostics", [])[0]["code"] == "workspace.file.no_read_handler"
 
     written = agent.action.execute_action("write_file", {"path": "notes/out.txt", "content": "ok"})
     assert written.get("status") == "success"
@@ -359,6 +367,33 @@ def test_action_extension_enable_workspace_file_actions_registers_file_actions(t
 
     outside = agent.action.execute_action("read_file", {"path": "../outside.txt"})
     assert outside.get("status") == "error"
+
+
+def test_action_extension_workspace_file_actions_export_flag_and_idempotent_user_action(tmp_path):
+    agent = Agently.create_agent()
+    (tmp_path / "input.md").write_text("# Hello\n", encoding="utf-8")
+    agent.register_action(
+        name="read_file",
+        desc="User-owned read file action.",
+        kwargs={"path": (str, "path")},
+        func=lambda path: {"user_action": path},
+    )
+
+    agent.enable_workspace_file_actions(root=tmp_path, write=True, export=True)
+
+    assert agent.action.execute_action("read_file", {"path": "input.md"}).get("data") == {"user_action": "input.md"}
+    assert agent.action.action_registry.get_spec("export_file") is not None
+    export_result = agent.action.execute_action(
+        "export_file",
+        {
+            "source_path": "input.md",
+            "output_path": "out.pdf",
+            "export_kind": "unknown_export",
+        },
+    )
+    assert export_result.get("status") == "success"
+    assert export_result.get("data", {}).get("exported") is False
+    assert export_result.get("data", {}).get("diagnostics", [])[0]["code"] == "workspace.file.no_export_handler"
 
 
 def test_action_extension_enable_workspace_file_actions_inherits_foundation_workspace(tmp_path):
@@ -377,6 +412,10 @@ def test_action_extension_enable_workspace_file_actions_inherits_foundation_work
     listed = agent.action.execute_action("list_files", {"path": "notes"})
     assert listed.get("status") == "success"
     assert listed.get("data") == ["notes/todo.txt"]
+
+    read = agent.action.execute_action("read_file", {"path": "notes/todo.txt"})
+    assert read.get("status") == "success"
+    assert read.get("data", {}).get("path") == "notes/todo.txt"
 
 
 def test_action_extension_enable_workspace_file_actions_uses_lazy_workspace(tmp_path, monkeypatch):

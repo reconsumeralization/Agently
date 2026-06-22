@@ -256,8 +256,64 @@ agent.enable_nodejs()
 ```
 
 `enable_workspace_file_actions(...)` 不创建第二个 Workspace；它只是把当前 Workspace
-文件作业区暴露成 list/search/read/write 文件 actions。只有某个 action 必须使用独立目录时，
+文件作业区暴露成 list/search/read/write 文件 actions。需要把 `export_file` 也暴露给
+Agent 时，同时传 `write=True` 与 `export=True`。只有某个 action 必须使用独立目录时，
 才显式传入 `root=` 或 `cwd=`。
+
+## File IO Handlers
+
+Workspace 的文件读、写、导出通过已注册的 `WorkspaceFileIOHandler` 实现完成。
+Workspace 只负责路径围栏、确定性的 file info、handler dispatch、digest 和 file refs；
+格式解析、渲染、MCP、VLM 语义由 handler、Builtins Action、MCP adapter、
+ExecutionResource provider 或 ModelRequest 层承担。Workspace 不会变成 shell executor、
+MCP client、renderer lifecycle owner、OCR engine 或 model requester。
+
+```python
+await agent.workspace.write_file("notes/todo.txt", "ship docs")
+read_result = await agent.workspace.read_file("notes/todo.txt", max_bytes=4096)
+
+export_result = await agent.workspace.export_file(
+    "report.md",
+    "report.pdf",
+    export_kind="markdown_pdf",
+)
+```
+
+默认 text handler 支持 UTF-8 / UTF-8-SIG 文本读取、纯文本写入，并返回有界 content、
+`bytes`、`sha256`、`offset`、`read_bytes`、`truncated`、diagnostics 和 file refs。
+未知 binary 文件会返回 `readable=False` 和结构化 diagnostics，不会用 replacement
+character 伪造文本。`search_files` 也只搜索通过同一 handler registry 判定为 readable
+text 的文件。
+
+内置可选 handler 覆盖：
+
+- 通过可选 `pypdf` 提取 PDF 文本；
+- 通过可选 Office 包提取 `.docx`、`.xlsx`、`.pptx`；
+- 把图片准备成 ModelRequest-compatible attachment，图片理解仍属于 `.image(...)` 或
+  其他 VLM-capable ModelRequest 路径；
+- 通过可选 renderer dependency 把 HTML/Markdown 导出为 PDF 或截图，默认不允许网络抓取。
+
+可选依赖缺失、不支持的文件类型、不支持的 export kind、扫描版/纯图片 PDF 都返回结构化
+diagnostics。越界路径、缺失路径和权限错误仍是执行错误。
+
+自定义 handler 可以注册到 Workspace manager：
+
+```python
+Agently.workspace.register_file_io_handler(custom_handler)
+Agently.workspace.register_file_io_handler(custom_handler, replace=True)
+Agently.workspace.unregister_file_io_handler("custom-handler")
+```
+
+相关示例：
+
+- `examples/workspace/workspace_file_io_handlers.py` 展示 text read/write、
+  不支持 binary diagnostics，以及确定性的可选 export 依赖缺失；
+- `examples/workspace/workspace_file_io_real_documents.py` 展示真实 text
+  read/write、PDF/Office 提取、HTML/Markdown 导出 E2E；
+- `examples/workspace/workspace_file_io_real_vlm.py` 展示真实 image attachment
+  preparation 加 VLM model request。VLM 示例默认使用 `qwen3-vl-plus`，需要真实
+  provider key，不会 mock 图片理解。key 不在默认 dotenv 路径时，可以用
+  `WORKSPACE_FILE_IO_VLM_ENV_FILE` 显式指定。
 
 文件边界 policy metadata 可以持久化用于审计，但 Workspace 不因此变成 cwd manager：
 

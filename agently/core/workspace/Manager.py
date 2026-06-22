@@ -18,7 +18,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from agently.types.data.workspace import WorkspaceContextPackage
+from agently.types.data.workspace import (
+    WorkspaceContextPackage,
+    WorkspaceFileExportResult,
+    WorkspaceFileInfo,
+    WorkspaceFileOperation,
+    WorkspaceFileReadResult,
+    WorkspaceFileWriteResult,
+)
 from agently.types.plugins import (
     ContextBuilder,
     IngestionProfile,
@@ -26,10 +33,22 @@ from agently.types.plugins import (
     Retriever,
     WorkspaceBackend,
     WorkspaceBackendProvider,
+    WorkspaceFileIOHandler,
 )
 
 from .ContextBuilder import DefaultContextBuilder, ContextProfile, RuleContextPlanner, WorkspaceRetriever
 from .Errors import WorkspaceConfigurationError
+from .FileIO import (
+    DefaultTextWorkspaceFileIOHandler,
+    HtmlExportWorkspaceFileIOHandler,
+    ImageVLMWorkspaceFileIOHandler,
+    OfficeWorkspaceFileIOHandler,
+    PdfWorkspaceFileIOHandler,
+    inspect_workspace_file,
+    unsupported_export_result,
+    unsupported_read_result,
+    unsupported_write_result,
+)
 from .Workspace import Workspace
 from .LocalBackend import LocalWorkspaceBackend
 from .Profiles import CheckpointIngestionProfile, FastIngestionProfile
@@ -42,6 +61,7 @@ class WorkspaceManager:
         self._profiles: dict[str, IngestionProfile] = {}
         self._context_profiles: dict[str, ContextProfile] = {}
         self._backend_providers: dict[str, WorkspaceBackendProvider] = {}
+        self._file_io_handlers: dict[str, WorkspaceFileIOHandler] = {}
         self.register_profile("fast", FastIngestionProfile())
         self.register_profile("checkpoint", CheckpointIngestionProfile())
         self.register_context_profile(
@@ -53,6 +73,11 @@ class WorkspaceManager:
                 context_builder=DefaultContextBuilder(),
             ),
         )
+        self.register_file_io_handler(DefaultTextWorkspaceFileIOHandler())
+        self.register_file_io_handler(PdfWorkspaceFileIOHandler())
+        self.register_file_io_handler(OfficeWorkspaceFileIOHandler())
+        self.register_file_io_handler(ImageVLMWorkspaceFileIOHandler())
+        self.register_file_io_handler(HtmlExportWorkspaceFileIOHandler())
 
     def create(
         self,
@@ -193,6 +218,164 @@ class WorkspaceManager:
 
     def list_context_profiles(self) -> list[str]:
         return sorted(self._context_profiles.keys())
+
+    def register_file_io_handler(
+        self,
+        handler: WorkspaceFileIOHandler,
+        *,
+        replace: bool = False,
+    ):
+        name = str(getattr(handler, "name", "")).strip()
+        if not name:
+            raise ValueError("Workspace file IO handler name must be non-empty.")
+        for method_name in ("supports", "read", "write", "export"):
+            if not callable(getattr(handler, method_name, None)):
+                raise TypeError(f"Workspace file IO handler must provide { method_name }(...).")
+        if name in self._file_io_handlers and not replace:
+            raise WorkspaceConfigurationError(f"Workspace file IO handler is already registered: { name }")
+        register_hook = getattr(handler, "_on_register", None)
+        if callable(register_hook):
+            register_hook()
+        if name in self._file_io_handlers and replace:
+            unregister_hook = getattr(self._file_io_handlers[name], "_on_unregister", None)
+            if callable(unregister_hook):
+                unregister_hook()
+        self._file_io_handlers[name] = handler
+        return self
+
+    def unregister_file_io_handler(self, handler_id: str):
+        normalized = str(handler_id).strip()
+        if not normalized:
+            raise ValueError("Workspace file IO handler name must be non-empty.")
+        handler = self._file_io_handlers.pop(normalized, None)
+        if handler is not None:
+            unregister_hook = getattr(handler, "_on_unregister", None)
+            if callable(unregister_hook):
+                unregister_hook()
+        return self
+
+    def list_file_io_handlers(self) -> list[str]:
+        return sorted(self._file_io_handlers.keys())
+
+    def inspect_file_path(self, path: Path, *, relative_path: str) -> WorkspaceFileInfo:
+        return inspect_workspace_file(path, relative_path=relative_path)
+
+    def _select_file_io_handler(
+        self,
+        *,
+        operation: WorkspaceFileOperation,
+        file_info: WorkspaceFileInfo,
+        handler: str | None = None,
+        export_kind: str | None = None,
+    ) -> WorkspaceFileIOHandler | None:
+        if handler is not None:
+            normalized = str(handler).strip()
+            if not normalized:
+                raise ValueError("Workspace file IO handler name must be non-empty.")
+            if normalized not in self._file_io_handlers:
+                raise WorkspaceConfigurationError(f"Workspace file IO handler is not registered: { normalized }")
+            selected = self._file_io_handlers[normalized]
+            if selected.supports(operation=operation, file_info=file_info, export_kind=export_kind):
+                return selected
+            return None
+        for candidate in sorted(
+            self._file_io_handlers.values(),
+            key=lambda item: (int(getattr(item, "priority", 1000)), str(getattr(item, "name", ""))),
+        ):
+            if candidate.supports(operation=operation, file_info=file_info, export_kind=export_kind):
+                return candidate
+        return None
+
+    async def read_file_path(
+        self,
+        path: Path,
+        *,
+        relative_path: str,
+        max_bytes: int = 20000,
+        offset: int = 0,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileReadResult:
+        file_info = self.inspect_file_path(path, relative_path=relative_path)
+        selected = self._select_file_io_handler(operation="read", file_info=file_info, handler=handler)
+        if selected is None:
+            return unsupported_read_result(
+                file_info=file_info,
+                handler_id=handler or "none",
+                code="workspace.file.no_read_handler",
+                message="No registered Workspace file IO handler can read this file type.",
+            )
+        return await selected.read(
+            path=path,
+            file_info=file_info,
+            max_bytes=max_bytes,
+            offset=offset,
+            options=options,
+        )
+
+    async def write_file_path(
+        self,
+        path: Path,
+        *,
+        relative_path: str,
+        content: str,
+        append: bool = False,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileWriteResult:
+        file_info = self.inspect_file_path(path, relative_path=relative_path)
+        selected = self._select_file_io_handler(operation="write", file_info=file_info, handler=handler)
+        if selected is None:
+            return unsupported_write_result(
+                file_info=file_info,
+                handler_id=handler or "none",
+                code="workspace.file.no_write_handler",
+                message="No registered Workspace file IO handler can write this file type.",
+            )
+        return await selected.write(
+            path=path,
+            file_info=file_info,
+            content=content,
+            append=append,
+            options=options,
+        )
+
+    async def export_file_path(
+        self,
+        source_path: Path,
+        output_path: Path,
+        *,
+        source_relative_path: str,
+        output_relative_path: str,
+        export_kind: str,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileExportResult:
+        source_info = self.inspect_file_path(source_path, relative_path=source_relative_path)
+        output_info = self.inspect_file_path(output_path, relative_path=output_relative_path)
+        selected = self._select_file_io_handler(
+            operation="export",
+            file_info=source_info,
+            handler=handler,
+            export_kind=export_kind,
+        )
+        if selected is None:
+            return unsupported_export_result(
+                source_info=source_info,
+                output_info=output_info,
+                export_kind=export_kind,
+                handler_id=handler or "none",
+                code="workspace.file.no_export_handler",
+                message="No registered Workspace file IO handler can export this source file to the requested kind.",
+            )
+        return await selected.export(
+            source_path=source_path,
+            output_path=output_path,
+            source_info=source_info,
+            output_info=output_info,
+            export_kind=export_kind,
+            options=options,
+        )
 
     async def build_context(
         self,

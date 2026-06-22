@@ -274,8 +274,69 @@ agent.enable_nodejs()
 
 `enable_workspace_file_actions(...)` does not create a second Workspace. It
 exposes list/search/read/write file actions over the current Workspace file
-area. Pass an explicit `root=` or `cwd=` only when an action must use an
-independent directory.
+area. Pass `export=True` together with `write=True` when the Agent should also
+receive an `export_file` action. Pass an explicit `root=` or `cwd=` only when an
+action must use an independent directory.
+
+## File IO Handlers
+
+Workspace file reads, writes, and exports use registered
+`WorkspaceFileIOHandler` implementations. Workspace owns path containment,
+deterministic file info, handler dispatch, digests, and file refs; handlers own
+format-specific parsing or rendering. Workspace does not become a shell
+executor, MCP client, renderer lifecycle owner, OCR engine, or model requester.
+
+```python
+await agent.workspace.write_file("notes/todo.txt", "ship docs")
+read_result = await agent.workspace.read_file("notes/todo.txt", max_bytes=4096)
+
+export_result = await agent.workspace.export_file(
+    "report.md",
+    "report.pdf",
+    export_kind="markdown_pdf",
+)
+```
+
+The default text handler reads UTF-8 / UTF-8-SIG text, writes plain text, and
+returns bounded content with `bytes`, `sha256`, `offset`, `read_bytes`,
+`truncated`, diagnostics, and file refs. Unknown binary files return
+`readable=False` with diagnostics instead of replacement-character content.
+`search_files` only searches files that are readable text through the same
+handler registry.
+
+Built-in optional handlers cover:
+
+- PDF text extraction through optional `pypdf`;
+- `.docx`, `.xlsx`, and `.pptx` extraction through optional Office packages;
+- image preparation as ModelRequest-compatible attachments, with interpretation
+  still owned by `.image(...)` or another VLM-capable ModelRequest path;
+- HTML/Markdown export to PDF or screenshot through optional renderer
+  dependencies, with network fetch disabled by default.
+
+Optional dependency missing, unsupported file type, unsupported export kind, and
+image-only/scanned PDF cases return structured diagnostics. Outside-root,
+missing-path, and permission failures remain execution errors.
+
+Custom handlers can be registered on the Workspace manager:
+
+```python
+Agently.workspace.register_file_io_handler(custom_handler)
+Agently.workspace.register_file_io_handler(custom_handler, replace=True)
+Agently.workspace.unregister_file_io_handler("custom-handler")
+```
+
+See:
+
+- `examples/workspace/workspace_file_io_handlers.py` for text read/write,
+  unsupported binary diagnostics, and deterministic optional export dependency
+  failure;
+- `examples/workspace/workspace_file_io_real_documents.py` for real text
+  read/write, PDF/Office extraction, and HTML/Markdown export E2E;
+- `examples/workspace/workspace_file_io_real_vlm.py` for real image attachment
+  preparation plus a VLM model request. The VLM example defaults to
+  `qwen3-vl-plus`, requires a real provider key, and does not mock image
+  interpretation. Use `WORKSPACE_FILE_IO_VLM_ENV_FILE` when the key lives in a
+  non-default dotenv file.
 
 File boundary policy metadata can be persisted for audit without turning
 Workspace into a cwd manager:
