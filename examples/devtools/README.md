@@ -27,6 +27,8 @@ Examples in this folder:
   Uses `EvaluationBridge` and `EvaluationRunner` to run a small repeatable suite.
 - `07_agently_observe_lazy_bridge.py`
   Uses `Agently.observe(flow, ...)` to lazily load DevTools and watch one TriggerFlow without importing `agently_devtools` in app code.
+- `08_model_request_telemetry_local.py`
+  Registers a local Event Center hook and shows `payload.model_request_telemetry` on model request RuntimeEvents; this is an infrastructure probe and does not require a real model provider.
 
 **InteractiveWrapper** (Active interaction):
 - `04_interactive_wrapper_basic.py`

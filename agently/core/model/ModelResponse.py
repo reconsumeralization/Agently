@@ -14,6 +14,7 @@
 
 import inspect
 import json
+import time
 import uuid
 
 from typing import Any, AsyncGenerator, Generator, Literal, TYPE_CHECKING, cast, overload
@@ -497,6 +498,7 @@ class ModelResponse:
 
     async def _get_response_generator(self) -> AsyncGenerator["AgentlyModelResultMessage", None]:
         from agently.base import async_emit_runtime
+        from agently.core.runtime.RuntimeEvents import attach_model_request_telemetry
 
         with bind_runtime_context(
             parent_run_context=self.request_run_context,
@@ -537,17 +539,27 @@ class ModelResponse:
                         await prefix(self.prompt, self.settings)
                     elif inspect.isfunction(prefix):
                         prefix(self.prompt, self.settings)
+                self.model_run_context.meta["_model_request_started_at"] = time.perf_counter()
+                request_started_payload = {
+                    "agent_name": self.agent_name,
+                    "response_id": self.id,
+                    "request_run_id": self.request_run_context.run_id,
+                    "model_run_id": self.model_run_context.run_id,
+                    "attempt_index": self.attempt_index,
+                    "provider_family": provider_name,
+                }
+                attach_model_request_telemetry(
+                    request_started_payload,
+                    event_kind="model.request_started",
+                    run=self.model_run_context,
+                    source="ModelResponse",
+                )
                 await async_emit_runtime(
                     {
                         "event_type": "model.request_started",
                         "source": "ModelResponse",
                         "message": f"Starting model request attempt #{ self.attempt_index } for agent '{ self.agent_name }'.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.id,
-                            "request_run_id": self.request_run_context.run_id,
-                            "attempt_index": self.attempt_index,
-                        },
+                        "payload": request_started_payload,
                         "run": self.model_run_context,
                     }
                 )
@@ -569,18 +581,27 @@ class ModelResponse:
                 model_requester = ModelRequester(self.prompt, self.settings)
                 request_data = model_requester.generate_request_data()
                 request_payload = self._build_request_payload(request_data)
+                model_requesting_payload = {
+                    "agent_name": self.agent_name,
+                    "response_id": self.id,
+                    "attempt_index": self.attempt_index,
+                    "request_run_id": self.request_run_context.run_id,
+                    "model_run_id": self.model_run_context.run_id,
+                    "provider_family": provider_name,
+                    **request_payload,
+                }
+                attach_model_request_telemetry(
+                    model_requesting_payload,
+                    event_kind="model.requesting",
+                    run=self.model_run_context,
+                    source="ModelResponse",
+                )
                 await async_emit_runtime(
                     {
                         "event_type": "model.requesting",
                         "source": "ModelResponse",
                         "message": f"Sending model request for agent '{ self.agent_name }'.",
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.id,
-                            "attempt_index": self.attempt_index,
-                            "request_run_id": self.request_run_context.run_id,
-                            **request_payload,
-                        },
+                        "payload": model_requesting_payload,
                         "run": self.model_run_context,
                     }
                 )
@@ -615,6 +636,16 @@ class ModelResponse:
                                     observation.data.get("error"),
                                     source=str(getattr(model_requester, "name", ModelRequester.name)),
                                     request_data=full_request_data,
+                                    payload={
+                                        "agent_name": self.agent_name,
+                                        "response_id": self.id,
+                                        "attempt_index": self.attempt_index,
+                                        "request_run_id": self.request_run_context.run_id,
+                                        "model_run_id": self.model_run_context.run_id,
+                                        "provider_family": provider_name,
+                                        "request_url": getattr(request_data, "request_url", None),
+                                    },
+                                    run=self.model_run_context,
                                 )
 
                         response_generator = AttemptRunner(
@@ -743,6 +774,22 @@ class ModelResponse:
                 request_failure_event = (
                     "request.side_channel_failed" if is_side_channel else "request.failed"
                 )
+                model_failure_payload = {
+                    "agent_name": self.agent_name,
+                    "response_id": self.id,
+                    "attempt_index": self.attempt_index,
+                    "request_run_id": self.request_run_context.run_id,
+                    "model_run_id": self.model_run_context.run_id,
+                    "provider_family": provider_name,
+                    "side_channel": is_side_channel,
+                }
+                attach_model_request_telemetry(
+                    model_failure_payload,
+                    event_kind=model_failure_event,
+                    run=self.model_run_context,
+                    source="ModelResponse",
+                    error=error,
+                )
                 await async_emit_runtime(
                     {
                         "event_type": model_failure_event,
@@ -753,13 +800,7 @@ class ModelResponse:
                             if is_side_channel
                             else f"Model request failed for agent '{ self.agent_name }'."
                         ),
-                        "payload": {
-                            "agent_name": self.agent_name,
-                            "response_id": self.id,
-                            "attempt_index": self.attempt_index,
-                            "request_run_id": self.request_run_context.run_id,
-                            "side_channel": is_side_channel,
-                        },
+                        "payload": model_failure_payload,
                         "error": error,
                         "run": self.model_run_context,
                     }

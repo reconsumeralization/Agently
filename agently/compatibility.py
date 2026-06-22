@@ -41,6 +41,20 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                     'attempt_index': 'model-request retry attempt '
                                                                                      'metadata; not an AgentExecution '
                                                                                      'counter'},
+                                                 'model_request_telemetry_contract': 'Existing model RuntimeEvents may '
+                                                                                     'carry '
+                                                                                     'payload.model_request_telemetry '
+                                                                                     'observation facts for '
+                                                                                     'response_id, attempt_index, run '
+                                                                                     'ids, provider/model, '
+                                                                                     'request_url, duration, usage, '
+                                                                                     'side_channel, and normalized '
+                                                                                     'errors. Telemetry dedupe is '
+                                                                                     'observation-only and must not '
+                                                                                     'drive routing, retry, '
+                                                                                     'verification, quality judgment, '
+                                                                                     'planner input, or prompt '
+                                                                                     'content.',
                                                  'agent_execution_limits': ['max_seconds', 'max_no_progress_seconds'],
                                                  'provider_stream_idle_timeout': ['OpenAICompatible.stream_idle_timeout',
                                                                                   'OpenAIResponsesCompatible.stream_idle_timeout'],

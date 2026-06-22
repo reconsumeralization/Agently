@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Mapping
 from typing import Any
 
 from agently.types.data import ErrorInfo, RuntimeEvent
@@ -26,6 +28,9 @@ __all__ = [
     "async_emit_session_observation",
     "emit_session_observation",
 ]
+
+_MODEL_REQUEST_TELEMETRY_KEYS_META = "_model_request_telemetry_keys"
+_MODEL_REQUEST_STARTED_AT_META = "_model_request_started_at"
 
 
 def _normalize_error(error: Any) -> tuple[ErrorInfo, BaseException | None]:
@@ -42,12 +47,137 @@ def _normalize_error(error: Any) -> tuple[ErrorInfo, BaseException | None]:
     return ErrorInfo.from_exception(final_error), final_error
 
 
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _extract_payload_meta(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    return _mapping(payload.get("meta"))
+
+
+def _extract_request(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    request = _mapping(payload.get("request"))
+    if request:
+        return request
+    request_data = _mapping(payload.get("request_data"))
+    if request_data:
+        return request_data
+    return {}
+
+
+def _extract_model(payload: Mapping[str, Any]) -> Any:
+    meta = _extract_payload_meta(payload)
+    if meta.get("model") is not None:
+        return meta.get("model")
+    request = _extract_request(payload)
+    request_data = _mapping(request.get("data"))
+    if request_data.get("model") is not None:
+        return request_data.get("model")
+    if request.get("model") is not None:
+        return request.get("model")
+    return payload.get("model")
+
+
+def _extract_usage(payload: Mapping[str, Any]) -> Any:
+    meta = _extract_payload_meta(payload)
+    if meta.get("usage") is not None:
+        return meta.get("usage")
+    if payload.get("usage") is not None:
+        return payload.get("usage")
+    return None
+
+
+def _extract_request_url(payload: Mapping[str, Any]) -> Any:
+    request = _extract_request(payload)
+    if request.get("request_url") is not None:
+        return request.get("request_url")
+    return payload.get("request_url")
+
+
+def _duration_ms(run: Any) -> float | None:
+    meta = getattr(run, "meta", None)
+    if not isinstance(meta, dict):
+        return None
+    started_at = meta.get(_MODEL_REQUEST_STARTED_AT_META)
+    if not isinstance(started_at, int | float):
+        return None
+    return round((time.perf_counter() - float(started_at)) * 1000, 3)
+
+
+def _should_attach_model_request_telemetry(run: Any, telemetry_key: str) -> bool:
+    meta = getattr(run, "meta", None)
+    if not isinstance(meta, dict):
+        return True
+    emitted_keys = meta.setdefault(_MODEL_REQUEST_TELEMETRY_KEYS_META, [])
+    if not isinstance(emitted_keys, list):
+        emitted_keys = []
+        meta[_MODEL_REQUEST_TELEMETRY_KEYS_META] = emitted_keys
+    if telemetry_key in emitted_keys:
+        return False
+    emitted_keys.append(telemetry_key)
+    return True
+
+
+def attach_model_request_telemetry(
+    payload: dict[str, Any],
+    *,
+    event_kind: str,
+    run: Any = None,
+    source: str | None = None,
+    error: Any = None,
+) -> dict[str, Any]:
+    """Attach observation-only ModelRequest telemetry to an existing payload."""
+
+    response_id = payload.get("response_id") or getattr(run, "response_id", None)
+    attempt_index = payload.get("attempt_index")
+    run_meta = getattr(run, "meta", None)
+    if attempt_index is None and isinstance(run_meta, Mapping):
+        attempt_index = run_meta.get("attempt_index")
+    request_run_id = payload.get("request_run_id")
+    if request_run_id is None:
+        request_run_id = getattr(run, "parent_run_id", None)
+    model_run_id = payload.get("model_run_id")
+    if model_run_id is None:
+        model_run_id = getattr(run, "run_id", None)
+    telemetry_key = f"{ response_id }:{ attempt_index }:{ event_kind }"
+    if not _should_attach_model_request_telemetry(run, telemetry_key):
+        return payload
+
+    meta = _extract_payload_meta(payload)
+    provider = payload.get("provider") or meta.get("provider") or source
+    provider_family = payload.get("provider_family") or payload.get("requester") or source
+    error_info = None
+    if error is not None:
+        normalized_error, _ = _normalize_error(error)
+        error_info = normalized_error.model_dump(mode="json")
+
+    payload["model_request_telemetry"] = {
+        "event_kind": event_kind,
+        "telemetry_key": telemetry_key,
+        "agent_name": payload.get("agent_name") or getattr(run, "agent_name", None),
+        "response_id": response_id,
+        "attempt_index": attempt_index,
+        "request_run_id": request_run_id,
+        "model_run_id": model_run_id,
+        "provider": provider,
+        "provider_family": provider_family,
+        "model": _extract_model(payload),
+        "request_url": _extract_request_url(payload),
+        "duration_ms": _duration_ms(run),
+        "usage": _extract_usage(payload),
+        "side_channel": payload.get("side_channel"),
+        "error": error_info,
+    }
+    return payload
+
+
 async def async_emit_model_requester_error(
     error: Any,
     *,
     source: str,
     request_data: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
+    run: Any = None,
 ) -> None:
     """Emit the official provider request error RuntimeEvent from core."""
 
@@ -59,6 +189,13 @@ async def async_emit_model_requester_error(
     if request_data is not None:
         event_payload.setdefault("request_data", request_data)
     error_info, raiseable_error = _normalize_error(error)
+    attach_model_request_telemetry(
+        event_payload,
+        event_kind="model.requester.error",
+        run=run,
+        source=source,
+        error=error_info,
+    )
     await async_emit_runtime(
         {
             "event_type": "model.requester.error",
@@ -67,6 +204,7 @@ async def async_emit_model_requester_error(
             "message": error_info.message,
             "payload": event_payload,
             "error": error_info,
+            "run": run,
         }
     )
     if settings.get("runtime.raise_error") and raiseable_error is not None:
@@ -100,6 +238,14 @@ async def async_emit_response_parser_observation(
     resolved_payload = dict(payload) if isinstance(payload, dict) else {}
     resolved_payload.setdefault("agent_name", agent_name)
     resolved_payload.setdefault("response_id", response_id)
+    if event_type in {"model.completed", "model.meta"}:
+        attach_model_request_telemetry(
+            resolved_payload,
+            event_kind=event_type,
+            run=run,
+            source=str(observation.get("source") or "AgentlyResponseParser"),
+            error=observation.get("error"),
+        )
     await async_emit_runtime(
         {
             "event_type": event_type,

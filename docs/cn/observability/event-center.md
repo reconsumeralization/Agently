@@ -25,6 +25,13 @@ run 与 retry 命名：
 - `attempt_index` 描述一次请求内部的模型重试 attempt；它不是 AgentExecution 计数。
 - DevTools 应保持两者语义分离：从 `run.run_kind` 渲染 `agent_execution`，从 `model_request` run 的 `payload.attempt_index` 或 `run.meta.attempt_index` 读取模型重试 attempt。
 
+模型请求 telemetry：
+
+- 模型 RuntimeEvent 可在 `model.request_started`、`model.requesting`、`model.completed`、`model.meta`、`model.request_failed`、`model.requester.error` 上携带 `payload["model_request_telemetry"]`。
+- telemetry payload 只用于观察，可包含 `response_id`、`attempt_index`、run ids、provider/model、request URL、duration、usage、side-channel 和规范化 error 事实。
+- telemetry 去重只移除同一 `response_id + attempt_index + event kind` 的重复 telemetry 子 payload；不会抑制原始 RuntimeEvent。
+- 不要把这些 telemetry 事实反馈给 route 选择、retry policy、verifier 判断、quality scoring、planner context 或 prompt 内容。它们只用于日志、DevTools 展示和诊断。
+
 ## 注册 hook
 
 ```python
@@ -149,6 +156,22 @@ await Agently.async_emit_runtime({
 | `run` | run lineage，包括 `run_id`、`parent_run_id`、`session_id`、`execution_id` 等 |
 | `meta` | 附加元数据 |
 | `timestamp` | 毫秒时间戳 |
+
+对于模型请求事件，`payload.model_request_telemetry` 是可扩展子 payload。消费者应把缺失字段视为未知，而不是失败。常见字段：
+
+| 字段 | 含义 |
+|---|---|
+| `event_kind` | 携带该 telemetry 的原始模型事件类型 |
+| `telemetry_key` | 去重 key，通常是 `response_id:attempt_index:event_kind` |
+| `response_id` | request/response 关联 id |
+| `attempt_index` | 请求内部的 retry attempt 编号 |
+| `request_run_id` / `model_run_id` | request 与 model attempt 的 run lineage id |
+| `provider` / `provider_family` / `model` | 可得的 provider 元数据 |
+| `request_url` | provider endpoint 或 provider 自有 symbolic URL |
+| `duration_ms` | 可得时从模型请求开始计算的耗时 |
+| `usage` | provider 上报的 usage 元数据 |
+| `side_channel` | 是否来自 side-channel request 路径 |
+| `error` | failed/requester-error 事件上的规范化错误事实 |
 
 ## TriggerFlow 事件别名
 

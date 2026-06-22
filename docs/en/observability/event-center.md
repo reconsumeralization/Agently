@@ -25,6 +25,13 @@ Run and retry naming:
 - `attempt_index` describes a retryable model-request attempt inside a request; it is not an AgentExecution counter.
 - DevTools should preserve both fields as separate semantics: render `agent_execution` from `run.run_kind`, and read model retry attempts from `payload.attempt_index` or `run.meta.attempt_index` on `model_request` runs.
 
+Model request telemetry:
+
+- Model RuntimeEvents may include `payload["model_request_telemetry"]` on `model.request_started`, `model.requesting`, `model.completed`, `model.meta`, `model.request_failed`, and `model.requester.error`.
+- The telemetry payload is observation-only. It can contain `response_id`, `attempt_index`, run ids, provider/model, request URL, duration, usage, side-channel, and normalized error facts.
+- Telemetry dedupe only removes duplicate telemetry sub-payloads for the same `response_id + attempt_index + event kind`; it does not suppress the original RuntimeEvent.
+- Do not feed these telemetry facts back into route selection, retry policy, verifier judgment, quality scoring, planner context, or prompt content. Use them for logs, DevTools display, and diagnostics.
+
 ## Register a hook
 
 ```python
@@ -152,6 +159,22 @@ The top-level fields come from `agently.types.data.event.RuntimeEvent`. `Observa
 | `run` | run lineage, including `run_id`, `parent_run_id`, `session_id`, `execution_id`, and related ids |
 | `meta` | additional metadata |
 | `timestamp` | millisecond timestamp |
+
+For model request events, `payload.model_request_telemetry` is an extensible sub-payload. Consumers should treat missing fields as unknown, not as failure. Common fields are:
+
+| Field | Meaning |
+|---|---|
+| `event_kind` | original model event kind that carried the telemetry |
+| `telemetry_key` | dedupe key, usually `response_id:attempt_index:event_kind` |
+| `response_id` | request/response correlation id |
+| `attempt_index` | retry attempt number inside the request |
+| `request_run_id` / `model_run_id` | run lineage ids for request and model attempt |
+| `provider` / `provider_family` / `model` | provider metadata when known |
+| `request_url` | provider endpoint or provider-owned symbolic URL when known |
+| `duration_ms` | elapsed time from model request start when available |
+| `usage` | provider-reported usage metadata when available |
+| `side_channel` | whether the model event came from a side-channel request path |
+| `error` | normalized error facts for failed/requester-error events |
 
 ## TriggerFlow event aliases
 

@@ -8,7 +8,10 @@ import pytest
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.core import ModelRequest, ModelResponseResult, PluginManager
 from agently.core.model.AttemptRunner import core_attempt_runner_entrypoint
-from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
+from agently.core.runtime.RuntimeEvents import (
+    async_emit_action_flow_observation,
+    async_emit_response_parser_observation,
+)
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState, RunContext
 from agently.types.data.event import normalize_triggerflow_event_type
 from agently.utils import Settings
@@ -441,9 +444,26 @@ async def test_model_request_events_include_prompt_and_child_run_lineage():
         assert requesting_event.payload["request"]["request_url"] == "mock://observation-requester"
         assert requesting_event.payload["attempt_index"] == 1
 
+        started_event = next(event for event in model_events if event.event_type == "model.request_started")
+        started_telemetry = started_event.payload["model_request_telemetry"]
+        assert started_telemetry["event_kind"] == "model.request_started"
+        assert started_telemetry["response_id"] == response.response_id
+        assert started_telemetry["attempt_index"] == 1
+        assert started_telemetry["request_run_id"] == request_run.run_id
+        assert started_telemetry["model_run_id"] == model_run.run_id
+        assert started_telemetry["provider_family"] == "MockObservationRequester"
+
+        requesting_telemetry = requesting_event.payload["model_request_telemetry"]
+        assert requesting_telemetry["event_kind"] == "model.requesting"
+        assert requesting_telemetry["request_url"] == "mock://observation-requester"
+
         meta_event = next(event for event in model_events if event.event_type == "model.meta")
         assert meta_event.payload["meta"]["provider"] == "mock-observation"
         assert meta_event.payload["meta"]["model"] == "mock-1"
+        meta_telemetry = meta_event.payload["model_request_telemetry"]
+        assert meta_telemetry["event_kind"] == "model.meta"
+        assert meta_telemetry["provider"] == "mock-observation"
+        assert meta_telemetry["model"] == "mock-1"
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
@@ -510,6 +530,11 @@ async def test_handler_driven_provider_error_becomes_core_runtime_event():
         assert requester_errors[0].source == "MockHandlerDrivenRequester"
         assert requester_errors[0].error is not None
         assert requester_errors[0].error.message == "handler provider failed"
+        requester_error_telemetry = requester_errors[0].payload["model_request_telemetry"]
+        assert requester_error_telemetry["event_kind"] == "model.requester.error"
+        assert requester_error_telemetry["response_id"] == response.response_id
+        assert requester_error_telemetry["attempt_index"] == 1
+        assert requester_error_telemetry["error"]["message"] == "handler provider failed"
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
@@ -543,6 +568,15 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
         attempt_start_events = [event for event in captured if event.event_type == "model.request_started"]
         assert len(attempt_start_events) == 2
         assert [event.payload["attempt_index"] for event in attempt_start_events] == [1, 2]
+        assert [
+            event.payload["model_request_telemetry"]["attempt_index"] for event in attempt_start_events
+        ] == [1, 2]
+        assert len(
+            {
+                event.payload["model_request_telemetry"]["telemetry_key"]
+                for event in attempt_start_events
+            }
+        ) == 2
         assert len({event.run.run_id for event in attempt_start_events if event.run is not None}) == 2
         assert response.run_context is not None
         request_run = response.run_context
@@ -564,6 +598,54 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
         }
         assert final_completed_event.payload["raw_text"] == '{"summary": "all good", "reply": "done"}'
         assert final_completed_event.payload["cleaned_text"] == '{"summary": "all good", "reply": "done"}'
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_model_request_telemetry_dedupes_same_kind_for_same_attempt():
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.telemetry_dedupe_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        run = RunContext.create(
+            run_kind="model_request",
+            agent_name="dedupe-agent",
+            response_id="response-dedupe",
+            meta={"attempt_index": 1},
+        )
+        await async_emit_response_parser_observation(
+            {
+                "kind": "meta",
+                "source": "TestParser",
+                "payload": {"meta": {"provider": "mock-provider", "model": "mock-model", "usage": {"total_tokens": 3}}},
+            },
+            agent_name="dedupe-agent",
+            response_id="response-dedupe",
+            run=run,
+        )
+        await async_emit_response_parser_observation(
+            {
+                "kind": "meta",
+                "source": "TestParser",
+                "payload": {"meta": {"provider": "mock-provider", "model": "mock-model", "usage": {"total_tokens": 3}}},
+            },
+            agent_name="dedupe-agent",
+            response_id="response-dedupe",
+            run=run,
+        )
+
+        meta_events = [event for event in captured if event.event_type == "model.meta"]
+        assert len(meta_events) == 2
+        assert "model_request_telemetry" in meta_events[0].payload
+        assert meta_events[0].payload["model_request_telemetry"]["telemetry_key"] == (
+            "response-dedupe:1:model.meta"
+        )
+        assert "model_request_telemetry" not in meta_events[1].payload
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
