@@ -21,11 +21,12 @@ the core class focused on orchestration.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from typing import Any, cast
 
-from agently.types.data import ActionArtifact, ActionResult
+from agently.types.data import ActionArtifact, ActionResult, WorkspaceFileRef
 
 from .ActionNormalization import normalize_execution_record
 
@@ -154,6 +155,80 @@ class ActionArtifactManager:
         except Exception:
             return len(str(value).encode("utf-8", errors="ignore"))
 
+    @classmethod
+    def _json_bytes(cls, value: Any) -> bytes:
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str, sort_keys=True).encode("utf-8")
+        except Exception:
+            return str(value).encode("utf-8", errors="ignore")
+
+    @classmethod
+    def _preview_meta(cls, value: Any, *, limit: int, path: str = "", depth: int = 0) -> list[dict[str, Any]]:
+        if depth > 4:
+            return []
+        if isinstance(value, str):
+            original_bytes = len(value.encode("utf-8"))
+            if len(value) <= limit:
+                return []
+            preview_bytes = len(value[:limit].encode("utf-8", errors="ignore"))
+            return [
+                {
+                    "path": path or "$",
+                    "truncated": True,
+                    "original_bytes": original_bytes,
+                    "preview_bytes": preview_bytes,
+                }
+            ]
+        if isinstance(value, dict):
+            metadata: list[dict[str, Any]] = []
+            for key, item in value.items():
+                item_path = f"{path}.{key}" if path else str(key)
+                metadata.extend(cls._preview_meta(item, limit=limit, path=item_path, depth=depth + 1))
+            return metadata
+        if isinstance(value, list):
+            metadata = []
+            for index, item in enumerate(value[:40]):
+                item_path = f"{path}[{index}]" if path else f"[{index}]"
+                metadata.extend(cls._preview_meta(item, limit=limit, path=item_path, depth=depth + 1))
+            return metadata
+        return []
+
+    @staticmethod
+    def _artifact_role(artifact_type: str) -> str:
+        if artifact_type.endswith("input") or artifact_type == "action_input":
+            return "input"
+        if artifact_type.endswith("output") or artifact_type == "action_output":
+            return "output"
+        return "artifact"
+
+    @classmethod
+    def _collect_file_refs(cls, record: ActionResult) -> list[WorkspaceFileRef]:
+        collected: list[WorkspaceFileRef] = []
+
+        def collect(value: Any):
+            if isinstance(value, dict):
+                refs = value.get("file_refs")
+                if isinstance(refs, list):
+                    for ref in refs:
+                        if isinstance(ref, dict):
+                            collected.append(cast(WorkspaceFileRef, dict(ref)))
+
+        collect(record)
+        collect(record.get("data"))
+        result = record.get("result")
+        if result is not record.get("data"):
+            collect(result)
+
+        deduped: list[WorkspaceFileRef] = []
+        seen: set[tuple[str, str, str]] = set()
+        for ref in collected:
+            key = (str(ref.get("path", "")), str(ref.get("sha256", "")), str(ref.get("role", "")))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(ref)
+        return deduped
+
     # ── artifact registration ──────────────────────────────────────────────
 
     def register_execution_artifact(
@@ -169,29 +244,39 @@ class ActionArtifactManager:
         artifact_id = f"act_art_{uuid.uuid4().hex}"
         safe_value = self._redact_value(value)
         preview = self._compact_value(safe_value, limit=4000)
-        size = self._safe_json_size(safe_value)
+        raw_bytes = self._json_bytes(safe_value)
+        size = len(raw_bytes)
+        preview_size = self._safe_json_size(preview)
+        role = self._artifact_role(artifact_type)
         stored = {
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
             "artifact_type": artifact_type,
+            "role": role,
             "label": label,
             "media_type": media_type,
             "value": safe_value,
             "meta": meta or {},
             "size": size,
+            "bytes": size,
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
         }
         self._artifacts[artifact_id] = stored
         return {
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
             "artifact_type": artifact_type,
+            "role": role,
             "label": label,
             "media_type": media_type,
             "preview": preview,
-            "truncated": size > 4000,
+            "preview_size": preview_size,
+            "truncated": preview_size < size,
             "full_value_available": True,
             "available": True,
             "size": size,
+            "bytes": size,
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
             "meta": meta or {},
         }
 
@@ -238,6 +323,9 @@ class ActionArtifactManager:
         redaction_report: list[str],
     ) -> dict[str, Any]:
         data = record.get("data", record.get("result"))
+        result_preview = self._compact_value(data, limit=8000)
+        result_size = self._safe_json_size(data)
+        result_preview_size = self._safe_json_size(result_preview)
         digest: dict[str, Any] = {
             "action_call_id": record.get("action_call_id", ""),
             "action_id": record.get("action_id", ""),
@@ -246,8 +334,15 @@ class ActionArtifactManager:
             "success": bool(record.get("success", record.get("ok", False))),
             "executor_type": record.get("executor_type", ""),
             "instruction": self._summarize_action_instruction(record),
-            "result_preview": self._compact_value(data, limit=8000),
+            "result_preview": result_preview,
+            "result_preview_meta": {
+                "truncated": result_preview_size < result_size,
+                "original_size": result_size,
+                "preview_size": result_preview_size,
+                "truncated_paths": self._preview_meta(data, limit=8000),
+            },
             "artifact_refs": artifact_refs,
+            "file_refs": record.get("file_refs", []),
         }
         error = record.get("error", "")
         if isinstance(error, str) and error:
@@ -270,11 +365,23 @@ class ActionArtifactManager:
         action_call_id = str(record.get("action_call_id", "") or f"act_call_{uuid.uuid4().hex}")
         record["action_call_id"] = action_call_id
 
-        if not self._is_instruction_heavy_record(record):
+        data = record.get("data", record.get("result"))
+        meta = record.get("meta", {})
+        if not isinstance(meta, dict):
+            meta = {}
+        should_externalize = (
+            self._is_instruction_heavy_record(record)
+            or self._safe_json_size(data) > 8000
+            or meta.get("max_output_bytes_exceeded") is True
+        )
+        file_refs = self._collect_file_refs(record)
+        if file_refs:
+            record["file_refs"] = file_refs
+
+        if not should_externalize:
             return record
 
         kwargs = record.get("kwargs", {})
-        data = record.get("data", record.get("result"))
         artifact_refs: list[ActionArtifact] = []
         if isinstance(kwargs, dict) and kwargs:
             artifact_refs.append(
@@ -323,6 +430,7 @@ class ActionArtifactManager:
         }
         record["meta"] = meta
         record["artifact_refs"] = artifact_refs
+        record["file_refs"] = file_refs
         record["artifacts"] = artifact_refs
         record["redaction_report"] = redaction_report
         record["model_digest"] = self._build_execution_digest(
@@ -341,9 +449,16 @@ class ActionArtifactManager:
             return []
 
         normalized: list[ActionResult] = []
+        seen_call_ids: set[str] = set()
         for index, record in enumerate(records):
             command = commands[index] if index < len(commands) else None
-            normalized.append(self.finalize_action_result(normalize_execution_record(record, command, index)))
+            finalized = self.finalize_action_result(normalize_execution_record(record, command, index))
+            action_call_id = str(finalized.get("action_call_id", ""))
+            if action_call_id and action_call_id in seen_call_ids:
+                continue
+            if action_call_id:
+                seen_call_ids.add(action_call_id)
+            normalized.append(finalized)
         return normalized
 
     # ── model-visible transformation ───────────────────────────────────────

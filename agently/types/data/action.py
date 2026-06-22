@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Literal
 from typing_extensions import TypedDict
 
+from .workspace import WorkspaceFileRef
 from .tool import KwargsType, ReturnType
 from .execution_resource import ExecutionResourceRequirement
 
@@ -57,14 +58,18 @@ class ActionArtifact(TypedDict, total=False):
     action_call_id: str
     label: str
     artifact_type: str
+    role: str
     path: str
     media_type: str
     preview: Any
+    preview_size: int
     value: Any
     truncated: bool
     full_value_available: bool
     available: bool
     size: int
+    bytes: int
+    sha256: str
     meta: dict[str, Any]
 
 
@@ -144,6 +149,7 @@ class ActionResult(TypedDict, total=False):
     data: Any
     model_digest: dict[str, Any]
     artifact_refs: list[ActionArtifact]
+    file_refs: list[WorkspaceFileRef]
     artifacts: list[ActionArtifact]
     diagnostics: list[ActionDiagnostic]
     approval: ActionApproval

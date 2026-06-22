@@ -187,6 +187,17 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                           'were produced so later response '
                                                                           'materialization does not re-enter '
                                                                           'ActionRuntime for the same prompt.',
+                                   'action_evidence_refs_contract': 'Instruction-heavy or large Action records use '
+                                                                    'model_digest as the hot-path model-visible '
+                                                                    'summary and preserve full redacted inputs/outputs '
+                                                                    'behind artifact_refs. Artifact refs include role, '
+                                                                    'media type, bytes, preview_size, sha256, '
+                                                                    'truncation flags, and availability fields. '
+                                                                    'Workspace file_refs returned by Action data are '
+                                                                    'surfaced on ActionResult/model_digest. '
+                                                                    'max_output_bytes records diagnostics and preserves '
+                                                                    'full output for artifact finalization instead of '
+                                                                    'destructively replacing the only data/result value.',
                                    'model_input_safety_contract': 'Model-planned Action commands from structured_plan '
                                                                   'and native_tool_calls are filtered at the '
                                                                   'ActionDispatcher boundary to registered '

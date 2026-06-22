@@ -790,14 +790,29 @@ class ActionDispatcher:
         if isinstance(max_output_bytes, int) and max_output_bytes > 0:
             serialized = json.dumps(result.get("data"), ensure_ascii=False, default=str)
             if len(serialized.encode("utf-8")) > max_output_bytes:
-                truncated = serialized.encode("utf-8")[:max_output_bytes].decode("utf-8", errors="ignore")
-                result["data"] = truncated
-                result["result"] = truncated
                 result_meta = result.get("meta")
                 if not isinstance(result_meta, dict):
                     result_meta = {}
-                result_meta["truncated"] = True
+                result_meta["max_output_bytes_exceeded"] = True
+                result_meta["max_output_bytes"] = max_output_bytes
+                result_meta["original_output_bytes"] = len(serialized.encode("utf-8"))
                 result["meta"] = result_meta
+                diagnostics = result.get("diagnostics")
+                diagnostics = diagnostics if isinstance(diagnostics, list) else []
+                diagnostics.append(
+                    self._exception_diagnostic(
+                        code="action.output.max_output_bytes_exceeded",
+                        message=(
+                            "Action output exceeded policy max_output_bytes; full output is preserved for "
+                            "Action artifact finalization while model-visible paths should use bounded previews."
+                        ),
+                        meta={
+                            "max_output_bytes": max_output_bytes,
+                            "original_output_bytes": len(serialized.encode("utf-8")),
+                        },
+                    )
+                )
+                result["diagnostics"] = diagnostics
         return result
 
     def execute(self, action_id: str, action_input: dict[str, Any], **kwargs):

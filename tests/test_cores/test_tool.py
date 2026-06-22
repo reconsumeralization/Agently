@@ -249,6 +249,113 @@ def test_action_dispatcher_timeout_has_structured_diagnostic():
     assert timeout_meta["timeout_seconds"] == 0.001
 
 
+def test_large_action_output_uses_digest_and_artifact_ref():
+    action = Agently.create_agent().action
+    action_id = f"large_output_{ uuid.uuid4().hex[:8] }"
+    stdout = "x" * 12000
+    stderr = "y" * 9000
+
+    action.register_action(
+        action_id=action_id,
+        desc="Return large command-like output.",
+        kwargs={},
+        func=lambda: {"stdout": stdout, "stderr": stderr, "exit_code": 0},
+        expose_to_model=False,
+    )
+
+    record = action.execute_action(action_id, {})
+
+    assert record.get("status") == "success"
+    assert record.get("data", {}).get("stdout") == stdout
+    artifact_refs = record.get("artifact_refs")
+    assert isinstance(artifact_refs, list)
+    output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
+    assert output_ref.get("role") == "output"
+    assert output_ref.get("truncated") is True
+    assert output_ref.get("bytes", 0) > output_ref.get("preview_size", 0)
+    assert isinstance(output_ref.get("sha256"), str) and len(str(output_ref.get("sha256"))) == 64
+
+    digest = record.get("model_digest")
+    assert isinstance(digest, dict)
+    preview_meta = digest.get("result_preview_meta")
+    assert isinstance(preview_meta, dict)
+    assert preview_meta["truncated"] is True
+    truncated_paths = preview_meta["truncated_paths"]
+    assert any(item["path"] == "stdout" for item in truncated_paths)
+    assert any(item["path"] == "stderr" for item in truncated_paths)
+
+    visible = Action.to_action_results([record])
+    visible_digest = next(iter(visible.values()))
+    assert visible_digest["result_preview_meta"]["truncated"] is True
+    assert "artifact_refs" in visible_digest
+
+    recalled = action.read_action_artifact(
+        artifact_id=str(output_ref.get("artifact_id", "")),
+        action_call_id=str(output_ref.get("action_call_id", "")),
+    )
+    assert recalled["ok"] is True
+    assert recalled["value"]["stdout"] == stdout
+    assert recalled["value"]["stderr"] == stderr
+
+
+def test_max_output_bytes_preserves_full_output_in_artifact():
+    action = Agently.create_agent().action
+    action_id = f"max_output_preserve_{ uuid.uuid4().hex[:8] }"
+    output = "z" * 2000
+
+    action.register_action(
+        action_id=action_id,
+        desc="Return output larger than policy preview.",
+        kwargs={},
+        func=lambda: output,
+        default_policy={"max_output_bytes": 20},
+        expose_to_model=False,
+    )
+
+    record = action.execute_action(action_id, {})
+
+    assert record.get("data") == output
+    assert record.get("meta", {}).get("max_output_bytes_exceeded") is True
+    diagnostics = record.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    assert any(item.get("code") == "action.output.max_output_bytes_exceeded" for item in diagnostics)
+    artifact_refs = record.get("artifact_refs")
+    assert isinstance(artifact_refs, list)
+    output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
+    recalled = action.read_action_artifact(
+        artifact_id=str(output_ref.get("artifact_id", "")),
+        action_call_id=str(output_ref.get("action_call_id", "")),
+    )
+    assert recalled["value"] == output
+
+
+def test_action_execution_record_dedupes_same_action_call_id():
+    action = Agently.create_agent().action
+    records = [
+        {
+            "action_call_id": "act_call_same",
+            "status": "success",
+            "success": True,
+            "action_id": "echo",
+            "purpose": "Echo",
+            "data": "first",
+        },
+        {
+            "action_call_id": "act_call_same",
+            "status": "success",
+            "success": True,
+            "action_id": "echo",
+            "purpose": "Echo",
+            "data": "duplicate",
+        },
+    ]
+
+    normalized = action._artifact_manager.normalize_execution_records(records, [])
+
+    assert len(normalized) == 1
+    assert normalized[0].get("data") == "first"
+
+
 def test_action_dispatcher_fail_closed_handler_returns_approval_required():
     action = Agently.action
     action_id = f"approval_pending_action_{ uuid.uuid4().hex[:8] }"

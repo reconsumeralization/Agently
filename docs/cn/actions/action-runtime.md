@@ -159,8 +159,10 @@ host 的 `direct` / `dry_run` 调用保持既有行为，不做这类过滤。
 这类指令型 action 会记录一份执行 digest 和一组 artifact references，用来控制后续模型上下文长度。
 
 后续 action planning round 默认看到的是 digest。它包含 action id、call id、目的、状态、精简指令预览、
-结果预览、脱敏说明和 artifact refs。完整代码、shell 输出、SQL 结果集、页面 HTML、截图、日志等原始内容
-会以脱敏 artifact 形式保留，不会默认塞进每一轮 prompt。
+结果预览、preview 截断元数据、脱敏说明、artifact refs，以及 Action 返回的 Workspace file refs。
+完整代码、shell 输出、SQL 结果集、页面 HTML、截图、日志等原始内容会以脱敏 artifact 形式保留，
+不会默认塞进每一轮 prompt。artifact refs 会包含 role、media type、size/bytes、preview size、
+SHA-256 和截断标记，消费方可以明确知道 preview 不是完整证据。
 
 如果模型或应用需要回溯细节，可以显式读取：
 
@@ -177,6 +179,9 @@ raw = agent.action.read_action_artifact(
 
 `Action.to_action_results(records)` 对指令型 action 使用 digest，因此后续回复能知道发生了什么，
 但不会默认拿到完整 payload。
+
+`max_output_bytes` 是输出证据策略，不是破坏性存储操作。Action 输出超过该限制时，Agently 会记录
+diagnostics，并把完整值保留在 artifact ref 后面；模型可见路径仍然使用有界 preview。
 
 当 host 显式调用 `agent.get_action_result(prompt=...)` 时，即使返回的
 records 为空，Agently 也会把该 prompt 标记为已经消费过 action loop。之后同一

@@ -169,9 +169,12 @@ recording an execution digest plus artifact references.
 
 The digest is what the next action-planning round normally sees. It includes the
 action id, call id, purpose, status, a compact instruction preview, result
-preview, redaction notes, and artifact refs. Full raw content such as complete
+preview, preview truncation metadata, redaction notes, artifact refs, and any
+Workspace file refs returned by the Action. Full raw content such as complete
 code, shell output, SQL rows, page HTML, screenshots, or logs is retained as a
-redacted artifact instead of being inserted into every prompt.
+redacted artifact instead of being inserted into every prompt. Artifact refs
+include role, media type, size/bytes, preview size, SHA-256, and truncation
+flags so consumers can tell that a preview is not complete evidence.
 
 When the model or application needs the omitted detail, read it explicitly:
 
@@ -189,6 +192,11 @@ raw = agent.action.read_action_artifact(
 `Action.to_action_results(records)` uses the digest for instruction-heavy
 actions, so follow-up replies can reason about what happened without receiving
 the full payload by default.
+
+`max_output_bytes` is an output evidence policy, not a destructive storage
+operation. When an Action output exceeds it, Agently records diagnostics and
+keeps the full value behind an artifact ref while the model-visible path
+continues to use bounded previews.
 
 When a host explicitly calls `agent.get_action_result(prompt=...)`, Agently
 marks that prompt as having consumed the action loop even if the returned record
