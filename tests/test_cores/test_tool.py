@@ -144,6 +144,111 @@ def test_sanitize_policy_override_strips_host_only_keys_for_model_sources():
     assert none_stripped == []
 
 
+def test_model_sourced_action_input_strips_undeclared_kwargs():
+    action = Agently.create_agent().action
+    action_id = f"input_safety_{ uuid.uuid4().hex[:8] }"
+    received: list[dict[str, Any]] = []
+
+    def capture(**kwargs):
+        received.append(dict(kwargs))
+        return dict(kwargs)
+
+    action.register_action(
+        action_id=action_id,
+        desc="Capture received kwargs.",
+        kwargs={"value": (int, "")},
+        func=capture,
+        expose_to_model=False,
+    )
+
+    model_result = action.execute_action(
+        action_id,
+        {"value": 3, "admin": True, "policy": {"approval": "self_grant"}},
+        source_protocol="structured_plan",
+    )
+
+    assert model_result.get("status") == "success"
+    assert model_result.get("data") == {"value": 3}
+    assert received[-1] == {"value": 3}
+    assert model_result.get("kwargs") == {"value": 3}
+    diagnostics = model_result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    strip_diagnostic = next(item for item in diagnostics if item.get("code") == "action.input.unexpected_keys_stripped")
+    strip_meta = strip_diagnostic.get("meta", {})
+    assert strip_meta["source_protocol"] == "structured_plan"
+    assert set(strip_meta["stripped_keys"]) == {"admin", "policy"}
+
+    direct_result = action.execute_action(
+        action_id,
+        {"value": 4, "admin": True},
+        source_protocol="direct",
+    )
+    assert direct_result.get("status") == "success"
+    assert received[-1] == {"value": 4, "admin": True}
+    assert not any(
+        item.get("code") == "action.input.unexpected_keys_stripped"
+        for item in direct_result.get("diagnostics", [])
+        if isinstance(item, dict)
+    )
+
+
+def test_action_dispatcher_parameter_error_has_structured_diagnostic():
+    action = Agently.create_agent().action
+    action_id = f"input_type_error_{ uuid.uuid4().hex[:8] }"
+
+    def requires_value(value: int):
+        return value
+
+    action.register_action(
+        action_id=action_id,
+        desc="Require a value.",
+        kwargs={"value": (int, "")},
+        func=requires_value,
+        expose_to_model=False,
+    )
+
+    result = action.execute_action(action_id, {}, source_protocol="structured_plan")
+
+    assert result.get("status") == "error"
+    diagnostics = result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    error_diagnostic = next(item for item in diagnostics if item.get("code") == "action.input.type_error")
+    error_meta = error_diagnostic.get("meta", {})
+    assert error_meta["exception_type"] == "TypeError"
+
+
+def test_action_dispatcher_timeout_has_structured_diagnostic():
+    action = Agently.create_agent().action
+    action_id = f"timeout_diagnostic_{ uuid.uuid4().hex[:8] }"
+
+    async def slow_action():
+        await asyncio.sleep(0.05)
+        return "done"
+
+    action.register_action(
+        action_id=action_id,
+        desc="Sleep briefly.",
+        kwargs={},
+        func=slow_action,
+        default_policy={"timeout_seconds": 0.001},
+        expose_to_model=False,
+    )
+
+    result = action.execute_action(
+        action_id,
+        {},
+        source_protocol="structured_plan",
+    )
+
+    assert result.get("status") == "error"
+    assert result.get("meta", {}).get("timeout_seconds") == 0.001
+    diagnostics = result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    timeout_diagnostic = next(item for item in diagnostics if item.get("code") == "action.execution.timeout")
+    timeout_meta = timeout_diagnostic.get("meta", {})
+    assert timeout_meta["timeout_seconds"] == 0.001
+
+
 def test_action_dispatcher_fail_closed_handler_returns_approval_required():
     action = Agently.action
     action_id = f"approval_pending_action_{ uuid.uuid4().hex[:8] }"

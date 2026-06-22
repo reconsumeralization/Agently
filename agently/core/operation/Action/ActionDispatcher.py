@@ -26,6 +26,7 @@ from agently.core.operation.ExecutionResource import (
 from agently.types.data import (
     ActionApproval,
     ActionCall,
+    ActionDiagnostic,
     ActionPolicy,
     ActionResult,
     ActionSpec,
@@ -102,6 +103,102 @@ class ActionDispatcher:
             else:
                 sanitized[key] = value
         return cast(ActionPolicy, sanitized), stripped
+
+    @staticmethod
+    def _compact_diagnostic_value(value: Any, *, limit: int = 800) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}... [truncated {len(text) - limit} chars]"
+
+    @classmethod
+    def _declared_action_input_keys(cls, spec: ActionSpec) -> set[str] | None:
+        kwargs = spec.get("kwargs", {})
+        if not isinstance(kwargs, dict):
+            return None
+        return {str(key) for key in kwargs.keys()}
+
+    @classmethod
+    def _sanitize_action_input(
+        cls,
+        spec: ActionSpec,
+        action_input: dict[str, Any],
+        *,
+        source_protocol: str,
+    ) -> tuple[dict[str, Any], list[str]]:
+        if source_protocol not in cls.MODEL_PLANNING_PROTOCOLS:
+            return dict(action_input), []
+        declared_keys = cls._declared_action_input_keys(spec)
+        if declared_keys is None:
+            return dict(action_input), []
+        sanitized: dict[str, Any] = {}
+        stripped: list[str] = []
+        for key, value in action_input.items():
+            key_text = str(key)
+            if key_text in declared_keys:
+                sanitized[key_text] = value
+            else:
+                stripped.append(key_text)
+        return sanitized, sorted(stripped)
+
+    @classmethod
+    def _input_stripped_diagnostic(
+        cls,
+        *,
+        source_protocol: str,
+        stripped_keys: list[str],
+        original_input: dict[str, Any],
+        sanitized_input: dict[str, Any],
+    ) -> ActionDiagnostic:
+        return cast(ActionDiagnostic, {
+            "source": "ActionDispatcher",
+            "severity": "warning",
+            "code": "action.input.unexpected_keys_stripped",
+            "message": (
+                "Ignored undeclared action input keys from a model-planned action command: "
+                f"{ ', '.join(stripped_keys) }."
+            ),
+            "meta": {
+                "source_protocol": source_protocol,
+                "stripped_keys": stripped_keys,
+                "original_kwargs_preview": cls._compact_diagnostic_value(original_input),
+                "executed_kwargs_preview": cls._compact_diagnostic_value(sanitized_input),
+            },
+        })
+
+    @classmethod
+    def _exception_diagnostic(
+        cls,
+        *,
+        code: str,
+        message: str,
+        error: BaseException | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> ActionDiagnostic:
+        diagnostic_meta: dict[str, Any] = dict(meta or {})
+        if error is not None:
+            diagnostic_meta.setdefault("exception_type", type(error).__name__)
+            diagnostic_meta.setdefault("exception_message", cls._compact_diagnostic_value(str(error)))
+        return cast(ActionDiagnostic, {
+            "source": "ActionDispatcher",
+            "severity": "error",
+            "code": code,
+            "message": message,
+            "meta": diagnostic_meta,
+        })
+
+    @classmethod
+    def _call_diagnostics(
+        cls,
+        action_call: ActionCall,
+        *extra_diagnostics: ActionDiagnostic,
+    ) -> list[ActionDiagnostic]:
+        diagnostics = action_call.get("diagnostics")
+        base = cast(list[ActionDiagnostic], list(diagnostics)) if isinstance(diagnostics, list) else []
+        return [*base, *extra_diagnostics]
 
     def _merge_policy(
         self,
@@ -366,7 +463,7 @@ class ActionDispatcher:
         action_input = action_call.get("action_input", {})
         if not isinstance(action_input, dict):
             action_input = {}
-        return cast(ActionResult, {
+        result = {
             "ok": False,
             "status": status,
             "purpose": str(action_call.get("purpose", f"Use { action_id }")),
@@ -383,7 +480,9 @@ class ActionDispatcher:
             "expose_to_model": bool(spec.get("expose_to_model", True)),
             "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
             "executor_type": str(spec.get("executor_type", "")),
-        })
+            "diagnostics": self._call_diagnostics(action_call),
+        }
+        return cast(ActionResult, result)
 
     async def async_execute(
         self,
@@ -439,14 +538,21 @@ class ActionDispatcher:
                 "executor_type": str(spec.get("executor_type", "")),
             }
 
+        original_action_input = dict(action_input)
         sanitized_override, stripped_policy_keys = self._sanitize_policy_override(
             policy_override,
             source_protocol=source_protocol,
         )
-        call_diagnostics: list[dict[str, Any]] = []
+        sanitized_action_input, stripped_input_keys = self._sanitize_action_input(
+            spec,
+            original_action_input,
+            source_protocol=source_protocol,
+        )
+        action_input = sanitized_action_input
+        call_diagnostics: list[ActionDiagnostic] = []
         if stripped_policy_keys:
             call_diagnostics.append(
-                {
+                cast(ActionDiagnostic, {
                     "source": "ActionDispatcher",
                     "severity": "warning",
                     "code": "action.policy_override.host_only_keys_stripped",
@@ -455,7 +561,16 @@ class ActionDispatcher:
                         f"{ ', '.join(sorted(stripped_policy_keys)) }."
                     ),
                     "meta": {"source_protocol": source_protocol, "stripped_keys": sorted(stripped_policy_keys)},
-                }
+                })
+            )
+        if stripped_input_keys:
+            call_diagnostics.append(
+                self._input_stripped_diagnostic(
+                    source_protocol=source_protocol,
+                    stripped_keys=stripped_input_keys,
+                    original_input=original_action_input,
+                    sanitized_input=sanitized_action_input,
+                )
             )
         action_call: ActionCall = {
             "purpose": purpose or f"Use { action_id }",
@@ -488,7 +603,7 @@ class ActionDispatcher:
             return {
                 "ok": False,
                 "status": "blocked",
-                "purpose": str(action_call["purpose"]),
+                "purpose": str(action_call.get("purpose", f"Use { action_id }")),
                 "action_id": action_id,
                 "tool_name": str(spec.get("name", action_id)),
                 "kwargs": dict(action_input),
@@ -498,6 +613,13 @@ class ActionDispatcher:
                 "result": None,
                 "data": None,
                 "error": f"Action '{ action_id }' requires a sandboxed executor.",
+                "diagnostics": self._call_diagnostics(
+                    action_call,
+                    self._exception_diagnostic(
+                        code="action.execution.sandbox_required",
+                        message=f"Action '{ action_id }' requires a sandboxed executor.",
+                    ),
+                ),
                 "expose_to_model": bool(spec.get("expose_to_model", True)),
                 "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
                 "executor_type": str(spec.get("executor_type", "")),
@@ -596,10 +718,15 @@ class ActionDispatcher:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":
                     await execution_resource.async_release(handle)
+            timeout_diagnostic = self._exception_diagnostic(
+                code="action.execution.timeout",
+                message=f"Action '{ action_id }' timed out after { timeout_seconds } seconds.",
+                meta={"timeout_seconds": timeout_seconds, "source_protocol": source_protocol},
+            )
             return {
                 "ok": False,
                 "status": "error",
-                "purpose": str(action_call["purpose"]),
+                "purpose": str(action_call.get("purpose", f"Use { action_id }")),
                 "action_id": action_id,
                 "tool_name": str(spec.get("name", action_id)),
                 "kwargs": dict(action_input),
@@ -609,6 +736,8 @@ class ActionDispatcher:
                 "result": None,
                 "data": None,
                 "error": f"Action '{ action_id }' timed out after { timeout_seconds } seconds.",
+                "diagnostics": self._call_diagnostics(action_call, timeout_diagnostic),
+                "meta": {"timeout_seconds": timeout_seconds},
                 "expose_to_model": bool(spec.get("expose_to_model", True)),
                 "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
                 "executor_type": str(spec.get("executor_type", "")),
@@ -617,10 +746,17 @@ class ActionDispatcher:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":
                     await execution_resource.async_release(handle)
+            diagnostic_code = "action.input.type_error" if isinstance(error, TypeError) else "action.execution.exception"
+            exception_diagnostic = self._exception_diagnostic(
+                code=diagnostic_code,
+                message=str(error) or f"Action '{ action_id }' raised { type(error).__name__ }.",
+                error=error,
+                meta={"source_protocol": source_protocol},
+            )
             return {
                 "ok": False,
                 "status": "error",
-                "purpose": str(action_call["purpose"]),
+                "purpose": str(action_call.get("purpose", f"Use { action_id }")),
                 "action_id": action_id,
                 "tool_name": str(spec.get("name", action_id)),
                 "kwargs": dict(action_input),
@@ -630,6 +766,11 @@ class ActionDispatcher:
                 "result": None,
                 "data": None,
                 "error": str(error),
+                "diagnostics": self._call_diagnostics(action_call, exception_diagnostic),
+                "meta": {
+                    "exception_type": type(error).__name__,
+                    "exception_message": self._compact_diagnostic_value(str(error)),
+                },
                 "expose_to_model": bool(spec.get("expose_to_model", True)),
                 "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
                 "executor_type": str(spec.get("executor_type", "")),

@@ -147,6 +147,20 @@ constraints. Use `desc_mode="override"` when you intentionally want to replace
 the default description, or `desc_mode="default"` to ignore the supplied
 description and keep only the built-in one.
 
+## Model-sourced input safety
+
+Action commands produced by model planning are treated as untrusted input at the
+Action boundary. For `structured_plan` and `native_tool_calls` commands,
+`ActionDispatcher` filters `action_input` to the keys declared in the registered
+`ActionSpec.kwargs` before the executor is called. Direct host calls keep their
+existing behavior and are not filtered this way.
+
+Filtered calls keep structured diagnostics on the `ActionResult`, including
+`action.input.unexpected_keys_stripped`, the stripped keys, and bounded previews
+of the original and executed kwargs. Timeout and executor exceptions also return
+structured Action failures with diagnostics. RuntimeEvent consumers may observe
+those facts, but RuntimeEvent does not enforce input safety or authorization.
+
 ## Execution recall
 
 Instruction-heavy actions such as `run_bash`, `run_python`, `run_nodejs`,

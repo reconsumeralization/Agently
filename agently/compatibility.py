@@ -187,6 +187,15 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                           'were produced so later response '
                                                                           'materialization does not re-enter '
                                                                           'ActionRuntime for the same prompt.',
+                                   'model_input_safety_contract': 'Model-planned Action commands from structured_plan '
+                                                                  'and native_tool_calls are filtered at the '
+                                                                  'ActionDispatcher boundary to registered '
+                                                                  'ActionSpec.kwargs before executor invocation. '
+                                                                  'Stripped input keys, timeouts, TypeError '
+                                                                  'call-boundary failures, and executor exceptions '
+                                                                  'are reported through structured ActionResult '
+                                                                  'diagnostics. Direct and dry_run host calls keep '
+                                                                  'existing unfiltered behavior.',
                                    'native_tool_call_empty_diagnostic': 'When native_tool_calls planning produces no '
                                                                         'executable tool_calls, ActionFlow returns a '
                                                                         'skipped ActionResult with diagnostic code '

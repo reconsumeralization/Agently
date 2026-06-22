@@ -141,6 +141,18 @@ browser/page/session，可以启用 Browser ExecutionResource provider。
 如果你确实要替换默认描述，使用 `desc_mode="override"`；如果要忽略传入描述、只保留内置描述，使用
 `desc_mode="default"`。
 
+## 模型来源输入安全
+
+模型规划产生的 Action command 在 Action 边界被视为不可信输入。对于
+`structured_plan` 和 `native_tool_calls` command，`ActionDispatcher` 会在调用
+executor 之前，把 `action_input` 过滤到注册时 `ActionSpec.kwargs` 声明过的 key。
+host 的 `direct` / `dry_run` 调用保持既有行为，不做这类过滤。
+
+被过滤的调用会在 `ActionResult` 上保留结构化 diagnostics，包括
+`action.input.unexpected_keys_stripped`、被移除的 key，以及原始 kwargs 和实际执行 kwargs
+的有界预览。timeout 和 executor exception 也会返回带 diagnostics 的结构化 Action failed
+结果。RuntimeEvent 消费者可以观察这些事实，但 RuntimeEvent 不负责输入过滤或授权。
+
 ## 执行回溯
 
 `run_bash`、`run_python`、`run_nodejs`、`query_sqlite`、`browse`、`search`
