@@ -74,6 +74,8 @@ class TaskBoardPlanningPolicy:
     action_block_meaning: str
     task_complexity_basis: tuple[str, ...]
     owner_boundaries: tuple[str, ...]
+    evidence_reuse_guidance: tuple[str, ...]
+    repair_orchestration_guidance: tuple[str, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_prompt_payload(self) -> dict[str, Any]:
@@ -82,6 +84,8 @@ class TaskBoardPlanningPolicy:
             "action_block_meaning": self.action_block_meaning,
             "task_complexity_basis": list(self.task_complexity_basis),
             "owner_boundaries": list(self.owner_boundaries),
+            "evidence_reuse_guidance": list(self.evidence_reuse_guidance),
+            "repair_orchestration_guidance": list(self.repair_orchestration_guidance),
             "metadata": dict(self.metadata),
         }
 
@@ -141,6 +145,16 @@ def resolve_task_board_planning_policy(
             "TaskBoard policy may shape orchestration complexity, reflection density, evidence depth, and repair tendency.",
             "TaskBoard policy must not grant permissions, hide capabilities, or define hard budgets.",
             "TriggerFlow owns framework-visible lifecycle; TaskBoard does not own ModelRequest or ActionRuntime.",
+        ),
+        evidence_reuse_guidance=(
+            "Use existing TaskBoard card results, artifact refs, file refs, and scoped readback before planning or executing another evidence-gathering action.",
+            "When dependency evidence already contains the needed facts or cold refs, prefer synthesis, comparison, or local repair over re-gathering the same external evidence.",
+            "Re-gather evidence only when the current card objective requires fresh evidence, the existing evidence is missing, stale, contradictory, or readback diagnostics show it cannot be used.",
+        ),
+        repair_orchestration_guidance=(
+            "When review localizes a defect, prefer the smallest repair that can fix the affected card output or artifact while preserving valid evidence.",
+            "Do not turn a localized defect into broad repair work that repeats completed evidence-gathering cards.",
+            "Use board results, diagnostics, and refs to carry localized repair context forward.",
         ),
         metadata=dict(metadata or {}),
     )

@@ -201,6 +201,9 @@ def test_task_board_effort_policy_does_not_define_hard_budgets_or_action_options
     assert forbidden_keys.isdisjoint({str(key) for key in walk_keys(payload)})
     assert "not a target count" in policy.action_block_meaning
     assert "not an allowlist" in policy.action_block_meaning
+    assert any("existing TaskBoard card results" in item for item in policy.evidence_reuse_guidance)
+    assert any("Re-gather evidence only" in item for item in policy.evidence_reuse_guidance)
+    assert any("localized defect" in item for item in policy.repair_orchestration_guidance)
 
 
 def test_task_board_planning_result_builds_valid_revision():
