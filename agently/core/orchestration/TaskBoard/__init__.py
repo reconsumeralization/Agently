@@ -18,6 +18,15 @@ from .TaskBoardRuntime import (
     TaskBoardHandler,
     TaskBoardTickResult,
 )
+from .TaskBoardPlanning import (
+    TaskBoardEffortProfile,
+    TaskBoardPlanningPolicy,
+    TaskBoardPlanningResult,
+    coerce_task_board_planning_result,
+    resolve_task_board_effort_profile,
+    resolve_task_board_planning_policy,
+    task_board_planning_output_schema,
+)
 from .TaskBoardValidation import (
     TaskBoardValidation,
     TaskBoardValidator,
@@ -29,11 +38,18 @@ from .TaskBoardValidation import (
 __all__ = [
     "TaskBoard",
     "TaskBoardContext",
+    "TaskBoardEffortProfile",
     "TaskBoardHandler",
+    "TaskBoardPlanningPolicy",
+    "TaskBoardPlanningResult",
     "TaskBoardTickResult",
     "TaskBoardValidation",
     "TaskBoardValidator",
     "apply_task_board_patch",
+    "coerce_task_board_planning_result",
+    "resolve_task_board_effort_profile",
+    "resolve_task_board_planning_policy",
     "schedule_task_board_revision",
+    "task_board_planning_output_schema",
     "validate_task_board_revision",
 ]

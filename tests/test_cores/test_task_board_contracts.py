@@ -6,6 +6,8 @@ from agently.core import (
     TaskBoardGraph,
     TaskBoardRevision,
     TaskBoardValidator,
+    coerce_task_board_planning_result,
+    resolve_task_board_planning_policy,
 )
 from agently.types.data import TaskBoardCardResult, TaskBoardPatch
 
@@ -121,6 +123,110 @@ def test_task_board_schedule_waits_for_completed_dependencies():
     assert next_revision.card_results["collect"].file_refs[0]["path"] == "facts.md"
 
 
+def test_task_board_effort_policy_does_not_define_hard_budgets_or_action_options():
+    policy = resolve_task_board_planning_policy("high")
+    payload = policy.to_prompt_payload()
+    forbidden_keys = {
+        "allowed_actions",
+        "action_options",
+        "max_cards",
+        "max_model_requests",
+        "max_steps",
+        "required_actions",
+        "step_count",
+    }
+
+    def walk_keys(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                yield key
+                yield from walk_keys(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from walk_keys(item)
+
+    assert policy.effort_profile.name == "high"
+    assert forbidden_keys.isdisjoint({str(key) for key in walk_keys(payload)})
+    assert "not a target count" in policy.action_block_meaning
+    assert "not an allowlist" in policy.action_block_meaning
+
+
+def test_task_board_planning_result_builds_valid_revision():
+    result = coerce_task_board_planning_result(
+        {
+            "board_goal": "Prepare a support refund decision.",
+            "cards": [
+                {
+                    "id": "collect",
+                    "action_block": "Collect ticket and invoice evidence.",
+                    "objective": "Gather customer and billing facts.",
+                    "depends_on": [],
+                    "evidence_to_use": ["ticket_id", "invoice_id"],
+                    "done_when": "Ticket and invoice evidence are available.",
+                },
+                {
+                    "id": "decide",
+                    "action_block": "Compare facts against refund policy.",
+                    "objective": "Decide whether refund approval is justified.",
+                    "depends_on": ["collect"],
+                    "done_when": "Decision has evidence-backed reason.",
+                    "allowed_execution_shape": "model",
+                },
+            ],
+            "reflection_points": ["Check that billing status matches the ticket claim."],
+            "completion_gate": "Final decision cites collected evidence.",
+            "why_this_effort_shape": "Balanced evidence and decision separation.",
+        },
+        board_id="refund",
+        effort="medium",
+    )
+
+    assert result.revision.board_id == "refund"
+    assert result.revision.graph.graph_id == "refund.graph"
+    assert [card.id for card in result.revision.graph.cards] == ["collect", "decide"]
+    assert result.revision.graph.cards[0].input_refs == ("ticket_id", "invoice_id")
+    assert result.revision.graph.cards[0].evidence_contract["action_block"] == "Collect ticket and invoice evidence."
+    assert result.revision.graph.cards[1].depends_on == ("collect",)
+    assert result.revision.graph.cards[1].allowed_execution_shape == "model"
+    assert result.revision.metadata["completion_gate"] == "Final decision cites collected evidence."
+    assert result.planning_policy.effort_profile.name == "medium"
+
+
+def test_task_board_planning_result_rejects_effort_as_hard_control_keys():
+    with pytest.raises(ValueError, match="forbidden effort-control key: max_cards"):
+        coerce_task_board_planning_result(
+            {
+                "board_goal": "Invalid board.",
+                "max_cards": 2,
+                "cards": [{"id": "only", "objective": "Run.", "depends_on": []}],
+                "completion_gate": "Done.",
+                "why_this_effort_shape": "Invalid hard control.",
+            },
+            board_id="invalid",
+        )
+
+
+def test_task_board_planning_result_still_fails_closed_on_invalid_dependencies():
+    with pytest.raises(ValueError, match="depends on missing card"):
+        coerce_task_board_planning_result(
+            {
+                "board_goal": "Invalid dependency board.",
+                "cards": [
+                    {
+                        "id": "final",
+                        "action_block": "Finalize.",
+                        "objective": "Write final.",
+                        "depends_on": ["missing"],
+                        "done_when": "Final exists.",
+                    }
+                ],
+                "completion_gate": "Done.",
+                "why_this_effort_shape": "Invalid dependency.",
+            },
+            board_id="missing-dependency",
+        )
+
+
 @pytest.mark.asyncio
 async def test_task_board_tick_runs_through_triggerflow_and_advances_revision():
     contexts: list[TaskBoardContext] = []
@@ -130,6 +236,8 @@ async def test_task_board_tick_runs_through_triggerflow_and_advances_revision():
         assert context.model == "model-key"
         assert context.workspace == "workspace-ref"
         assert context.effort == "high"
+        assert context.planning_policy is not None
+        assert context.planning_policy.effort_profile.name == "high"
         return {
             "status": "completed",
             "preview": f"done:{ context.card.id }",

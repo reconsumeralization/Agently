@@ -29,6 +29,10 @@ from agently.types.data import (
 )
 from agently.types.trigger_flow import TriggerFlowRuntimeData
 
+from .TaskBoardPlanning import (
+    TaskBoardPlanningPolicy,
+    resolve_task_board_planning_policy,
+)
 from .TaskBoardValidation import (
     TaskBoardValidator,
     apply_task_board_patch,
@@ -45,6 +49,7 @@ class TaskBoardContext:
     model: Any = None
     workspace: Any = None
     effort: str = "medium"
+    planning_policy: TaskBoardPlanningPolicy | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -69,6 +74,7 @@ class TaskBoard:
         model: Any = None,
         workspace: Any = None,
         effort: str = "medium",
+        planning_policy: TaskBoardPlanningPolicy | Mapping[str, Any] | None = None,
         name: str | None = None,
         metadata: Mapping[str, Any] | None = None,
         validator: TaskBoardValidator | None = None,
@@ -78,6 +84,11 @@ class TaskBoard:
         self.model = model
         self.workspace = workspace
         self.effort = effort
+        self.planning_policy = (
+            planning_policy
+            if isinstance(planning_policy, TaskBoardPlanningPolicy)
+            else resolve_task_board_planning_policy(effort, metadata=planning_policy if isinstance(planning_policy, Mapping) else None)
+        )
         self.name = name or f"task-board-{ self.revision.board_id }"
         self.metadata = dict(metadata or {})
         self.validator = validator or TaskBoardValidator()
@@ -190,6 +201,7 @@ class TaskBoard:
             model=self.model,
             workspace=self.workspace,
             effort=self.effort,
+            planning_policy=self.planning_policy,
             metadata=self.metadata,
         )
         raw_result = handler(context)
