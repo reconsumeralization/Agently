@@ -6,6 +6,7 @@ from agently.core import (
     TaskBoardGraph,
     TaskBoardRevision,
     TaskBoardValidator,
+    build_task_board_evidence_view,
     coerce_task_board_planning_result,
     resolve_task_board_planning_policy,
 )
@@ -121,6 +122,57 @@ def test_task_board_schedule_waits_for_completed_dependencies():
     assert second_schedule.runnable_card_ids == ("final",)
     assert second_schedule.completed_card_ids == ("collect",)
     assert next_revision.card_results["collect"].file_refs[0]["path"] == "facts.md"
+
+
+def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
+    revision = _revision()
+    cold_ref = {
+        "path": "artifacts/collect.json",
+        "sha256": "abc",
+        "bytes": 1200,
+        "preview": "ref preview must not enter hot path",
+        "content": "full content must not enter hot path",
+    }
+    next_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision="rev-0",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "preview": "x" * 1200,
+                        "artifact_refs": [cold_ref],
+                        "file_refs": [cold_ref],
+                        "diagnostics": [{"kind": "probe", "content": "diagnostic body"}],
+                    },
+                },
+            ),
+        ),
+    )
+
+    view = build_task_board_evidence_view(next_revision, preview_chars=100).to_dict()
+
+    collect = view["cards"][0]
+    assert collect["card_id"] == "collect"
+    assert collect["preview"]["content"] == "x" * 100
+    assert collect["preview"]["truncated"] is True
+    assert collect["preview"]["original_chars"] == 1200
+    assert collect["has_cold_refs"] is True
+    assert collect["artifact_refs"][0]["path"] == "artifacts/collect.json"
+    assert "preview" not in collect["artifact_refs"][0]
+    assert "content" not in collect["artifact_refs"][0]
+    assert "content" not in collect["diagnostics"]["items"][0]
+    assert view["truncated"] is True
+    assert view["status_counts"]["completed"] == 1
+    assert view["status_counts"]["pending"] == 1
+
+
+def test_task_board_evidence_view_rejects_unknown_card_scope():
+    with pytest.raises(ValueError, match="unknown card ids"):
+        build_task_board_evidence_view(_revision(), card_ids=["missing"])
 
 
 def test_task_board_effort_policy_does_not_define_hard_budgets_or_action_options():

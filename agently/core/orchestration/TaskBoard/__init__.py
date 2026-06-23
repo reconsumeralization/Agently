@@ -18,6 +18,10 @@ from .TaskBoardRuntime import (
     TaskBoardHandler,
     TaskBoardTickResult,
 )
+from .TaskBoardEvidence import (
+    TaskBoardEvidenceView,
+    build_task_board_evidence_view,
+)
 from .TaskBoardPlanning import (
     TaskBoardEffortProfile,
     TaskBoardPlanningPolicy,
@@ -39,6 +43,7 @@ __all__ = [
     "TaskBoard",
     "TaskBoardContext",
     "TaskBoardEffortProfile",
+    "TaskBoardEvidenceView",
     "TaskBoardHandler",
     "TaskBoardPlanningPolicy",
     "TaskBoardPlanningResult",
@@ -46,6 +51,7 @@ __all__ = [
     "TaskBoardValidation",
     "TaskBoardValidator",
     "apply_task_board_patch",
+    "build_task_board_evidence_view",
     "coerce_task_board_planning_result",
     "resolve_task_board_effort_profile",
     "resolve_task_board_planning_policy",
