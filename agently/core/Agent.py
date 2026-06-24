@@ -923,6 +923,7 @@ class BaseAgent:
         *,
         goal: str,
         success_criteria: list[str] | None = None,
+        execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
         workspace: str | os.PathLike[str] | None = None,
         max_iterations: int = 3,
         verify: Literal["before_done"] = "before_done",
@@ -931,12 +932,14 @@ class BaseAgent:
         limits: dict[str, Any] | None = None,
         options: dict[str, Any] | None = None,
         task_id: str | None = None,
-    ):
+    ) -> "AgentExecution":
         if workspace is not None:
             cast(Any, self).use_workspace(workspace)
+        normalized_execution = AgentTask.normalize_execution_strategy(execution)
         task_options = {
             "goal": goal,
             "success_criteria": success_criteria,
+            "execution": normalized_execution,
             "workspace": workspace,
             "max_iterations": max_iterations,
             "verify": verify,
@@ -946,16 +949,16 @@ class BaseAgent:
             "options": options,
             "task_id": task_id,
         }
-        execution = self.create_execution(
+        agent_execution = self.create_execution(
             lineage={"task_id": task_id} if task_id is not None else None,
             options={
                 "strategy": "task",
                 "task": {key: value for key, value in task_options.items() if value is not None},
             },
         )
-        execution.goal(goal, success_criteria)
-        execution.workspace = getattr(self, "workspace", None)
-        return execution
+        agent_execution.goal(goal, success_criteria)
+        agent_execution.workspace = getattr(self, "workspace", None)
+        return agent_execution
 
     async def async_resume(
         self,
@@ -1027,6 +1030,7 @@ class BaseAgent:
         *,
         goal: str,
         success_criteria: list[str] | None = None,
+        execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
         workspace: str | os.PathLike[str] | None = None,
         max_iterations: int = 3,
         verify: Literal["before_done"] = "before_done",
@@ -1035,10 +1039,11 @@ class BaseAgent:
         limits: dict[str, Any] | None = None,
         options: dict[str, Any] | None = None,
         task_id: str | None = None,
-    ):
-        execution = self.create_task(
+    ) -> "AgentExecution":
+        agent_execution = self.create_task(
             goal=goal,
             success_criteria=success_criteria,
+            execution=execution,
             workspace=workspace,
             max_iterations=max_iterations,
             verify=verify,
@@ -1048,8 +1053,8 @@ class BaseAgent:
             options=options,
             task_id=task_id,
         )
-        execution.strategy("task_loop")
-        return execution
+        agent_execution.strategy("task_loop")
+        return agent_execution
 
     def validate(self, handler: "OutputValidateHandler"):
         self.extension_handlers.append("validate_handlers", handler)

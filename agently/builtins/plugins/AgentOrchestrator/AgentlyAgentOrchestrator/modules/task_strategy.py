@@ -63,10 +63,12 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     if isinstance(task, AgentTask):
         goal = task.goal
         success_criteria = list(task.success_criteria)
+        execution_strategy = task.execution_strategy
     else:
         generated_before = list(getattr(execution, "generated_success_criteria", []) or [])
         goal = execution.task_goal()
         success_criteria = execution.task_success_criteria()
+        execution_strategy = AgentTask.normalize_execution_strategy(task_options.get("execution", "auto"))
         generated_after = list(getattr(execution, "generated_success_criteria", []) or [])
         if generated_after and generated_after != generated_before:
             await execution.emit_stream(
@@ -91,6 +93,9 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         agent_task_options.setdefault("agent_task", {})
         if isinstance(agent_task_options["agent_task"], dict):
             agent_task_options["agent_task"].setdefault("effort", effort_strategy)
+    agent_task_options.setdefault("agent_task", {})
+    if isinstance(agent_task_options["agent_task"], dict):
+        agent_task_options["agent_task"]["execution_strategy"] = execution_strategy
     required_actions = execution.required_action_ids()
     required_skills = execution.required_skill_ids()
     if required_actions or required_skills:
@@ -128,6 +133,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             execution.agent,
             goal=goal,
             success_criteria=success_criteria,
+            execution=execution_strategy,
             workspace=task_options.get("workspace"),
             max_iterations=int(max_iterations or 3),
             verify=cast(Any, task_options.get("verify", "before_done")),
@@ -152,12 +158,18 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     execution.task_refs = {
         "task_id": task.id,
         "strategy": route_meta.get("strategy") or execution.strategy_name or "task",
+        "execution_strategy": task.execution_strategy,
         "resume": bool(resume_task_id is not None or task_options.get("resume")),
         "resumed_from_iteration": getattr(task, "_resumed_from_iteration", 0),
     }
     await execution.emit_stream(
         "agent_task.created",
-        {"task_id": task.id, "goal": goal, "success_criteria": success_criteria},
+        {
+            "task_id": task.id,
+            "goal": goal,
+            "success_criteria": success_criteria,
+            "execution_strategy": task.execution_strategy,
+        },
         route="agent_task",
         source="agent_execution",
         task_id=task.id,
@@ -170,6 +182,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     execution.task_refs.update(
         {
             "status": task.status,
+            "execution_strategy": task.execution_strategy,
             "workspace_refs": task_meta.get("workspace_refs", {}),
         }
     )

@@ -269,6 +269,103 @@ class MockGoalPursuitRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockFlatReplanRequester(MockAgentExecutionRequester):
+    name = "MockFlatReplanRequester"
+    verify_calls = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockFlatReplanRequester.verify_calls = 0
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "dynamic_task",
+                "step_instruction": "collect one piece of evidence",
+                "expected_evidence": "evidence exists",
+                "rationale": "the mock intentionally asks for DAG to prove flat host policy wins",
+            }
+        elif "Execute exactly one bounded step" in text:
+            payload = {
+                "step_result": "flat bounded step result",
+                "evidence": ["flat evidence"],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            MockFlatReplanRequester.verify_calls += 1
+            if MockFlatReplanRequester.verify_calls == 1:
+                payload = {
+                    "is_complete": False,
+                    "requires_block": False,
+                    "reason": "first pass lacks enough evidence",
+                    "missing_criteria": ["needs one more bounded pass"],
+                    "replan_instruction": "Run one more flat bounded step.",
+                    "final_result_required": True,
+                    "final_result": "",
+                }
+            else:
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "second pass is enough",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result_required": True,
+                    "final_result": "flat accepted result",
+                }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
+class MockTaskBoardRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Complete the task through a board.",
+                "cards": [
+                    {
+                        "id": "collect",
+                        "action_block": "Collect and summarize evidence.",
+                        "objective": "Collect one fact and summarize it.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "The fact is summarized.",
+                        "allowed_execution_shape": "model",
+                    }
+                ],
+                "reflection_points": ["Check the collected fact before finalizing."],
+                "completion_gate": "All cards completed and final answer synthesized.",
+                "why_this_effort_shape": "One card is enough for this mock task.",
+                "risk_notes": [],
+            }
+        elif "Execute exactly one TaskBoard card" in text:
+            payload = {
+                "status": "completed",
+                "answer": "taskboard card result",
+                "evidence": ["taskboard card evidence"],
+                "remaining_work": [],
+                "diagnostics": [],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": True,
+                "reason": "completed card evidence satisfies the criterion",
+                "final_result": "taskboard accepted result",
+                "missing_criteria": [],
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 def _create_goal_pursuit_agent(name: str = "agent-execution-goal-pursuit"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -276,9 +373,106 @@ def _create_goal_pursuit_agent(name: str = "agent-execution-goal-pursuit"):
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def _create_flat_replan_agent(name: str = "agent-execution-flat-replan"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockFlatReplanRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_agent(name: str = "agent-execution-taskboard"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
 def test_execution_options_validate_known_route_schema():
     with pytest.raises(ValueError):
         ExecutionOptions.model_validate({"routes": {"skills": {"unknown": True}}})
+
+
+def test_create_task_execution_parameter_normalizes_and_rejects(tmp_path):
+    agent = _create_agent("execution-strategy-normalization").use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Do the task.",
+        success_criteria=["The task is done."],
+        execution="flat_react",
+    )
+    assert execution.task_options["execution"] == "flat"
+
+    taskboard_execution = agent.create_task(
+        goal="Do the board task.",
+        success_criteria=["The task is done."],
+        execution="task_board",
+    )
+    assert taskboard_execution.task_options["execution"] == "taskboard"
+
+    with pytest.raises(ValueError, match="execution must be one of"):
+        agent.create_task(
+            goal="Do the task.",
+            success_criteria=["The task is done."],
+            execution="unknown",
+        )
+
+
+@pytest.mark.asyncio
+async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate(tmp_path):
+    agent = _create_flat_replan_agent("execution-flat-strategy").use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Produce a checked answer.",
+        success_criteria=["The answer is accepted by verifier."],
+        execution="flat",
+        max_iterations=2,
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["final_result"] == "flat accepted result"
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert meta["task_refs"]["execution_strategy"] == "flat"
+    assert task_meta["execution_strategy"] == "flat"
+    assert len(task_meta["iterations"]) == 2
+    assert task_meta["iterations"][0]["plan"]["execution_shape"] == "dynamic_task"
+    assert task_meta["iterations"][0]["plan"]["effective_execution_shape"] == "direct"
+    assert task_meta["iterations"][0]["plan"]["step_execution"]["policy"]["execution_strategy"] == "flat"
+    assert task_meta["iterations"][0]["plan"]["step_execution"]["policy"]["allow_dag_steps"] is False
+    assert task_meta["iterations"][0]["verification"]["is_complete"] is False
+    assert task_meta["iterations"][1]["verification"]["is_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path):
+    agent = _create_taskboard_agent("execution-taskboard-strategy").use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Produce a board-managed answer.",
+        success_criteria=["The board final answer is accepted."],
+        execution="taskboard",
+        max_iterations=2,
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    taskboard = task_meta["result"]["taskboard"]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["execution_strategy"] == "taskboard"
+    assert result["final_result"] == "taskboard accepted result"
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert meta["task_refs"]["execution_strategy"] == "taskboard"
+    assert task_meta["execution_strategy"] == "taskboard"
+    assert taskboard["revision"]["card_results"]["collect"]["status"] == "completed"
+    assert taskboard["evidence_view"]["cards"][0]["card_id"] == "collect"
+    assert "content" not in taskboard["evidence_view"]["cards"][0]["artifact_refs"]
 
 
 @pytest.mark.asyncio

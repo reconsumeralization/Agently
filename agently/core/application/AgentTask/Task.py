@@ -18,12 +18,19 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Generator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Generator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
-from agently.core.orchestration import TriggerFlow
-from agently.types.data import AgentExecutionStreamData, ReplanSignal
+from agently.core.orchestration import (
+    TaskBoard,
+    TriggerFlow,
+    build_task_board_evidence_view,
+    coerce_task_board_planning_result,
+    resolve_task_board_planning_policy,
+    task_board_planning_output_schema,
+)
+from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult
 from agently.utils import DataFormatter, FunctionShifter
 
 if TYPE_CHECKING:
@@ -41,6 +48,19 @@ AgentTaskStatus = Literal[
     "capability_unavailable",
     "error",
 ]
+AgentTaskExecutionStrategy = Literal["auto", "flat", "taskboard"]
+
+_AGENT_TASK_EXECUTION_STRATEGY_ALIASES = {
+    "": "auto",
+    "default": "auto",
+    "automatic": "auto",
+    "linear": "flat",
+    "react": "flat",
+    "flat_react": "flat",
+    "task_board": "taskboard",
+    "board": "taskboard",
+    "taskboard_evidenceview": "taskboard",
+}
 
 _STEP_EXECUTION_SHAPES = {
     "direct",
@@ -65,12 +85,21 @@ class _AgentTaskDeadlineExceeded(TimeoutError):
 class AgentTask:
     """Retained owner for one Agent-managed business task lifecycle."""
 
+    @staticmethod
+    def normalize_execution_strategy(value: Any = "auto") -> AgentTaskExecutionStrategy:
+        text = str(value if value is not None else "auto").strip().lower().replace("-", "_")
+        normalized = _AGENT_TASK_EXECUTION_STRATEGY_ALIASES.get(text, text)
+        if normalized not in {"auto", "flat", "taskboard"}:
+            raise ValueError("AgentTask execution must be one of: 'auto', 'flat', or 'taskboard'.")
+        return cast(AgentTaskExecutionStrategy, normalized)
+
     def __init__(
         self,
         agent: "BaseAgent",
         *,
         goal: str,
         success_criteria: list[str],
+        execution: AgentTaskExecutionStrategy | str | None = "auto",
         workspace: str | os.PathLike[str] | None = None,
         max_iterations: int = 3,
         verify: Literal["before_done"] = "before_done",
@@ -88,6 +117,7 @@ class AgentTask:
         self.id = task_id or f"agent_task_{uuid.uuid4().hex}"
         self.goal = str(goal)
         self.success_criteria = [str(item) for item in success_criteria if str(item).strip()]
+        self.execution_strategy = self.normalize_execution_strategy(execution)
         self.max_iterations = max(1, int(max_iterations))
         self.verify = verify
         self.context_profile = context_profile
@@ -177,6 +207,12 @@ class AgentTask:
                     "agent_task.resumed",
                     {"task_id": self.id, "resumed_from_iteration": self._resumed_from_iteration},
                 )
+            if self.execution_strategy == "taskboard":
+                result = await self._run_taskboard()
+                await data.async_set_state("agent_task.latest_iteration", result, emit=False)
+                await data.async_set_state("agent_task.result", self.result, emit=False)
+                await data.async_set_state("agent_task.status", self.status, emit=False)
+                return
             for iteration_index in range(start_iteration, self.max_iterations + 1):
                 result = await self._run_iteration(iteration_index)
                 await data.async_set_state("agent_task.latest_iteration", result, emit=False)
@@ -214,6 +250,7 @@ class AgentTask:
                     diagnostics={
                         "goals": [self.goal],
                         "success_criteria": self.success_criteria,
+                        "execution_strategy": self.execution_strategy,
                         "max_iterations": self.max_iterations,
                         "required_capabilities": self.options.get("capability_constraints", {}),
                     },
@@ -338,7 +375,7 @@ class AgentTask:
     async def _run_iteration(self, iteration_index: int) -> dict[str, Any]:
         try:
             if self._task_deadline_exceeded():
-                return await self._terminate_timed_out(iteration_index)
+                return await self._terminate_timed_out(iteration_index, stage="plan")
             await self._emit_progress(
                 iteration_index,
                 "context",
@@ -652,6 +689,356 @@ class AgentTask:
         )
         return {"terminal": False, "status": "continue"}
 
+    async def _run_taskboard(self) -> dict[str, Any]:
+        iteration_index = 1
+        try:
+            if self._task_deadline_exceeded():
+                return await self._terminate_timed_out(iteration_index)
+            await self._emit_progress(
+                iteration_index,
+                "context",
+                "TaskBoard: building a Workspace context pack for board planning.",
+            )
+            context_pack = await self._await_task_deadline(
+                self._build_context(),
+                stage="context",
+            )
+            await self._emit("agent_task.taskboard.context", context_pack)
+
+            await self._emit_progress(
+                iteration_index,
+                "taskboard_plan",
+                "TaskBoard: asking the model to plan the initial board.",
+            )
+            planning_result = await self._await_task_deadline(
+                self._request_taskboard_plan(context_pack),
+                stage="taskboard_plan",
+            )
+        except _AgentTaskDeadlineExceeded as error:
+            return await self._terminate_timed_out(iteration_index, stage=error.stage)
+
+        board = TaskBoard(
+            planning_result.revision,
+            handler=lambda context: self._run_taskboard_card(context, context_pack),
+            planning_policy=planning_result.planning_policy,
+        )
+        await self._record_phase(
+            "taskboard_planned",
+            iteration=iteration_index,
+            diagnostics={
+                "board_id": board.revision.board_id,
+                "revision_id": board.revision.revision_id,
+                "card_count": len(board.revision.graph.cards),
+                "execution_strategy": self.execution_strategy,
+            },
+        )
+        await self._emit(
+            "agent_task.taskboard.plan",
+            {
+                "revision": board.revision.to_dict(),
+                "planning_policy": planning_result.planning_policy.to_prompt_payload(),
+            },
+        )
+
+        for tick_index in range(1, self.max_iterations + 1):
+            if self._task_deadline_exceeded():
+                return await self._terminate_timed_out(tick_index, stage="taskboard_tick")
+            schedule = board.schedule()
+            await self._emit(
+                f"agent_task.taskboard.tick.{tick_index}.scheduled",
+                {
+                    "schedule": schedule.to_dict(),
+                    "evidence_view": build_task_board_evidence_view(board.revision).to_dict(),
+                },
+            )
+            if not schedule.runnable_card_ids:
+                break
+            try:
+                tick_result = await self._await_task_deadline(
+                    board.async_run_tick(),
+                    stage="taskboard_tick",
+                )
+            except _AgentTaskDeadlineExceeded as error:
+                return await self._terminate_timed_out(tick_index, stage=error.stage)
+            board.revision = tick_result.revision
+            await self._emit(
+                f"agent_task.taskboard.tick.{tick_index}.completed",
+                {
+                    "revision": tick_result.revision.to_dict(),
+                    "schedule": tick_result.schedule.to_dict(),
+                    "card_results": {key: value.to_dict() for key, value in tick_result.card_results.items()},
+                    "evidence_view": build_task_board_evidence_view(tick_result.revision).to_dict(),
+                },
+            )
+            await self._record_phase(
+                "taskboard_tick",
+                iteration=tick_index,
+                diagnostics={
+                    "revision_id": tick_result.revision.revision_id,
+                    "runnable_card_ids": list(tick_result.schedule.runnable_card_ids),
+                    "completed_card_ids": list(tick_result.schedule.completed_card_ids),
+                },
+            )
+            if self._taskboard_revision_completed(tick_result.revision):
+                break
+
+        return await self._finalize_taskboard(board.revision)
+
+    async def _request_taskboard_plan(self, context_pack: "WorkspaceContextPackage"):
+        policy = resolve_task_board_planning_policy(
+            self._taskboard_effort(),
+            metadata={"execution_strategy": self.execution_strategy, "task_id": self.id},
+        )
+        request = self.agent.create_temp_request()
+        request.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "context_pack": DataFormatter.sanitize(context_pack),
+                "execution_prompt": self._execution_prompt_context(),
+                "planning_policy": policy.to_prompt_payload(),
+                "planner_capabilities": self._planner_capabilities(),
+            }
+        )
+        request.instruct(
+            "Plan a TaskBoard for this submitted task. "
+            "TaskBoard is already selected by the caller; do not decide whether to use TaskBoard. "
+            "Use the planning_policy as vocabulary guidance for orchestration complexity, evidence depth, "
+            "reflection density, and repair tendency. Do not create hard budgets, fixed card counts, "
+            "or action allowlists from the effort profile."
+        )
+        request.output(task_board_planning_output_schema(), format="json")
+        raw_plan = await self._await_task_request(request.async_get_data(), stage="taskboard_plan")
+        if not isinstance(raw_plan, Mapping):
+            raise TypeError("TaskBoard planning request must return a mapping.")
+        return coerce_task_board_planning_result(
+            raw_plan,
+            board_id=self.id,
+            graph_id=f"{self.id}.taskboard",
+            effort=self._taskboard_effort(),
+            planning_policy=policy,
+            metadata={"execution_strategy": self.execution_strategy},
+        )
+
+    async def _run_taskboard_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
+        evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
+        try:
+            evidence_view = build_task_board_evidence_view(
+                context.revision,
+                card_ids=evidence_card_ids or None,
+            ).to_dict()
+        except ValueError:
+            evidence_view = build_task_board_evidence_view(context.revision).to_dict()
+        execution = self.agent.create_execution(
+            lineage={
+                "task_id": self.id,
+                "iteration_id": f"taskboard:{context.card.id}",
+                "step_id": "taskboard_card",
+                "scope": {"strategy_phase": "taskboard_card_execution", "card_id": context.card.id},
+            },
+            limits=self.limits,
+            options=self.options,
+        )
+        execution.route_policy({
+            "allowed_routes": ["model_request"],
+            "on_violation": "block",
+            "owner": "AgentTaskTaskBoard",
+            "step_execution_shape": "taskboard_card",
+        })
+        execution.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "card": context.card.to_dict(),
+                "dependency_results": {
+                    key: value.to_dict() for key, value in dict(context.dependency_results).items()
+                },
+                "taskboard_evidence_view": evidence_view,
+                "context_pack": DataFormatter.sanitize(context_pack),
+                "execution_prompt": self._execution_prompt_context(),
+            }
+        )
+        execution.instruct(
+            "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
+            "Use TaskBoard evidence view as the hot summary; request full content only through available "
+            "Workspace or Action refs when needed. Return card-local evidence and remaining work. "
+            "Do not claim the whole task is complete; TaskBoard and AgentTask own lifecycle completion."
+        )
+        execution.output(
+            {
+                "status": (str, "completed, blocked, or failed for this card", False),
+                "answer": (str, "Card-local result or artifact summary", True),
+                "evidence": ([str], "Evidence produced or used by this card", False),
+                "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
+                "diagnostics": ([dict], "Optional card diagnostics", False),
+            },
+            format="json",
+        )
+        try:
+            card_output = await execution.async_get_data()
+            execution_meta = await execution.async_get_meta()
+        except Exception as error:
+            return TaskBoardCardResult(
+                card_id=context.card.id,
+                status="failed",
+                preview=f"TaskBoard card execution failed: { error.__class__.__name__}: { error }",
+                diagnostics=(
+                    {"type": error.__class__.__name__, "message": str(error), "card_id": context.card.id},
+                ),
+            )
+        summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
+        card_status = self._taskboard_card_status(card_output, execution_meta)
+        diagnostics = []
+        if isinstance(card_output, Mapping):
+            raw_diagnostics = card_output.get("diagnostics")
+            if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+                diagnostics.extend(dict(item) if isinstance(item, Mapping) else {"value": item} for item in raw_diagnostics)
+        diagnostics.append(
+            {
+                "execution_id": execution_meta.get("execution_id"),
+                "route": DataFormatter.sanitize(execution_meta.get("route", {})),
+                "evidence_summary": DataFormatter.sanitize(summary),
+            }
+        )
+        return TaskBoardCardResult(
+            card_id=context.card.id,
+            status=card_status,
+            preview=DataFormatter.sanitize(card_output),
+            artifact_refs=tuple(summary.get("artifact_refs", []) if isinstance(summary.get("artifact_refs"), list) else []),
+            diagnostics=tuple(diagnostics),
+            metadata={
+                "execution_id": execution_meta.get("execution_id"),
+                "execution_strategy": self.execution_strategy,
+            },
+        )
+
+    async def _finalize_taskboard(self, revision: Any) -> dict[str, Any]:
+        schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
+        result_status = self._taskboard_terminal_status(revision, schedule)
+        evidence_view = build_task_board_evidence_view(revision).to_dict()
+        if result_status != "completed":
+            self.status = "blocked" if result_status == "blocked" else "error"
+            self.result = {
+                "status": self.status,
+                "accepted": False,
+                "artifact_status": "partial",
+                "task_id": self.id,
+                "execution_strategy": self.execution_strategy,
+                "reason": "TaskBoard did not reach a completed board state.",
+                "taskboard": {
+                    "revision": revision.to_dict(),
+                    "schedule": schedule.to_dict(),
+                    "evidence_view": evidence_view,
+                },
+            }
+            await self._emit("agent_task.blocked", self.result)
+            return {"terminal": True, "status": self.status}
+
+        final = await self._request_taskboard_final(revision, evidence_view)
+        accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
+        self.status = "completed" if accepted else "blocked"
+        self.result = {
+            "status": self.status,
+            "accepted": accepted,
+            "artifact_status": "accepted" if accepted else "partial",
+            "task_id": self.id,
+            "execution_strategy": self.execution_strategy,
+            "final_result": final.get("final_result", ""),
+            "reason": final.get("reason", ""),
+            "taskboard": {
+                "revision": revision.to_dict(),
+                "schedule": schedule.to_dict(),
+                "evidence_view": evidence_view,
+            },
+        }
+        await self._record_phase(
+            "terminal",
+            diagnostics={
+                "status": self.status,
+                "accepted": accepted,
+                "execution_strategy": self.execution_strategy,
+                "taskboard_revision_id": revision.revision_id,
+            },
+        )
+        await self._emit("agent_task.completed" if accepted else "agent_task.blocked", self.result)
+        return {"terminal": True, "status": self.status}
+
+    async def _request_taskboard_final(self, revision: Any, evidence_view: Mapping[str, Any]) -> dict[str, Any]:
+        request = self.agent.create_temp_request()
+        request.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "taskboard_evidence_view": DataFormatter.sanitize(evidence_view),
+                "revision": DataFormatter.sanitize(revision.to_dict()),
+                "execution_prompt": self._execution_prompt_context(),
+            }
+        )
+        request.instruct(
+            "Synthesize the final result for this TaskBoard task from completed card evidence. "
+            "Verify every success criterion. Use the hot evidence view for summaries and preserve cold refs "
+            "as evidence pointers; do not invent unsupported facts."
+        )
+        request.output(
+            {
+                "accepted": (bool, "True only when all success criteria are satisfied", True),
+                "reason": (str, "Concise final verification reason", True),
+                "final_result": (str, "Final business result when accepted", True),
+                "missing_criteria": ([str], "Unmet or weak criteria, empty when accepted", False),
+            },
+            format="json",
+        )
+        result = await self._await_task_request(request.async_get_data(), stage="taskboard_finalize")
+        if isinstance(result, Mapping):
+            return dict(result)
+        return {"accepted": False, "reason": str(result), "final_result": "", "missing_criteria": self.success_criteria}
+
+    def _taskboard_effort(self) -> Any:
+        agent_task_options = self.options.get("agent_task")
+        if isinstance(agent_task_options, Mapping):
+            effort = agent_task_options.get("effort")
+            if effort is not None:
+                return effort
+        return "medium"
+
+    @staticmethod
+    def _taskboard_revision_completed(revision: Any) -> bool:
+        card_ids = {card.id for card in revision.graph.cards}
+        completed = {
+            card_id
+            for card_id, result in revision.card_results.items()
+            if str(result.status) == "completed"
+        }
+        return bool(card_ids) and card_ids.issubset(completed)
+
+    @staticmethod
+    def _taskboard_terminal_status(revision: Any, schedule: Any) -> str:
+        statuses = {str(result.status) for result in revision.card_results.values()}
+        if "failed" in statuses:
+            return "failed"
+        if "blocked" in statuses or schedule.blocked_card_ids:
+            return "blocked"
+        if AgentTask._taskboard_revision_completed(revision):
+            return "completed"
+        return "running"
+
+    @staticmethod
+    def _taskboard_card_status(card_output: Any, execution_meta: Mapping[str, Any]) -> str:
+        execution_status = str(execution_meta.get("status") or "").strip().lower()
+        if execution_status in {"failed", "error", "timed_out", "blocked"}:
+            return "failed"
+        if isinstance(card_output, Mapping):
+            status = str(card_output.get("status") or "completed").strip().lower()
+            if status in {"completed", "blocked", "failed", "skipped"}:
+                return status
+            remaining = card_output.get("remaining_work")
+            if isinstance(remaining, Sequence) and not isinstance(remaining, str | bytes | bytearray) and remaining:
+                return "blocked"
+        return "completed"
+
     async def _build_context(self) -> "WorkspaceContextPackage":
         try:
             return await self.workspace.build_context(
@@ -711,10 +1098,15 @@ class AgentTask:
             raw_step_plan = "dag"
         if raw_step_plan not in {"direct", "auto", "dag"}:
             raw_step_plan = "direct"
+        if self.execution_strategy == "flat":
+            raw_step_plan = "direct"
         policy["step_plan"] = raw_step_plan
+        policy["execution_strategy"] = self.execution_strategy
         if "max_tasks" not in policy and "max_plan_items" in policy:
             policy["max_tasks"] = policy.get("max_plan_items")
         policy.setdefault("allow_dag_steps", raw_step_plan in {"auto", "dag"})
+        if self.execution_strategy == "flat":
+            policy["allow_dag_steps"] = False
         failed_dag_shapes = sorted(self._failed_execution_shapes.intersection(_DAG_STEP_EXECUTION_SHAPES))
         if raw_step_plan == "auto" and failed_dag_shapes:
             policy["allow_dag_steps"] = False
@@ -767,6 +1159,8 @@ class AgentTask:
             "model": "direct",
             "model_request": "direct",
             "direct_request": "direct",
+            "flat": "direct",
+            "flat_react": "direct",
             "action": "actions",
             "tool": "actions",
             "tools": "actions",
@@ -1058,6 +1452,7 @@ class AgentTask:
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": execution_prompt,
                 "execution_policy": self._step_execution_policy(),
+                "execution_strategy": self.execution_strategy,
                 "planner_capabilities": planner_capabilities,
             }
         )
@@ -1074,12 +1469,23 @@ class AgentTask:
             if planner_capabilities
             else ""
         )
+        allowed_shapes = (
+            "direct or actions"
+            if self.execution_strategy == "flat"
+            else "direct, actions, skills, dynamic_task, or execution_dag"
+        )
+        strategy_note = (
+            " The selected execution_strategy is flat: keep the task in a linear AgentTask loop and do not plan DAG or TaskBoard steps."
+            if self.execution_strategy == "flat"
+            else ""
+        )
         request.instruct(
             "Plan the next bounded AgentExecution step for this AgentTask. "
             "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
-            "Set execution_shape to direct, actions, skills, dynamic_task, or execution_dag. "
+            f"Set execution_shape to {allowed_shapes}. "
             "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
+            + strategy_note
             + capability_note
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
             "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
@@ -1259,6 +1665,7 @@ class AgentTask:
                 "iteration": iteration_index,
                 "plan": DataFormatter.sanitize(plan),
                 "step_execution": step_execution,
+                "execution_strategy": self.execution_strategy,
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
             }
@@ -1267,6 +1674,7 @@ class AgentTask:
             (
                 "Execute exactly one bounded step for the AgentTask. "
                 f"Use the selected execution shape: {step_execution.get('effective_shape', 'direct')}. "
+                f"The AgentTask execution_strategy is {self.execution_strategy}. "
                 "Respect the caller-provided execution_prompt context and output contract when present. "
                 "Return concrete evidence for the verifier. Do not claim final completion unless evidence supports it."
             )
@@ -1889,6 +2297,7 @@ class AgentTask:
         return {
             "goal": self.goal,
             "success_criteria": list(self.success_criteria),
+            "execution_strategy": self.execution_strategy,
             "max_iterations": self.max_iterations,
             "verify": self.verify,
             "context_profile": self.context_profile,
@@ -1971,6 +2380,7 @@ class AgentTask:
             agent,
             goal=str(manifest.get("goal") or ""),
             success_criteria=list(manifest.get("success_criteria") or []),
+            execution=cast(Any, manifest.get("execution_strategy", "auto")),
             workspace=workspace,
             max_iterations=int(manifest.get("max_iterations") or 3),
             verify=cast(Any, manifest.get("verify", "before_done")),
@@ -2168,6 +2578,7 @@ class AgentTask:
             "status": self.status,
             "goal": self.goal,
             "success_criteria": DataFormatter.sanitize(self.success_criteria),
+            "execution_strategy": self.execution_strategy,
             "max_iterations": self.max_iterations,
             "iterations": DataFormatter.sanitize(self.iterations),
             "resumed_from_iteration": self._resumed_from_iteration,
@@ -2860,6 +3271,7 @@ class AgentTask:
             "task_id": self.id,
             "goal": self.goal,
             "success_criteria": self.success_criteria,
+            "execution_strategy": self.execution_strategy,
             "max_iterations": self.max_iterations,
             "verify": self.verify,
         }
