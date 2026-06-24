@@ -1915,12 +1915,19 @@ class AgentTask:
                 f"Use the selected execution shape: {step_execution.get('effective_shape', 'direct')}. "
                 f"The AgentTask execution_strategy is {self.execution_strategy}. "
                 "Respect the caller-provided execution_prompt context and output contract when present. "
-                "Return concrete evidence for the verifier. Do not claim final completion unless evidence supports it."
+                "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
+                "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
+                "of burying the only copy inside evidence. Do not claim final completion unless evidence supports it."
             )
         )
         execution.output(
             {
                 "step_result": (str, "Concrete result of this bounded step", True),
+                "candidate_final_result": (
+                    str,
+                    "Complete answer/report/artifact body produced by this step when it may satisfy the final task",
+                    False,
+                ),
                 "evidence": ([str], "Evidence produced by the step", True),
                 "remaining_work": ([str], "Known remaining work, empty when none"),
             },
@@ -2207,6 +2214,7 @@ class AgentTask:
         evidence_summary = self._compact_verifier_evidence_summary(
             self._execution_log_summary(execution_meta)
         )
+        candidate_final_result = self._candidate_final_result_from_execution_result(execution_result)
         request = self.agent.create_temp_request()
         request.input(
             {
@@ -2215,6 +2223,10 @@ class AgentTask:
                 "success_criteria": self.success_criteria,
                 "iteration": iteration_index,
                 "plan": self._compact_verifier_prompt_value(plan, max_chars=_VERIFIER_PROMPT_ITEM_CHARS),
+                "candidate_final_result": self._compact_verifier_prompt_value(
+                    candidate_final_result,
+                    max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
+                ),
                 "execution_result": self._compact_verifier_prompt_value(
                     execution_result,
                     max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
@@ -2242,6 +2254,10 @@ class AgentTask:
             "purely an action or side effect with no expected returned deliverable. "
             "When marking complete, put every required final deliverable in final_result; if final_result_required is "
             "true and final_result would omit a required deliverable, keep is_complete=false and ask for a replan. "
+            "When candidate_final_result contains a complete answer/report/artifact body that satisfies the criteria, "
+            "use it as final_result; the caller or host may persist final_result to the requested file path after "
+            "verification. Do not require a Workspace file artifact unless the success criteria explicitly require a "
+            "Workspace write/readback action. "
             "If evidence is incomplete, set is_complete=false and give a concrete replan_instruction. "
             "Set requires_block=true only when the task cannot continue."
         )
@@ -2271,7 +2287,49 @@ class AgentTask:
         return self._normalize_verification(
             verification,
             execution_evidence_summary=self._execution_log_summary(execution_meta),
+            candidate_final_result=candidate_final_result,
         )
+
+    @classmethod
+    def _candidate_final_result_from_execution_result(cls, execution_result: Any) -> str:
+        if isinstance(execution_result, Mapping):
+            for key in (
+                "candidate_final_result",
+                "final_result",
+                "artifact_markdown",
+                "artifact_html",
+                "answer",
+                "result",
+            ):
+                value = execution_result.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            step_result = execution_result.get("step_result")
+            if isinstance(step_result, str) and len(step_result.strip()) > 200:
+                return step_result.strip()
+            remaining_work = execution_result.get("remaining_work")
+            evidence = execution_result.get("evidence")
+            if not cls._has_remaining_work(remaining_work) and isinstance(evidence, Sequence) and not isinstance(
+                evidence, str | bytes | bytearray
+            ):
+                text_items = [item.strip() for item in evidence if isinstance(item, str) and item.strip()]
+                if text_items:
+                    longest = max(text_items, key=len)
+                    if len(longest) > max(800, len(str(step_result or "")) * 3):
+                        return longest
+        if isinstance(execution_result, str) and execution_result.strip():
+            return execution_result.strip()
+        return ""
+
+    @staticmethod
+    def _has_remaining_work(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+            return any(bool(str(item).strip()) for item in value)
+        return bool(value)
 
     @classmethod
     def _verification_execution_meta_summary(
@@ -2393,6 +2451,7 @@ class AgentTask:
         verification: dict[str, Any],
         *,
         execution_evidence_summary: dict[str, Any],
+        candidate_final_result: str = "",
     ) -> dict[str, Any]:
         normalized: dict[str, Any] = {
             "is_complete": self._normalize_bool(verification.get("is_complete"), default=False),
@@ -2535,12 +2594,15 @@ class AgentTask:
         )
         normalized["final_result_required"] = final_result_required
         if normalized["is_complete"] and final_result_required and not normalized["final_result"].strip():
-            normalized["is_complete"] = False
-            guard_reasons.append("final_result_missing")
-            normalized["missing_criteria"] = [
-                *normalized["missing_criteria"],
-                "Final result is missing.",
-            ]
+            if candidate_final_result.strip():
+                normalized["final_result"] = candidate_final_result.strip()
+            else:
+                normalized["is_complete"] = False
+                guard_reasons.append("final_result_missing")
+                normalized["missing_criteria"] = [
+                    *normalized["missing_criteria"],
+                    "Final result is missing.",
+                ]
         if guard_reasons:
             normalized["guard_reasons"] = guard_reasons
             if not normalized["replan_instruction"]:

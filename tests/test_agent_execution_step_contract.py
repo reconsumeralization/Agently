@@ -377,6 +377,41 @@ class MockFlatActionRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockFlatEvidenceCandidateRequester(MockAgentExecutionRequester):
+    name = "MockFlatEvidenceCandidateRequester"
+    report = "# Weekly Report\n\n" + ("Detailed section with grounded evidence.\n" * 80)
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "direct",
+                "step_instruction": "Produce the requested report.",
+                "expected_evidence": "Complete report text and supporting evidence.",
+                "rationale": "One bounded step can produce the report.",
+            }
+        elif "Execute exactly one bounded step" in text:
+            payload = {
+                "step_result": "Report written; see evidence for the full Markdown.",
+                "evidence": [self.report],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": "candidate_final_result" in text and "Weekly Report" in text,
+                "requires_block": False,
+                "reason": "candidate final report is visible to verifier",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "",
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardRequester"
 
@@ -602,6 +637,13 @@ def _create_flat_action_agent(name: str = "agent-execution-flat-action"):
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def _create_flat_evidence_candidate_agent(name: str = "agent-execution-flat-evidence-candidate"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockFlatEvidenceCandidateRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
 def _create_taskboard_agent(name: str = "agent-execution-taskboard"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -756,6 +798,34 @@ async def test_flat_verifier_uses_bounded_action_evidence_prompt(tmp_path):
     assert "artifact_refs" in verify_prompt
     assert hidden_tail not in verify_prompt
     assert len(verify_prompt) < 80000
+
+
+@pytest.mark.asyncio
+async def test_flat_promotes_report_like_evidence_to_candidate_final_result(tmp_path):
+    agent = _create_flat_evidence_candidate_agent("execution-flat-evidence-candidate").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Produce a Markdown weekly report.",
+        success_criteria=["The final report is returned."],
+        execution="flat",
+        max_iterations=1,
+    )
+
+    result = await execution.async_get_data()
+    verify_requests = [
+        request
+        for request in MockAgentExecutionRequester.requests
+        if "Verify the task against every success criterion" in request
+    ]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["final_result"].strip() == MockFlatEvidenceCandidateRequester.report.strip()
+    assert verify_requests
+    assert "candidate_final_result" in verify_requests[-1]
+    assert "Weekly Report" in verify_requests[-1]
 
 
 @pytest.mark.asyncio
