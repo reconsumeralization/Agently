@@ -422,6 +422,52 @@ class MockTaskBoardRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardSlowCardRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardSlowCardRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Exercise a bounded card timeout.",
+                "cards": [
+                    {
+                        "id": "slow",
+                        "action_block": "Run a slow evidence collection step.",
+                        "objective": "Collect evidence with a slow model request.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "The slow evidence is collected.",
+                        "allowed_execution_shape": "model",
+                    }
+                ],
+                "reflection_points": [],
+                "completion_gate": "The slow card completes.",
+                "why_this_effort_shape": "One card is enough for this timeout probe.",
+                "risk_notes": [],
+            }
+        elif "Execute exactly one TaskBoard card" in text:
+            await asyncio.sleep(0.6)
+            payload = {
+                "status": "completed",
+                "answer": "slow card eventually completed",
+                "evidence": ["late evidence"],
+                "remaining_work": [],
+                "diagnostics": [],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": True,
+                "reason": "should not finalize after a card timeout",
+                "final_result": "unexpected final",
+                "missing_criteria": [],
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardReadbackRequester"
     last_action_id = ""
@@ -560,6 +606,13 @@ def _create_taskboard_agent(name: str = "agent-execution-taskboard"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockTaskBoardRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_slow_card_agent(name: str = "agent-execution-taskboard-slow-card"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardSlowCardRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -735,6 +788,38 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     assert "read_action_artifact" in MockTaskBoardReadbackRequester.review_planning_prompt
     assert "read_action_artifact" in review_actions
     assert review_result["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
+    agent = _create_taskboard_slow_card_agent("execution-taskboard-card-timeout").use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Run a board card that should time out.",
+        success_criteria=["The board records a structured card timeout."],
+        execution="taskboard",
+        max_iterations=1,
+        options={"request_timeout_seconds": 0.25},
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    taskboard = task_meta["result"]["taskboard"]
+    slow_result = taskboard["revision"]["card_results"]["slow"]
+    diagnostic = slow_result["diagnostics"][0]
+
+    assert result["status"] == "error"
+    assert result["accepted"] is False
+    assert result["artifact_status"] == "partial"
+    assert meta["route"]["selected_route"] == "agent_task"
+    assert meta["task_refs"]["execution_strategy"] == "taskboard"
+    assert slow_result["status"] == "failed"
+    assert diagnostic["code"] == "taskboard.card.timeout"
+    assert diagnostic["card_id"] == "slow"
+    assert diagnostic["timeout_seconds"] == 0.25
+    assert "timed out" in diagnostic["message"]
+    assert task_meta["diagnostics"]["taskboard_card_errors"][0]["code"] == "taskboard.card.timeout"
 
 
 @pytest.mark.asyncio

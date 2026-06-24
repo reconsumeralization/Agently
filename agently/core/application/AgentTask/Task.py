@@ -77,9 +77,19 @@ _STREAM_REPLAY_LIMIT = 5000
 
 
 class _AgentTaskDeadlineExceeded(TimeoutError):
-    def __init__(self, stage: str):
-        super().__init__(f"AgentTask exceeded max_seconds while running stage '{stage}'.")
+    def __init__(
+        self,
+        stage: str,
+        *,
+        reason: str | None = None,
+        limit_name: str = "max_seconds",
+        timeout_seconds: float | None = None,
+    ):
+        super().__init__(reason or f"AgentTask exceeded {limit_name} while running stage '{stage}'.")
         self.stage = stage
+        self.reason = reason
+        self.limit_name = limit_name
+        self.timeout_seconds = timeout_seconds
 
 
 class AgentTask:
@@ -301,12 +311,21 @@ class AgentTask:
             return True
         return getattr(error, "status", None) == "timed_out"
 
-    async def _terminate_timed_out(self, iteration_index: int, *, stage: str | None = None) -> dict[str, Any]:
+    async def _terminate_timed_out(
+        self,
+        iteration_index: int,
+        *,
+        stage: str | None = None,
+        reason: str | None = None,
+        limit_name: str = "max_seconds",
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         self.status = "timed_out"
         stage_text = f" during the { stage } stage" if stage else ""
-        reason = (
+        timeout_value = timeout_seconds if timeout_seconds is not None else self._task_max_seconds()
+        reason = reason or (
             "Task exceeded its wall-clock budget "
-            f"(max_seconds={ self._task_max_seconds() }){ stage_text } before completion."
+            f"({limit_name}={ timeout_value }){ stage_text } before completion."
         )
         self.result = {
             "status": "timed_out",
@@ -321,7 +340,15 @@ class AgentTask:
         await self._record_phase(
             "terminal",
             iteration=iteration_index,
-            diagnostics={"status": self.status, "accepted": False, "artifact_status": "partial"},
+            diagnostics={
+                "status": self.status,
+                "accepted": False,
+                "artifact_status": "partial",
+                "stage": stage,
+                "limit_name": limit_name,
+                "timeout_seconds": timeout_value,
+                "reason": reason,
+            },
         )
         await self._emit("agent_task.blocked", self.result)
         return {"terminal": True, "status": self.status}
@@ -412,7 +439,13 @@ class AgentTask:
                 )
             )
         except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(iteration_index, stage=error.stage)
+            return await self._terminate_timed_out(
+                iteration_index,
+                stage=error.stage,
+                reason=error.reason,
+                limit_name=error.limit_name,
+                timeout_seconds=error.timeout_seconds,
+            )
         await self._record_phase(
             "planned",
             iteration=iteration_index,
@@ -460,7 +493,13 @@ class AgentTask:
                 stage="execute",
             )
         except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(iteration_index, stage=error.stage)
+            return await self._terminate_timed_out(
+                iteration_index,
+                stage=error.stage,
+                reason=error.reason,
+                limit_name=error.limit_name,
+                timeout_seconds=error.timeout_seconds,
+            )
         execution_failed = str(execution_meta.get("status") or "").strip().lower() in {
             "failed",
             "error",
@@ -523,7 +562,13 @@ class AgentTask:
                 stage="verify",
             )
         except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(iteration_index, stage=error.stage)
+            return await self._terminate_timed_out(
+                iteration_index,
+                stage=error.stage,
+                reason=error.reason,
+                limit_name=error.limit_name,
+                timeout_seconds=error.timeout_seconds,
+            )
         await self._record_phase(
             "verified",
             iteration=iteration_index,
@@ -715,7 +760,13 @@ class AgentTask:
                 stage="taskboard_plan",
             )
         except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(iteration_index, stage=error.stage)
+            return await self._terminate_timed_out(
+                iteration_index,
+                stage=error.stage,
+                reason=error.reason,
+                limit_name=error.limit_name,
+                timeout_seconds=error.timeout_seconds,
+            )
 
         board = TaskBoard(
             planning_result.revision,
@@ -759,7 +810,13 @@ class AgentTask:
                     stage="taskboard_tick",
                 )
             except _AgentTaskDeadlineExceeded as error:
-                return await self._terminate_timed_out(tick_index, stage=error.stage)
+                return await self._terminate_timed_out(
+                    tick_index,
+                    stage=error.stage,
+                    reason=error.reason,
+                    limit_name=error.limit_name,
+                    timeout_seconds=error.timeout_seconds,
+                )
             board.revision = tick_result.revision
             await self._emit(
                 f"agent_task.taskboard.tick.{tick_index}.completed",
@@ -782,7 +839,16 @@ class AgentTask:
             if self._taskboard_revision_completed(tick_result.revision):
                 break
 
-        return await self._finalize_taskboard(board.revision)
+        try:
+            return await self._finalize_taskboard(board.revision)
+        except _AgentTaskDeadlineExceeded as error:
+            return await self._terminate_timed_out(
+                self.max_iterations,
+                stage=error.stage,
+                reason=error.reason,
+                limit_name=error.limit_name,
+                timeout_seconds=error.timeout_seconds,
+            )
 
     async def _request_taskboard_plan(self, context_pack: "WorkspaceContextPackage"):
         policy = resolve_task_board_planning_policy(
@@ -885,16 +951,21 @@ class AgentTask:
             format="json",
         )
         try:
-            card_output = await execution.async_get_data()
-            execution_meta = await execution.async_get_meta()
-        except Exception as error:
-            return TaskBoardCardResult(
+            card_output = await self._await_taskboard_card_execution(
+                execution.async_get_data(),
                 card_id=context.card.id,
-                status="failed",
-                preview=f"TaskBoard card execution failed: { error.__class__.__name__}: { error }",
-                diagnostics=(
-                    {"type": error.__class__.__name__, "message": str(error), "card_id": context.card.id},
-                ),
+                stage="data",
+            )
+            execution_meta = await self._await_taskboard_card_execution(
+                execution.async_get_meta(),
+                card_id=context.card.id,
+                stage="meta",
+            )
+        except Exception as error:
+            return self._failed_taskboard_card_result(
+                card_id=context.card.id,
+                error=error,
+                execution_id=str(getattr(execution, "id", "") or "") or None,
             )
         summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
         card_status = self._taskboard_card_status(card_output, execution_meta)
@@ -919,6 +990,61 @@ class AgentTask:
             metadata={
                 "execution_id": execution_meta.get("execution_id"),
                 "execution_strategy": self.execution_strategy,
+            },
+        )
+
+    async def _await_taskboard_card_execution(
+        self,
+        awaitable: Awaitable[Any],
+        *,
+        card_id: str,
+        stage: str,
+    ) -> Any:
+        timeout = self._task_request_timeout()
+        if timeout is None:
+            return await awaitable
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except TimeoutError as error:
+            raise TimeoutError(
+                f"TaskBoard card '{card_id}' {stage} request timed out after {timeout} seconds."
+            ) from error
+
+    def _failed_taskboard_card_result(
+        self,
+        *,
+        card_id: str,
+        error: Exception,
+        execution_id: str | None = None,
+    ) -> TaskBoardCardResult:
+        message = str(error) or error.__class__.__name__
+        is_timeout = self._is_timeout_error(error)
+        if is_timeout and message == error.__class__.__name__:
+            message = (
+                f"TaskBoard card '{card_id}' execution timed out after "
+                f"{self._task_request_timeout()} seconds."
+            )
+        diagnostic = {
+            "type": error.__class__.__name__,
+            "code": "taskboard.card.timeout" if is_timeout else "taskboard.card.execution_error",
+            "message": message,
+            "card_id": card_id,
+            "execution_id": execution_id,
+            "execution_strategy": self.execution_strategy,
+            "stage": "taskboard_card",
+            "timeout_seconds": self._task_request_timeout() if is_timeout else None,
+            "status": "failed",
+        }
+        self.diagnostics.setdefault("taskboard_card_errors", []).append(diagnostic)
+        return TaskBoardCardResult(
+            card_id=card_id,
+            status="failed",
+            preview=f"TaskBoard card execution failed: { error.__class__.__name__}: { message }",
+            diagnostics=(diagnostic,),
+            metadata={
+                "execution_id": execution_id,
+                "execution_strategy": self.execution_strategy,
+                "status": "failed",
             },
         )
 
@@ -2292,7 +2418,13 @@ class AgentTask:
         try:
             return await asyncio.wait_for(awaitable, timeout=timeout)
         except TimeoutError as error:
-            raise TimeoutError(f"AgentTask {stage} request timed out after {timeout} seconds.") from error
+            reason = f"AgentTask {stage} request timed out after {timeout} seconds."
+            raise _AgentTaskDeadlineExceeded(
+                stage,
+                reason=reason,
+                limit_name="request_timeout_seconds",
+                timeout_seconds=timeout,
+            ) from error
 
     def _task_request_timeout(self) -> float | None:
         # Per plan/verify request timeout. max_seconds is the task wall-clock
@@ -2330,7 +2462,11 @@ class AgentTask:
             return await awaitable
         if remaining <= 0:
             self._close_unawaited(awaitable)
-            raise _AgentTaskDeadlineExceeded(stage)
+            raise _AgentTaskDeadlineExceeded(
+                stage,
+                limit_name="max_seconds",
+                timeout_seconds=self._task_max_seconds(),
+            )
         task = asyncio.ensure_future(awaitable)
         done, pending = await asyncio.wait({task}, timeout=remaining)
         if pending:
@@ -2341,7 +2477,11 @@ class AgentTask:
                 pass
             except Exception:
                 pass
-            raise _AgentTaskDeadlineExceeded(stage)
+            raise _AgentTaskDeadlineExceeded(
+                stage,
+                limit_name="max_seconds",
+                timeout_seconds=self._task_max_seconds(),
+            )
         return await next(iter(done))
 
     @staticmethod
