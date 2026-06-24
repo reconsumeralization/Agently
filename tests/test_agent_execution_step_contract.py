@@ -1093,6 +1093,7 @@ async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(t
     assert meta["effective_options"]["effort_strategy"]["max_iterations"] == 1
     assert any(item.path == "agent_task.phase.configured" for item in stream_items)
     assert any(item.path == "agent_task.phase.terminal" for item in stream_items)
+    assert any((item.meta or {}).get("stream_kind") == "child_execution" for item in stream_items)
 
 
 def test_goal_alias_and_detailed_effort_strategy_are_normalized(tmp_path):

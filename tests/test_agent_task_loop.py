@@ -280,6 +280,14 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert any("building a Workspace context pack" in str(message) for message in progress_messages)
     assert any(value.get("stage") == "plan" for value in snapshot_values)
     assert any(value.get("stage") == "verification" for value in snapshot_values)
+    child_execution_items = [
+        item
+        for item in stream_items
+        if (item.meta or {}).get("stream_kind") == "child_execution"
+    ]
+    assert any(item.path == "agent_task.iteration.1.execution.route.selected" for item in child_execution_items)
+    assert any(item.path.endswith(".execution.step_result") for item in child_execution_items)
+    assert all((item.meta or {}).get("child_execution_id") for item in child_execution_items)
     assert any(item.path.endswith(".replan") for item in stream_items)
     assert any(item.path == "result" for item in stream_items)
     phase_names = [item["phase"] for item in meta["diagnostics"]["phases"]]

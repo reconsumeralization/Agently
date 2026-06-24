@@ -19,6 +19,7 @@ import os
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Generator, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
 
@@ -1949,10 +1950,16 @@ class AgentTask:
             f"agent_task.iteration.{iteration_index}.execution.started",
             {"execution_id": execution.id, "step_execution": step_execution},
         )
+        stream_task = asyncio.create_task(self._bridge_step_execution_stream(iteration_index, execution))
         try:
             result = await execution.async_get_data()
             meta = await execution.async_get_meta()
+            await stream_task
         except Exception as error:
+            if not stream_task.done():
+                stream_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await stream_task
             result, failed_meta = self._failed_execution_result(
                 iteration_index,
                 plan=plan,
@@ -1974,6 +1981,54 @@ class AgentTask:
             )
             return result, failed_meta
         return result, cast(dict[str, Any], meta)
+
+    async def _bridge_step_execution_stream(self, iteration_index: int, execution: Any) -> None:
+        try:
+            async for item in execution.get_async_generator():
+                await self._emit_step_execution_stream_item(iteration_index, execution, item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.diagnostics.setdefault("stream_errors", []).append(
+                {
+                    "type": error.__class__.__name__,
+                    "message": str(error),
+                    "iteration": iteration_index,
+                    "stage": "execution",
+                    "child_execution_id": str(getattr(execution, "id", "") or ""),
+                }
+            )
+
+    async def _emit_step_execution_stream_item(
+        self,
+        iteration_index: int,
+        execution: Any,
+        item: Any,
+    ) -> AgentExecutionStreamData:
+        raw_path = str(getattr(item, "path", "") or "stream")
+        event_type: Literal["delta", "done"] = "delta" if getattr(item, "event_type", None) == "delta" else "done"
+        item_meta = getattr(item, "meta", None)
+        meta: dict[str, Any] = {
+            "task_id": self.id,
+            "status": self.status,
+            "iteration": iteration_index,
+            "stage": "execution",
+            "stream_kind": "child_execution",
+            "child_execution_id": str(getattr(execution, "id", "") or ""),
+            "child_path": raw_path,
+            "child_source": str(getattr(item, "source", "") or ""),
+            "child_route": str(getattr(item, "route", "") or ""),
+        }
+        if isinstance(item_meta, Mapping):
+            meta["child_meta"] = DataFormatter.sanitize(dict(item_meta))
+        return await self._emit(
+            f"agent_task.iteration.{iteration_index}.execution.{raw_path}",
+            getattr(item, "value", None),
+            event_type=event_type,
+            delta=getattr(item, "delta", None),
+            is_complete=bool(getattr(item, "is_complete", event_type == "done")),
+            meta=meta,
+        )
 
     def _step_stage_override(self, stage_name: str):
         overrides = getattr(self, "_agent_task_step_overrides", None)
