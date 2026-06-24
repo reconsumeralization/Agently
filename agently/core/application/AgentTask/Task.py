@@ -968,6 +968,11 @@ class AgentTask:
             },
             format="json",
         )
+        await self._emit(
+            f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.execution.started",
+            {"execution_id": execution.id, "card_id": context.card.id},
+        )
+        stream_task = asyncio.create_task(self._bridge_taskboard_card_execution_stream(context.card.id, execution))
         try:
             card_output = await self._await_taskboard_card_execution(
                 execution.async_get_data(),
@@ -979,7 +984,12 @@ class AgentTask:
                 card_id=context.card.id,
                 stage="meta",
             )
+            await stream_task
         except Exception as error:
+            if not stream_task.done():
+                stream_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await stream_task
             return self._failed_taskboard_card_result(
                 card_id=context.card.id,
                 error=error,
@@ -1009,6 +1019,54 @@ class AgentTask:
                 "execution_id": execution_meta.get("execution_id"),
                 "execution_strategy": self.execution_strategy,
             },
+        )
+
+    async def _bridge_taskboard_card_execution_stream(self, card_id: str, execution: Any) -> None:
+        try:
+            async for item in execution.get_async_generator():
+                await self._emit_taskboard_card_execution_stream_item(card_id, execution, item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.diagnostics.setdefault("stream_errors", []).append(
+                {
+                    "type": error.__class__.__name__,
+                    "message": str(error),
+                    "card_id": card_id,
+                    "stage": "taskboard_card",
+                    "child_execution_id": str(getattr(execution, "id", "") or ""),
+                }
+            )
+
+    async def _emit_taskboard_card_execution_stream_item(
+        self,
+        card_id: str,
+        execution: Any,
+        item: Any,
+    ) -> AgentExecutionStreamData:
+        raw_path = str(getattr(item, "path", "") or "stream")
+        event_type: Literal["delta", "done"] = "delta" if getattr(item, "event_type", None) == "delta" else "done"
+        item_meta = getattr(item, "meta", None)
+        meta: dict[str, Any] = {
+            "task_id": self.id,
+            "status": self.status,
+            "stage": "taskboard_card",
+            "card_id": card_id,
+            "stream_kind": "child_execution",
+            "child_execution_id": str(getattr(execution, "id", "") or ""),
+            "child_path": raw_path,
+            "child_source": str(getattr(item, "source", "") or ""),
+            "child_route": str(getattr(item, "route", "") or ""),
+        }
+        if isinstance(item_meta, Mapping):
+            meta["child_meta"] = DataFormatter.sanitize(dict(item_meta))
+        return await self._emit(
+            f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.execution.{raw_path}",
+            getattr(item, "value", None),
+            event_type=event_type,
+            delta=getattr(item, "delta", None),
+            is_complete=bool(getattr(item, "is_complete", event_type == "done")),
+            meta=meta,
         )
 
     async def _await_taskboard_card_execution(
@@ -2029,6 +2087,11 @@ class AgentTask:
             is_complete=bool(getattr(item, "is_complete", event_type == "done")),
             meta=meta,
         )
+
+    @staticmethod
+    def _stream_path_token(value: Any) -> str:
+        token = str(value or "").strip().replace("/", ".")
+        return token or "item"
 
     def _step_stage_override(self, stage_name: str):
         overrides = getattr(self, "_agent_task_step_overrides", None)

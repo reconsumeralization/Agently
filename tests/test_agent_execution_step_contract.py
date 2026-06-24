@@ -1019,6 +1019,7 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
         max_iterations=2,
     )
 
+    stream_items = [item async for item in execution.get_async_generator()]
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -1034,6 +1035,14 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
     assert taskboard["revision"]["card_results"]["collect"]["status"] == "completed"
     assert taskboard["evidence_view"]["cards"][0]["card_id"] == "collect"
     assert "content" not in taskboard["evidence_view"]["cards"][0]["artifact_refs"]
+    assert any(item.path == "agent_task.taskboard.card.collect.execution.started" for item in stream_items)
+    assert any(
+        item.path == "agent_task.taskboard.card.collect.execution.route.selected"
+        and (item.meta or {}).get("stream_kind") == "child_execution"
+        and (item.meta or {}).get("stage") == "taskboard_card"
+        and (item.meta or {}).get("card_id") == "collect"
+        for item in stream_items
+    )
 
 
 @pytest.mark.asyncio
