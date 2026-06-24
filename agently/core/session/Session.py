@@ -29,7 +29,7 @@ from agently.utils import DeprecationWarnings, FunctionShifter, Settings, Settin
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.model.ModelRequest import ModelResponseResult
+    from agently.core.model import ModelRequestResult
     from agently.types.data import SerializableValue
     from agently.types.plugins import (
         AnalysisHandler,
@@ -381,7 +381,7 @@ class Session:
 
     @staticmethod
     async def resolve_finally_contents(
-        result: "ModelResponseResult",
+        result: "ModelRequestResult",
         settings: "Settings",
         agent_prompt: "Prompt",
     ) -> tuple[str | None, str | None]:

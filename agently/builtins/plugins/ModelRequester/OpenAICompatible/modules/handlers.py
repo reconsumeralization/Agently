@@ -44,6 +44,10 @@ class OpenAICompatibleHandlersMixin:
             attempts = 2
         return max(1, attempts)
 
+    def _get_request_retry_after_output(self) -> bool:
+        retry_config = self.plugin_settings.get("request_retry", None)
+        return bool(retry_config.get("after_output", False)) if isinstance(retry_config, dict) else False
+
     @staticmethod
     def _is_retryable_provider_error(error: BaseException) -> bool:
         if isinstance(error, HTTPStatusError):
@@ -57,6 +61,7 @@ class OpenAICompatibleHandlersMixin:
 
     def build_request_handlers(self, request_data: "AgentlyRequestData") -> AttemptHandlers:
         max_attempts = self._get_request_retry_max_attempts()
+        retry_after_output = self._get_request_retry_after_output()
 
         async def execute(state: AttemptState) -> AsyncGenerator[tuple[str, Any], None]:
             async for item in self._request_model_legacy(request_data):
@@ -64,20 +69,23 @@ class OpenAICompatibleHandlersMixin:
                 if (
                     event == "error"
                     and isinstance(payload, BaseException)
-                    and not state.output_started
                     and self._is_retryable_provider_error(payload)
                     and state.attempt_index < max_attempts
+                    and (not state.output_started or retry_after_output)
                 ):
                     raise payload
                 yield item
 
         async def handle_error(error: BaseException, state: AttemptState) -> AttemptDecision:
             if (
-                not state.output_started
-                and self._is_retryable_provider_error(error)
+                self._is_retryable_provider_error(error)
                 and state.attempt_index < max_attempts
+                and (not state.output_started or retry_after_output)
             ):
-                return AttemptDecision.retry(reason="provider_transient_error")
+                return AttemptDecision.retry(
+                    reason="provider_transient_error",
+                    allow_after_output_started=retry_after_output,
+                )
             return AttemptDecision.yield_error(error)
 
         return AttemptHandlers(execute=execute, handle_error=handle_error)

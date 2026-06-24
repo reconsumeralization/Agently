@@ -292,7 +292,7 @@ def check(result, ctx):
 
 ## 单 response 单次执行
 
-每个 `ModelResponseResult` 只跑**一次** validation 并缓存结果。多次调用——`get_data()` 再 `get_data()`，或 `get_data()` 后 `get_data_object()`——**不会**重跑 validator。如果 validation 已经定型后再往同一个 result 注入新 handler，新 handler 被忽略并发 warning。
+每个 `ModelRequestResult` 只跑**一次** validation 并缓存结果。多次调用——`get_data()` 再 `get_data()`，或 `get_data()` 后 `get_data_object()`——**不会**重跑 validator。如果 validation 已经定型后再往同一个 result 注入新 handler，新 handler 被忽略并发 warning。
 
 含义：不要为不同 consumer 切换 validator。需要不同校验时，发两次请求。
 

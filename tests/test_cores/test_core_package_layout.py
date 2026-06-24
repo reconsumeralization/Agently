@@ -15,6 +15,7 @@ def test_core_root_exports_remain_stable():
         ExecutionResourceManager,
         ExtensionHandlers,
         ModelRequest,
+        ModelRequestResult,
         ModelResponse,
         ModelResponseResult,
         PluginManager,
@@ -38,8 +39,9 @@ def test_core_root_exports_remain_stable():
     assert ExecutionResourceManager.__name__ == "ExecutionResourceManager"
     assert ExtensionHandlers.__name__ == "ExtensionHandlers"
     assert ModelRequest.__name__ == "ModelRequest"
+    assert ModelRequestResult.__name__ == "ModelRequestResult"
     assert ModelResponse.__name__ == "ModelResponse"
-    assert ModelResponseResult.__name__ == "ModelResponseResult"
+    assert ModelResponseResult is ModelRequestResult
     assert PluginManager.__name__ == "PluginManager"
     assert Prompt.__name__ == "Prompt"
     assert RuntimeEvent.__name__ == "RuntimeEvent"
@@ -72,7 +74,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.operation.Action import Action, Tool
     from agently.core.operation.ExecutionResource import ExecutionResourceManager
     from agently.core.extension import ExtensionHandlers, PluginManager
-    from agently.core.model import ModelRequest, ModelResponse, ModelResponseResult, Prompt
+    from agently.core.model import ModelRequest, ModelRequestResult, ModelResponse, ModelResponseResult, Prompt
     from agently.core.application.DynamicTask import DynamicTask
     from agently.core.orchestration.TaskBoard import TaskBoard
     from agently.core.orchestration.TaskDAG import TaskDAGExecutor
@@ -85,8 +87,10 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.Agent").BaseAgent is BaseAgent
     assert importlib.import_module("agently.core.application.AgentExecution.Stream").AgentExecutionStream is AgentExecutionStream
     assert importlib.import_module("agently.core.model.ModelRequest").ModelRequest is ModelRequest
+    assert importlib.import_module("agently.core.model.ModelRequestResult").ModelRequestResult is ModelRequestResult
     assert importlib.import_module("agently.core.model.ModelResponse").ModelResponse is ModelResponse
-    assert importlib.import_module("agently.core.model.ModelResponseResult").ModelResponseResult is ModelResponseResult
+    assert importlib.import_module("agently.core.model.ModelResponseResult").ModelResponseResult is ModelRequestResult
+    assert ModelResponseResult is ModelRequestResult
     assert importlib.import_module("agently.core.model.Prompt").Prompt is Prompt
     assert importlib.import_module("agently.core.model.AttemptRunner").AttemptRunner is AttemptRunner
     assert importlib.import_module("agently.core.runtime.EventCenter").EventCenter is EventCenter

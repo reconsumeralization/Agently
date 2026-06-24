@@ -104,6 +104,9 @@ class AnthropicCompatibleResponseAdapterMixin:
             if event == "error":
                 yield "error", message
                 continue
+            if event == "status":
+                yield "status", message
+                continue
 
             saw_any_event = True
             if not isinstance(message, str):

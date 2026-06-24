@@ -81,7 +81,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`get_result()` returns a reusable `ModelResponseResult`. You can pull text, structured data, and metadata from the same result without re-issuing the request — see [Model Result](../requests/model-response.md).
+`get_result()` returns a reusable `ModelRequestResult`. You can pull text, structured data, and metadata from the same result without re-issuing the request — see [Model Result](../requests/model-response.md).
 
 ## Async + TriggerFlow
 

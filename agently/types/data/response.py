@@ -37,6 +37,7 @@ AgentlyModelResultEvent = Literal[
     "done",
     "meta",
     "extra",
+    "status",
 ]
 
 AgentlyModelResultMessage: TypeAlias = tuple[AgentlyModelResultEvent, Any]

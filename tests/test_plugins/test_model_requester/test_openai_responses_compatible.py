@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Any
 
 import pytest
 
@@ -65,7 +66,7 @@ async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict,
     return captured
 
 
-def collect_events(plugin: OpenAIResponsesCompatible, request_events: list[tuple[str, str]]):
+def collect_events(plugin: OpenAIResponsesCompatible, request_events: list[tuple[str, Any]]):
     async def _run():
         async def generator():
             for event, payload in request_events:
@@ -267,6 +268,17 @@ def test_broadcast_response_maps_text_stream_and_meta():
     assert ("reasoning_done", "") in events
     assert ("original_done", final_response) in events
     assert ("meta", {"id": "resp_1", "model": "gpt-5.5", "status": "completed", "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}, "finish_reason": "stop"}) in events
+
+
+def test_broadcast_response_preserves_core_status_record():
+    plugin = build_plugin({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
+
+    events = collect_events(
+        plugin,
+        [("status", {"status": "failed", "attempt_index": 1, "retry": True})],
+    )
+
+    assert events == [("status", {"status": "failed", "attempt_index": 1, "retry": True})]
 
 
 def test_broadcast_response_synthesizes_tool_call_done_without_completed_event():
@@ -536,10 +548,14 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
     async for event, payload in plugin.request_model(request_data):
         events.append((event, payload))
 
-    assert len(events) == 1
-    assert events[0][0] == "error"
-    assert isinstance(events[0][1], TimeoutError)
-    assert "First token timeout after 0.01 seconds." in str(events[0][1])
+    assert len(events) == 2
+    assert events[0][0] == "status"
+    assert events[0][1]["status"] == "failed"
+    assert events[0][1]["retry"] is False
+    assert events[0][1]["reason"] == "First token timeout after 0.01 seconds."
+    assert events[1][0] == "error"
+    assert isinstance(events[1][1], TimeoutError)
+    assert "First token timeout after 0.01 seconds." in str(events[1][1])
 
 
 @pytest.mark.asyncio
@@ -593,8 +609,12 @@ async def test_stream_idle_timeout_returns_timeout_error_event(monkeypatch: pyte
     async for event, payload in plugin.request_model(request_data):
         events.append((event, payload))
 
-    assert len(events) == 2
+    assert len(events) == 3
     assert events[0][0] == "response.output_text.delta"
-    assert events[1][0] == "error"
-    assert isinstance(events[1][1], TimeoutError)
-    assert "Stream idle timeout after 0.01 seconds." in str(events[1][1])
+    assert events[1][0] == "status"
+    assert events[1][1]["status"] == "failed"
+    assert events[1][1]["retry"] is False
+    assert events[1][1]["reason"] == "Stream idle timeout after 0.01 seconds."
+    assert events[2][0] == "error"
+    assert isinstance(events[2][1], TimeoutError)
+    assert "Stream idle timeout after 0.01 seconds." in str(events[2][1])

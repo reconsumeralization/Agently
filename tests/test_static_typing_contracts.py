@@ -23,7 +23,7 @@ from agently import (
     SkillRuntimeStreamItem as RootSkillRuntimeStreamItem,
     StreamingData as RootStreamingData,
 )
-from agently.core import AgentExecutionResult, BaseAgent, ModelResponseResult
+from agently.core import AgentExecutionResult, BaseAgent, ModelRequestResult, ModelResponseResult
 from agently.types.data import (
     AgentExecutionStreamData,
     AgentlyModelResultEvent,
@@ -66,12 +66,13 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(execution.get_async_generator(type="all"), AsyncGenerator[AgentExecutionStreamData, None])
         assert_type(execution.get_async_generator(type="original"), AsyncGenerator[AgentExecutionStreamData, None])
 
-        result: ModelResponseResult = agent.create_request().input("hello").get_result()
+        result: ModelRequestResult = agent.create_request().input("hello").get_result()
         assert_type(result.get_generator(type="instant"), Generator[StreamingData, None, None])
         assert_type(result.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResultMessage, None])
 
-        compat_result: ModelResponseResult = agent.create_request().input("hello").get_response()
+        compat_result: ModelRequestResult = agent.create_request().input("hello").get_response()
         assert_type(compat_result.result.get_text(), str)
+        assert_type(cast(ModelResponseResult, result), ModelRequestResult)
 
 
 def test_public_handler_type_aliases():

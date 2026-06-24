@@ -15,7 +15,7 @@
 """Pure normalization functions for Action decision/record handling.
 
 All functions are stateless and import-safe — they depend only on stdlib types.
-Extracted from Action.py to follow the ModelRequest/ModelResponse thin-coordinator
+Extracted from Action.py to follow the ModelRequest/ModelRequestRunner thin-coordinator
 pattern where domain logic lives in focused companion modules.
 """
 

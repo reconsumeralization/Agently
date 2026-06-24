@@ -473,5 +473,5 @@ async for item in execution.get_async_generator(type="instant"):
         print(item.delta, end="", flush=True)
 ```
 
-这样保留 ModelResponseResult `instant` 的字段级 delta 语义，同时让过程流 path
+这样保留 ModelRequestResult `instant` 的字段级 delta 语义，同时让过程流 path
 由 Agent execution route 统一拥有。

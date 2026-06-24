@@ -24,7 +24,7 @@ from agently.core.extension import ExtensionHandlers
 from agently.core.application import AgentTask, DynamicTask
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
-from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
+from agently.core.model.ModelRequestResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
 from agently.utils import DataFormatter, FunctionShifter, Settings
 
@@ -47,7 +47,7 @@ if TYPE_CHECKING:
         StreamingData,
         TaskDAG,
     )
-    from agently.core.model import ModelResponseResult
+    from agently.core.model import ModelRequestResult
     from agently.types.options import ExecutionOptions
     from agently.types.plugins import AgentExecution
 
@@ -575,12 +575,12 @@ class BaseAgent:
             }
         )
 
-    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelRequestResult":
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_response(parent_run_context=agent_execution_run_context)
 
-    def get_result(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
+    def get_result(self, *, parent_run_context: "RunContext | None" = None) -> "ModelRequestResult":
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_result(parent_run_context=agent_execution_run_context)

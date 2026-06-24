@@ -198,9 +198,12 @@ supports `fixed`, `random`, `round_robin`, and `least_used`; the legacy top-leve
 `failover` controls what happens after the provider request fails with a
 credential or provider-side error. Without a `failover` policy, Agently does not
 try another credential. `OpenAICompatible` still has a narrow transport replay:
-transient disconnects before any output starts are retried with the same model,
-prompt, and output format according to `OpenAICompatible.request_retry`
-(default `{"max_attempts": 2}`). The built-in `try_next` policy retries the next
+transient disconnects are retried with the same model, prompt, and output format
+according to `OpenAICompatible.request_retry` (default
+`{"max_attempts": 2, "after_output": false}`). Replay after partial output is
+opt-in through `after_output=true` and requires consumers to process `$status`
+or clear plain-delta state on the `"<$retry>{reason}</$retry>"` marker before
+accepting replacement deltas. The built-in `try_next` policy retries the next
 key only for configured HTTP status codes. By default, use credential or
 quota-oriented codes such as `401`, `403`, and `429`. Status codes such as `405`
 and `422` often mean endpoint, method, payload, or model-capability mismatch;

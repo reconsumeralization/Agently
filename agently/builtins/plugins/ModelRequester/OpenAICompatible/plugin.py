@@ -66,6 +66,7 @@ class OpenAICompatible(
         "stream_idle_timeout": None,
         "request_retry": {
             "max_attempts": 2,
+            "after_output": False,
         },
         "client_options": {},
         "headers": {},

@@ -41,6 +41,7 @@ from .extension import ExtensionHandlers, PluginManager
 from .model import (
     AttemptRunner,
     ModelRequest,
+    ModelRequestResult,
     ModelResponse,
     ModelResponseResult,
     Prompt,
@@ -125,6 +126,7 @@ __all__ = [
     "LazyWorkspace",
     "LocalWorkspaceBackend",
     "ModelRequest",
+    "ModelRequestResult",
     "ModelResponse",
     "ModelResponseResult",
     "ObservationEventEmitter",

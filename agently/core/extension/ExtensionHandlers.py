@@ -19,7 +19,7 @@ from agently.utils import StateData
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.model.ModelRequest import ModelResponseResult
+    from agently.core.model import ModelRequestResult
     from agently.utils import Settings
     from agently.types.data import AgentlyModelResultEvent, AgentlyModelResult, OutputValidateHandler
 
@@ -49,7 +49,7 @@ class ExtensionHandlers(StateData):
     def append(
         self,
         key: Literal["finally"],
-        value: "Callable[[ModelResponseResult, Settings], Any]",
+        value: "Callable[[ModelRequestResult, Settings], Any]",
     ): ...
     @overload
     def append(

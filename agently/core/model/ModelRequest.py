@@ -22,6 +22,8 @@ from agently.core.runtime import resolve_parent_run_context
 from agently.utils import Settings, FunctionShifter
 
 from .Prompt import Prompt
+from .ModelRequestRunner import ModelRequestRunner
+from .ModelRequestResult import ModelRequestResult
 from .ModelResponse import ModelResponse
 from .ModelResponseResult import ModelResponseResult
 from .AttachmentInput import ImageDetail, build_image_attachment
@@ -313,7 +315,7 @@ class ModelRequest:
         return self
 
     # Result
-    def _create_model_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
+    def _create_model_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelRequestResult:
         if self._model_key:
             from agently.utils.ModelPool import resolve_model_pool_settings
             resolve_model_pool_settings(self._model_key, self.settings)
@@ -323,7 +325,7 @@ class ModelRequest:
             if parent_run_context is not None and parent_run_context.run_kind == "agent_execution"
             else None
         )
-        response = ModelResponse(
+        response = ModelRequestRunner(
             self.agent_name,
             self.plugin_manager,
             self.settings,
@@ -331,16 +333,15 @@ class ModelRequest:
             self.extension_handlers,
             run_context=self._create_request_run_context(parent_run_context=parent_run_context),
             agent_execution_run_context=agent_execution_run_context,
-            warn_deprecated=False,
         )
         response.run_context.response_id = response.id
         self.prompt.clear()
         return response.result
 
-    def get_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
+    def get_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelRequestResult:
         return self._create_model_result(parent_run_context=parent_run_context)
 
-    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelResponseResult:
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> ModelRequestResult:
         return self.get_result(parent_run_context=parent_run_context)
 
     def get_meta(self, *, parent_run_context: "RunContext | None" = None):
@@ -677,6 +678,7 @@ class ModelRequest:
 
 __all__ = [
     "ModelRequest",
+    "ModelRequestResult",
     "ModelResponse",
     "ModelResponseResult",
 ]

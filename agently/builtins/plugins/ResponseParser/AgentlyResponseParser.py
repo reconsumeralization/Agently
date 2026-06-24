@@ -14,6 +14,7 @@
 
 import asyncio
 import contextlib
+import html
 import re
 import warnings
 
@@ -297,6 +298,35 @@ class AgentlyResponseParser(ResponseParser):
         self._runtime_observations = []
         return observations
 
+    @staticmethod
+    def _should_reset_for_retry_status(data: Any) -> bool:
+        return isinstance(data, Mapping) and data.get("status") == "failed" and data.get("retry") is True
+
+    @staticmethod
+    def _format_delta_retry_marker(data: Any) -> str:
+        """Format the plain-delta replay boundary without trusting provider text."""
+
+        reason = data.get("reason") if isinstance(data, Mapping) else None
+        text = str(reason).strip() if reason is not None else ""
+        if not text:
+            text = "Retrying model request."
+        return f"<$retry>{ html.escape(text, quote=False) }</$retry>"
+
+    def _reset_retried_attempt_result(self) -> None:
+        """Discard parser-owned state from an attempt replaced by a replay."""
+
+        self.full_result_data["meta"].clear()
+        self.full_result_data["original_delta"].clear()
+        self.full_result_data["original_done"] = {}
+        self.full_result_data["text_result"] = ""
+        self.full_result_data["cleaned_result"] = ""
+        self.full_result_data["parsed_result"] = None
+        self.full_result_data["result_object"] = None
+        self.full_result_data["errors"].clear()
+        self.full_result_data["extra"].clear()
+        self._final_json_parse_result = None
+        self._streaming_canceled = False
+
     async def _handle_done_event(self, data: Any, buffer: str) -> None:
         self.full_result_data["text_result"] = str(data)
         if self._prompt_object.output_format == "json":
@@ -465,6 +495,14 @@ class AgentlyResponseParser(ResponseParser):
                     event, data = item
                 except:
                     warnings.warn(f"\n⚠️ Incorrect response data from Agently Response Generator: { item }")
+                    continue
+                if event == "status":
+                    if self._should_reset_for_retry_status(data):
+                        buffer = ""
+                        stream_chunk_index = 0
+                        think_normalizer = LeadingThinkEventNormalizer()
+                        self._reset_retried_attempt_result()
+                    yield event, data
                     continue
                 if event == "delta":
                     for normalized_event, normalized_data in think_normalizer.feed_delta(str(data)):
@@ -664,7 +702,9 @@ class AgentlyResponseParser(ResponseParser):
                     case "all":
                         yield event, data
                     case "delta":
-                        if event == "delta":
+                        if event == "status" and self._should_reset_for_retry_status(data):
+                            yield self._format_delta_retry_marker(data)
+                        elif event == "delta":
                             yield data
                     case "specific":
                         if specific is None:
@@ -674,6 +714,20 @@ class AgentlyResponseParser(ResponseParser):
                         if event in specific:
                             yield event, data
                     case "instant" | "streaming_parse":
+                        if event == "status":
+                            if self._should_reset_for_retry_status(data):
+                                if streaming_json_parser is not None:
+                                    streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+                                if streaming_flat_markdown_parser is not None:
+                                    streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
+                                if streaming_hybrid_parser is not None:
+                                    streaming_hybrid_parser = HybridStreamingParser(self._prompt_object.output or {})
+                                if streaming_xml_field_parser is not None:
+                                    streaming_xml_field_parser = XmlFieldStreamingParser(self._prompt_object.output or {})
+                                if streaming_yaml_literal_parser is not None:
+                                    streaming_yaml_literal_parser = YamlLiteralStreamingParser(self._prompt_object.output or {})
+                            yield StreamingData(path="$status", value=data)
+                            continue
                         if streaming_json_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_json_parser.parse_chunk(str(data)):
@@ -830,7 +884,9 @@ class AgentlyResponseParser(ResponseParser):
                 case "all":
                     yield event, data
                 case "delta":
-                    if event == "delta":
+                    if event == "status" and self._should_reset_for_retry_status(data):
+                        yield self._format_delta_retry_marker(data)
+                    elif event == "delta":
                         yield data
                 case "specific":
                     if specific is None:
@@ -840,6 +896,20 @@ class AgentlyResponseParser(ResponseParser):
                     if event in specific:
                         yield event, data
                 case "instant" | "streaming_parse":
+                    if event == "status":
+                        if self._should_reset_for_retry_status(data):
+                            if streaming_json_parser is not None:
+                                streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+                            if streaming_flat_markdown_parser is not None:
+                                streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
+                            if streaming_hybrid_parser is not None:
+                                streaming_hybrid_parser = HybridStreamingParser(self._prompt_object.output or {})
+                            if streaming_xml_field_parser is not None:
+                                streaming_xml_field_parser = XmlFieldStreamingParser(self._prompt_object.output or {})
+                            if streaming_yaml_literal_parser is not None:
+                                streaming_yaml_literal_parser = YamlLiteralStreamingParser(self._prompt_object.output or {})
+                        yield StreamingData(path="$status", value=data)
+                        continue
                     if streaming_json_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(

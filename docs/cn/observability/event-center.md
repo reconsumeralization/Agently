@@ -27,10 +27,21 @@ run 与 retry 命名：
 
 模型请求 telemetry：
 
-- 模型 RuntimeEvent 可在 `model.request_started`、`model.requesting`、`model.completed`、`model.meta`、`model.request_failed`、`model.requester.error` 上携带 `payload["model_request_telemetry"]`。
+- 模型 RuntimeEvent 可在 `model.request_started`、`model.requesting`、`model.status`、`model.completed`、`model.meta`、`model.request_failed`、`model.requester.error` 上携带 `payload["model_request_telemetry"]`。
 - telemetry payload 只用于观察，可包含 `response_id`、`attempt_index`、run ids、provider/model、request URL、duration、usage、side-channel 和规范化 error 事实。
 - telemetry 去重只移除同一 `response_id + attempt_index + event kind` 的重复 telemetry 子 payload；不会抑制原始 RuntimeEvent。
 - 不要把这些 telemetry 事实反馈给 route 选择、retry policy、verifier 判断、quality scoring、planner context 或 prompt 内容。它们只用于日志、DevTools 展示和诊断。
+
+模型请求状态：
+
+- `model.status` 记录一次 ModelRequest attempt 的结果事实，只用于观察；它不决定 retry 或下游控制流。
+- 原始 response stream 使用 `("status", payload)`；`instant` / `streaming_parse` 使用 `StreamingData(path="$status", value=payload)`。
+- `payload["status"]` 为 `completed`、`failed` 或 `cancelled`。
+- `failed` 且 `retry=true` 表示 `payload["attempt_index"]` 的 partial 输出已失效，下一次 attempt 是 `payload["next_attempt_index"]`。消费者应先清除临时输出，再渲染替代 attempt 的 delta。
+- `reason` 包含有界的 provider/transport 实际说明；有异常对象时 `error_type` 为原始异常类型。它不包含 traceback 或原始 request body。
+- 纯文本 `type="delta"` generator 会在同一重放边界输出独立的
+  `"<$retry>{reason}</$retry>"` chunk；消费者必须据此清除临时文本。需要 lineage 或
+  无碰撞结构化事实时，应使用 `type="all"`、`specific`、`instant` 或 `streaming_parse`。
 
 ## 注册 hook
 
