@@ -321,6 +321,61 @@ class MockFlatReplanRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockFlatActionRequester(MockAgentExecutionRequester):
+    name = "MockFlatActionRequester"
+    action_planning_calls = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockFlatActionRequester.action_planning_calls = 0
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "actions",
+                "step_instruction": "Call the probe_action framework Action.",
+                "expected_evidence": "probe_action result",
+                "rationale": "The task needs action evidence.",
+            }
+        elif "next_action" in text and "execution_commands" in text:
+            MockFlatActionRequester.action_planning_calls += 1
+            if MockFlatActionRequester.action_planning_calls == 1:
+                payload = {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "Collect probe action evidence.",
+                            "action_id": "probe_action",
+                            "action_input": {},
+                        }
+                    ],
+                }
+            else:
+                payload = {"next_action": "response", "execution_commands": []}
+        elif "[ACTION RESULTS]" in text:
+            payload = {
+                "step_result": "action evidence collected",
+                "evidence": ["probe_action executed"],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "action evidence is present",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "flat action accepted result",
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardRequester"
 
@@ -377,6 +432,13 @@ def _create_flat_replan_agent(name: str = "agent-execution-flat-replan"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockFlatReplanRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_flat_action_agent(name: str = "agent-execution-flat-action"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockFlatActionRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -445,6 +507,42 @@ async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate
     assert task_meta["iterations"][0]["plan"]["step_execution"]["policy"]["allow_dag_steps"] is False
     assert task_meta["iterations"][0]["verification"]["is_complete"] is False
     assert task_meta["iterations"][1]["verification"]["is_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_flat_actions_shape_activates_framework_actions_from_capabilities(tmp_path):
+    agent = _create_flat_action_agent("execution-flat-action-strategy").use_workspace(tmp_path / "workspace")
+
+    @agent.action_func
+    def probe_action() -> dict[str, str]:
+        return {"status": "ok", "evidence": "framework action executed"}
+
+    execution = (
+        agent.create_task(
+            goal="Collect action evidence.",
+            success_criteria=["The probe action executes."],
+            execution="flat",
+            max_iterations=1,
+        )
+        .use_actions(["probe_action"])
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    iteration = task_meta["iterations"][0]
+    step_execution = iteration["plan"]["step_execution"]
+    action_logs = iteration["execution_meta"]["logs"]["action_logs"]
+    if isinstance(action_logs, dict):
+        action_ids = list(action_logs.keys())
+    else:
+        action_ids = [item.get("action_id") for item in action_logs]
+
+    assert result["accepted"] is True
+    assert step_execution["effective_shape"] == "actions"
+    assert step_execution["action_scope_source"] == "planner_capabilities"
+    assert set(action_ids) == {"probe_action"}
+    assert action_ids
 
 
 @pytest.mark.asyncio

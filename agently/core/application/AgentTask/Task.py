@@ -1263,12 +1263,27 @@ class AgentTask:
             sync_action_scope = getattr(execution, "_sync_action_scope", None)
             if callable(sync_action_scope):
                 sync_action_scope(source="AgentTaskLoop.step_scope")
+        action_scope_source = "step_scope" if allowed_capability_ids else ""
+        if effective_shape == "actions" and not allowed_capability_ids:
+            action_capability_ids = [
+                str(item.get("id") or "").strip()
+                for item in self._planner_capabilities()
+                if isinstance(item, Mapping)
+                and str(item.get("kind") or "").strip() == "action"
+                and str(item.get("id") or "").strip()
+            ]
+            if action_capability_ids:
+                use_actions = getattr(execution, "use_actions", None)
+                if callable(use_actions):
+                    use_actions(action_capability_ids)
+                    action_scope_source = "planner_capabilities"
         step_execution = {
             "requested_shape": requested_shape,
             "effective_shape": effective_shape,
             "dag_allowed": dag_allowed,
             "dynamic_task_candidate_added": candidate_added,
             "step_scope": DataFormatter.sanitize(step_scope),
+            "action_scope_source": action_scope_source,
             "policy": DataFormatter.sanitize(policy),
         }
         route_policy = self._route_policy_for_step_execution(effective_shape)
