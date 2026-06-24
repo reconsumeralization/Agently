@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +17,9 @@ from agently.types.data import AgentlyRequestData
 from agently.types.options import ExecutionOptions, SkillsRouteOptions
 from agently.utils import DataFormatter
 from agently.utils import Settings
+from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.result_views import (
+    get_async_generator as agent_execution_get_async_generator,
+)
 
 
 class MockAgentExecutionRequester:
@@ -64,6 +68,24 @@ class MockAgentExecutionRequester:
                 response_text += str(data)
                 yield "delta", str(data)
         yield "done", response_text
+
+
+class _FakeStreamForGeneratorCancel:
+    def __init__(self) -> None:
+        self.items: list[Any] = []
+        self.queues: list[asyncio.Queue[Any]] = []
+
+
+class _FakeExecutionForGeneratorCancel:
+    def __init__(self) -> None:
+        self._completed = False
+        self.stream = _FakeStreamForGeneratorCancel()
+
+    async def async_start(self) -> None:
+        await asyncio.sleep(0.01)
+        for queue in list(self.stream.queues):
+            await queue.put(None)
+        raise RuntimeError("synthetic stream start failure")
 
 
 class MockAgentExecutionActionRequester(MockAgentExecutionRequester):
@@ -117,6 +139,27 @@ class MockScopedActionRequester(MockAgentExecutionRequester):
         else:
             payload = {"answer": "plain-text-delta", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_stream_cancel_retrieves_start_exception():
+    event_loop = asyncio.get_running_loop()
+    captured: list[dict[str, Any]] = []
+    previous_handler = event_loop.get_exception_handler()
+    event_loop.set_exception_handler(lambda _, context: captured.append(context))
+    try:
+        owner = _FakeExecutionForGeneratorCancel()
+        generator = agent_execution_get_async_generator(cast(Any, owner))
+        pending = asyncio.create_task(generator.__anext__())
+        await asyncio.sleep(0)
+        pending.cancel()
+        with suppress(asyncio.CancelledError):
+            await pending
+        await asyncio.sleep(0.03)
+    finally:
+        event_loop.set_exception_handler(previous_handler)
+
+    assert captured == []
 
 
 class MockAgentExecutionIsolationRequester(MockAgentExecutionRequester):

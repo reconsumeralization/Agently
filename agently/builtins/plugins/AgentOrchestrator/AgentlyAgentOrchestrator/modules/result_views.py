@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Generator
+from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
 from agently.utils import DataFormatter, FunctionShifter
@@ -89,6 +90,7 @@ async def get_async_generator(
         await queue.put(item)
     owner.stream.queues.append(queue)
     start_task = asyncio.create_task(owner.async_start())
+    start_task.add_done_callback(_retrieve_generator_start_exception)
     try:
         while True:
             item = await queue.get()
@@ -99,6 +101,13 @@ async def get_async_generator(
     finally:
         if queue in owner.stream.queues:
             owner.stream.queues.remove(queue)
+
+
+def _retrieve_generator_start_exception(task: "asyncio.Task[Any]") -> None:
+    if task.cancelled():
+        return
+    with suppress(Exception):
+        task.exception()
 
 
 def sync_generator(owner: "AgentExecution", *args: Any, **kwargs: Any) -> Generator[Any, None, None]:
