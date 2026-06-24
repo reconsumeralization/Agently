@@ -720,6 +720,45 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
 
 
 @pytest.mark.asyncio
+async def test_flat_verifier_uses_bounded_action_evidence_prompt(tmp_path):
+    agent = _create_flat_action_agent("execution-flat-verifier-evidence-bounds").use_workspace(tmp_path / "workspace")
+
+    hidden_tail = "VERIFIER_SHOULD_NOT_SEE_FULL_ACTION_OUTPUT"
+
+    @agent.action_func
+    def probe_action() -> dict[str, str]:
+        return {
+            "status": "ok",
+            "payload": ("x" * 8000) + hidden_tail + ("z" * 8000),
+        }
+
+    execution = (
+        agent.create_task(
+            goal="Collect action evidence without flooding the verifier.",
+            success_criteria=["The probe action executes."],
+            execution="flat",
+            max_iterations=1,
+        )
+        .use_actions(["probe_action"])
+    )
+
+    result = await execution.async_get_data()
+    verify_requests = [
+        request
+        for request in MockAgentExecutionRequester.requests
+        if "Verify the task against every success criterion" in request
+    ]
+
+    assert result["accepted"] is True
+    assert verify_requests
+    verify_prompt = verify_requests[-1]
+    assert "probe_action" in verify_prompt
+    assert "artifact_refs" in verify_prompt
+    assert hidden_tail not in verify_prompt
+    assert len(verify_prompt) < 80000
+
+
+@pytest.mark.asyncio
 async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path):
     agent = _create_taskboard_agent("execution-taskboard-strategy").use_workspace(tmp_path / "workspace")
 

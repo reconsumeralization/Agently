@@ -74,6 +74,8 @@ _DAG_STEP_EXECUTION_SHAPES = {"dynamic_task", "execution_dag"}
 
 # Upper bound on the in-memory stream replay buffer for late subscribers.
 _STREAM_REPLAY_LIMIT = 5000
+_VERIFIER_PROMPT_VALUE_CHARS = 12000
+_VERIFIER_PROMPT_ITEM_CHARS = 2400
 
 
 class _AgentTaskDeadlineExceeded(TimeoutError):
@@ -2202,6 +2204,9 @@ class AgentTask:
         execution_meta: dict[str, Any],
         context_pack: "WorkspaceContextPackage",
     ) -> dict[str, Any]:
+        evidence_summary = self._compact_verifier_evidence_summary(
+            self._execution_log_summary(execution_meta)
+        )
         request = self.agent.create_temp_request()
         request.input(
             {
@@ -2209,12 +2214,15 @@ class AgentTask:
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
                 "iteration": iteration_index,
-                "plan": plan,
-                "execution_result": DataFormatter.sanitize(execution_result),
-                "execution_meta": DataFormatter.sanitize(execution_meta),
-                "execution_evidence_summary": self._execution_log_summary(execution_meta),
+                "plan": self._compact_verifier_prompt_value(plan, max_chars=_VERIFIER_PROMPT_ITEM_CHARS),
+                "execution_result": self._compact_verifier_prompt_value(
+                    execution_result,
+                    max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
+                ),
+                "execution_meta": self._verification_execution_meta_summary(execution_meta, evidence_summary),
+                "execution_evidence_summary": evidence_summary,
                 "capability_evidence_requirements": self._capability_evidence_requirements(),
-                "context_pack": DataFormatter.sanitize(context_pack),
+                "context_pack": self._compact_context_pack_for_verifier(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "previous_iterations": self._iteration_prompt_summaries(),
             }
@@ -2264,6 +2272,121 @@ class AgentTask:
             verification,
             execution_evidence_summary=self._execution_log_summary(execution_meta),
         )
+
+    @classmethod
+    def _verification_execution_meta_summary(
+        cls,
+        execution_meta: Mapping[str, Any],
+        evidence_summary: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        route = execution_meta.get("route")
+        diagnostics = execution_meta.get("diagnostics")
+        return {
+            "status": str(execution_meta.get("status") or ""),
+            "route": cls._compact_verifier_prompt_value(route, max_chars=1200),
+            "diagnostics": cls._compact_verifier_prompt_value(diagnostics, max_chars=1200),
+            "evidence_summary": dict(evidence_summary),
+        }
+
+    @classmethod
+    def _compact_context_pack_for_verifier(cls, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
+        compact = cls._compact_verifier_prompt_value(context_pack, max_chars=_VERIFIER_PROMPT_VALUE_CHARS)
+        return compact if isinstance(compact, dict) else {}
+
+    @classmethod
+    def _compact_verifier_evidence_summary(cls, summary: Mapping[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        for key, value in summary.items():
+            if key == "artifact_refs" and isinstance(value, list):
+                compact[key] = [cls._compact_artifact_ref_for_verifier(ref) for ref in value[:24]]
+                if len(value) > 24:
+                    compact[key].append({"omitted": len(value) - 24, "reason": "prompt_budget"})
+                continue
+            if key == "workspace_refs" and isinstance(value, Mapping):
+                compact[key] = cls._compact_verifier_prompt_value(value, max_chars=2400)
+                continue
+            compact[key] = cls._compact_verifier_prompt_value(value, max_chars=_VERIFIER_PROMPT_ITEM_CHARS)
+        return compact
+
+    @classmethod
+    def _compact_artifact_ref_for_verifier(cls, ref: Any) -> Any:
+        if not isinstance(ref, Mapping):
+            return cls._compact_verifier_prompt_value(ref, max_chars=600)
+        keep_keys = (
+            "artifact_id",
+            "action_call_id",
+            "role",
+            "label",
+            "media_type",
+            "size",
+            "bytes",
+            "sha256",
+            "truncated",
+            "available",
+            "full_value_available",
+            "path",
+        )
+        compact = {key: ref.get(key) for key in keep_keys if key in ref}
+        if "preview" in ref:
+            compact["preview"] = cls._compact_verifier_prompt_value(ref.get("preview"), max_chars=600)
+        return compact
+
+    @classmethod
+    def _compact_verifier_prompt_value(
+        cls,
+        value: Any,
+        *,
+        max_chars: int = _VERIFIER_PROMPT_ITEM_CHARS,
+        depth: int = 0,
+    ) -> Any:
+        value = DataFormatter.sanitize(value)
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, bytes):
+            text = value[:max_chars].decode("utf-8", "replace")
+            return {"bytes": len(value), "preview": cls._truncate_prompt_text(text, max_chars)}
+        if isinstance(value, str):
+            return cls._truncate_prompt_text(value, max_chars)
+        if depth >= 5:
+            return cls._truncate_prompt_text(value, max_chars)
+        if isinstance(value, list):
+            limit = 24
+            items = [
+                cls._compact_verifier_prompt_value(
+                    item,
+                    max_chars=max(240, max_chars // 2),
+                    depth=depth + 1,
+                )
+                for item in value[:limit]
+            ]
+            if len(value) > limit:
+                items.append({"omitted": len(value) - limit, "reason": "prompt_budget"})
+            return items
+        if isinstance(value, dict):
+            limit = 48
+            compacted: dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= limit:
+                    compacted["omitted"] = {"count": len(value) - limit, "reason": "prompt_budget"}
+                    break
+                key_text = str(key)
+                item_chars = max_chars
+                if key_text in {"content", "raw", "text", "output", "result", "data", "body", "preview"}:
+                    item_chars = max(240, max_chars // 3)
+                compacted[key_text] = cls._compact_verifier_prompt_value(
+                    item,
+                    max_chars=item_chars,
+                    depth=depth + 1,
+                )
+            return compacted
+        return cls._truncate_prompt_text(value, max_chars)
+
+    @staticmethod
+    def _truncate_prompt_text(value: Any, max_chars: int) -> str:
+        text = str(value or "")
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 32)].rstrip() + "\n[truncated for verifier prompt]"
 
     def _normalize_verification(
         self,

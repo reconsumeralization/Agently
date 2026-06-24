@@ -186,7 +186,7 @@ def _compact_record_content(record: WorkspaceRecordRef, value: Any) -> Any:
         return {
             "iteration": value.get("iteration"),
             "action_evidence": _compact_action_logs(logs.get("action_logs", []) if isinstance(logs, dict) else []),
-            "execution_result": value.get("execution_result"),
+            "execution_result": _compact_hot_value(value.get("execution_result"), max_chars=2400),
             "plan": _compact_plan(value.get("plan")),
             "execution_summary": _compact_execution_meta(execution_meta),
         }
@@ -227,7 +227,7 @@ def _compact_execution_meta(execution_meta: Any) -> dict[str, Any]:
     return {
         "status": execution_meta.get("status"),
         "route": execution_meta.get("route"),
-        "close_snapshot": execution_meta.get("close_snapshot"),
+        "diagnostics": _compact_hot_value(execution_meta.get("diagnostics"), max_chars=1200),
     }
 
 
@@ -280,7 +280,38 @@ def _compact_action_data(data: Any) -> Any:
                 for source in sources
             ],
         }
-    return data
+    return _compact_hot_value(data, max_chars=1200)
+
+
+def _compact_hot_value(value: Any, *, max_chars: int = 1200, depth: int = 0) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, bytes):
+        return {"bytes": len(value), "preview": _truncate_text(value[: max_chars].decode("utf-8", "replace"), max_chars)}
+    if isinstance(value, str):
+        return _truncate_text(value, max_chars)
+    if depth >= 4:
+        return _truncate_text(value, max_chars)
+    if isinstance(value, list):
+        limit = 12
+        items = [_compact_hot_value(item, max_chars=max(240, max_chars // 2), depth=depth + 1) for item in value[:limit]]
+        if len(value) > limit:
+            items.append({"omitted": len(value) - limit, "reason": "prompt_budget"})
+        return items
+    if isinstance(value, dict):
+        limit = 32
+        compacted: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= limit:
+                compacted["omitted"] = {"count": len(value) - limit, "reason": "prompt_budget"}
+                break
+            key_text = str(key)
+            item_budget = max_chars
+            if key_text in {"content", "raw", "text", "output", "result", "data", "body", "preview"}:
+                item_budget = max(240, max_chars // 2)
+            compacted[key_text] = _compact_hot_value(item, max_chars=item_budget, depth=depth + 1)
+        return compacted
+    return _truncate_text(value, max_chars)
 
 
 def _truncate_text(value: Any, max_chars: int) -> str:
