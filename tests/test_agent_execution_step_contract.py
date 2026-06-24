@@ -322,6 +322,95 @@ class MockFlatReplanRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockFlatRepairConstraintRequester(MockAgentExecutionRequester):
+    name = "MockFlatRepairConstraintRequester"
+    plan_calls = 0
+    verify_calls = 0
+    second_plan_prompt = ""
+    latest_step_instruction = ""
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockFlatRepairConstraintRequester.plan_calls = 0
+        MockFlatRepairConstraintRequester.verify_calls = 0
+        MockFlatRepairConstraintRequester.second_plan_prompt = ""
+        MockFlatRepairConstraintRequester.latest_step_instruction = ""
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan the next bounded AgentExecution step" in text:
+            MockFlatRepairConstraintRequester.plan_calls += 1
+            if MockFlatRepairConstraintRequester.plan_calls == 1:
+                step_instruction = "Draft a broad weekly report with all collected items."
+                payload = {
+                    "execution_shape": "direct",
+                    "step_instruction": step_instruction,
+                    "expected_evidence": "Candidate report.",
+                    "rationale": "Start with an initial report draft.",
+                }
+            else:
+                MockFlatRepairConstraintRequester.second_plan_prompt = text
+                if "repair_context" in text and "Reduce the report to 5-8 news items." in text:
+                    step_instruction = (
+                        "Revise the candidate report to contain 5-8 news items and keep existing grounded evidence."
+                    )
+                else:
+                    step_instruction = "Repeat the broad weekly report draft without repair context."
+                payload = {
+                    "execution_shape": "direct",
+                    "step_instruction": step_instruction,
+                    "expected_evidence": "Repaired report that satisfies the 5-8 item constraint.",
+                    "rationale": "The latest verifier repair_context requires reducing the report to 5-8 items.",
+                }
+            MockFlatRepairConstraintRequester.latest_step_instruction = step_instruction
+        elif "Execute exactly one bounded step" in text:
+            if "Revise the candidate report to contain 5-8 news items" in text:
+                payload = {
+                    "step_result": "Repaired report produced.",
+                    "candidate_final_result": "# Weekly\n\n" + "\n".join(f"- Item {index}" for index in range(1, 7)),
+                    "evidence": ["repaired to 6 items"],
+                    "remaining_work": [],
+                }
+            else:
+                payload = {
+                    "step_result": "Initial oversized report produced.",
+                    "candidate_final_result": "# Weekly\n\n" + "\n".join(f"- Item {index}" for index in range(1, 16)),
+                    "evidence": ["initial report has 15 items"],
+                    "remaining_work": [],
+                }
+        elif "Verify the task against every success criterion" in text:
+            MockFlatRepairConstraintRequester.verify_calls += 1
+            if MockFlatRepairConstraintRequester.verify_calls == 1:
+                payload = {
+                    "is_complete": False,
+                    "requires_block": False,
+                    "reason": "The draft includes 15 items but the task asks for 5-8.",
+                    "missing_criteria": ["The report must include 5-8 news items, not 15."],
+                    "repair_constraints": ["Reduce the report to 5-8 news items."],
+                    "next_step_requirements": ["Revise the candidate report; do not restart evidence gathering."],
+                    "replan_instruction": "Revise the report to satisfy the item-count constraint.",
+                    "final_result_required": True,
+                    "final_result": "",
+                }
+            else:
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "The repaired report now has 6 items.",
+                    "missing_criteria": [],
+                    "repair_constraints": [],
+                    "next_step_requirements": [],
+                    "replan_instruction": "",
+                    "final_result_required": True,
+                    "final_result": "repaired accepted result",
+                }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockFlatActionRequester(MockAgentExecutionRequester):
     name = "MockFlatActionRequester"
     action_planning_calls = 0
@@ -630,6 +719,13 @@ def _create_flat_replan_agent(name: str = "agent-execution-flat-replan"):
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def _create_flat_repair_constraint_agent(name: str = "agent-execution-flat-repair-constraint"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockFlatRepairConstraintRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
 def _create_flat_action_agent(name: str = "agent-execution-flat-action"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -723,6 +819,47 @@ async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate
     assert task_meta["iterations"][0]["plan"]["step_execution"]["policy"]["allow_dag_steps"] is False
     assert task_meta["iterations"][0]["verification"]["is_complete"] is False
     assert task_meta["iterations"][1]["verification"]["is_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
+    agent = _create_flat_repair_constraint_agent("execution-flat-repair-constraints").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Produce an Agent engineering weekly report with 5-8 news items.",
+        success_criteria=["The final report contains 5-8 news items."],
+        execution="flat",
+        max_iterations=2,
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    first_verification = task_meta["iterations"][0]["verification"]
+    second_plan = task_meta["iterations"][1]["plan"]
+    second_plan_prompt = MockFlatRepairConstraintRequester.second_plan_prompt
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["final_result"] == "repaired accepted result"
+    assert first_verification["is_complete"] is False
+    assert "Reduce the report to 5-8 news items." in first_verification["repair_constraints"]
+    assert "The report must include 5-8 news items, not 15." in first_verification["repair_constraints"]
+    assert (
+        "Revise the candidate report; do not restart evidence gathering."
+        in first_verification["next_step_requirements"]
+    )
+    assert (
+        "Revise the report to satisfy the item-count constraint."
+        in first_verification["next_step_requirements"]
+    )
+    assert second_plan["step_instruction"].startswith("Revise the candidate report")
+    assert "repair_context" in second_plan_prompt
+    assert "repair_constraints" in second_plan_prompt
+    assert "Reduce the report to 5-8 news items." in second_plan_prompt
+    assert "Revise the candidate report; do not restart evidence gathering." in second_plan_prompt
 
 
 @pytest.mark.asyncio

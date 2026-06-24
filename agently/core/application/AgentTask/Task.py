@@ -600,6 +600,8 @@ class AgentTask:
                 "reason": verification.get("reason"),
                 "missing_criteria": verification.get("missing_criteria", []),
                 "replan_instruction": verification.get("replan_instruction", ""),
+                "repair_constraints": verification.get("repair_constraints", []),
+                "next_step_requirements": verification.get("next_step_requirements", []),
             },
             message=(
                 f"Iteration {iteration_index}: verification "
@@ -722,6 +724,8 @@ class AgentTask:
             {
                 "reason": verification.get("reason"),
                 "replan_instruction": verification.get("replan_instruction"),
+                "repair_constraints": verification.get("repair_constraints", []),
+                "next_step_requirements": verification.get("next_step_requirements", []),
                 "replan_signals": verification.get("replan_signals", []),
             },
         )
@@ -731,6 +735,8 @@ class AgentTask:
             diagnostics={
                 "reason": verification.get("reason"),
                 "replan_instruction": verification.get("replan_instruction"),
+                "repair_constraints": verification.get("repair_constraints", []),
+                "next_step_requirements": verification.get("next_step_requirements", []),
                 "replan_signals": verification.get("replan_signals", []),
             },
         )
@@ -1681,13 +1687,16 @@ class AgentTask:
         request = self.agent.create_temp_request()
         planner_capabilities = self._planner_capabilities()
         execution_prompt = self._execution_prompt_context()
+        previous_iterations = self._iteration_prompt_summaries()
+        repair_context = self._planner_repair_context(previous_iterations)
         request.input(
             {
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
                 "iteration": iteration_index,
-                "previous_iterations": self._iteration_prompt_summaries(),
+                "previous_iterations": previous_iterations,
+                "repair_context": repair_context,
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": execution_prompt,
                 "execution_policy": self._step_execution_policy(),
@@ -1722,6 +1731,9 @@ class AgentTask:
             "Plan the next bounded AgentExecution step for this AgentTask. "
             "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
+            "When repair_context is present, treat repair_constraints and next_step_requirements as hard planning inputs "
+            "for the next bounded step. The verifier does not choose tools or routes; the planner must choose a valid "
+            "bounded step that directly addresses those constraints without repeating an unrelated previous step. "
             f"Set execution_shape to {allowed_shapes}. "
             "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
             + strategy_note
@@ -2144,6 +2156,8 @@ class AgentTask:
                         "reason": verification.get("reason", ""),
                         "missing_criteria": verification.get("missing_criteria", []),
                         "replan_instruction": verification.get("replan_instruction", ""),
+                        "repair_constraints": verification.get("repair_constraints", []),
+                        "next_step_requirements": verification.get("next_step_requirements", []),
                     },
                     "observation_ref": record.get("observation_ref"),
                     "verification_ref": record.get("verification_ref"),
@@ -2156,6 +2170,44 @@ class AgentTask:
         if isinstance(limit, int) and limit > 0 and len(combined) > limit:
             combined = combined[-limit:]
         return combined
+
+    @staticmethod
+    def _planner_repair_context(previous_iterations: list[dict[str, Any]]) -> dict[str, Any]:
+        if not previous_iterations:
+            return {}
+        latest = previous_iterations[-1]
+        if not isinstance(latest, Mapping):
+            return {}
+        verification = latest.get("verification")
+        if not isinstance(verification, Mapping):
+            return {}
+        if verification.get("is_complete") is True:
+            return {}
+
+        def normalize_list(value: Any) -> list[str]:
+            if isinstance(value, list):
+                return [str(item) for item in value if str(item).strip()]
+            if isinstance(value, tuple):
+                return [str(item) for item in value if str(item).strip()]
+            if isinstance(value, str) and value.strip():
+                return [value.strip()]
+            return []
+
+        missing_criteria = normalize_list(verification.get("missing_criteria"))
+        repair_constraints = normalize_list(verification.get("repair_constraints"))
+        next_step_requirements = normalize_list(verification.get("next_step_requirements"))
+        replan_instruction = str(verification.get("replan_instruction") or "").strip()
+        if not any([missing_criteria, repair_constraints, next_step_requirements, replan_instruction]):
+            return {}
+        return {
+            "source_iteration": latest.get("iteration"),
+            "verification_ref": latest.get("verification_ref"),
+            "reason": str(verification.get("reason") or ""),
+            "missing_criteria": missing_criteria,
+            "repair_constraints": repair_constraints,
+            "next_step_requirements": next_step_requirements,
+            "replan_instruction": replan_instruction,
+        }
 
     def _iterations_prompt_limit(self) -> int | None:
         configured = self._agent_task_option("iterations_prompt_limit", None)
@@ -2258,7 +2310,10 @@ class AgentTask:
             "use it as final_result; the caller or host may persist final_result to the requested file path after "
             "verification. Do not require a Workspace file artifact unless the success criteria explicitly require a "
             "Workspace write/readback action. "
-            "If evidence is incomplete, set is_complete=false and give a concrete replan_instruction. "
+            "If evidence is incomplete, set is_complete=false and give concrete repair_constraints and "
+            "next_step_requirements for the planner. These fields describe what must be fixed or produced next; "
+            "do not use them to choose tools, routes, or execution shapes unless a success criterion explicitly "
+            "requires a specific capability. Also include a short human-readable replan_instruction. "
             "Set requires_block=true only when the task cannot continue."
         )
         request.output(
@@ -2268,6 +2323,14 @@ class AgentTask:
                 "reason": (str, "Concise verification reason", True),
                 "missing_criteria": ([str], "Unmet or weak criteria, empty when none"),
                 "replan_instruction": (str, "Instruction for the next planning round when incomplete"),
+                "repair_constraints": (
+                    [str],
+                    "Verifier-owned constraints the next planner step must satisfy; not a tool or route plan",
+                ),
+                "next_step_requirements": (
+                    [str],
+                    "Observable requirements for the next bounded step output or evidence",
+                ),
                 "final_result_required": (bool, "True when the goal expects a concrete returned final deliverable"),
                 "final_result": (str, "Final business result when complete"),
             },
@@ -2281,6 +2344,8 @@ class AgentTask:
                 "reason": str(verification),
                 "missing_criteria": self.success_criteria,
                 "replan_instruction": "Run another bounded step with stronger evidence.",
+                "repair_constraints": self.success_criteria,
+                "next_step_requirements": ["Run another bounded step with stronger evidence."],
                 "final_result_required": False,
                 "final_result": "",
             }
@@ -2459,6 +2524,8 @@ class AgentTask:
             "reason": str(verification.get("reason") or ""),
             "missing_criteria": self._normalize_string_list(verification.get("missing_criteria")),
             "replan_instruction": str(verification.get("replan_instruction") or ""),
+            "repair_constraints": self._normalize_string_list(verification.get("repair_constraints")),
+            "next_step_requirements": self._normalize_string_list(verification.get("next_step_requirements")),
             "final_result": str(verification.get("final_result") or ""),
         }
         guard_reasons: list[str] = []
@@ -2614,6 +2681,14 @@ class AgentTask:
                     "missing_criteria": normalized["missing_criteria"],
                 }
             )
+        normalized["repair_constraints"] = self._merge_string_lists(
+            normalized.get("repair_constraints"),
+            normalized.get("missing_criteria"),
+        )
+        normalized["next_step_requirements"] = self._merge_string_lists(
+            normalized.get("next_step_requirements"),
+            [normalized.get("replan_instruction")] if normalized.get("replan_instruction") else [],
+        )
         for key, value in verification.items():
             normalized.setdefault(key, DataFormatter.sanitize(value))
         return normalized
@@ -2627,6 +2702,15 @@ class AgentTask:
         if isinstance(value, str) and value.strip():
             return [value.strip()]
         return []
+
+    @classmethod
+    def _merge_string_lists(cls, *values: Any) -> list[str]:
+        merged: list[str] = []
+        for value in values:
+            for item in cls._normalize_string_list(value):
+                if item not in merged:
+                    merged.append(item)
+        return merged
 
     async def _await_task_request(self, awaitable, *, stage: str):
         timeout = self._task_request_timeout()
