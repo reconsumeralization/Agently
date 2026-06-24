@@ -14,7 +14,7 @@
 
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar
+from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar, cast
 
 from agently.core import BaseAgent
 from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
@@ -224,12 +224,20 @@ class ActionExtension(BaseAgent):
             else set()
         )
         if not allowed_ids:
-            return action_list
-        return [
+            scoped_list = action_list
+        else:
+            scoped_list = [
             item
             for item in action_list
             if self._action_item_id(item) in allowed_ids
-        ]
+            ]
+        recall_records = getattr(execution_context, "scoped_action_artifact_recall_records", None)
+        if callable(recall_records):
+            scoped_list = self.action._with_action_artifact_recall_action(
+                scoped_list,
+                cast(list["ActionResult"], recall_records()),
+            )
+        return scoped_list
 
     def use_tools(self, tools: Callable | str | list[str | Callable] | Any):
         return self.use_actions(tools)

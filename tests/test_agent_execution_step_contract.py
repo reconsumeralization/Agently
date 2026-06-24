@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
@@ -421,6 +422,119 @@ class MockTaskBoardRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardReadbackRequester"
+    last_action_id = ""
+    readback_planning_seen = False
+    review_planning_prompt = ""
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockTaskBoardReadbackRequester.last_action_id = ""
+        MockTaskBoardReadbackRequester.readback_planning_seen = False
+        MockTaskBoardReadbackRequester.review_planning_prompt = ""
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Complete the task through evidence readback.",
+                "cards": [
+                    {
+                        "id": "collect",
+                        "action_block": "Collect opaque evidence.",
+                        "objective": "Collect one opaque evidence artifact.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "The opaque evidence is available as a cold artifact ref.",
+                        "allowed_execution_shape": "model",
+                    },
+                    {
+                        "id": "review",
+                        "action_block": "Review evidence.",
+                        "objective": "Review evidence by reading cold artifact refs when previews are insufficient.",
+                        "depends_on": ["collect"],
+                        "evidence_to_use": ["collect"],
+                        "done_when": "The cold artifact ref has been read back.",
+                        "allowed_execution_shape": "model",
+                    },
+                ],
+                "reflection_points": ["Read cold refs when dependency previews are insufficient."],
+                "completion_gate": "Both cards completed and final answer synthesized.",
+                "why_this_effort_shape": "The second card depends on the first card evidence.",
+                "risk_notes": [],
+            }
+        elif "next_action" in text and "execution_commands" in text:
+            artifact_id_match = re.search(r"act_art_[0-9a-f]+", text)
+            action_call_id_match = re.search(r"act_call_[0-9a-f]+", text)
+            if "read_action_artifact" in text and artifact_id_match is not None:
+                MockTaskBoardReadbackRequester.review_planning_prompt = text
+                MockTaskBoardReadbackRequester.readback_planning_seen = True
+                MockTaskBoardReadbackRequester.last_action_id = "read_action_artifact"
+                payload = {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "Read dependency cold artifact.",
+                            "action_id": "read_action_artifact",
+                            "action_input": {
+                                "artifact_id": artifact_id_match.group(0) if artifact_id_match else "missing",
+                                "action_call_id": action_call_id_match.group(0) if action_call_id_match else "",
+                            },
+                        }
+                    ],
+                }
+            else:
+                MockTaskBoardReadbackRequester.last_action_id = "produce_large_evidence"
+                payload = {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "Produce an opaque artifact.",
+                            "action_id": "produce_large_evidence",
+                            "action_input": {},
+                        }
+                    ],
+                }
+        elif "[ACTION RESULTS]" in text:
+            if MockTaskBoardReadbackRequester.last_action_id == "read_action_artifact":
+                payload = {
+                    "status": "completed",
+                    "answer": "readback confirmed",
+                    "evidence": ["read_action_artifact returned the dependency artifact"],
+                    "remaining_work": [],
+                    "diagnostics": [],
+                }
+            else:
+                payload = {
+                    "status": "completed",
+                    "answer": "cold artifact produced",
+                    "evidence": ["produce_large_evidence produced a cold artifact ref"],
+                    "remaining_work": [],
+                    "diagnostics": [],
+                }
+        elif "Execute exactly one TaskBoard card" in text:
+            payload = {
+                "status": "completed",
+                "answer": "card completed without action",
+                "evidence": ["card evidence"],
+                "remaining_work": [],
+                "diagnostics": [],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": True,
+                "reason": "dependency evidence was read back",
+                "final_result": "taskboard readback accepted result",
+                "missing_criteria": [],
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 def _create_goal_pursuit_agent(name: str = "agent-execution-goal-pursuit"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -446,6 +560,13 @@ def _create_taskboard_agent(name: str = "agent-execution-taskboard"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockTaskBoardRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_readback_agent(name: str = "agent-execution-taskboard-readback"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardReadbackRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -571,6 +692,49 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
     assert taskboard["revision"]["card_results"]["collect"]["status"] == "completed"
     assert taskboard["evidence_view"]["cards"][0]["card_id"] == "collect"
     assert "content" not in taskboard["evidence_view"]["cards"][0]["artifact_refs"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path):
+    agent = _create_taskboard_readback_agent("execution-taskboard-readback").use_workspace(tmp_path / "workspace")
+
+    @agent.action_func
+    def produce_large_evidence() -> dict[str, Any]:
+        return {
+            "records": [
+                {
+                    "title": "Hidden evidence",
+                    "url": "https://example.test/evidence",
+                    "snippet": "detail available only through artifact readback",
+                }
+            ],
+            "padding": "x" * 9000,
+        }
+
+    execution = (
+        agent.create_task(
+            goal="Use a dependency cold artifact to finish the board.",
+            success_criteria=["The review card reads back dependency evidence."],
+            execution="taskboard",
+            max_iterations=3,
+        )
+        .use_actions(["produce_large_evidence"])
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    taskboard = task_meta["result"]["taskboard"]
+    review_result = taskboard["revision"]["card_results"]["review"]
+    review_actions = review_result["diagnostics"][-1]["evidence_summary"]["action_ids"]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["final_result"] == "taskboard readback accepted result"
+    assert MockTaskBoardReadbackRequester.readback_planning_seen is True
+    assert "read_action_artifact" in MockTaskBoardReadbackRequester.review_planning_prompt
+    assert "read_action_artifact" in review_actions
+    assert review_result["status"] == "completed"
 
 
 @pytest.mark.asyncio

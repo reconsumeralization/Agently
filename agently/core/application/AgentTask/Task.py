@@ -830,6 +830,7 @@ class AgentTask:
             ).to_dict()
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
+        readback_records = self._taskboard_action_artifact_recall_records(evidence_view)
         execution = self.agent.create_execution(
             lineage={
                 "task_id": self.id,
@@ -840,6 +841,10 @@ class AgentTask:
             limits=self.limits,
             options=self.options,
         )
+        if readback_records:
+            set_recall_records = getattr(execution.execution_context, "set_action_artifact_recall_records", None)
+            if callable(set_recall_records):
+                set_recall_records(readback_records, source="AgentTaskTaskBoard.evidence_view")
         execution.route_policy({
             "allowed_routes": ["model_request"],
             "on_violation": "block",
@@ -856,6 +861,7 @@ class AgentTask:
                     key: value.to_dict() for key, value in dict(context.dependency_results).items()
                 },
                 "taskboard_evidence_view": evidence_view,
+                "available_readback": self._taskboard_available_readback(evidence_view),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
             }
@@ -863,7 +869,9 @@ class AgentTask:
         execution.instruct(
             "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
             "Use TaskBoard evidence view as the hot summary; request full content only through available "
-            "Workspace or Action refs when needed. Return card-local evidence and remaining work. "
+            "Workspace or Action refs when needed. If available_readback lists Action artifact refs and a "
+            "bounded preview is insufficient, call read_action_artifact with the artifact_id and action_call_id "
+            "before blocking on missing evidence. Return card-local evidence and remaining work. "
             "Do not claim the whole task is complete; TaskBoard and AgentTask own lifecycle completion."
         )
         execution.output(
@@ -1038,6 +1046,62 @@ class AgentTask:
             if isinstance(remaining, Sequence) and not isinstance(remaining, str | bytes | bytearray) and remaining:
                 return "blocked"
         return "completed"
+
+    @staticmethod
+    def _taskboard_action_artifact_recall_records(evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
+        raw_refs = evidence_view.get("artifact_refs")
+        if not isinstance(raw_refs, Sequence) or isinstance(raw_refs, str | bytes | bytearray):
+            return []
+        refs: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw_refs:
+            if not isinstance(item, Mapping):
+                continue
+            artifact_id = str(item.get("artifact_id") or "").strip()
+            if not artifact_id:
+                continue
+            action_call_id = str(item.get("action_call_id") or "").strip()
+            key = (artifact_id, action_call_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(
+                {
+                    "artifact_id": artifact_id,
+                    "action_call_id": action_call_id,
+                    "artifact_type": str(item.get("artifact_type") or ""),
+                    "role": str(item.get("role") or ""),
+                    "label": str(item.get("label") or ""),
+                    "media_type": str(item.get("media_type") or ""),
+                    "bytes": item.get("bytes", item.get("size")),
+                    "sha256": item.get("sha256"),
+                    "truncated": bool(item.get("truncated")),
+                    "full_value_available": bool(item.get("full_value_available", item.get("available", False))),
+                }
+            )
+        if not refs:
+            return []
+        return [
+            {
+                "action_id": "taskboard_upstream_evidence",
+                "status": "success",
+                "artifact_refs": refs,
+            }
+        ]
+
+    @staticmethod
+    def _taskboard_available_readback(evidence_view: Mapping[str, Any]) -> dict[str, Any]:
+        records = AgentTask._taskboard_action_artifact_recall_records(evidence_view)
+        refs = records[0]["artifact_refs"] if records else []
+        return {
+            "schema_version": "agent_task_taskboard_readback/v1",
+            "action_artifact_readback": {
+                "available": bool(refs),
+                "action_id": "read_action_artifact",
+                "artifact_refs": DataFormatter.sanitize(refs),
+            },
+            "policy": "Use readback only when bounded previews are insufficient for the current card objective.",
+        }
 
     async def _build_context(self) -> "WorkspaceContextPackage":
         try:

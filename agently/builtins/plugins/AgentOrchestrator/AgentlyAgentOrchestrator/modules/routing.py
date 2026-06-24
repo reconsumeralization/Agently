@@ -54,11 +54,14 @@ class HybridRoutePlanner:
             return []
         local_ids = set(getattr(self.execution, "local_action_ids", []) or [])
         if local_ids:
-            return [
+            candidates = [
                 candidate
                 for candidate in candidates
                 if str(candidate.get("action_id") or candidate.get("name") or "") in local_ids
             ]
+        recall_records = getattr(self.execution.execution_context, "scoped_action_artifact_recall_records", None)
+        if callable(recall_records):
+            candidates = action._with_action_artifact_recall_action(candidates, recall_records())
         return candidates
 
     def skill_candidate_summary(self) -> dict[str, Any]:

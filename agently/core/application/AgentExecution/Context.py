@@ -164,6 +164,7 @@ class AgentExecutionContext:
         self.last_progress_event: dict[str, Any] | None = None
         self.stage_events: list[dict[str, Any]] = []
         self.action_scope: dict[str, Any] = {}
+        self.action_artifact_recall_records: list[dict[str, Any]] = []
         # Depth of this AgentExecution in a nested agent-step chain (root = 0).
         self.nesting_depth = int(nesting_depth)
         # Effective max nesting depth inherited from the constraining ancestor
@@ -225,6 +226,14 @@ class AgentExecutionContext:
             },
             "limit_events": [dict(item) for item in self.limit_events],
             "action_scope": DataFormatter.sanitize(dict(self.action_scope)),
+            "action_artifact_recall": {
+                "record_count": len(self.action_artifact_recall_records),
+                "artifact_ref_count": sum(
+                    len(item.get("artifact_refs", []))
+                    for item in self.action_artifact_recall_records
+                    if isinstance(item.get("artifact_refs"), list)
+                ),
+            },
             "stages": {
                 "events": [dict(item) for item in self.stage_events[-50:]],
             },
@@ -256,6 +265,32 @@ class AgentExecutionContext:
             return None
         normalized = {str(item).strip() for item in ids if str(item).strip()}
         return normalized or None
+
+    def set_action_artifact_recall_records(
+        self,
+        records: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+        *,
+        source: str,
+    ) -> None:
+        normalized: list[dict[str, Any]] = []
+        for item in records or []:
+            if not isinstance(item, dict):
+                continue
+            refs = item.get("artifact_refs")
+            if not isinstance(refs, list) or not refs:
+                continue
+            normalized.append(
+                {
+                    "action_id": str(item.get("action_id") or "upstream_action_artifact"),
+                    "status": str(item.get("status") or "success"),
+                    "artifact_refs": DataFormatter.sanitize(refs),
+                    "source": source,
+                }
+            )
+        self.action_artifact_recall_records = normalized
+
+    def scoped_action_artifact_recall_records(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self.action_artifact_recall_records]
 
     def record_progress(
         self,
