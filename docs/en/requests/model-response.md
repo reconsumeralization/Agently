@@ -242,7 +242,7 @@ For services and TriggerFlow usage, async is the recommended path — see [Async
 ### Attempt status
 
 `$status` is a reserved framework stream path, not a model output field. It is
-useful when a provider replay is explicitly allowed after partial output:
+used when a provider replay happens after partial output:
 
 ```python
 result = agent.create_request().input("Summarize the incident.").get_result()

@@ -234,8 +234,8 @@ asyncio.run(main())
 
 ### Attempt 状态
 
-`$status` 是框架保留的 stream path，不是模型输出字段。当显式允许 provider 在已经有
-partial 输出后重放时，它用于通知 UI/SSE 消费者：
+`$status` 是框架保留的 stream path，不是模型输出字段。当 provider 在已经有 partial
+输出后重放时，它用于通知 UI/SSE 消费者：
 
 ```python
 result = agent.create_request().input("总结这次事故。").get_result()

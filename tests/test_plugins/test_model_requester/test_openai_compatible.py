@@ -181,12 +181,51 @@ async def test_request_model_retries_transient_provider_error_before_output_star
 
 
 @pytest.mark.asyncio
-async def test_request_model_does_not_retry_transient_provider_error_after_output_started(monkeypatch):
+async def test_request_model_retries_transient_provider_error_after_output_started_by_default(monkeypatch):
     plugin = build_plugin(
         {
             "base_url": "https://api.example.com/v1",
             "model": "m1",
             "request_retry": {"max_attempts": 2},
+        },
+        {"input": "hello"},
+    )
+    calls = 0
+
+    async def fake_legacy(_request_data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield "message", '{"choices":[{"delta":{"content":"partial"}}]}'
+            yield "error", RemoteProtocolError("server disconnected")
+            return
+        yield "message", '{"choices":[{"delta":{"content":"replacement"}}]}'
+        yield "message", "[DONE]"
+
+    monkeypatch.setattr(plugin, "_request_model_legacy", fake_legacy)
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert calls == 2
+    assert events[0] == ("message", '{"choices":[{"delta":{"content":"partial"}}]}')
+    assert events[1][0] == "status"
+    assert events[1][1]["status"] == "failed"
+    assert events[1][1]["retry"] is True
+    assert events[1][1]["next_attempt_index"] == 2
+    assert events[1][1]["reason"] == "server disconnected"
+    assert events[2] == ("message", '{"choices":[{"delta":{"content":"replacement"}}]}')
+    assert events[-1] == ("status", {"status": "completed", "attempt_index": 2, "retry": False})
+
+
+@pytest.mark.asyncio
+async def test_request_model_can_disable_retry_after_output_started(monkeypatch):
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "request_retry": {"max_attempts": 2, "after_output": False},
         },
         {"input": "hello"},
     )

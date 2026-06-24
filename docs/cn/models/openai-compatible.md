@@ -28,7 +28,7 @@ Agently.set_settings("OpenAICompatible", {
 | `api_key` | bearer token；本地无鉴权服务可省略 |
 | `model` | provider 模型名 |
 | `model_type` | `"chat"`（默认）或 `"completion"`（旧 completion 端点） |
-| `request_retry` | 临时传输错误重试策略；默认 `{"max_attempts": 2, "after_output": false}` |
+| `request_retry` | 临时传输错误重试策略；默认 `{"max_attempts": 2, "after_output": true}` |
 | `request_options` | 转给底层 HTTP client 的额外 dict（timeout、header） |
 
 完整集合在 [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/) 包目录中。公开插件类由 `plugin.py` 导出，请求构造、鉴权、transport、handler 绑定和 response mapping 放在私有 `modules/` 包下。
@@ -88,20 +88,19 @@ agent.set_settings("OpenAICompatible", {"model": "${ENV.OPENAI_MODEL_FAST}"})
 
 某 provider 没完全实现 OpenAI 语义中的某项时（如怪异流式格式），底层插件尽量容忍；具体 case 通过 issue 报告。
 
-对连接重置、provider 断开连接这类临时传输错误，如果还没有任何输出发出，
-`OpenAICompatible` 默认用同一个请求重试一次。它不会改变已选模型、prompt 或结构化输出
-格式。设置 `"request_retry": {"max_attempts": 1}` 或 `"request_retry": False` 可以关闭
-这次重放。
+对连接重置、provider 断开连接这类临时传输错误，`OpenAICompatible` 默认用同一个请求
+重试一次。它不会改变已选模型、prompt 或结构化输出格式。设置
+`"request_retry": {"max_attempts": 1}` 或 `"request_retry": False` 可以关闭这次重放。
 
-一旦输出已经开始，provider 层 retry 仍保持保守，避免普通文本流消费者把 partial
-content 和重放结果拼在一起。只有相关消费者会处理保留的 `$status` 记录、处理纯文本
-delta 的 `"<$retry>{reason}</$retry>"` 标记，或只读取最终结果时，才开启
-`request_retry.after_output=True`：
+如果输出已经开始，失败 attempt 的 partial 输出会失效。Agently 会通过保留的 `$status`
+记录，以及纯文本 delta 的 `"<$retry>{reason}</$retry>"` 标记暴露这个边界。流式文本
+消费者应在这个边界清空临时输出，再接受替换 attempt 的正文。只有当你希望 partial
+输出后直接失败而不是重放时，才设置 `request_retry.after_output=False`：
 
 ```python
 agent.set_settings("OpenAICompatible.request_retry", {
     "max_attempts": 2,
-    "after_output": True,
+    "after_output": False,
 })
 ```
 

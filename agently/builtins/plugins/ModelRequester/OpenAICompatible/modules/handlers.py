@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator
 from httpx import HTTPStatusError, RequestError
 from httpx_sse import SSEError
 
+from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.model.AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState
 
@@ -46,12 +47,18 @@ class OpenAICompatibleHandlersMixin:
 
     def _get_request_retry_after_output(self) -> bool:
         retry_config = self.plugin_settings.get("request_retry", None)
-        return bool(retry_config.get("after_output", False)) if isinstance(retry_config, dict) else False
+        if retry_config is False:
+            return False
+        if isinstance(retry_config, dict):
+            return bool(retry_config.get("after_output", True))
+        return True
 
     @staticmethod
     def _is_retryable_provider_error(error: BaseException) -> bool:
         if isinstance(error, HTTPStatusError):
             return False
+        if isinstance(error, RuntimeStageStallError):
+            return error.stage == "response_first_event"
         if isinstance(error, (RequestError, TimeoutError, SSEError)):
             # Locally synthesized HTTP status failures use RequestError too,
             # but those are model/provider decisions rather than transport

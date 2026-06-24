@@ -195,9 +195,9 @@ agent.activate_model("reasoning")
 `failover` 控制 provider 请求遇到 credential 或 provider-side 错误后怎么处理。如果没有
 声明 `failover`，Agently 不会自动尝试另一个 credential。`OpenAICompatible` 仍然有一个
 窄范围传输重放：会按 `OpenAICompatible.request_retry`（默认
-`{"max_attempts": 2, "after_output": false}`）用同一个模型、prompt 和输出格式重试。
-partial 输出后的重放需显式开启 `after_output=true`，并要求消费者先处理 `$status`，或在
-收到 `"<$retry>{reason}</$retry>"` 标记时清空纯文本 delta 状态，再接受替代 delta。
+`{"max_attempts": 2, "after_output": true}`）用同一个模型、prompt 和输出格式重试。
+partial 输出后的重放会使失败 attempt 的临时输出失效；流式消费者应先处理 `$status`，
+或在收到 `"<$retry>{reason}</$retry>"` 标记时清空纯文本 delta 状态，再接受替代 delta。
 内置 `try_next` 只会对
 配置的 HTTP 状态码尝试下一个 key。默认建议使用 `401`、`403`、`429` 这类鉴权或额度相关
 状态码。`405` 和 `422` 很多时候代表 endpoint、method、payload 或模型能力不匹配，只有当
