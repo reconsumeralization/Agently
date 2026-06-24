@@ -165,10 +165,14 @@ class TaskBoard:
         if not schedule.runnable_card_ids:
             return revision
         card_by_id = revision.graph.card_by_id()
-        results: list[TaskBoardCardResult] = []
         if concurrency is None or concurrency <= 1:
+            next_revision = revision
             for card_id in schedule.runnable_card_ids:
-                results.append(await self._async_run_card(revision, schedule, card_by_id[card_id]))
+                result = await self._async_run_card(next_revision, schedule, card_by_id[card_id])
+                next_revision = _apply_card_results(next_revision, (result,))
+                if _card_result_stops_current_tick(result):
+                    return next_revision
+            return next_revision
         else:
             import asyncio
 
@@ -252,6 +256,13 @@ def _apply_card_results(
         evidence_refs=tuple(evidence_refs),
     )
     return apply_task_board_patch(revision, patch)
+
+
+def _card_result_stops_current_tick(result: TaskBoardCardResult) -> bool:
+    status = str(result.status).strip().lower()
+    if status in {"failed", "blocked"}:
+        return True
+    return result.patch_proposal is not None
 
 
 def _coerce_card_result(card_id: str, value: Any) -> TaskBoardCardResult:

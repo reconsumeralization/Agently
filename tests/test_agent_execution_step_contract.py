@@ -812,6 +812,7 @@ async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
     assert result["status"] == "error"
     assert result["accepted"] is False
     assert result["artifact_status"] == "partial"
+    assert result["taskboard"]["revision"]["card_results"]["slow"]["status"] == "failed"
     assert meta["route"]["selected_route"] == "agent_task"
     assert meta["task_refs"]["execution_strategy"] == "taskboard"
     assert slow_result["status"] == "failed"

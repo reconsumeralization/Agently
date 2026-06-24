@@ -340,6 +340,39 @@ async def test_task_board_explicit_simple_task_still_uses_task_board_process():
 
 
 @pytest.mark.asyncio
+async def test_task_board_serial_tick_preserves_failure_and_stops_current_tick():
+    seen: list[str] = []
+
+    async def handler(context: TaskBoardContext):
+        seen.append(context.card.id)
+        if context.card.id == "first":
+            return {"status": "failed", "preview": "network timeout"}
+        return {"status": "completed", "preview": "should not run in this tick"}
+
+    board = TaskBoard(
+        TaskBoardRevision.create(
+            board_id="failure-stop",
+            graph={
+                "graph_id": "failure-stop-graph",
+                "cards": [
+                    {"id": "first", "objective": "Try fragile evidence."},
+                    {"id": "second", "objective": "Independent follow-up."},
+                ],
+            },
+        ),
+        handler=handler,
+    )
+
+    tick = await board.async_run_tick(timeout=1)
+
+    assert seen == ["first"]
+    assert tick.revision.revision_id == "rev-1"
+    assert tick.revision.card_results["first"].status == "failed"
+    assert "second" not in tick.revision.card_results
+    assert tick.card_results["first"].preview == "network timeout"
+
+
+@pytest.mark.asyncio
 async def test_task_board_handler_cannot_mutate_frozen_revision_directly():
     def handler(context: TaskBoardContext):
         with pytest.raises(Exception):

@@ -791,7 +791,7 @@ class AgentTask:
             },
         )
 
-        for tick_index in range(1, self.max_iterations + 1):
+        for tick_index in range(1, self._taskboard_max_ticks() + 1):
             if self._task_deadline_exceeded():
                 return await self._terminate_timed_out(tick_index, stage="taskboard_tick")
             schedule = board.schedule()
@@ -804,9 +804,10 @@ class AgentTask:
             )
             if not schedule.runnable_card_ids:
                 break
+            tick_timeout = self._taskboard_tick_timeout()
             try:
                 tick_result = await self._await_task_deadline(
-                    board.async_run_tick(),
+                    board.async_run_tick(timeout=tick_timeout),
                     stage="taskboard_tick",
                 )
             except _AgentTaskDeadlineExceeded as error:
@@ -816,6 +817,14 @@ class AgentTask:
                     reason=error.reason,
                     limit_name=error.limit_name,
                     timeout_seconds=error.timeout_seconds,
+                )
+            except TimeoutError:
+                return await self._terminate_timed_out(
+                    tick_index,
+                    stage="taskboard_tick",
+                    reason=f"TaskBoard tick timed out after {tick_timeout} seconds.",
+                    limit_name="taskboard_tick_timeout_seconds",
+                    timeout_seconds=tick_timeout,
                 )
             board.revision = tick_result.revision
             await self._emit(
@@ -1137,6 +1146,29 @@ class AgentTask:
             if effort is not None:
                 return effort
         return "medium"
+
+    def _taskboard_tick_timeout(self) -> float | None:
+        return self._taskboard_option_timeout("taskboard_tick_timeout_seconds")
+
+    def _taskboard_max_ticks(self) -> int:
+        value = self._taskboard_option("taskboard_max_ticks")
+        try:
+            ticks = int(value) if value is not None else self.max_iterations
+        except (TypeError, ValueError):
+            ticks = self.max_iterations
+        return max(1, ticks)
+
+    def _taskboard_option_timeout(self, key: str) -> float | None:
+        value = self._taskboard_option(key)
+        if value is None:
+            return None
+        return self._normalize_timeout(value)
+
+    def _taskboard_option(self, key: str) -> Any:
+        agent_task_options = self.options.get("agent_task")
+        if isinstance(agent_task_options, Mapping) and key in agent_task_options:
+            return agent_task_options.get(key)
+        return self.options.get(key)
 
     @staticmethod
     def _taskboard_revision_completed(revision: Any) -> bool:
