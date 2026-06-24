@@ -589,6 +589,65 @@ class MockTaskBoardRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardFinalCandidateRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardFinalCandidateRequester"
+    full_report = (
+        "# Repository Report\n\n"
+        "## Repository Snapshot\n"
+        "- Source: cloned repository files.\n\n"
+        "## Purpose\n"
+        "This project trains reusable agent skills from source-grounded examples.\n\n"
+        "## Core Ideas\n"
+        "- Treat the skill document as trainable state.\n"
+        "- Validate edits against held-out tasks.\n\n"
+        "## Evidence Table\n"
+        "| Claim | Evidence |\n"
+        "| --- | --- |\n"
+        "| Skill state is edited | README.md and package entry point |\n"
+    )
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Write a source-grounded repository report.",
+                "cards": [
+                    {
+                        "id": "final_report",
+                        "action_block": "Draft the final repository report.",
+                        "objective": "Produce the complete final Markdown deliverable.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "The complete final report is available.",
+                        "allowed_execution_shape": "model",
+                    }
+                ],
+                "reflection_points": [],
+                "completion_gate": "The final report is complete.",
+                "why_this_effort_shape": "One card is enough for this regression.",
+                "risk_notes": [],
+            }
+        elif "Execute exactly one TaskBoard card" in text:
+            payload = {
+                "status": "completed",
+                "answer": self.full_report,
+                "evidence": ["README.md supports the report."],
+                "remaining_work": [],
+                "diagnostics": [],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": True,
+                "reason": "all required sections are present",
+                "final_result": self.full_report[:120],
+                "missing_criteria": [],
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardSlowCardRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardSlowCardRequester"
 
@@ -787,6 +846,13 @@ def _create_taskboard_agent(name: str = "agent-execution-taskboard"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockTaskBoardRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_final_candidate_agent(name: str = "agent-execution-taskboard-final-candidate"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardFinalCandidateRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -1043,6 +1109,27 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
         and (item.meta or {}).get("card_id") == "collect"
         for item in stream_items
     )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_final_preserves_complete_candidate_from_terminal_card(tmp_path):
+    agent = _create_taskboard_final_candidate_agent("execution-taskboard-final-candidate").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Write the complete repository report.",
+        success_criteria=["The final result preserves the complete Markdown deliverable."],
+        execution="taskboard",
+        max_iterations=2,
+    )
+
+    result = await execution.async_get_data()
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["final_result"] == MockTaskBoardFinalCandidateRequester.full_report.strip()
+    assert len(result["final_result"]) > len(MockTaskBoardFinalCandidateRequester.full_report[:120])
 
 
 @pytest.mark.asyncio

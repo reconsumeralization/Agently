@@ -1146,7 +1146,13 @@ class AgentTask:
             await self._emit("agent_task.blocked", self.result)
             return {"terminal": True, "status": self.status}
 
-        final = await self._request_taskboard_final(revision, evidence_view)
+        candidate_final_result = self._taskboard_candidate_final_result(revision)
+        final = await self._request_taskboard_final(
+            revision,
+            evidence_view,
+            candidate_final_result=candidate_final_result,
+        )
+        final = self._normalize_taskboard_final_result(final, candidate_final_result)
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         self.status = "completed" if accepted else "blocked"
         self.result = {
@@ -1175,7 +1181,13 @@ class AgentTask:
         await self._emit("agent_task.completed" if accepted else "agent_task.blocked", self.result)
         return {"terminal": True, "status": self.status}
 
-    async def _request_taskboard_final(self, revision: Any, evidence_view: Mapping[str, Any]) -> dict[str, Any]:
+    async def _request_taskboard_final(
+        self,
+        revision: Any,
+        evidence_view: Mapping[str, Any],
+        *,
+        candidate_final_result: str = "",
+    ) -> dict[str, Any]:
         request = self.agent.create_temp_request()
         request.input(
             {
@@ -1184,13 +1196,16 @@ class AgentTask:
                 "success_criteria": self.success_criteria,
                 "taskboard_evidence_view": DataFormatter.sanitize(evidence_view),
                 "revision": DataFormatter.sanitize(revision.to_dict()),
+                "candidate_final_result": self._compact_verifier_prompt_value(candidate_final_result),
                 "execution_prompt": self._execution_prompt_context(),
             }
         )
         request.instruct(
             "Synthesize the final result for this TaskBoard task from completed card evidence. "
             "Verify every success criterion. Use the hot evidence view for summaries and preserve cold refs "
-            "as evidence pointers; do not invent unsupported facts."
+            "as evidence pointers; do not invent unsupported facts. When candidate_final_result contains a "
+            "complete answer/report/artifact body that satisfies the criteria, preserve it as final_result "
+            "instead of rewriting it into a shorter summary."
         )
         request.output(
             {
@@ -1205,6 +1220,59 @@ class AgentTask:
         if isinstance(result, Mapping):
             return dict(result)
         return {"accepted": False, "reason": str(result), "final_result": "", "missing_criteria": self.success_criteria}
+
+    def _taskboard_candidate_final_result(self, revision: Any) -> str:
+        graph = getattr(revision, "graph", None)
+        cards = list(getattr(graph, "cards", []) or [])
+        card_results = getattr(revision, "card_results", {}) or {}
+        depended_on: set[str] = set()
+        for card in cards:
+            depended_on.update(str(card_id) for card_id in getattr(card, "depends_on", ()) or ())
+        leaf_ids = {str(getattr(card, "id", "")) for card in cards if str(getattr(card, "id", "")) not in depended_on}
+        candidates: list[str] = []
+        for card_id, result in card_results.items():
+            if str(getattr(result, "status", "")) != "completed":
+                continue
+            if leaf_ids and str(card_id) not in leaf_ids:
+                continue
+            candidate = self._candidate_final_result_from_execution_result(getattr(result, "preview", None))
+            if candidate:
+                candidates.append(candidate)
+        if not candidates:
+            for result in card_results.values():
+                if str(getattr(result, "status", "")) != "completed":
+                    continue
+                candidate = self._candidate_final_result_from_execution_result(getattr(result, "preview", None))
+                if candidate:
+                    candidates.append(candidate)
+        return max(candidates, key=len, default="")
+
+    @classmethod
+    def _normalize_taskboard_final_result(cls, final: dict[str, Any], candidate_final_result: str) -> dict[str, Any]:
+        candidate = candidate_final_result.strip()
+        if not candidate:
+            return final
+        accepted = cls._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
+        if not accepted:
+            return final
+        final_result = str(final.get("final_result") or "").strip()
+        if not final_result or cls._looks_like_candidate_prefix(final_result, candidate):
+            normalized = dict(final)
+            normalized["final_result"] = candidate
+            return normalized
+        return final
+
+    @staticmethod
+    def _looks_like_candidate_prefix(value: str, candidate: str) -> bool:
+        value = value.strip()
+        candidate = candidate.strip()
+        if not value or len(value) >= len(candidate):
+            return False
+        if candidate.startswith(value):
+            return True
+        compact_value = " ".join(value.split())
+        compact_candidate = " ".join(candidate.split())
+        return len(compact_value) < len(compact_candidate) and compact_candidate.startswith(compact_value)
 
     def _taskboard_effort(self) -> Any:
         agent_task_options = self.options.get("agent_task")
