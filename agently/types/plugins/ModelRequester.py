@@ -47,6 +47,10 @@ class ModelRequester(AgentlyPlugin, Protocol):
     - `broadcast_response`: Process and broadcast the response stream in a standardized format.
     - `build_request_handlers` (optional): Return typed attempt handlers for core-owned request execution.
 
+    Handler-driven requesters must pass the core-owned `("status", payload)`
+    attempt records through `broadcast_response` unchanged. They are framework
+    stream records, not provider wire messages and not model output fields.
+
     Recommended usage:
     - Plugin developers can inherit from this protocol to implement custom model request logic.
     - Framework users can call different models via a unified interface, abstracting away API differences.

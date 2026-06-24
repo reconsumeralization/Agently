@@ -40,10 +40,20 @@ async def run_model_request_route(
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
     result = execution.request.get_result(parent_run_context=agent_execution_run_context)
     execution.record_model_response_id(result.id)
+    stream_meta = {
+        "response_id": result.response_id,
+        "request_run_id": result.request_run_context.run_id if result.request_run_context is not None else None,
+        "model_run_id": result.model_run_context.run_id if result.model_run_context is not None else None,
+        "attempt_index": result.attempt_index,
+    }
     has_structured_stream = bool(execution.prompt_snapshot.get("output"))
     if has_structured_stream:
         async for item in result.get_async_generator(type="instant"):
-            await execution.bridge_model_stream_item(item, route="model_request")
+            await execution.bridge_model_stream_item(
+                item,
+                route="model_request",
+                meta=stream_meta,
+            )
     else:
         async for event, data in result.get_async_generator(type="all"):
             if event in {"action", "tool"}:
@@ -61,6 +71,15 @@ async def run_model_request_route(
                     delta=str(data),
                     event_type="delta",
                     is_complete=False,
+                    meta=stream_meta,
+                )
+            elif event == "status":
+                await execution.emit_stream(
+                    "$status",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    meta={**stream_meta, "field_path": "$status"},
                 )
             elif event == "done":
                 await execution.emit_stream(
@@ -68,6 +87,7 @@ async def run_model_request_route(
                     data,
                     route="model_request",
                     source="model_request",
+                    meta=stream_meta,
                 )
     data = await result.async_get_data(
         type=type,

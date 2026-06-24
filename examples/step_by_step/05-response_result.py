@@ -8,15 +8,15 @@ Environment:
     Set DYNAMIC_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
 
 This is a Foundation example effect check for the low-level ModelRequest /
-ModelResponseResult substrate. It intentionally avoids AgentExecution so release
+ModelRequestResult substrate. It intentionally avoids AgentExecution so release
 reviewers can verify the request foundation directly:
 
     request = Agently.create_request()
     result = request.input(...).output(...).get_result()
 
-Expected key output from one real DeepSeek run on 2026-06-08:
+Expected key output from one real DeepSeek run on 2026-06-24:
     provider=deepseek
-    result_type=ModelResponseResult
+    result_type=ModelRequestResult
     data_has_definition=True
     data_has_example=True
     text_nonempty=True
@@ -36,11 +36,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agently import Agently
-from agently.core import ModelResponseResult
+from agently.core import ModelRequestResult
 from examples.dynamic_task._shared import configure_model
 
 
-def build_result_request() -> ModelResponseResult:
+def build_result_request() -> ModelRequestResult:
     Agently.set_settings("OpenAICompatible.stream", False)
     request = Agently.create_request()
     result = (
@@ -56,8 +56,8 @@ def build_result_request() -> ModelResponseResult:
         )
         .get_result()
     )
-    if not isinstance(result, ModelResponseResult):
-        raise TypeError(f"Expected ModelResponseResult, got {type(result).__name__}")
+    if not isinstance(result, ModelRequestResult):
+        raise TypeError(f"Expected ModelRequestResult, got {type(result).__name__}")
     return result
 
 
@@ -88,7 +88,7 @@ def main() -> None:
     data_dict: dict[str, Any] = data if isinstance(data, dict) else {}
 
     print(f"provider={provider}")
-    print("result_type=ModelResponseResult")
+    print("result_type=ModelRequestResult")
     print(f"data_has_definition={bool(data_dict.get('definition'))}")
     print(f"data_has_example={bool(data_dict.get('example'))}")
     print(f"text_nonempty={bool(str(text).strip())}")

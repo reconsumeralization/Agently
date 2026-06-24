@@ -14,7 +14,7 @@ from agently.compatibility import (
 from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.application.AgentExecution import AgentExecutionContext
 from agently.core.extension.ExtensionHandlers import ExtensionHandlers
-from agently.core.model.ModelResponseResult import ModelResponseResult
+from agently.core.model.ModelRequestResult import ModelRequestResult
 from agently.core.model.ModelResponse import ModelResponse
 from agently.core.model.Prompt import Prompt
 from agently.core.runtime.RuntimeContext import bind_runtime_context
@@ -178,7 +178,7 @@ def test_model_response_direct_construction_warns_but_get_result_does_not():
         warnings.simplefilter("always")
         result = ModelRequest(Agently.plugin_manager, parent_settings=Agently.settings).input("hello").get_result()
 
-    assert isinstance(result, ModelResponseResult)
+    assert isinstance(result, ModelRequestResult)
     assert not any("ModelResponse is deprecated" in str(item.message) for item in caught)
 
 
@@ -569,7 +569,7 @@ async def test_model_response_result_materialization_idle_timeout():
             "response": {"materialization_idle_timeout": 0.001},
         }
     )
-    result = ModelResponseResult(
+    result = ModelRequestResult(
         "timeout-agent",
         "response-timeout",
         Prompt(cast(Any, FakePluginManager()), settings),

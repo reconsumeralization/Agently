@@ -21,7 +21,7 @@ from agently.core.runtime.RuntimeContext import get_current_request_run_context
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.model.ModelRequest import ModelResponseResult
+    from agently.core.model import ModelRequestResult
     from agently.types.data import ChatMessage, ChatMessageDict
     from agently.utils import Settings
     from agently.types.plugins import SessionAnalysisHandler, SessionResizeHandler
@@ -190,7 +190,7 @@ class SessionExtension(BaseAgent):
                 run=self._get_runtime_request_run_context(_settings),
             )
 
-    async def _session_finally(self, result: "ModelResponseResult", settings: "Settings"):
+    async def _session_finally(self, result: "ModelRequestResult", settings: "Settings"):
         if self.activated_session is None:
             return
 

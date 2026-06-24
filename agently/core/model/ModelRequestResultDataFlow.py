@@ -27,11 +27,11 @@ from agently.utils import DataFormatter, DataLocator, DataPathBuilder
 
 if TYPE_CHECKING:
     from agently.types.data import OutputValidateHandler, OutputValidateResult
-    from .ModelResponseResult import ModelResponseResult
+    from .ModelRequestResult import ModelRequestResult
 
 
-class ModelResponseDataFlow:
-    def __init__(self, result: "ModelResponseResult"):
+class ModelRequestResultDataFlow:
+    def __init__(self, result: "ModelRequestResult"):
         self._result = result
 
     def get_auto_ensure_policies(
@@ -92,7 +92,7 @@ class ModelResponseDataFlow:
         if isinstance(value, str):
             return bool(value.strip())
         if isinstance(value, list):
-            return bool(value) and all(ModelResponseDataFlow.ensure_value_is_present(item) for item in value)
+            return bool(value) and all(ModelRequestResultDataFlow.ensure_value_is_present(item) for item in value)
         return True
 
     def is_strict_output_enabled(self) -> bool:
@@ -223,7 +223,7 @@ class ModelResponseDataFlow:
         await async_emit_runtime(
             {
                 "event_type": "model.response_materialization_stalled",
-                "source": "ModelResponseResult",
+                "source": "ModelRequestResult",
                 "level": "ERROR",
                 "message": str(error),
                 "payload": error.to_diagnostic(),
@@ -325,7 +325,7 @@ class ModelResponseDataFlow:
         await async_emit_runtime(
             {
                 "event_type": event_type,
-                "source": "ModelResponseResult",
+                "source": "ModelRequestResult",
                 "level": level,
                 "message": message,
                 "payload": {
@@ -479,7 +479,7 @@ class ModelResponseDataFlow:
             await async_emit_runtime(
                 {
                     "event_type": "model.retrying",
-                    "source": "ModelResponseResult",
+                    "source": "ModelRequestResult",
                     "level": "WARNING",
                     "message": (
                         message
@@ -618,11 +618,11 @@ class ModelResponseDataFlow:
         raise_ensure_failure: bool,
         retry_count: int,
     ) -> Any:
-        from agently.core.model.ModelResponse import ModelResponse
+        from agently.core.model.ModelRequestRunner import ModelRequestRunner
 
         result = self._result
         await self._apply_retry_backoff(retry_count)
-        return await ModelResponse(
+        return await ModelRequestRunner(
             result.agent_name,
             result.plugin_manager,
             result.settings,
@@ -630,7 +630,6 @@ class ModelResponseDataFlow:
             result._extension_handlers,
             run_context=result.request_run_context,
             attempt_index=result.attempt_index + 1,
-            warn_deprecated=False,
         ).result.async_get_data(
             type=type,
             ensure_keys=ensure_keys,

@@ -81,7 +81,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`get_result()` 返回一个可复用的 `ModelResponseResult`。你可以从同一个 result 拿 text、结构化 data 和 metadata，不会重发请求——见 [模型结果](../requests/model-response.md)。
+`get_result()` 返回一个可复用的 `ModelRequestResult`。你可以从同一个 result 拿 text、结构化 data 和 metadata，不会重发请求——见 [模型结果](../requests/model-response.md)。
 
 ## Async + TriggerFlow
 

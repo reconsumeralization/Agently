@@ -14,7 +14,7 @@ Agently has three protocol-level request plugins, plus per-provider configuratio
 Application code
       │
       ▼
-  ModelRequest  ──►  ModelResponseResult
+  ModelRequest  ──►  ModelRequestResult
       │
       ▼
 ModelRequester plugin (the "protocol layer")
@@ -36,6 +36,8 @@ For custom requester handlers, `build_request_handlers()` returns
 `AttemptHandlers`; annotate the handler stream with `AttemptStreamMessage` /
 `AttemptStreamGenerator` from `agently.types.data`. `broadcast_response(...)`
 then maps that attempt/provider stream into the public `AgentlyResultGenerator`.
+It must pass core-owned `("status", payload)` attempt records unchanged rather
+than treating them as provider wire payloads.
 
 If you are pointing at `https://api.anthropic.com` (or a Claude-compatible proxy that speaks the same protocol), use [AnthropicCompatible](anthropic-compatible.md). For everything else (OpenAI, DeepSeek, Qwen, Ollama, Kimi, GLM, MiniMax, Doubao, SiliconFlow, Groq, ERNIE, Gemini's OpenAI-compat endpoint, plus any private gateway speaking the OpenAI Chat Completions API), use [OpenAICompatible](openai-compatible.md).
 

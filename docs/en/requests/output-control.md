@@ -308,7 +308,7 @@ Two caveats:
 
 ## Single execution per response
 
-Validation runs **once** per `ModelResponseResult` and the outcome is cached. Repeated calls — `get_data()` then `get_data()` again, or `get_data()` then `get_data_object()` — do **not** rerun validators. If you try to inject a different handler on the same result after validation has already finalized, the new handler is ignored with a warning.
+Validation runs **once** per `ModelRequestResult` and the outcome is cached. Repeated calls — `get_data()` then `get_data()` again, or `get_data()` then `get_data_object()` — do **not** rerun validators. If you try to inject a different handler on the same result after validation has already finalized, the new handler is ignored with a warning.
 
 This means: don't expect to swap validators per consumer. If you need different validation for different consumers, run the request twice.
 

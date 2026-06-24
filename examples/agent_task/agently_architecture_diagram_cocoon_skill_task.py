@@ -130,7 +130,7 @@ EXCERPT_TERMS = [
     "DynamicTask",
     "TriggerFlow",
     "ModelRequest",
-    "ModelResponse",
+    "ModelRequestResult",
     "Workspace",
     "Action",
     "ActionRuntime",

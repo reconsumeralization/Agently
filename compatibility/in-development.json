@@ -26,6 +26,7 @@
           "attempt_index": "model-request retry attempt metadata; not an AgentExecution counter"
         },
         "model_request_telemetry_contract": "Existing model RuntimeEvents may carry payload.model_request_telemetry observation facts for response_id, attempt_index, run ids, provider/model, request_url, duration, usage, side_channel, and normalized errors. Telemetry dedupe is observation-only and must not drive routing, retry, verification, quality judgment, planner input, or prompt content.",
+        "model_request_result_stream_status_contract": "ModelRequestResult reserves $status for completed, failed, and cancelled ModelRequest attempt outcomes. failed/retry=true invalidates provisional stream output before a replacement attempt; plain delta streams emit the standalone <$retry>{reason}</$retry> marker at that replay boundary, while $status remains the structured fact source. AgentExecution projects $status and response/run lineage in its structured process stream. model.status RuntimeEvents are observation-only. OpenAICompatible after-output transport replay is explicit through request_retry.after_output and remains disabled by default.",
         "agent_execution_limits": [
           "max_seconds",
           "max_no_progress_seconds"
@@ -237,7 +238,7 @@
       "contract": "Common generator and handler type annotations are exposed through agently and agently.types.data. Result-named aliases are the recommended root-level public names: delta yields str, instant/streaming_parse yields StreamingData with is_complete, specific/all yield event-tagged result messages, AgentExecution streams yield AgentExecutionStreamData, and direct Skills stream handlers receive SkillRuntimeStreamItem dictionaries. Response-named aliases are compatibility-only aliases under agently.types.data and are not re-exported from the agently root.",
       "compatibility_policy": "StreamingData.is_complete remains the canonical instant/streaming_parse completion field. Response-named type aliases remain compatibility-only aliases in agently.types.data and are deprecated in favor of Result-named aliases; they will be removed in Agently 4.2."
     },
-    "model_response_result_facade": {
+    "model_request_result_facade": {
       "status": "in-development",
       "surface": [
         "ModelRequest.get_result",
@@ -250,8 +251,8 @@
         "ModelResponse",
         "ModelResponseResult"
       ],
-      "contract": "get_result() is the recommended reusable facade for text, data, metadata, and streaming readers. Agent quick prompt chains return AgentExecutionResult; direct ModelRequest calls return ModelResponseResult. get_response() remains a compatibility alias. ModelResponseResult.result points to itself so older response.result reader chains continue to work.",
-      "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); data = result.get_data(). Code that already calls get_response() and then reader methods or response.result reader chains remains supported. Direct ModelResponse construction is deprecated and will be removed in Agently 4.2."
+      "contract": "get_result() is the recommended reusable facade for text, data, metadata, and streaming readers. Agent quick prompt chains return AgentExecutionResult; direct ModelRequest calls return ModelRequestResult. get_response() remains a compatibility alias. ModelRequestResult.result points to itself so older response.result reader chains continue to work.",
+      "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); data = result.get_data(). ModelResponseResult remains a 4.1.x compatibility alias for ModelRequestResult, and direct ModelResponse construction remains deprecated for removal in Agently 4.2."
     },
     "agent_execution_task_loop": {
       "status": "in-development",

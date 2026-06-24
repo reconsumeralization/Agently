@@ -17,7 +17,10 @@ async def test_attempt_runner_streams_successful_attempt():
     runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error))
     events = [event async for event in runner.run_stream()]
 
-    assert events == [("message", "attempt-1")]
+    assert events == [
+        ("message", "attempt-1"),
+        ("status", {"status": "completed", "attempt_index": 1, "retry": False}),
+    ]
     assert runner.state.output_started is True
 
 
@@ -45,8 +48,22 @@ async def test_attempt_runner_retries_before_output_started():
     events = [event async for event in runner.run_stream()]
 
     assert calls == 2
-    assert events == [("message", "ok")]
-    assert [observation.kind for observation in observations] == ["retry", "output_started"]
+    assert events == [
+        (
+            "status",
+            {
+                "status": "failed",
+                "attempt_index": 1,
+                "retry": True,
+                "next_attempt_index": 2,
+                "reason": "retry me",
+                "error_type": "RuntimeError",
+            },
+        ),
+        ("message", "ok"),
+        ("status", {"status": "completed", "attempt_index": 2, "retry": False}),
+    ]
+    assert [observation.kind for observation in observations] == ["status", "retry", "output_started", "status"]
 
 
 @pytest.mark.asyncio
@@ -89,7 +106,7 @@ async def test_attempt_runner_does_not_retry_after_output_started_by_default():
     with pytest.raises(RuntimeError, match="stream broke"):
         [event async for event in runner.run_stream()]
 
-    assert [observation.kind for observation in observations] == ["output_started", "retry_blocked"]
+    assert [observation.kind for observation in observations] == ["output_started", "status", "retry_blocked"]
 
 
 @pytest.mark.asyncio
@@ -112,7 +129,22 @@ async def test_attempt_runner_can_retry_after_output_started_when_explicitly_all
     events = [event async for event in runner.run_stream()]
 
     assert calls == 2
-    assert events == [("message", "partial"), ("message", "replacement")]
+    assert events == [
+        ("message", "partial"),
+        (
+            "status",
+            {
+                "status": "failed",
+                "attempt_index": 1,
+                "retry": True,
+                "next_attempt_index": 2,
+                "reason": "allowed retry",
+                "error_type": "RuntimeError",
+            },
+        ),
+        ("message", "replacement"),
+        ("status", {"status": "completed", "attempt_index": 2, "retry": False}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -139,7 +171,9 @@ async def test_attempt_runner_ingests_typed_decision_observations():
     with pytest.raises(RuntimeError, match="observable"):
         [event async for event in runner.run_stream()]
 
-    assert observations == [AttemptObservation("provider_error", {"code": "E_OBS"})]
+    assert observations[0] == AttemptObservation("provider_error", {"code": "E_OBS"})
+    assert observations[1].kind == "status"
+    assert observations[1].data["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -158,10 +192,24 @@ async def test_attempt_runner_propagates_cancellation_without_error_handler():
 
     runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error))
 
+    events = []
     with pytest.raises(asyncio.CancelledError):
-        [event async for event in runner.run_stream()]
+        async for event in runner.run_stream():
+            events.append(event)
 
     assert handled is False
+    assert events == [
+        (
+            "status",
+            {
+                "status": "cancelled",
+                "attempt_index": 1,
+                "retry": False,
+                "reason": "CancelledError",
+                "error_type": "CancelledError",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -227,9 +275,37 @@ async def test_attempt_runner_can_yield_error_without_raising():
     runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error))
     events = [event async for event in runner.run_stream()]
 
-    assert len(events) == 1
-    assert events[0][0] == "error"
-    assert isinstance(events[0][1], RuntimeError)
+    assert len(events) == 2
+    assert events[0][0] == "status"
+    assert events[0][1]["status"] == "failed"
+    assert events[0][1]["reason"] == "provider failed"
+    assert events[1][0] == "error"
+    assert isinstance(events[1][1], RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_attempt_runner_status_keeps_provider_detail_without_request_body():
+    async def execute(_state: AttemptState):
+        if False:
+            yield "message", "never"
+        raise RuntimeError("Status Code: 502\nDetail: upstream reset\nRequest Data: {'input': 'private'}")
+
+    async def handle_error(error: BaseException, _state: AttemptState):
+        return AttemptDecision.yield_error(error)
+
+    runner = AttemptRunner(AttemptHandlers(execute=execute, handle_error=handle_error))
+    events = [event async for event in runner.run_stream()]
+
+    assert events[0] == (
+        "status",
+        {
+            "status": "failed",
+            "attempt_index": 1,
+            "retry": False,
+            "reason": "Status Code: 502\nDetail: upstream reset",
+            "error_type": "RuntimeError",
+        },
+    )
 
 
 @pytest.mark.asyncio

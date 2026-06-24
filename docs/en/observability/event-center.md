@@ -27,10 +27,30 @@ Run and retry naming:
 
 Model request telemetry:
 
-- Model RuntimeEvents may include `payload["model_request_telemetry"]` on `model.request_started`, `model.requesting`, `model.completed`, `model.meta`, `model.request_failed`, and `model.requester.error`.
+- Model RuntimeEvents may include `payload["model_request_telemetry"]` on `model.request_started`, `model.requesting`, `model.status`, `model.completed`, `model.meta`, `model.request_failed`, and `model.requester.error`.
 - The telemetry payload is observation-only. It can contain `response_id`, `attempt_index`, run ids, provider/model, request URL, duration, usage, side-channel, and normalized error facts.
 - Telemetry dedupe only removes duplicate telemetry sub-payloads for the same `response_id + attempt_index + event kind`; it does not suppress the original RuntimeEvent.
 - Do not feed these telemetry facts back into route selection, retry policy, verifier judgment, quality scoring, planner context, or prompt content. Use them for logs, DevTools display, and diagnostics.
+
+Model request status:
+
+- `model.status` records a ModelRequest attempt outcome. It is observation-only;
+  it does not decide retry or downstream control flow.
+- The raw response stream event is `("status", payload)`; `instant` /
+  `streaming_parse` exposes it as `StreamingData(path="$status", value=payload)`.
+- `payload["status"]` is `completed`, `failed`, or `cancelled`.
+- `failed` with `retry=true` invalidates partial output from
+  `payload["attempt_index"]`; the next attempt is
+  `payload["next_attempt_index"]`. Consumers must clear provisional output
+  before rendering replacement deltas.
+- `reason` carries a bounded provider/transport explanation and `error_type`
+  carries the original exception class when available. It is not a traceback or
+  a raw request body.
+- Text-only `type="delta"` generators receive a standalone
+  `"<$retry>{reason}</$retry>"` chunk at that replay boundary. They must clear
+  provisional text on the marker; use `type="all"`, `specific`, `instant`, or
+  `streaming_parse` when lineage or collision-free structured facts are
+  required.
 
 ## Register a hook
 

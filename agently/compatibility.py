@@ -520,7 +520,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                             'in agently.types.data and are deprecated '
                                                                             'in favor of Result-named aliases; they '
                                                                             'will be removed in Agently 4.2.'},
-                   'model_response_result_facade': {'status': 'released',
+                   'model_request_result_facade': {'status': 'in-development',
                                                     'surface': ['ModelRequest.get_result',
                                                                 'AgentExecution.get_result',
                                                                 'AgentExecutionResult',
@@ -528,14 +528,15 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                 'ModelRequest.get_response',
                                                                 'AgentExecution.get_response',
                                                                 'Agent.get_response',
+                                                                'ModelRequestResult',
                                                                 'ModelResponse',
                                                                 'ModelResponseResult'],
                                                     'contract': 'get_result() is the recommended reusable facade for '
                                                                 'text, data, metadata, and streaming readers. Agent '
                                                                 'quick prompt chains return AgentExecutionResult; '
-                                                                'direct ModelRequest calls return ModelResponseResult. '
+                                                                            'direct ModelRequest calls return ModelRequestResult. '
                                                                 'get_response() remains a compatibility alias. '
-                                                                'ModelResponseResult.result points to itself so older '
+                                                                            'ModelRequestResult.result points to itself so older '
                                                                 'response.result reader chains continue to work.',
                                                     'compatibility_policy': 'Recommended documentation, examples, and '
                                                                             'Skills guidance use result = '
@@ -544,8 +545,9 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                             'already calls get_response() and then '
                                                                             'reader methods or response.result reader '
                                                                             'chains remains supported. Direct '
-                                                                            'ModelResponse construction is deprecated '
-                                                                            'and will be removed in Agently 4.2.'},
+                                                                            'ModelResponseResult is a compatibility alias, and '
+                                                                            'ModelResponse construction is deprecated for removal '
+                                                                            'in Agently 4.2.'},
                    'agent_execution_task_loop': {'status': 'released',
                                                  'surface': ['Agent.goal',
                                                              'Agent.goals',

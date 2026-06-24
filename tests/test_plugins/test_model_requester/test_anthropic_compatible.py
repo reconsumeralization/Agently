@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Any
 
 import pytest
 
@@ -63,7 +64,7 @@ async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict,
     return captured
 
 
-def collect_events(plugin: AnthropicCompatible, request_events: list[tuple[str, str]]):
+def collect_events(plugin: AnthropicCompatible, request_events: list[tuple[str, Any]]):
     async def _run():
         async def generator():
             for event, payload in request_events:
@@ -273,6 +274,17 @@ def test_broadcast_response_maps_text_stream_and_meta():
     assert meta["id"] == "msg_1"
     assert meta["finish_reason"] == "stop"
     assert meta["usage"]["output_tokens"] == 2
+
+
+def test_broadcast_response_preserves_core_status_record():
+    plugin = build_plugin({"base_url": "https://api.anthropic.example/v1"}, {"input": "hello"})
+
+    events = collect_events(
+        plugin,
+        [("status", {"status": "failed", "attempt_index": 1, "retry": True})],
+    )
+
+    assert events == [("status", {"status": "failed", "attempt_index": 1, "retry": True})]
 
 
 def test_broadcast_response_maps_tool_use_to_tool_calls():
