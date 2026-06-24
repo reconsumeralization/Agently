@@ -1097,7 +1097,10 @@ async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
         success_criteria=["The board records a structured card timeout."],
         execution="taskboard",
         max_iterations=1,
-        options={"request_timeout_seconds": 0.25},
+        options={
+            "request_timeout_seconds": 5.0,
+            "agent_task": {"taskboard_card_timeout_seconds": 0.25},
+        },
     )
 
     result = await execution.async_get_data()

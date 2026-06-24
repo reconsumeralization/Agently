@@ -1076,7 +1076,7 @@ class AgentTask:
         card_id: str,
         stage: str,
     ) -> Any:
-        timeout = self._task_request_timeout()
+        timeout = self._taskboard_card_timeout()
         if timeout is None:
             return await awaitable
         try:
@@ -1108,7 +1108,7 @@ class AgentTask:
             "execution_id": execution_id,
             "execution_strategy": self.execution_strategy,
             "stage": "taskboard_card",
-            "timeout_seconds": self._task_request_timeout() if is_timeout else None,
+            "timeout_seconds": self._taskboard_card_timeout() if is_timeout else None,
             "status": "failed",
         }
         self.diagnostics.setdefault("taskboard_card_errors", []).append(diagnostic)
@@ -1216,6 +1216,12 @@ class AgentTask:
 
     def _taskboard_tick_timeout(self) -> float | None:
         return self._taskboard_option_timeout("taskboard_tick_timeout_seconds")
+
+    def _taskboard_card_timeout(self) -> float | None:
+        timeout = self._taskboard_option_timeout("taskboard_card_timeout_seconds")
+        if timeout is not None:
+            return timeout
+        return self._task_request_timeout()
 
     def _taskboard_max_ticks(self) -> int:
         value = self._taskboard_option("taskboard_max_ticks")
