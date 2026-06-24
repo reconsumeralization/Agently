@@ -297,6 +297,18 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     assert recalled["value"]["stdout"] == stdout
     assert recalled["value"]["stderr"] == stderr
 
+    dispatched_recall = action.execute_action(
+        "read_action_artifact",
+        {
+            "artifact_id": str(output_ref.get("artifact_id", "")),
+            "action_call_id": str(output_ref.get("action_call_id", "")),
+        },
+        source_protocol="structured_plan",
+    )
+    assert dispatched_recall.get("status") == "success"
+    assert dispatched_recall.get("data", {}).get("stdout") == stdout
+    assert dispatched_recall.get("result", {}).get("stderr") == stderr
+
 
 def test_max_output_bytes_preserves_full_output_in_artifact():
     action = Agently.create_agent().action

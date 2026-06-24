@@ -214,6 +214,7 @@ class Action:
                 "error": "Action artifact does not belong to the requested action_call_id.",
             }
         else:
+            value = artifact.get("value")
             result = {
                 "ok": True,
                 "status": "success",
@@ -222,7 +223,9 @@ class Action:
                 "artifact_type": artifact.get("artifact_type", ""),
                 "label": artifact.get("label", ""),
                 "media_type": artifact.get("media_type", ""),
-                "value": artifact.get("value"),
+                "value": value,
+                "data": value,
+                "result": value,
                 "meta": artifact.get("meta", {}),
             }
 
