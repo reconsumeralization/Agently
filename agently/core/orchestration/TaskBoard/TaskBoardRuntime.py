@@ -18,6 +18,7 @@ import asyncio
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from agently.core.orchestration.TriggerFlow import TriggerFlow
@@ -66,6 +67,86 @@ class TaskBoardTickResult:
     triggerflow_snapshot: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class TaskBoardTickExecution:
+    board: "TaskBoard"
+    previous_revision: TaskBoardRevision
+    schedule: TaskBoardSchedulePlan
+    execution: Any
+    card_requested_event: str
+    cards_completed_event: str
+    card_run_binding_id: str
+
+    def save(
+        self,
+        path: str | Path | None = None,
+        *,
+        encoding: str | None = "utf-8",
+        require_idle: bool = False,
+    ):
+        return self.execution.save(path, encoding=encoding, require_idle=require_idle)
+
+    def load(
+        self,
+        state: dict[str, Any] | str | Path,
+        *,
+        encoding: str | None = "utf-8",
+        runtime_resources: dict[str, Any] | None = None,
+        execution_resources: list[Any] | None = None,
+        validate_resources: bool = False,
+    ):
+        self.execution.load(
+            state,
+            encoding=encoding,
+            runtime_resources=runtime_resources,
+            execution_resources=execution_resources,
+            validate_resources=validate_resources,
+        )
+        return self
+
+    def inspect_load(
+        self,
+        state: dict[str, Any] | str | Path,
+        *,
+        encoding: str | None = "utf-8",
+        runtime_resources: dict[str, Any] | None = None,
+        execution_resources: list[Any] | None = None,
+    ):
+        return self.execution.inspect_load(
+            state,
+            encoding=encoding,
+            runtime_resources=runtime_resources,
+            execution_resources=execution_resources,
+        )
+
+    async def async_start(self):
+        await self.execution.async_start(self.previous_revision.to_dict())
+        return self
+
+    async def async_resume_pending(self):
+        expected = self.execution.get_state("expected_card_ids", [], inherit=False)
+        collected = self.execution.get_state("collected_card_results", {}, inherit=False)
+        if not isinstance(expected, Sequence) or isinstance(expected, str | bytes | bytearray):
+            return self
+        if not isinstance(collected, Mapping):
+            collected = {}
+        missing_card_ids = [str(card_id) for card_id in expected if str(card_id) not in collected]
+        if not missing_card_ids and expected:
+            ordered = [collected[str(card_id)] for card_id in expected if str(card_id) in collected]
+            await self.execution.async_emit(self.cards_completed_event, ordered)
+            return self
+        for card_id in missing_card_ids:
+            await self.execution.async_emit_nowait(self.card_requested_event, {"card_id": card_id})
+        return self
+
+    async def async_close(self, *, timeout: float | None = None) -> TaskBoardTickResult:
+        snapshot = await self.execution.async_close(timeout=timeout)
+        return self.board._finalize_tick_snapshot(
+            self.previous_revision,
+            snapshot,
+        )
+
+
 class TaskBoard:
     def __init__(
         self,
@@ -104,6 +185,22 @@ class TaskBoard:
         timeout: float | None = None,
         concurrency: int | None = None,
     ) -> TaskBoardTickResult:
+        tick_execution = await self.async_start_tick(concurrency=concurrency)
+        return await tick_execution.async_close(timeout=timeout)
+
+    async def async_start_tick(
+        self,
+        *,
+        concurrency: int | None = None,
+    ) -> TaskBoardTickExecution:
+        tick_execution = self.create_tick_execution(concurrency=concurrency)
+        return await tick_execution.async_start()
+
+    def create_tick_execution(
+        self,
+        *,
+        concurrency: int | None = None,
+    ) -> TaskBoardTickExecution:
         previous_revision = self.revision
         schedule = schedule_task_board_revision(previous_revision)
         card_by_id = previous_revision.graph.card_by_id()
@@ -204,8 +301,21 @@ class TaskBoard:
                 "role": "task_board_card_fanout",
             },
         )
-        await execution.async_start(previous_revision.to_dict())
-        snapshot = await execution.async_close(timeout=timeout)
+        return TaskBoardTickExecution(
+            board=self,
+            previous_revision=previous_revision,
+            schedule=schedule,
+            execution=execution,
+            card_requested_event=card_requested_event,
+            cards_completed_event=cards_completed_event,
+            card_run_binding_id=card_run_binding_id,
+        )
+
+    def _finalize_tick_snapshot(
+        self,
+        previous_revision: TaskBoardRevision,
+        snapshot: Mapping[str, Any],
+    ) -> TaskBoardTickResult:
         next_revision = TaskBoardRevision.from_value(snapshot["revision"])
         schedule = TaskBoardSchedulePlan(
             revision_id=snapshot["schedule"]["revision_id"],

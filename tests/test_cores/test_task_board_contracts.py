@@ -614,6 +614,66 @@ async def test_task_board_tick_does_not_cancel_independent_card_on_required_fail
 
 
 @pytest.mark.asyncio
+async def test_task_board_tick_resume_retries_missing_cards_without_repeating_completed():
+    previous_revision = TaskBoardRevision.create(
+        board_id="resume-fanout",
+        graph={
+            "graph_id": "resume-fanout-graph",
+            "cards": [
+                {"id": "a", "objective": "Run A."},
+                {"id": "b", "objective": "Run B."},
+                {"id": "c", "objective": "Run C."},
+            ],
+        },
+    )
+    original_calls: list[str] = []
+    restored_calls: list[str] = []
+    second_running = asyncio.Event()
+    release_original = asyncio.Event()
+
+    async def original_handler(context: TaskBoardContext):
+        original_calls.append(context.card.id)
+        if len(original_calls) == 2:
+            second_running.set()
+            await release_original.wait()
+        return {"status": "completed", "preview": f"original:{ context.card.id }"}
+
+    async def restored_handler(context: TaskBoardContext):
+        restored_calls.append(context.card.id)
+        return {"status": "completed", "preview": f"restored:{ context.card.id }"}
+
+    original_board = TaskBoard(previous_revision, handler=original_handler)
+    original_tick = await original_board.async_start_tick(concurrency=1)
+    await asyncio.wait_for(second_running.wait(), timeout=1)
+    saved_state = original_tick.save()
+    completed_before_save = original_calls[0]
+    expected_restored_cards = {"a", "b", "c"} - {completed_before_save}
+
+    release_original.set()
+    await original_tick.async_close(timeout=1)
+
+    restored_board = TaskBoard(previous_revision, handler=restored_handler)
+    restored_tick = restored_board.create_tick_execution(concurrency=2)
+    restored_tick.load(saved_state)
+    restored_signal_net = restored_tick.save()["signal_net"]
+
+    await restored_tick.async_resume_pending()
+    result = await restored_tick.async_close(timeout=1)
+
+    assert set(restored_calls) == expected_restored_cards
+    assert completed_before_save not in restored_calls
+    assert result.revision.revision_id == "rev-1"
+    assert result.revision.card_results[completed_before_save].preview == f"original:{ completed_before_save }"
+    for card_id in expected_restored_cards:
+        assert result.revision.card_results[card_id].preview == f"restored:{ card_id }"
+    assert any(
+        attempt["trigger_event"] == result.triggerflow_snapshot["runtime_topology"]["card_requested_event"]
+        and attempt["status"] == "interrupted"
+        for attempt in restored_signal_net["signal_attempts"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_task_board_tick_continues_after_optional_failure():
     seen: list[str] = []
 
