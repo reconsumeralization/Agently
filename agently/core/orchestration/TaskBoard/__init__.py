@@ -16,6 +16,7 @@ from .TaskBoardRuntime import (
     TaskBoard,
     TaskBoardContext,
     TaskBoardHandler,
+    TaskBoardTickExecution,
     TaskBoardTickResult,
 )
 from .TaskBoardEvidence import (
@@ -45,6 +46,7 @@ __all__ = [
     "TaskBoardEffortProfile",
     "TaskBoardEvidenceView",
     "TaskBoardHandler",
+    "TaskBoardTickExecution",
     "TaskBoardPlanningPolicy",
     "TaskBoardPlanningResult",
     "TaskBoardTickResult",
