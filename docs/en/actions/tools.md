@@ -118,6 +118,9 @@ package object. They also retry transient transport failures once by default
 disconnects such as incomplete chunked reads, timeouts, connection resets, and
 proxy handshakes; it is not a substitute for a long-term unavailable network or
 an unreachable proxy.
+Browse's default backend order is Playwright -> restricted curl -> BS4. The
+curl backend only receives normalized URL candidates from Browse and is not
+exposed as a shell action.
 
 When an Agent-level language policy is set with `agent.language("zh-CN")`,
 registered Search/Browse packages receive compatible locale defaults unless the

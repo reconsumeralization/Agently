@@ -134,8 +134,9 @@ agent.use_actions(Browse())
 
 Search 是 Action-native package，不进入 ExecutionResource；proxy、timeout、
 backend、region 都属于 package/executor 配置。Browse 也是 Action-native；默认主线是
-Playwright + BS4，pyautogui 保留为 legacy/advanced 配置。如果 Browse action 需要托管
-browser/page/session，可以启用 Browser ExecutionResource provider。
+Playwright -> restricted curl -> BS4，pyautogui 保留为 legacy/advanced 配置。curl backend
+是 Browse 内部的 URL fetch fallback，不是暴露给模型的 shell access。如果 Browse action
+需要托管 browser/page/session，可以启用 Browser ExecutionResource provider。
 
 Agent Client Protocol（ACP）coding agent 作为 Action capability 暴露，不是
 AgentExecution route。使用 `agent.use_acp(root=".", on_missing="skip")` 可以扫描本地

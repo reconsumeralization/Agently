@@ -137,8 +137,9 @@ agent.use_actions(Browse())
 
 Search is an Action-native package and does not use ExecutionResource;
 proxy, timeout, backend, and region are package/executor configuration. Browse
-is also Action-native; its default path is Playwright + BS4, while pyautogui is
-kept as legacy/advanced configuration. If a Browse action needs a managed
+is also Action-native; its default path is Playwright -> restricted curl -> BS4,
+while pyautogui is kept as legacy/advanced configuration. The curl backend is a
+Browse-internal URL fetch fallback, not model-visible shell access. If a Browse action needs a managed
 browser/page/session, register it with a Browser ExecutionResource provider enabled.
 
 Agent Client Protocol (ACP) coding agents are exposed as Action capability, not

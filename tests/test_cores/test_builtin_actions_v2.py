@@ -221,9 +221,94 @@ def test_agent_language_policy_updates_builtin_browse_accept_language():
     assert browse.headers["Accept-Language"].startswith("zh-CN")
 
 
+def test_browse_default_fallback_prefers_playwright_curl_then_bs4():
+    browse = Browse()
+
+    assert browse.fallback_order == ("playwright", "curl", "bs4")
+    assert browse.enable_curl is True
+
+
+def test_browse_text_extraction_tolerates_missing_node_attrs():
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup("<html><body><main><p>Readable official page content.</p></main></body></html>", "html.parser")
+    assert soup.main is not None
+    soup.main.attrs = None  # type: ignore[assignment]
+
+    content = Browse._extract_text_from_soup(soup, min_length=10)
+
+    assert "Readable official page content" in content
+
+
+@pytest.mark.asyncio
+async def test_browse_curl_backend_extracts_html_content():
+    browse = Browse(
+        fallback_order=("curl",),
+        enable_playwright=False,
+        enable_bs4=False,
+        min_content_length=10,
+        max_attempts=1,
+    )
+
+    async def fake_curl(url: str):
+        return {
+            "ok": True,
+            "content_kind": "html",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "text/html",
+            "content": "Curl backend official page with enough readable content.",
+            "links": [{"url": "https://example.com/next", "text": "Next"}],
+            "canonical_links": ["https://example.com/"],
+        }
+
+    browse._curl_browse = fake_curl  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="https://example.com")
+
+    assert result["status"] == "success"
+    assert result["meta"]["backend"] == "curl"
+    assert result["data"]["content"].startswith("Curl backend official page")
+    assert result["data"]["links"][0]["url"] == "https://example.com/next"
+
+
+@pytest.mark.asyncio
+async def test_browse_curl_backend_materializes_remote_file_to_workspace(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "browse-curl-workspace")
+    browse = Browse(
+        fallback_order=("curl",),
+        enable_playwright=False,
+        enable_bs4=False,
+        max_attempts=1,
+    )
+    pdf_bytes = b"%PDF-1.4\ncurl pdf bytes\n%%EOF"
+
+    async def fake_curl(url: str):
+        return {
+            "ok": True,
+            "content_kind": "remote_file",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "application/pdf",
+            "headers": {"content-type": "application/pdf"},
+            "content_bytes": pdf_bytes,
+        }
+
+    browse._curl_browse = fake_curl  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="https://example.com/syllabus.pdf", workspace=workspace)
+
+    assert result["status"] in {"success", "partial_success"}
+    assert result["data"]["kind"] == "remote_file"
+    assert result["file_refs"][0]["path"].startswith("downloads/syllabus-")
+    assert (workspace.files_root / result["file_refs"][0]["path"]).is_file()
+
+
 def test_browse_action_failure_is_structured_error_not_success_text():
     agent = Agently.create_agent()
-    browse = Browse(enable_pyautogui=False, enable_playwright=False, enable_bs4=False)
+    browse = Browse(enable_pyautogui=False, enable_playwright=False, enable_curl=False, enable_bs4=False)
     agent.use_actions(browse)
 
     result = agent.action.execute_action("browse", {"url": "https://example.com/nope"})

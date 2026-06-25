@@ -15,12 +15,14 @@
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Literal
+import asyncio
 import hashlib
 import json
 import os
 import platform
 import re
 import subprocess
+import tempfile
 import time
 import unicodedata
 import webbrowser
@@ -164,9 +166,10 @@ class Browse:
         timeout: int | None = None,
         headers: dict[str, str] | None = None,
         *,
-        fallback_order: tuple[str, ...] = ("pyautogui", "playwright", "bs4"),
+        fallback_order: tuple[str, ...] = ("playwright", "curl", "bs4"),
         enable_pyautogui: bool = False,
         enable_playwright: bool = True,
+        enable_curl: bool = True,
         enable_bs4: bool = True,
         response_mode: Literal["markdown", "text"] = "markdown",
         max_content_length: int = 12000,
@@ -206,6 +209,7 @@ class Browse:
         self.fallback_order = tuple(item.strip().lower() for item in fallback_order if str(item).strip())
         self.enable_pyautogui = enable_pyautogui
         self.enable_playwright = enable_playwright
+        self.enable_curl = enable_curl
         self.enable_bs4 = enable_bs4
         self.response_mode = response_mode
         self.max_content_length = max_content_length
@@ -351,9 +355,18 @@ class Browse:
             return text
         return "#" * int(level[1]) + " " + text
 
+    @staticmethod
+    def _safe_node_get(node: Any, key: str, default: Any = None) -> Any:
+        try:
+            if hasattr(node, "get"):
+                return node.get(key, default)
+        except Exception:
+            return default
+        return default
+
     @classmethod
     def _is_noise_node(cls, node) -> bool:
-        class_values = node.get("class", []) if hasattr(node, "get") else []
+        class_values = cls._safe_node_get(node, "class", [])
         if isinstance(class_values, str):
             class_text = class_values.lower()
         elif isinstance(class_values, (list, tuple)):
@@ -361,7 +374,7 @@ class Browse:
         else:
             class_text = ""
 
-        node_id = str(node.get("id", "")).lower() if hasattr(node, "get") else ""
+        node_id = str(cls._safe_node_get(node, "id", "") or "").lower()
         merged = f"{class_text} {node_id}".strip()
         return any(keyword in merged for keyword in cls.NOISE_KEYWORDS)
 
@@ -372,7 +385,11 @@ class Browse:
         best_node = None
         best_length = 0
         for selector in cls.PRIMARY_CONTENT_SELECTORS:
-            for node in soup.select(selector):
+            try:
+                nodes = soup.select(selector)
+            except Exception:
+                continue
+            for node in nodes:
                 if not isinstance(node, Tag):
                     continue
                 text_length = len(node.get_text(" ", strip=True))
@@ -444,7 +461,8 @@ class Browse:
         for node in root.find_all(("img", "picture", "source", "svg", "canvas", "video", "audio", "iframe")):
             node.decompose()
         for node in root.find_all(True):
-            for attr, value in list(getattr(node, "attrs", {}).items()):
+            node_attrs = getattr(node, "attrs", None) or {}
+            for attr, value in list(node_attrs.items()):
                 values = value if isinstance(value, list) else [value]
                 text = " ".join(str(item) for item in values)
                 if "data:" in text or len(text) > 512:
@@ -554,8 +572,12 @@ class Browse:
     def _extract_canonical_links(soup: Any, *, base_url: str) -> list[str]:
         links: list[str] = []
         for selector in ('link[rel="canonical"]', 'meta[property="og:url"]'):
-            for node in soup.select(selector):
-                value = str(node.get("href") or node.get("content") or "").strip()
+            try:
+                nodes = soup.select(selector)
+            except Exception:
+                continue
+            for node in nodes:
+                value = str(Browse._safe_node_get(node, "href") or Browse._safe_node_get(node, "content") or "").strip()
                 if not value:
                     continue
                 absolute = urljoin(base_url, value)
@@ -1323,6 +1345,116 @@ class Browse:
         except Exception as e:
             return f"Can not browse '{target_url}'.\tError: {str(e)}"
 
+    @staticmethod
+    def _parse_curl_header_dump(header_bytes: bytes) -> dict[str, Any]:
+        text = header_bytes.decode("iso-8859-1", errors="replace")
+        blocks = [block.strip() for block in re.split(r"\r?\n\r?\n", text) if block.strip()]
+        status = None
+        headers: dict[str, str] = {}
+        for block in blocks:
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if not lines or not lines[0].lower().startswith("http/"):
+                continue
+            status_match = re.search(r"\s(\d{3})(?:\s|$)", lines[0])
+            if status_match:
+                status = int(status_match.group(1))
+            headers = {}
+            for line in lines[1:]:
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
+        return {"status": status, "headers": headers}
+
+    async def _curl_browse(self, url: str) -> str | dict[str, Any]:
+        target_url = self._normalize_url(url)
+        timeout = int(self.timeout or 30)
+
+        def run_curl() -> dict[str, Any] | str:
+            with tempfile.NamedTemporaryFile() as header_file, tempfile.NamedTemporaryFile() as body_file:
+                cmd = [
+                    "curl",
+                    "-L",
+                    "--silent",
+                    "--show-error",
+                    "--compressed",
+                    "--max-time",
+                    str(max(1, timeout)),
+                    "--dump-header",
+                    header_file.name,
+                    "--output",
+                    body_file.name,
+                    "--write-out",
+                    "%{url_effective}",
+                ]
+                if self.proxy:
+                    cmd.extend(["--proxy", self.proxy])
+                for key, value in self.headers.items():
+                    cmd.extend(["-H", f"{key}: {value}"])
+                cmd.append(target_url)
+                completed = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if completed.returncode != 0:
+                    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+                    return f"Can not browse '{target_url}'.\tError: curl exited {completed.returncode}: {stderr}"
+                header_file.seek(0)
+                body_file.seek(0)
+                header_info = self._parse_curl_header_dump(header_file.read())
+                content = body_file.read()
+                effective_url = completed.stdout.decode("utf-8", errors="replace").strip() or target_url
+                headers = dict(header_info.get("headers", {}))
+                media_type = self._media_type_from_content_type(str(headers.get("content-type", "")))
+                if self._looks_like_remote_file(url=effective_url, media_type=media_type, content=content):
+                    return {
+                        "ok": True,
+                        "content_kind": "remote_file",
+                        "requested_url": target_url,
+                        "url": effective_url,
+                        "status": header_info.get("status"),
+                        "media_type": media_type,
+                        "headers": headers,
+                        "content_bytes": bytes(content),
+                    }
+                return {
+                    "ok": True,
+                    "content_kind": "html",
+                    "requested_url": target_url,
+                    "url": effective_url,
+                    "status": header_info.get("status"),
+                    "media_type": media_type,
+                    "headers": headers,
+                    "content_bytes": bytes(content),
+                }
+
+        result = await asyncio.to_thread(run_curl)
+        if isinstance(result, str):
+            return result
+        if result.get("content_kind") == "remote_file":
+            return result
+
+        LazyImport.import_package("bs4", install_name="beautifulsoup4")
+        from bs4 import BeautifulSoup
+
+        content_bytes = result.pop("content_bytes", b"")
+        soup = BeautifulSoup(content_bytes, "html.parser")
+        content = self._extract_text_from_soup(soup, min_length=self.min_content_length)
+        content = self._normalize_content(content)
+        final_url = str(result.get("url") or target_url)
+        links = self._extract_links_from_soup(soup, base_url=final_url, max_links=self.playwright_max_links)
+        canonical_links = self._extract_canonical_links(soup, base_url=final_url)
+        if not content:
+            return f"Can not fetch any content from {target_url}!"
+        return {
+            **result,
+            "content": content,
+            "links": links,
+            "canonical_links": canonical_links,
+        }
+
     async def _browse_with_trace(self, url: str) -> dict[str, Any]:
         requested_url = str(url or "")
         normalized_url = self._normalize_url(requested_url)
@@ -1333,6 +1465,8 @@ class Browse:
             if backend == "pyautogui" and not self.enable_pyautogui:
                 continue
             if backend == "playwright" and not self.enable_playwright:
+                continue
+            if backend == "curl" and not self.enable_curl:
                 continue
             if backend == "bs4" and not self.enable_bs4:
                 continue
@@ -1347,6 +1481,8 @@ class Browse:
                             result = await self._pyautogui_open_and_read_url(candidate_url)
                         elif backend == "playwright":
                             result = await self._playwright_open(candidate_url)
+                        elif backend == "curl":
+                            result = await self._curl_browse(candidate_url)
                         elif backend == "bs4":
                             result = await self._bs4_browse(candidate_url)
                         else:
