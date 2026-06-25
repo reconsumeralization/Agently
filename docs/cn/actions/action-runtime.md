@@ -137,6 +137,13 @@ backend、region 都属于 package/executor 配置。Browse 也是 Action-native
 Playwright + BS4，pyautogui 保留为 legacy/advanced 配置。如果 Browse action 需要托管
 browser/page/session，可以启用 Browser ExecutionResource provider。
 
+Agent Client Protocol（ACP）coding agent 作为 Action capability 暴露，不是
+AgentExecution route。使用 `agent.use_acp(root=".", on_missing="skip")` 可以扫描本地
+ACP endpoint、对可用 coding agent 做 handshake，并且只在存在已验证可运行 agent 时注册
+`acp_list_agents` 和 `acp_run_task`。默认 `on_missing="skip"` 只记录 diagnostics，
+不会伪造 runnable agent；`on_missing="error"` 会 fail closed。ACP run action 会声明
+`ExecutionResource(kind="acp")`，让 root scope 和 lifecycle 事实留在 resource 层。
+
 `enable_*` helpers 的 `desc=` 是可选项。默认会作为补充说明追加，确保模型仍然看到基础用法和安全边界。
 如果你确实要替换默认描述，使用 `desc_mode="override"`；如果要忽略传入描述、只保留内置描述，使用
 `desc_mode="default"`。

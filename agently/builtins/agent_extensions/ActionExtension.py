@@ -203,6 +203,32 @@ class ActionExtension(BaseAgent):
         self._register_action_items(actions)
         return self
 
+    def use_acp(
+        self,
+        *,
+        root: str | Path | None = None,
+        agent_ids: list[str] | tuple[str, ...] | str | None = None,
+        provider: Any | None = None,
+        on_missing: Literal["skip", "error"] = "skip",
+        timeout_seconds: float | None = 600,
+        action_prefix: str = "",
+    ):
+        from agently.builtins.actions import ACP
+
+        acp = ACP(
+            root=root,
+            agent_ids=agent_ids,
+            provider=provider,
+            on_missing=on_missing,
+            timeout_seconds=timeout_seconds,
+            action_prefix=action_prefix,
+        )
+        self._register_action_items(acp)
+        diagnostics = acp.list_agents().get("diagnostics", [])
+        if diagnostics:
+            self.settings.set("agent.acp.diagnostics", cast(Any, diagnostics))
+        return self
+
     def require_actions(self, actions: Callable | str | list[str | Callable] | Any, *, always: bool = False):
         if not always:
             return self.create_execution().require_actions(actions)

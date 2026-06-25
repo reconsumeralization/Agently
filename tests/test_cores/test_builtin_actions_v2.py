@@ -5,7 +5,7 @@ import importlib
 import pytest
 
 from agently import Agently
-from agently.builtins.actions import Browse, Cmd, Search
+from agently.builtins.actions import ACP, Browse, Cmd, Search
 from agently.builtins.tools import Browse as LegacyBrowse
 from agently.builtins.tools import Cmd as LegacyCmd
 from agently.builtins.tools import Search as LegacySearch
@@ -54,11 +54,113 @@ def test_v2_default_plugins_are_registered():
         "SQLiteActionExecutor",
     }.issubset(action_executors)
     assert {
+        "ACPExecutionResourceProvider",
         "NodeExecutionResourceProvider",
         "DockerExecutionResourceProvider",
         "BrowserExecutionResourceProvider",
         "SQLiteExecutionResourceProvider",
     }.issubset(environment_providers)
+
+
+class FakeACPProvider:
+    def __init__(self, agents: list[dict[str, Any]]):
+        self.agents = agents
+        self.runs: list[dict[str, Any]] = []
+
+    def discover_agents(self, *, root: str, agent_ids=None, timeout_seconds=None):
+        return {
+            "agents": self.agents,
+            "diagnostics": [{"code": "fake.discovery", "root": root, "agent_ids": agent_ids}],
+        }
+
+    async def async_run_task(
+        self,
+        *,
+        agent_id: str,
+        task: str,
+        root: str,
+        working_dir: str,
+        timeout_seconds=None,
+        context=None,
+    ):
+        record = {
+            "agent_id": agent_id,
+            "task": task,
+            "root": root,
+            "working_dir": working_dir,
+            "context": dict(context or {}),
+        }
+        self.runs.append(record)
+        return {"ok": True, "status": "success", "output": f"{agent_id}: {task}", "record": record}
+
+
+def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
+    agent = Agently.create_agent()
+    provider = FakeACPProvider(
+        [
+            {"agent_id": "codex", "name": "Codex", "status": "ready", "endpoint": "local"},
+            {"agent_id": "broken", "name": "Broken", "status": "failed"},
+        ]
+    )
+
+    agent.use_acp(root=tmp_path, provider=provider)
+
+    action_ids = {item.get("action_id") for item in agent.action.get_action_list(tags=[f"agent-{ agent.name }"])}
+    assert {"acp_list_agents", "acp_run_task"}.issubset(action_ids)
+
+    list_result = agent.action.execute_action("acp_list_agents", {})
+    assert list_result.get("status") == "success"
+    assert [item["agent_id"] for item in list_result.get("agents", [])] == ["codex"]
+    assert [item["agent_id"] for item in list_result.get("data", {}).get("agents", [])] == ["codex"]
+
+    run_result = agent.action.execute_action(
+        "acp_run_task",
+        {"agent_id": "codex", "task": "inspect the current branch", "working_subdir": "."},
+    )
+
+    assert run_result.get("status") == "success"
+    assert run_result.get("agent_id") == "codex"
+    assert run_result.get("data", {}).get("output") == "codex: inspect the current branch"
+    assert provider.runs[0]["working_dir"] == str(tmp_path.resolve())
+
+
+def test_agent_use_acp_skips_missing_or_failed_agents(tmp_path):
+    agent = Agently.create_agent()
+    provider = FakeACPProvider([{"agent_id": "broken", "status": "failed"}])
+
+    agent.use_acp(root=tmp_path, provider=provider)
+
+    action_ids = {item.get("action_id") for item in agent.action.get_action_list(tags=[f"agent-{ agent.name }"])}
+    assert "acp_list_agents" in action_ids
+    assert "acp_run_task" not in action_ids
+    list_result = agent.action.execute_action("acp_list_agents", {})
+    assert list_result.get("status") == "skipped"
+    assert list_result.get("agents") == []
+    diagnostics = list_result.get("diagnostics", [])
+    assert isinstance(diagnostics, list)
+    assert diagnostics[0].get("code") == "fake.discovery"
+
+
+def test_agent_use_acp_error_on_missing_agents(tmp_path):
+    agent = Agently.create_agent()
+    provider = FakeACPProvider([])
+
+    with pytest.raises(RuntimeError, match="No handshake-verified Agent Client Protocol"):
+        agent.use_acp(root=tmp_path, provider=provider, on_missing="error")
+
+
+@pytest.mark.asyncio
+async def test_acp_run_task_rejects_unknown_agent_and_outside_root(tmp_path):
+    provider = FakeACPProvider([{"agent_id": "codex", "status": "ready"}])
+    acp = ACP(root=tmp_path, provider=provider)
+
+    unknown = await acp.async_run_task("unknown", "do work")
+    outside = await acp.async_run_task("codex", "do work", working_subdir="../outside")
+
+    assert unknown["status"] == "error"
+    assert unknown["diagnostics"][0]["code"] == "acp.agent_unknown"
+    assert outside["status"] == "error"
+    assert outside["diagnostics"][0]["code"] == "acp.root_boundary"
 
 
 def test_agent_use_actions_accepts_search_package():

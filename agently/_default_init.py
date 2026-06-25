@@ -36,6 +36,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
         SearchActionExecutor,
     )
     from agently.builtins.plugins.ExecutionResourceProvider import (
+        ACPExecutionResourceProvider,
         BashExecutionResourceProvider,
         BrowserExecutionResourceProvider,
         DockerExecutionResourceProvider,
@@ -57,6 +58,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("ActionExecutor", NodeJSActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", DockerActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", SQLiteActionExecutor, activate=False)
+    plugin_manager.register("ExecutionResourceProvider", ACPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", MCPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", BashExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", PythonExecutionResourceProvider, activate=False)

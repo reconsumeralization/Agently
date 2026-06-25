@@ -141,6 +141,15 @@ is also Action-native; its default path is Playwright + BS4, while pyautogui is
 kept as legacy/advanced configuration. If a Browse action needs a managed
 browser/page/session, register it with a Browser ExecutionResource provider enabled.
 
+Agent Client Protocol (ACP) coding agents are exposed as Action capability, not
+as an AgentExecution route. Use `agent.use_acp(root=".", on_missing="skip")` to
+scan local ACP endpoints, handshake with available coding agents, and register
+`acp_list_agents` plus `acp_run_task` only when a runnable agent is verified.
+The default `on_missing="skip"` records diagnostics and avoids fake runnable
+agents; `on_missing="error"` fails closed. ACP run actions declare
+`ExecutionResource(kind="acp")` so root scope and lifecycle facts stay in the
+resource layer.
+
 The `desc=` argument on `enable_*` helpers is optional. By default it is appended
 as additional guidance so the model still sees the baseline usage and safety
 constraints. Use `desc_mode="override"` when you intentionally want to replace

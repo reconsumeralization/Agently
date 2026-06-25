@@ -21,6 +21,7 @@ from .ActionExecutor import (
 )
 from .ActionRuntime import AgentlyActionRuntime
 from .ExecutionResourceProvider import (
+    ACPExecutionResourceProvider,
     BashExecutionResourceProvider,
     MCPExecutionResourceProvider,
     PythonExecutionResourceProvider,

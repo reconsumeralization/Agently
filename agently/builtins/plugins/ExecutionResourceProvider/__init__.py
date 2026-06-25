@@ -1,3 +1,4 @@
+from .ACPExecutionResourceProvider import ACPExecutionResourceProvider
 from .BashExecutionResourceProvider import BashExecutionResourceProvider
 from .MCPExecutionResourceProvider import MCPExecutionResourceProvider
 from .PythonExecutionResourceProvider import PythonExecutionResourceProvider
