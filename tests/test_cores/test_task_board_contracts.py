@@ -561,6 +561,7 @@ async def test_task_board_tick_fans_out_independent_cards_by_default():
                 "cards": [
                     {"id": "a", "objective": "Run A."},
                     {"id": "b", "objective": "Run B."},
+                    {"id": "c", "objective": "Run C."},
                 ],
             },
         ),
@@ -569,10 +570,11 @@ async def test_task_board_tick_fans_out_independent_cards_by_default():
 
     tick = await board.async_run_tick(timeout=1)
 
-    assert max_active == 2
-    assert set(tick.revision.card_results) == {"a", "b"}
+    assert max_active == 3
+    assert set(tick.revision.card_results) == {"a", "b", "c"}
     assert tick.revision.card_results["a"].preview == "done:a"
     assert tick.revision.card_results["b"].preview == "done:b"
+    assert tick.revision.card_results["c"].preview == "done:c"
     assert tick.triggerflow_snapshot["runtime_topology"]["fanout"] == "signal_net_dynamic_overlay"
     assert tick.triggerflow_snapshot["runtime_topology"]["card_requested_event"].startswith("task_board.card.requested.")
     assert tick.triggerflow_snapshot["runtime_topology"]["card_run_binding_id"].startswith("task_board.tick.run_card.")
