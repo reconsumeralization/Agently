@@ -402,6 +402,9 @@ def test_task_board_effort_policy_does_not_define_hard_budgets_or_action_options
     assert any("existing TaskBoard card results" in item for item in policy.evidence_reuse_guidance)
     assert any("Re-gather evidence only" in item for item in policy.evidence_reuse_guidance)
     assert any("localized defect" in item for item in policy.repair_orchestration_guidance)
+    assert any("one terminal control card" in item for item in policy.control_card_guidance)
+    assert any("allowed_execution_shape='readback'" in item for item in policy.control_card_guidance)
+    assert any("synthesis, verification, and next-step decision" in item for item in payload["control_card_guidance"])
 
 
 def test_task_board_planning_result_builds_valid_revision():
@@ -611,6 +614,48 @@ async def test_task_board_tick_does_not_cancel_independent_card_on_required_fail
     assert tick.revision.card_results["first"].status == "failed"
     assert tick.revision.card_results["second"].status == "completed"
     assert tick.card_results["first"].preview == "network timeout"
+
+
+def test_task_board_tick_finalize_incomplete_snapshot_preserves_collected_results():
+    revision = TaskBoardRevision.create(
+        board_id="incomplete-snapshot",
+        graph={
+            "graph_id": "incomplete-snapshot-graph",
+            "cards": [
+                {"id": "a", "objective": "Run A."},
+                {"id": "b", "objective": "Run B."},
+            ],
+        },
+    )
+    board = TaskBoard(revision, handler=lambda _context: {"status": "completed"})
+
+    result = board._finalize_tick_snapshot(
+        revision,
+        {
+            "status": "failed",
+            "pending_tasks_cancelled": 1,
+            "schedule": {
+                "revision_id": "rev-0",
+                "runnable_card_ids": ["a", "b"],
+                "blocked_card_ids": [],
+                "completed_card_ids": [],
+                "diagnostics": [],
+            },
+            "collected_card_results": {
+                "a": {
+                    "card_id": "a",
+                    "status": "completed",
+                    "preview": "A finished before close failure.",
+                }
+            },
+        },
+    )
+
+    assert result.revision.revision_id == "rev-1"
+    assert result.revision.card_results["a"].status == "completed"
+    assert result.revision.card_results["a"].preview == "A finished before close failure."
+    assert result.revision.diagnostics[-1]["code"] == "taskboard.tick.incomplete_snapshot"
+    assert result.triggerflow_snapshot["status"] == "failed"
 
 
 @pytest.mark.asyncio

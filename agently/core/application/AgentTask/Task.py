@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -73,6 +74,23 @@ _STEP_EXECUTION_SHAPES = {
 }
 
 _DAG_STEP_EXECUTION_SHAPES = {"dynamic_task", "execution_dag"}
+_TASKBOARD_CONTROL_CARD_SHAPES = {
+    "control",
+    "model_control",
+    "synthesis",
+    "synthesize",
+    "finalize",
+    "final",
+    "verification",
+    "verify",
+}
+_TASKBOARD_READBACK_CARD_SHAPES = {
+    "readback",
+    "artifact_readback",
+    "cold_readback",
+    "evidence_readback",
+}
+_TASKBOARD_READBACK_PREVIEW_CHARS = 4000
 
 # Upper bound on the in-memory stream replay buffer for late subscribers.
 _STREAM_REPLAY_LIMIT = 5000
@@ -899,7 +917,16 @@ class AgentTask:
             "Plan card objectives and done_when conditions around user-visible outcomes, not around one "
             "specific provider, endpoint, file format, or auxiliary guidance source unless the user explicitly "
             "requires that exact source or artifact. Mark replaceable evidence attempts, optional guidance, "
-            "style checks, and non-critical cross-checks as optional or degradable through failure_policy."
+            "style checks, and non-critical cross-checks as optional or degradable through failure_policy. "
+            "Use allowed_execution_shape='control' for synthesis, verification, finalization, or board-continuation "
+            "decision cards that should be handled by one structured model request. Use allowed_execution_shape='readback' "
+            "for cards whose only job is bounded cold artifact readback. Use an action-capable shape such as 'actions' "
+            "or 'auto' for cards that need external tools, Workspace operations, side effects, or mixed action/readback work. "
+            "After evidence fan-in, do not create a serial chain of control-only cards for synthesis, finalization, "
+            "review, and next-step decision when one control card can return the deliverable, sufficient/gaps, "
+            "next_board_action, diagnostics, and optional patch_proposal. Multiple dependent control cards are only "
+            "justified for distinct user-visible artifacts, different upstream evidence sets, or materially separate "
+            "decisions that cannot be verified in one request."
         )
         request.output(task_board_planning_output_schema(), format="json")
         raw_plan = await self._await_task_request(request.async_get_data(), stage="taskboard_plan")
@@ -915,6 +942,13 @@ class AgentTask:
         )
 
     async def _run_taskboard_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
+        if self._taskboard_card_uses_readback(context.card):
+            return await self._run_taskboard_readback_card(context, context_pack)
+        if self._taskboard_card_uses_control_request(context.card):
+            return await self._run_taskboard_control_card(context, context_pack)
+        return await self._run_taskboard_agent_card(context, context_pack)
+
+    async def _run_taskboard_agent_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
         evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
         try:
             evidence_view = build_task_board_evidence_view(
@@ -1048,6 +1082,319 @@ class AgentTask:
             metadata={
                 "execution_id": execution_meta.get("execution_id"),
                 "execution_strategy": self.execution_strategy,
+            },
+        )
+
+    async def _run_taskboard_control_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
+        evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
+        try:
+            evidence_view = build_task_board_evidence_view(
+                context.revision,
+                card_ids=evidence_card_ids or None,
+            ).to_dict()
+        except ValueError:
+            evidence_view = build_task_board_evidence_view(context.revision).to_dict()
+        request = self.agent.create_temp_request()
+        request.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "card": context.card.to_dict(),
+                "dependency_results": {
+                    key: value.to_dict() for key, value in dict(context.dependency_results).items()
+                },
+                "taskboard_evidence_view": evidence_view,
+                "available_readback": self._taskboard_available_readback(evidence_view),
+                "context_pack": DataFormatter.sanitize(context_pack),
+                "execution_prompt": self._execution_prompt_context(),
+                "planning_policy": context.planning_policy.to_prompt_payload() if context.planning_policy is not None else {},
+            }
+        )
+        request.instruct(
+            "Execute one TaskBoard control card with a single structured model request. "
+            "This card is for synthesis, verification, finalization, or deciding the next board action; "
+            "do not plan or call tools from this request. Use TaskBoardEvidenceView as the hot evidence summary "
+            "and preserve cold refs as pointers. If bounded previews are insufficient, set next_board_action to "
+            "'readback' or 'repair' and explain the exact missing refs or gaps instead of inventing facts. "
+            "When the card can produce the user-facing deliverable, put the complete deliverable body in "
+            "artifact_markdown, candidate_final_result, or final_result. Also return whether the card is sufficient "
+            "and what continuation, if any, the board should consider."
+        )
+        request.output(
+            {
+                "status": (str, "completed, blocked, failed, or skipped for this card", False),
+                "answer": (str, "Card-local synthesis or decision summary", True),
+                "candidate_final_result": (
+                    str,
+                    "Complete user-facing deliverable body when this card directly produces one",
+                    False,
+                ),
+                "final_result": (
+                    str,
+                    "Complete final deliverable body when this card directly produces the final answer",
+                    False,
+                ),
+                "artifact_markdown": (
+                    str,
+                    "Complete markdown deliverable body when this card creates a markdown artifact",
+                    False,
+                ),
+                "sufficient": (bool, "True when this card has enough evidence to satisfy its objective", False),
+                "next_board_action": (
+                    str,
+                    "finalize, continue, readback, repair, patch, block, or stop",
+                    False,
+                ),
+                "gaps": ([str], "Evidence or quality gaps that remain after this control request", False),
+                "evidence": ([str], "Evidence used by this control card", False),
+                "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
+                "diagnostics": ([dict], "Optional control-card diagnostics", False),
+                "patch_proposal": (dict, "Optional TaskBoardPatch proposal when next_board_action is patch", False),
+            },
+            format="json",
+        )
+        await self._emit(
+            f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.control.started",
+            {"card_id": context.card.id},
+        )
+        result_handle = request.get_result()
+        try:
+            card_output = await self._await_taskboard_card_execution(
+                self._consume_taskboard_control_request(context.card.id, result_handle),
+                card_id=context.card.id,
+                stage="control",
+            )
+        except Exception as error:
+            return self._failed_taskboard_card_result(
+                card_id=context.card.id,
+                error=error,
+                execution_id=None,
+            )
+        diagnostics = []
+        if isinstance(card_output, Mapping):
+            raw_diagnostics = card_output.get("diagnostics")
+            if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+                diagnostics.extend(dict(item) if isinstance(item, Mapping) else {"value": item} for item in raw_diagnostics)
+        diagnostics.append(
+            {
+                "execution_kind": "taskboard_control_request",
+                "execution_strategy": self.execution_strategy,
+                "card_id": context.card.id,
+                "next_board_action": card_output.get("next_board_action") if isinstance(card_output, Mapping) else None,
+                "sufficient": card_output.get("sufficient") if isinstance(card_output, Mapping) else None,
+            }
+        )
+        card_status = self._taskboard_control_card_status(card_output)
+        return TaskBoardCardResult(
+            card_id=context.card.id,
+            status=card_status,
+            preview=DataFormatter.sanitize(card_output),
+            diagnostics=tuple(diagnostics),
+            patch_proposal=dict(card_output["patch_proposal"])
+            if isinstance(card_output, Mapping) and isinstance(card_output.get("patch_proposal"), Mapping)
+            else None,
+            metadata={
+                "execution_kind": "taskboard_control_request",
+                "execution_strategy": self.execution_strategy,
+                "next_board_action": card_output.get("next_board_action") if isinstance(card_output, Mapping) else None,
+            },
+        )
+
+    async def _run_taskboard_readback_card(
+        self,
+        context: Any,
+        context_pack: "WorkspaceContextPackage",
+    ) -> TaskBoardCardResult:
+        evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
+        try:
+            evidence_view = build_task_board_evidence_view(
+                context.revision,
+                card_ids=evidence_card_ids or None,
+            ).to_dict()
+        except ValueError:
+            evidence_view = build_task_board_evidence_view(context.revision).to_dict()
+        refs = self._taskboard_readback_artifact_refs(evidence_view)
+        await self._emit(
+            f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.readback.started",
+            {
+                "card_id": context.card.id,
+                "ref_count": len(refs),
+            },
+        )
+        if not refs:
+            payload = {
+                "status": "blocked",
+                "answer": "No Action artifact refs are available for this readback card.",
+                "readbacks": [],
+                "evidence": [],
+                "remaining_work": ["Upstream cards must produce Action artifact refs before readback can run."],
+                "diagnostics": [
+                    {
+                        "code": "taskboard.readback.no_refs",
+                        "card_id": context.card.id,
+                        "evidence_scope": evidence_card_ids or "all",
+                    }
+                ],
+            }
+            await self._emit(
+                f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.readback.completed",
+                {"card_id": context.card.id, "status": "blocked", "success_count": 0, "ref_count": 0},
+            )
+            return TaskBoardCardResult(
+                card_id=context.card.id,
+                status="blocked",
+                preview=DataFormatter.sanitize(payload),
+                diagnostics=tuple(payload["diagnostics"]),
+                metadata={
+                    "execution_kind": "taskboard_artifact_readback",
+                    "execution_strategy": self.execution_strategy,
+                    "ref_count": 0,
+                    "success_count": 0,
+                },
+            )
+
+        action = getattr(self.agent, "action", None)
+        reader = getattr(action, "async_read_action_artifact", None)
+        if not callable(reader):
+            payload = {
+                "status": "failed",
+                "answer": "Action artifact readback is unavailable on the bound Agent.",
+                "readbacks": [],
+                "evidence": [],
+                "remaining_work": ["Provide an Agent Action runtime with async_read_action_artifact(...)."],
+                "diagnostics": [
+                    {
+                        "code": "taskboard.readback.reader_unavailable",
+                        "card_id": context.card.id,
+                        "ref_count": len(refs),
+                    }
+                ],
+            }
+            await self._emit(
+                f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.readback.completed",
+                {"card_id": context.card.id, "status": "failed", "success_count": 0, "ref_count": len(refs)},
+            )
+            return TaskBoardCardResult(
+                card_id=context.card.id,
+                status="failed",
+                preview=DataFormatter.sanitize(payload),
+                artifact_refs=tuple(refs),
+                diagnostics=tuple(payload["diagnostics"]),
+                metadata={
+                    "execution_kind": "taskboard_artifact_readback",
+                    "execution_strategy": self.execution_strategy,
+                    "ref_count": len(refs),
+                    "success_count": 0,
+                },
+            )
+
+        readbacks: list[dict[str, Any]] = []
+        diagnostics: list[dict[str, Any]] = []
+        for ref in refs:
+            artifact_id = str(ref.get("artifact_id") or "")
+            action_call_id = str(ref.get("action_call_id") or "")
+            try:
+                raw_readback = await self._await_taskboard_card_execution(
+                    cast(Awaitable[Any], reader(artifact_id, action_call_id or None)),
+                    card_id=context.card.id,
+                    stage="readback",
+                )
+            except Exception as error:
+                raw_readback = {
+                    "ok": False,
+                    "status": "error",
+                    "artifact_id": artifact_id,
+                    "action_call_id": action_call_id,
+                    "error": f"{ error.__class__.__name__}: { error }",
+                }
+            compact = self._compact_taskboard_action_artifact_readback(raw_readback, ref)
+            readbacks.append(compact)
+            if not compact.get("ok"):
+                diagnostics.append(
+                    {
+                        "code": "taskboard.readback.ref_failed",
+                        "artifact_id": artifact_id,
+                        "action_call_id": action_call_id,
+                        "status": compact.get("status"),
+                        "error": compact.get("error"),
+                    }
+                )
+
+        success_count = sum(1 for item in readbacks if item.get("ok"))
+        failed_count = len(readbacks) - success_count
+        status = "completed" if success_count > 0 else "failed"
+        payload = {
+            "status": status,
+            "answer": f"Read { success_count } of { len(refs) } Action artifact refs with bounded previews.",
+            "readbacks": readbacks,
+            "evidence": [
+                f"artifact:{ item.get('artifact_id') } status={ item.get('status') }"
+                for item in readbacks
+                if item.get("artifact_id")
+            ],
+            "remaining_work": [] if failed_count == 0 else [f"{ failed_count } artifact refs could not be read."],
+            "diagnostics": diagnostics,
+        }
+        await self._emit(
+            f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.readback.completed",
+            {
+                "card_id": context.card.id,
+                "status": status,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "ref_count": len(refs),
+            },
+        )
+        diagnostics.append(
+            {
+                "execution_kind": "taskboard_artifact_readback",
+                "execution_strategy": self.execution_strategy,
+                "card_id": context.card.id,
+                "ref_count": len(refs),
+                "success_count": success_count,
+                "failed_count": failed_count,
+            }
+        )
+        return TaskBoardCardResult(
+            card_id=context.card.id,
+            status=status,
+            preview=DataFormatter.sanitize(payload),
+            artifact_refs=tuple(refs),
+            diagnostics=tuple(diagnostics),
+            metadata={
+                "execution_kind": "taskboard_artifact_readback",
+                "execution_strategy": self.execution_strategy,
+                "ref_count": len(refs),
+                "success_count": success_count,
+                "failed_count": failed_count,
+            },
+        )
+
+    async def _consume_taskboard_control_request(self, card_id: str, result_handle: Any) -> Any:
+        async for item in result_handle.get_async_generator(type="instant"):
+            await self._emit_taskboard_control_stream_item(card_id, item)
+        return await result_handle.async_get_data(raise_ensure_failure=False)
+
+    async def _emit_taskboard_control_stream_item(
+        self,
+        card_id: str,
+        item: Any,
+    ) -> AgentExecutionStreamData:
+        raw_path = str(getattr(item, "path", "") or "stream")
+        return await self._emit(
+            f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.control.{raw_path}",
+            getattr(item, "value", None),
+            event_type="delta",
+            delta=getattr(item, "delta", None),
+            is_complete=bool(getattr(item, "is_complete", False)),
+            meta={
+                "task_id": self.id,
+                "status": self.status,
+                "stage": "taskboard_card_control",
+                "card_id": card_id,
+                "stream_kind": "taskboard_control_request",
+                "control_path": raw_path,
             },
         )
 
@@ -1431,6 +1778,33 @@ class AgentTask:
         return "completed"
 
     @staticmethod
+    def _taskboard_control_card_status(card_output: Any) -> str:
+        if isinstance(card_output, Mapping):
+            status = str(card_output.get("status") or "completed").strip().lower()
+            if status in {"completed", "blocked", "failed", "skipped"}:
+                return status
+            next_action = str(card_output.get("next_board_action") or "").strip().lower()
+            if next_action in {"readback", "needs_readback", "repair", "patch", "continue", "block"}:
+                return "blocked"
+            remaining = card_output.get("remaining_work")
+            gaps = card_output.get("gaps")
+            if AgentTask._has_remaining_work(remaining) or AgentTask._has_remaining_work(gaps):
+                return "blocked"
+        return "completed"
+
+    @staticmethod
+    def _taskboard_card_execution_shape(card: Any) -> str:
+        return str(getattr(card, "allowed_execution_shape", "") or "auto").strip().lower().replace("-", "_")
+
+    @classmethod
+    def _taskboard_card_uses_control_request(cls, card: Any) -> bool:
+        return cls._taskboard_card_execution_shape(card) in _TASKBOARD_CONTROL_CARD_SHAPES
+
+    @classmethod
+    def _taskboard_card_uses_readback(cls, card: Any) -> bool:
+        return cls._taskboard_card_execution_shape(card) in _TASKBOARD_READBACK_CARD_SHAPES
+
+    @staticmethod
     def _taskboard_action_artifact_recall_records(evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
         raw_refs = evidence_view.get("artifact_refs")
         if not isinstance(raw_refs, Sequence) or isinstance(raw_refs, str | bytes | bytearray):
@@ -1473,17 +1847,86 @@ class AgentTask:
         ]
 
     @staticmethod
+    def _taskboard_readback_artifact_refs(evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
+        records = AgentTask._taskboard_action_artifact_recall_records(evidence_view)
+        if not records:
+            return []
+        refs = records[0].get("artifact_refs")
+        if not isinstance(refs, list):
+            return []
+        return [dict(ref) for ref in refs if isinstance(ref, Mapping)]
+
+    @classmethod
+    def _compact_taskboard_action_artifact_readback(
+        cls,
+        readback: Any,
+        ref: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(readback, Mapping):
+            readback = {
+                "ok": False,
+                "status": "invalid_result",
+                "error": f"Action artifact reader returned { type(readback).__name__ }.",
+            }
+        artifact_id = str(readback.get("artifact_id") or ref.get("artifact_id") or "")
+        action_call_id = str(readback.get("action_call_id") or ref.get("action_call_id") or "")
+        value = readback.get("value", readback.get("data", readback.get("result")))
+        original_chars = cls._serialized_prompt_chars(value)
+        preview = cls._compact_verifier_prompt_value(value, max_chars=_TASKBOARD_READBACK_PREVIEW_CHARS)
+        preview_chars = cls._serialized_prompt_chars(preview)
+        compact: dict[str, Any] = {
+            "ok": bool(readback.get("ok")),
+            "status": str(readback.get("status") or ""),
+            "artifact_id": artifact_id,
+            "action_call_id": action_call_id,
+            "artifact_type": str(readback.get("artifact_type") or ref.get("artifact_type") or ""),
+            "label": str(readback.get("label") or ref.get("label") or ""),
+            "media_type": str(readback.get("media_type") or ref.get("media_type") or ""),
+            "ref": DataFormatter.sanitize(dict(ref)),
+            "value_preview": preview,
+            "value_preview_meta": {
+                "truncated": preview_chars < original_chars,
+                "original_chars": original_chars,
+                "preview_chars": preview_chars,
+                "limit_chars": _TASKBOARD_READBACK_PREVIEW_CHARS,
+            },
+        }
+        error = readback.get("error")
+        if error:
+            compact["error"] = cls._truncate_prompt_text(error, 1200)
+        meta = readback.get("meta")
+        if isinstance(meta, Mapping):
+            compact["meta"] = cls._compact_verifier_prompt_value(meta, max_chars=1200)
+        return compact
+
+    @staticmethod
+    def _serialized_prompt_chars(value: Any) -> int:
+        try:
+            return len(json.dumps(DataFormatter.sanitize(value), ensure_ascii=False, default=str))
+        except Exception:
+            return len(str(value or ""))
+
+    @staticmethod
     def _taskboard_available_readback(evidence_view: Mapping[str, Any]) -> dict[str, Any]:
         records = AgentTask._taskboard_action_artifact_recall_records(evidence_view)
         refs = records[0]["artifact_refs"] if records else []
         return {
             "schema_version": "agent_task_taskboard_readback/v1",
+            "taskboard_readback_shape": {
+                "available": bool(refs),
+                "allowed_execution_shape": "readback",
+                "artifact_refs": DataFormatter.sanitize(refs),
+            },
             "action_artifact_readback": {
                 "available": bool(refs),
                 "action_id": "read_action_artifact",
                 "artifact_refs": DataFormatter.sanitize(refs),
             },
-            "policy": "Use readback only when bounded previews are insufficient for the current card objective.",
+            "policy": (
+                "Use a TaskBoard readback card only when bounded previews are insufficient and the only "
+                "remaining work is scoped cold artifact readback. Mixed tool/readback work may still use "
+                "the ActionRuntime read_action_artifact action."
+            ),
         }
 
     async def _build_context(self) -> "WorkspaceContextPackage":

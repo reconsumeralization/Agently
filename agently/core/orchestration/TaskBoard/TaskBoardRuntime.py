@@ -316,15 +316,55 @@ class TaskBoard:
         previous_revision: TaskBoardRevision,
         snapshot: Mapping[str, Any],
     ) -> TaskBoardTickResult:
-        next_revision = TaskBoardRevision.from_value(snapshot["revision"])
-        schedule = TaskBoardSchedulePlan(
-            revision_id=snapshot["schedule"]["revision_id"],
-            runnable_card_ids=tuple(snapshot["schedule"]["runnable_card_ids"]),
-            blocked_card_ids=tuple(snapshot["schedule"].get("blocked_card_ids") or ()),
-            completed_card_ids=tuple(snapshot["schedule"].get("completed_card_ids") or ()),
-            diagnostics=tuple(snapshot["schedule"].get("diagnostics") or ()),
-            metadata=dict(snapshot["schedule"].get("metadata") or {}),
-        )
+        schedule_payload = snapshot.get("schedule")
+        if isinstance(schedule_payload, Mapping):
+            schedule = TaskBoardSchedulePlan(
+                revision_id=str(schedule_payload.get("revision_id") or previous_revision.revision_id),
+                runnable_card_ids=tuple(schedule_payload.get("runnable_card_ids") or ()),
+                blocked_card_ids=tuple(schedule_payload.get("blocked_card_ids") or ()),
+                completed_card_ids=tuple(schedule_payload.get("completed_card_ids") or ()),
+                diagnostics=tuple(schedule_payload.get("diagnostics") or ()),
+                metadata=dict(schedule_payload.get("metadata") or {}),
+            )
+        else:
+            schedule = schedule_task_board_revision(previous_revision)
+        if "revision" in snapshot:
+            next_revision = TaskBoardRevision.from_value(snapshot["revision"])
+        else:
+            collected_payload = snapshot.get("collected_card_results")
+            collected_results: list[TaskBoardCardResult] = []
+            if isinstance(collected_payload, Mapping):
+                for value in collected_payload.values():
+                    collected_results.append(TaskBoardCardResult.from_value(value))
+            diagnostic = {
+                "code": "taskboard.tick.incomplete_snapshot",
+                "message": "TriggerFlow tick closed before a finalized TaskBoard revision was written.",
+                "snapshot_status": snapshot.get("status"),
+                "pending_tasks_cancelled": snapshot.get("pending_tasks_cancelled"),
+            }
+            operations: list[Mapping[str, Any]] = [
+                {"op": "record_card_result", "result": result.to_dict()} for result in collected_results
+            ]
+            evidence_refs: list[Mapping[str, Any]] = []
+            for result in collected_results:
+                evidence_refs.extend(result.artifact_refs)
+                evidence_refs.extend(result.file_refs)
+            operations.append({"op": "append_diagnostic", "diagnostic": diagnostic})
+            if collected_results:
+                patch = TaskBoardPatch(
+                    base_revision=previous_revision.revision_id,
+                    operations=tuple(operations),
+                    evidence_refs=tuple(evidence_refs),
+                    source="task_board.tick.incomplete_snapshot",
+                )
+                next_revision = apply_task_board_patch(previous_revision, patch)
+            else:
+                patch = TaskBoardPatch(
+                    base_revision=previous_revision.revision_id,
+                    operations=tuple(operations),
+                    source="task_board.tick.incomplete_snapshot",
+                )
+                next_revision = apply_task_board_patch(previous_revision, patch)
         self.revision = next_revision
         return TaskBoardTickResult(
             previous_revision=previous_revision,

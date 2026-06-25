@@ -74,6 +74,7 @@ class TaskBoardPlanningPolicy:
     action_block_meaning: str
     task_complexity_basis: tuple[str, ...]
     owner_boundaries: tuple[str, ...]
+    control_card_guidance: tuple[str, ...]
     evidence_reuse_guidance: tuple[str, ...]
     repair_orchestration_guidance: tuple[str, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -84,6 +85,7 @@ class TaskBoardPlanningPolicy:
             "action_block_meaning": self.action_block_meaning,
             "task_complexity_basis": list(self.task_complexity_basis),
             "owner_boundaries": list(self.owner_boundaries),
+            "control_card_guidance": list(self.control_card_guidance),
             "evidence_reuse_guidance": list(self.evidence_reuse_guidance),
             "repair_orchestration_guidance": list(self.repair_orchestration_guidance),
             "metadata": dict(self.metadata),
@@ -146,6 +148,14 @@ def resolve_task_board_planning_policy(
             "TaskBoard policy must not grant permissions, hide capabilities, or define hard budgets.",
             "TriggerFlow owns framework-visible lifecycle; TaskBoard does not own ModelRequest or ActionRuntime.",
         ),
+        control_card_guidance=(
+            "Use allowed_execution_shape='control' for synthesis, verification, finalization, or board-continuation decisions that do not need tools.",
+            "Use allowed_execution_shape='readback' when the card's only work is bounded cold artifact readback from existing dependency refs.",
+            "A control card returns the deliverable or card-local synthesis plus sufficient, gaps, next_board_action, diagnostics, and optional patch_proposal in one structured payload.",
+            "After evidence fan-in, prefer one terminal control card that combines synthesis, verification, and next-step decision instead of a serial chain of synthesis -> risk -> finalization -> review control cards.",
+            "Create multiple dependent control cards only when each one produces a distinct user-visible artifact, waits for different upstream evidence, or represents a materially separate decision that cannot be verified in the same request.",
+            "Do not use a downstream control card only to review, summarize, or repackage the immediately previous control card; put that review or finalization into the earlier control card fields.",
+        ),
         evidence_reuse_guidance=(
             "Use existing TaskBoard card results, artifact refs, file refs, and scoped readback before planning or executing another evidence-gathering action.",
             "When dependency evidence already contains the needed facts or cold refs, prefer synthesis, comparison, or local repair over re-gathering the same external evidence.",
@@ -174,7 +184,14 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                 "depends_on": ([str], "Upstream card ids this card depends on.", True),
                 "evidence_to_use": ([str], "Evidence sources or upstream refs this card expects to use.", False),
                 "done_when": (str, "Completion condition for this card.", True),
-                "allowed_execution_shape": (str, "Optional owned execution shape hint such as auto, model, action, or task_dag.", False),
+                "allowed_execution_shape": (
+                    str,
+                    "Optional handler-defined execution shape. Use control for synthesis/finalization/verification "
+                    "cards that should run as one structured model request; use readback for scoped cold artifact "
+                    "readback; use auto or actions for tool, Workspace, side-effect, or mixed action/readback cards. "
+                    "Avoid serial control-only chains when one control card can synthesize, verify, and decide continuation.",
+                    False,
+                ),
                 "failure_policy": (
                     str,
                     "required, optional, or degradable. Required failure blocks dependents. Optional/degradable failure may unblock dependents with diagnostics when enough core evidence exists.",

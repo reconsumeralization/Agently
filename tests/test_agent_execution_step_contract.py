@@ -649,6 +649,61 @@ class MockTaskBoardRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardControlRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardControlRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Complete the task through a control card.",
+                "cards": [
+                    {
+                        "id": "synthesize",
+                        "action_block": "Synthesize and verify the final deliverable.",
+                        "objective": "Produce the complete final Markdown deliverable and decide whether it is enough.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "The final deliverable is complete and sufficient.",
+                        "allowed_execution_shape": "control",
+                    }
+                ],
+                "reflection_points": ["Check sufficiency in the control-card output."],
+                "completion_gate": "The control card returns a complete accepted deliverable.",
+                "why_this_effort_shape": "One control card can synthesize and self-check this task.",
+                "risk_notes": [],
+            }
+        elif "Execute one TaskBoard control card with a single structured model request" in text:
+            payload = {
+                "status": "completed",
+                "answer": "control card synthesized the final deliverable",
+                "artifact_markdown": "# Control Result\n\nComplete deliverable body.",
+                "sufficient": True,
+                "next_board_action": "finalize",
+                "gaps": [],
+                "evidence": ["control evidence summary"],
+                "remaining_work": [],
+                "diagnostics": [{"kind": "control", "message": "single request handled synthesis and decision"}],
+            }
+        elif "Execute exactly one TaskBoard card" in text:
+            payload = {
+                "status": "failed",
+                "answer": "legacy child execution should not run for control cards",
+                "remaining_work": ["unexpected legacy path"],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": True,
+                "reason": "control-card deliverable satisfies the criterion",
+                "final_result": "# Control Result",
+                "missing_criteria": [],
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardFinalCandidateRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardFinalCandidateRequester"
     full_report = (
@@ -790,7 +845,7 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                         "depends_on": ["collect"],
                         "evidence_to_use": ["collect"],
                         "done_when": "The cold artifact ref has been read back.",
-                        "allowed_execution_shape": "model",
+                        "allowed_execution_shape": "readback",
                     },
                 ],
                 "reflection_points": ["Read cold refs when dependency previews are insufficient."],
@@ -801,7 +856,11 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
         elif "next_action" in text and "execution_commands" in text:
             artifact_id_match = re.search(r"act_art_[0-9a-f]+", text)
             action_call_id_match = re.search(r"act_call_[0-9a-f]+", text)
-            if "read_action_artifact" in text and artifact_id_match is not None:
+            if (
+                "Review evidence by reading cold artifact refs" in text
+                and "read_action_artifact" in text
+                and artifact_id_match is not None
+            ):
                 MockTaskBoardReadbackRequester.review_planning_prompt = text
                 MockTaskBoardReadbackRequester.readback_planning_seen = True
                 MockTaskBoardReadbackRequester.last_action_id = "read_action_artifact"
@@ -913,6 +972,13 @@ def _create_taskboard_agent(name: str = "agent-execution-taskboard"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockTaskBoardRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_control_agent(name: str = "agent-execution-taskboard-control"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardControlRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -1226,6 +1292,52 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_taskboard_control_card_uses_single_model_request_without_child_execution(tmp_path):
+    agent = _create_taskboard_control_agent("execution-taskboard-control-card").use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Produce a control-card deliverable.",
+        success_criteria=["The control card final answer is accepted."],
+        execution="taskboard",
+        max_iterations=2,
+    )
+
+    stream_items = [item async for item in execution.get_async_generator()]
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    taskboard = task_meta["result"]["taskboard"]
+    card_result = taskboard["revision"]["card_results"]["synthesize"]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["final_result"] == "# Control Result\n\nComplete deliverable body."
+    assert card_result["status"] == "completed"
+    assert card_result["metadata"]["execution_kind"] == "taskboard_control_request"
+    assert any(
+        item.path == "agent_task.taskboard.card.synthesize.control.started"
+        for item in stream_items
+    )
+    assert any(
+        (item.meta or {}).get("stream_kind") == "taskboard_control_request"
+        and (item.meta or {}).get("card_id") == "synthesize"
+        for item in stream_items
+    )
+    assert not any(
+        item.path == "agent_task.taskboard.card.synthesize.execution.started"
+        for item in stream_items
+    )
+    assert not any("Execute exactly one TaskBoard card" in request for request in MockAgentExecutionRequester.requests)
+    planning_requests = [
+        request for request in MockAgentExecutionRequester.requests
+        if "Plan a TaskBoard for this submitted task" in request
+    ]
+    assert planning_requests
+    assert "serial chain of control-only cards" in planning_requests[-1]
+    assert "control_card_guidance" in planning_requests[-1]
+
+
+@pytest.mark.asyncio
 async def test_taskboard_final_preserves_complete_candidate_from_terminal_card(tmp_path):
     agent = _create_taskboard_final_candidate_agent("execution-taskboard-final-candidate").use_workspace(
         tmp_path / "workspace"
@@ -1273,20 +1385,24 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
         .use_actions(["produce_large_evidence"])
     )
 
+    stream_items = [item async for item in execution.get_async_generator()]
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
     review_result = taskboard["revision"]["card_results"]["review"]
-    review_actions = review_result["diagnostics"][-1]["evidence_summary"]["action_ids"]
+    readbacks = review_result["preview"]["readbacks"]
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["final_result"] == "taskboard readback accepted result"
-    assert MockTaskBoardReadbackRequester.readback_planning_seen is True
-    assert "read_action_artifact" in MockTaskBoardReadbackRequester.review_planning_prompt
-    assert "read_action_artifact" in review_actions
     assert review_result["status"] == "completed"
+    assert review_result["metadata"]["execution_kind"] == "taskboard_artifact_readback"
+    assert readbacks[0]["ok"] is True
+    assert "Hidden evidence" in json.dumps(readbacks[0]["value_preview"], ensure_ascii=False)
+    assert any(item.path == "agent_task.taskboard.card.review.readback.started" for item in stream_items)
+    assert any(item.path == "agent_task.taskboard.card.review.readback.completed" for item in stream_items)
+    assert not any(item.path == "agent_task.taskboard.card.review.execution.started" for item in stream_items)
 
 
 @pytest.mark.asyncio

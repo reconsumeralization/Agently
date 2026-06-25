@@ -494,10 +494,16 @@ class TriggerFlowActionFlow:
             await data.async_emit("PLAN", None)
             return records
 
+        async def finalize_loop(data):
+            result = data.value if isinstance(data.value, list) else []
+            data.set_state("action_loop_result", result)
+            data.set_state("done_plans", result)
+            return result
+
         flow.to(initialize_loop)
         flow.when("PLAN").to(plan_step)
         flow.when("EXECUTE").to(execute_step)
-        flow.when("DONE").to(lambda data: data.value).end()
+        flow.when("DONE").to(finalize_loop)
 
         execution = flow.create_execution(parent_run_context=action_loop_run, auto_close=False)
         try:
@@ -546,7 +552,7 @@ class TriggerFlowActionFlow:
                 )
             raise
         if isinstance(result, dict):
-            result = result.get("$final_result")
+            result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
             return []
         normalized = [

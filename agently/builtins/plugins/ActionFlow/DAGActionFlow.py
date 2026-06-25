@@ -367,10 +367,16 @@ class DAGActionFlow:
             await data.async_emit("PLAN", None)
             return records
 
+        async def finalize_loop(data):
+            result = data.value if isinstance(data.value, list) else []
+            data.set_state("action_loop_result", result)
+            data.set_state("done_plans", result)
+            return result
+
         flow.to(initialize_loop)
         flow.when("PLAN").to(plan_step)
         flow.when("EXECUTE").to(execute_step_via_dag)
-        flow.when("DONE").to(lambda data: data.value).end()
+        flow.when("DONE").to(finalize_loop)
 
         execution = flow.create_execution(parent_run_context=action_loop_run)
         try:
@@ -399,7 +405,7 @@ class DAGActionFlow:
                 )
             raise
         if isinstance(result, dict):
-            result = result.get("$final_result")
+            result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
             return []
         normalized = [
