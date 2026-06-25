@@ -1400,10 +1400,10 @@ class AgentTask:
                 "and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
                 "is available, return status completed with diagnostics that explain the degraded source boundary. "
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
-                "evidence is truly critical. If this card produces the user-facing deliverable, put the complete "
-                "deliverable body in artifact_markdown, candidate_final_result, or final_result when it fits the "
-                "bounded output. For long reports, exam papers, or multi-section deliverables, return artifact_markdown "
-                "or an artifact_manifest with sections/content instead of forcing the full body through one JSON field. "
+                "evidence is truly critical. If this card produces the user-facing deliverable, use candidate_final_result, "
+                "final_result, or artifact_markdown only when the complete body is short enough for the bounded output. "
+                "For long reports, exam papers, or multi-section deliverables, prefer artifact_manifest with "
+                "sections/content so the JSON stays a control plane instead of a giant body field. "
                 "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
                 "for deliverables. Review or "
                 "verification cards must not put review notes in those deliverable fields unless they include the "
@@ -1426,7 +1426,7 @@ class AgentTask:
                     ),
                     "artifact_markdown": (
                         str,
-                        "Complete markdown deliverable body when this card creates a markdown artifact",
+                        "Short markdown deliverable body when this card creates a bounded markdown artifact",
                         False,
                     ),
                     "artifact_manifest": (
@@ -1584,9 +1584,10 @@ class AgentTask:
             "do not plan or call tools from this request. Use TaskBoardEvidenceView as the hot evidence summary "
             "and preserve cold refs as pointers. If bounded previews are insufficient, set next_board_action to "
             "'readback' or 'repair' and explain the exact missing refs or gaps instead of inventing facts. "
-            "When the card can produce the user-facing deliverable, put the complete deliverable body in "
-            "artifact_markdown, candidate_final_result, or final_result. For sectioned artifacts, return an "
-            "artifact_manifest with sections/content; AgentTask will write/read back Workspace files and produce "
+            "When the card can produce the user-facing deliverable, use artifact_markdown, candidate_final_result, "
+            "or final_result only when the complete body is short enough for the bounded output. For sectioned or "
+            "long artifacts, prefer artifact_manifest with sections/content so JSON remains the control plane; "
+            "AgentTask will write/read back Workspace files and produce "
             "trusted file_refs. Do not invent file_refs for deliverables. Also return whether the card is sufficient "
             "and what continuation, if any, the board should consider."
         )
@@ -1606,7 +1607,7 @@ class AgentTask:
                 ),
                 "artifact_markdown": (
                     str,
-                    "Complete markdown deliverable body when this card creates a markdown artifact",
+                    "Short markdown deliverable body when this card creates a bounded markdown artifact",
                     False,
                 ),
                 "artifact_manifest": (
@@ -3013,9 +3014,9 @@ class AgentTask:
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
             "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
             " For long deliverables, choose deliverable_mode='workspace_artifact' or "
-            "'sectioned_workspace_artifact' and instruct the execution step to return artifact_markdown or an "
-            "artifact_manifest. AgentTask will write/read back Workspace files; the model must not self-declare "
-            "trusted file_refs for a deliverable."
+            "'sectioned_workspace_artifact' and instruct the execution step to return a sectioned artifact_manifest; "
+            "use artifact_markdown only for bounded short deliverables. AgentTask will write/read back Workspace "
+            "files; the model must not self-declare trusted file_refs for a deliverable."
         )
         request.output(
             {
@@ -3215,8 +3216,9 @@ class AgentTask:
                 "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
                 "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
                 "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "
-                "is workspace_artifact or sectioned_workspace_artifact, return artifact_markdown or an artifact_manifest "
-                "with sections/content; AgentTask will write/read back Workspace files and produce trusted file_refs. "
+                "is workspace_artifact or sectioned_workspace_artifact, prefer an artifact_manifest with sections/content "
+                "for long or multi-section deliverables; use artifact_markdown only for bounded short bodies. AgentTask "
+                "will write/read back Workspace files and produce trusted file_refs. "
                 "Do not invent file_refs for deliverables. "
                 "Do not claim final completion unless evidence supports it."
             )
@@ -3231,7 +3233,7 @@ class AgentTask:
                 ),
                 "artifact_markdown": (
                     str,
-                    "Complete markdown deliverable body when this step creates one and it fits bounded output",
+                    "Short markdown deliverable body when this step creates one and it fits bounded output",
                     False,
                 ),
                 "artifact_manifest": (

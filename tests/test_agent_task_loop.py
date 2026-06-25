@@ -217,6 +217,90 @@ async def test_agent_task_flat_workspace_artifact_delivery_before_verification(t
     assert meta["iterations"][0]["verification"]["reason"] == "trusted Workspace readback evidence is present"
 
 
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_refs_survive_incomplete_verification(tmp_path):
+    class WorkspaceArtifactPartialRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactPartialRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                assert "reports/partial.md" in text
+                payload = {
+                    "is_complete": False,
+                    "requires_block": False,
+                    "reason": "real Workspace artifact exists but source coverage is incomplete",
+                    "failure_analysis": "The artifact was written, but verification still needs stronger evidence.",
+                    "acceptance_delta": ["Add stronger cited evidence before final acceptance."],
+                    "missing_criteria": ["stronger cited evidence"],
+                    "replan_instruction": "Gather stronger cited evidence and update the artifact.",
+                    "final_result_required": True,
+                    "final_result": "",
+                }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {
+                    "execution_shape": "direct",
+                    "step_instruction": "draft the report as a sectioned Workspace artifact manifest",
+                    "expected_evidence": "Workspace write/readback and cited evidence",
+                    "rationale": "the task requires a file deliverable",
+                    "deliverable_mode": "sectioned_workspace_artifact",
+                }
+            elif "Execute exactly one bounded step" in text:
+                payload = {
+                    "step_result": "prepared a sectioned artifact manifest",
+                    "artifact_manifest": {
+                        "path": "reports/partial.md",
+                        "sections": [
+                            {
+                                "title": "概览",
+                                "content": "这是一份仍需补证据的报告草稿。",
+                            },
+                            {
+                                "title": "待补充证据",
+                                "content": "后续步骤需要补充真实引用后才能验收。",
+                            },
+                        ],
+                        "file_refs": [{"path": "fake-partial.md", "sha256": "fake"}],
+                    },
+                    "file_refs": [{"path": "model-claimed.md", "sha256": "fake"}],
+                    "evidence": ["draft content is ready for framework delivery"],
+                    "remaining_work": ["stronger cited evidence"],
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-partial-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-workspace-artifact-partial-plugins")
+    plugin_manager.register("ModelRequester", WorkspaceArtifactPartialRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-workspace-artifact-partial")
+    task = agent.create_task(
+        task_id="workspace-artifact-partial",
+        goal="Create a report file and verify it against cited evidence.",
+        success_criteria=["A final report file is written.", "The report has stronger cited evidence."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    result = await task.run()
+    meta = await task.meta()
+
+    assert result["status"] == "max_iterations"
+    assert result["accepted"] is False
+    assert result["artifact_status"] == "partial"
+    delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
+    assert delivery["status"] == "delivered"
+    assert delivery["file_refs"][0]["path"] == "reports/partial.md"
+    assert meta["iterations"][0]["verification"]["reason"] == "real Workspace artifact exists but source coverage is incomplete"
+    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace").with_scope_node(
+        "tasks",
+        "workspace-artifact-partial",
+    )
+    readback = await task_scoped_workspace.read_file("reports/partial.md")
+    assert "这是一份仍需补证据的报告草稿" in readback["content"]
+    assert "## 待补充证据" in readback["content"]
+
+
 def test_agent_language_policy_normalizes_and_reaches_execution_prompt():
     agent = _create_agent("agent-language-policy")
 
