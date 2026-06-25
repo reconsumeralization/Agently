@@ -420,17 +420,21 @@ class AgentlyActionRuntime:
         context: "ActionRunContext",
         request: "ActionExecutionRequest",
     ) -> list["ActionResult"]:
+        from agently.core.orchestration.TriggerFlow import TriggerFlow
+
         settings = context["settings"]
         action_calls = request.get("action_calls", [])
         concurrency = request.get("concurrency", None)
+        timeout = request.get("timeout", None)
         if len(action_calls) == 0:
             return []
         if self.action.async_execute_action is None:
             raise RuntimeError("[Agently Action] Action dispatcher is not available.")
 
-        semaphore = asyncio.Semaphore(concurrency) if isinstance(concurrency, int) and concurrency > 0 else None
-
-        async def run_one(action_call: "ActionCall"):
+        async def run_one(data):
+            action_call = data.input
+            if not isinstance(action_call, dict):
+                action_call = {}
             action_id = str(action_call.get("action_id", ""))
             action_input = action_call.get("action_input", {})
             if not isinstance(action_input, dict):
@@ -453,12 +457,21 @@ class AgentlyActionRuntime:
                     next_value=next_step,
                 )
 
-            if semaphore is None:
-                return await execute_once()
-            async with semaphore:
-                return await execute_once()
+            return await execute_once()
 
-        return await asyncio.gather(*[run_one(action_call) for action_call in action_calls])
+        async def collect_results(data):
+            values = data.input if isinstance(data.input, list) else []
+            await data.async_set_state("results", values)
+            return values
+
+        flow = TriggerFlow(name="action-runtime-execute-actions")
+        flow.for_each(concurrency=concurrency).to(run_one).end_for_each().to(collect_results)
+        execution = flow.create_execution(auto_close=False)
+        await execution.async_start(list(action_calls))
+        close_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
+        snapshot = await execution.async_close(timeout=close_timeout)
+        results = snapshot.get("results")
+        return cast(list["ActionResult"], results if isinstance(results, list) else [])
 
     async def async_generate_action_call(
         self,

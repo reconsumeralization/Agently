@@ -32,6 +32,7 @@ from agently.types.data import (
 
 _TASK_BOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _TERMINAL_CARD_STATUSES = {"completed", "failed", "blocked", "skipped"}
+_SATISFYING_DEGRADED_STATUSES = {"failed", "blocked", "skipped"}
 
 
 @dataclass(frozen=True)
@@ -131,11 +132,33 @@ def schedule_task_board_revision(
     }
     runnable: list[str] = []
     blocked: list[str] = []
+    diagnostics: list[Mapping[str, Any]] = []
     for card_id in validation.topological_card_ids:
         card = card_by_id[card_id]
         if card_id in terminal or str(card.status) in _TERMINAL_CARD_STATUSES:
             continue
-        missing = [dependency for dependency in card.depends_on if dependency not in completed]
+        missing: list[str] = []
+        for dependency in card.depends_on:
+            dependency_card = card_by_id[dependency]
+            dependency_result = normalized.card_results.get(dependency)
+            if task_board_dependency_satisfied(dependency_card, dependency_result):
+                status = str(dependency_result.status) if dependency_result is not None else str(dependency_card.status)
+                if status in _SATISFYING_DEGRADED_STATUSES:
+                    diagnostics.append(
+                        {
+                            "code": "taskboard.degraded_dependency_satisfied",
+                            "card_id": card_id,
+                            "dependency": dependency,
+                            "dependency_status": status,
+                            "failure_policy": task_board_card_failure_policy(dependency_card),
+                            "message": (
+                                f"TaskBoardCard '{card_id}' can run because dependency "
+                                f"'{dependency}' is non-required and ended with status '{status}'."
+                            ),
+                        }
+                    )
+                continue
+            missing.append(dependency)
         if missing:
             blocked.append(card_id)
             continue
@@ -145,6 +168,7 @@ def schedule_task_board_revision(
         runnable_card_ids=tuple(runnable),
         blocked_card_ids=tuple(blocked),
         completed_card_ids=tuple(sorted(completed)),
+        diagnostics=tuple(diagnostics),
     )
 
 
@@ -278,3 +302,37 @@ def _operation_dependency(operation: Mapping[str, Any]) -> str:
     if not dependency:
         raise ValueError(f"TaskBoardPatch operation '{ operation.get('op') }' requires dependency.")
     return dependency
+
+
+def task_board_card_failure_policy(card: TaskBoardCard) -> str:
+    value = getattr(card, "failure_policy", None)
+    if value is None and isinstance(getattr(card, "evidence_contract", None), Mapping):
+        value = card.evidence_contract.get("failure_policy")
+    if value is None and isinstance(getattr(card, "metadata", None), Mapping):
+        value = card.metadata.get("failure_policy")
+    text = str(value or "required").strip().lower().replace("-", "_")
+    if text in {"nice_to_have", "best_effort", "non_blocking", "nonblocking"}:
+        return "optional"
+    if text in {"soft", "fallback", "degrade"}:
+        return "degradable"
+    if text in {"optional", "degradable"}:
+        return text
+    return "required"
+
+
+def task_board_card_required(card: TaskBoardCard) -> bool:
+    return task_board_card_failure_policy(card) == "required"
+
+
+def task_board_dependency_satisfied(
+    dependency_card: TaskBoardCard,
+    dependency_result: TaskBoardCardResult | None,
+) -> bool:
+    if dependency_result is None:
+        return str(getattr(dependency_card, "status", "")).strip().lower() == "skipped" and not task_board_card_required(dependency_card)
+    status = str(dependency_result.status).strip().lower()
+    if status == "completed":
+        return True
+    if status in _SATISFYING_DEGRADED_STATUSES and not task_board_card_required(dependency_card):
+        return True
+    return False

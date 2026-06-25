@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -104,22 +105,79 @@ class TaskBoard:
         concurrency: int | None = None,
     ) -> TaskBoardTickResult:
         previous_revision = self.revision
+        schedule = schedule_task_board_revision(previous_revision)
+        card_by_id = previous_revision.graph.card_by_id()
         flow = TriggerFlow(name=f"{ self.name }-tick-{ previous_revision.revision_id }")
+        card_requested_event = f"task_board.card.requested.{ previous_revision.revision_id }"
+        cards_completed_event = f"task_board.cards.completed.{ previous_revision.revision_id }"
+        collect_lock = asyncio.Lock()
 
-        async def run_tick(data: TriggerFlowRuntimeData[Any, Any, Any]):
-            revision = TaskBoardRevision.from_value(data.input)
-            schedule = schedule_task_board_revision(revision)
+        async def prepare_tick(data: TriggerFlowRuntimeData[Any, Any, Any]):
             await data.async_put_into_stream(
                 {
                     "event": "task_board.tick.started",
-                    "board_id": revision.board_id,
-                    "revision_id": revision.revision_id,
+                    "board_id": previous_revision.board_id,
+                    "revision_id": previous_revision.revision_id,
                     "runnable_card_ids": list(schedule.runnable_card_ids),
                 }
             )
-            next_revision = await self._async_execute_schedule(revision, schedule, concurrency=concurrency)
-            await data.async_set_state("previous_revision", revision.to_dict())
+            await data.async_set_state("previous_revision", previous_revision.to_dict())
             await data.async_set_state("schedule", schedule.to_dict())
+            await data.async_set_state(
+                "runtime_topology",
+                {
+                    "fanout": "dynamic_emit_when",
+                    "card_requested_event": card_requested_event,
+                    "cards_completed_event": cards_completed_event,
+                    "concurrency": concurrency,
+                },
+            )
+            if not schedule.runnable_card_ids:
+                await data.async_set_state("revision", previous_revision.to_dict())
+                await data.async_set_state(
+                    "card_results",
+                    {card_id: result.to_dict() for card_id, result in previous_revision.card_results.items()},
+                )
+                await data.async_put_into_stream(
+                    {
+                        "event": "task_board.tick.completed",
+                        "board_id": previous_revision.board_id,
+                        "revision_id": previous_revision.revision_id,
+                    }
+                )
+                return {"runnable_card_ids": []}
+            await data.async_set_state("expected_card_ids", list(schedule.runnable_card_ids))
+            await data.async_set_state("collected_card_results", {})
+            for card_id in schedule.runnable_card_ids:
+                await data.async_emit_nowait(card_requested_event, {"card_id": card_id})
+            return {"runnable_card_ids": list(schedule.runnable_card_ids)}
+
+        async def run_card_branch(data: TriggerFlowRuntimeData[Any, Any, Any]):
+            card_payload = data.input if isinstance(data.input, Mapping) else {}
+            card_id = str(card_payload.get("card_id") or "")
+            card = card_by_id[card_id]
+            result = await self._async_run_card(previous_revision, schedule, card)
+            return result.to_dict()
+
+        async def collect_card_result(data: TriggerFlowRuntimeData[Any, Any, Any]):
+            result = TaskBoardCardResult.from_value(data.input)
+            async with collect_lock:
+                collected = data.get_state("collected_card_results", {}, inherit=False)
+                if not isinstance(collected, dict):
+                    collected = {}
+                collected[str(result.card_id)] = result.to_dict()
+                await data.async_set_state("collected_card_results", collected)
+                expected = data.get_state("expected_card_ids", [], inherit=False)
+                expected_count = len(expected) if isinstance(expected, Sequence) and not isinstance(expected, str | bytes | bytearray) else 0
+                if expected_count and len(collected) >= expected_count:
+                    ordered = [collected[str(card_id)] for card_id in expected if str(card_id) in collected]
+                    await data.async_emit(cards_completed_event, ordered)
+            return result.to_dict()
+
+        async def apply_results(data: TriggerFlowRuntimeData[Any, Any, Any]):
+            values = data.input if isinstance(data.input, Sequence) and not isinstance(data.input, str | bytes | bytearray) else []
+            results = [TaskBoardCardResult.from_value(value) for value in values]
+            next_revision = _apply_card_results(previous_revision, results)
             await data.async_set_state("revision", next_revision.to_dict())
             await data.async_set_state(
                 "card_results",
@@ -132,9 +190,15 @@ class TaskBoard:
                     "revision_id": next_revision.revision_id,
                 }
             )
+            return next_revision.to_dict()
 
-        flow.to(run_tick, name="task_board.tick")
-        execution = flow.create_execution(auto_close=False)
+        flow.to(prepare_tick, name="task_board.tick.prepare")
+        flow.when(card_requested_event).to(
+            run_card_branch,
+            name="task_board.tick.run_card",
+        ).to(collect_card_result, name="task_board.tick.collect_card")
+        flow.when(cards_completed_event).to(apply_results, name="task_board.tick.apply")
+        execution = flow.create_execution(auto_close=False, concurrency=concurrency)
         await execution.async_start(previous_revision.to_dict())
         snapshot = await execution.async_close(timeout=timeout)
         next_revision = TaskBoardRevision.from_value(snapshot["revision"])
@@ -154,36 +218,6 @@ class TaskBoard:
             card_results=dict(next_revision.card_results),
             triggerflow_snapshot=snapshot,
         )
-
-    async def _async_execute_schedule(
-        self,
-        revision: TaskBoardRevision,
-        schedule: TaskBoardSchedulePlan,
-        *,
-        concurrency: int | None,
-    ) -> TaskBoardRevision:
-        if not schedule.runnable_card_ids:
-            return revision
-        card_by_id = revision.graph.card_by_id()
-        if concurrency is None or concurrency <= 1:
-            next_revision = revision
-            for card_id in schedule.runnable_card_ids:
-                result = await self._async_run_card(next_revision, schedule, card_by_id[card_id])
-                next_revision = _apply_card_results(next_revision, (result,))
-                if _card_result_stops_current_tick(result):
-                    return next_revision
-            return next_revision
-        else:
-            import asyncio
-
-            semaphore = asyncio.Semaphore(concurrency)
-
-            async def run_one(card: TaskBoardCard):
-                async with semaphore:
-                    return await self._async_run_card(revision, schedule, card)
-
-            results = list(await asyncio.gather(*(run_one(card_by_id[card_id]) for card_id in schedule.runnable_card_ids)))
-        return _apply_card_results(revision, results)
 
     async def _async_run_card(
         self,
@@ -256,14 +290,6 @@ def _apply_card_results(
         evidence_refs=tuple(evidence_refs),
     )
     return apply_task_board_patch(revision, patch)
-
-
-def _card_result_stops_current_tick(result: TaskBoardCardResult) -> bool:
-    status = str(result.status).strip().lower()
-    if status in {"failed", "blocked"}:
-        return True
-    return result.patch_proposal is not None
-
 
 def _coerce_card_result(card_id: str, value: Any) -> TaskBoardCardResult:
     if isinstance(value, TaskBoardCardResult):

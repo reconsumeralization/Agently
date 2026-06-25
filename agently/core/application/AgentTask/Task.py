@@ -31,6 +31,7 @@ from agently.core.orchestration import (
     resolve_task_board_planning_policy,
     task_board_planning_output_schema,
 )
+from agently.core.orchestration.TaskBoard.TaskBoardValidation import task_board_card_required
 from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult
 from agently.utils import DataFormatter, FunctionShifter
 
@@ -804,11 +805,13 @@ class AgentTask:
             if self._task_deadline_exceeded():
                 return await self._terminate_timed_out(tick_index, stage="taskboard_tick")
             schedule = board.schedule()
+            tick_concurrency = self._taskboard_concurrency()
             await self._emit(
                 f"agent_task.taskboard.tick.{tick_index}.scheduled",
                 {
                     "schedule": schedule.to_dict(),
                     "evidence_view": build_task_board_evidence_view(board.revision).to_dict(),
+                    "concurrency": tick_concurrency,
                 },
             )
             if not schedule.runnable_card_ids:
@@ -816,7 +819,7 @@ class AgentTask:
             tick_timeout = self._taskboard_tick_timeout()
             try:
                 tick_result = await self._await_task_deadline(
-                    board.async_run_tick(timeout=tick_timeout),
+                    board.async_run_tick(timeout=tick_timeout, concurrency=tick_concurrency),
                     stage="taskboard_tick",
                 )
             except _AgentTaskDeadlineExceeded as error:
@@ -843,6 +846,7 @@ class AgentTask:
                     "schedule": tick_result.schedule.to_dict(),
                     "card_results": {key: value.to_dict() for key, value in tick_result.card_results.items()},
                     "evidence_view": build_task_board_evidence_view(tick_result.revision).to_dict(),
+                    "runtime_topology": DataFormatter.sanitize(tick_result.triggerflow_snapshot.get("runtime_topology", {})),
                 },
             )
             await self._record_phase(
@@ -852,6 +856,7 @@ class AgentTask:
                     "revision_id": tick_result.revision.revision_id,
                     "runnable_card_ids": list(tick_result.schedule.runnable_card_ids),
                     "completed_card_ids": list(tick_result.schedule.completed_card_ids),
+                    "concurrency": tick_concurrency,
                 },
             )
             if self._taskboard_revision_completed(tick_result.revision):
@@ -890,7 +895,11 @@ class AgentTask:
             "TaskBoard is already selected by the caller; do not decide whether to use TaskBoard. "
             "Use the planning_policy as vocabulary guidance for orchestration complexity, evidence depth, "
             "reflection density, and repair tendency. Do not create hard budgets, fixed card counts, "
-            "or action allowlists from the effort profile."
+            "or action allowlists from the effort profile. "
+            "Plan card objectives and done_when conditions around user-visible outcomes, not around one "
+            "specific provider, endpoint, file format, or auxiliary guidance source unless the user explicitly "
+            "requires that exact source or artifact. Mark replaceable evidence attempts, optional guidance, "
+            "style checks, and non-critical cross-checks as optional or degradable through failure_policy."
         )
         request.output(task_board_planning_output_schema(), format="json")
         raw_plan = await self._await_task_request(request.async_get_data(), stage="taskboard_plan")
@@ -956,12 +965,33 @@ class AgentTask:
             "Workspace or Action refs when needed. If available_readback lists Action artifact refs and a "
             "bounded preview is insufficient, call read_action_artifact with the artifact_id and action_call_id "
             "before blocking on missing evidence. Return card-local evidence and remaining work. "
-            "Do not claim the whole task is complete; TaskBoard and AgentTask own lifecycle completion."
+            "If the card's original method fails but equivalent evidence or a bounded fallback is available, "
+            "return status completed with diagnostics that explain the degraded source boundary. Only return "
+            "failed or blocked when the card cannot produce the required outcome or the missing evidence is "
+            "truly critical. If this card produces the user-facing deliverable, put the complete deliverable "
+            "body in artifact_markdown, candidate_final_result, or final_result. Review or verification cards "
+            "must not put review notes in those deliverable fields unless they include the full corrected "
+            "deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask own lifecycle completion."
         )
         execution.output(
             {
                 "status": (str, "completed, blocked, or failed for this card", False),
                 "answer": (str, "Card-local result or artifact summary", True),
+                "candidate_final_result": (
+                    str,
+                    "Complete user-facing deliverable body when this card directly produces one",
+                    False,
+                ),
+                "final_result": (
+                    str,
+                    "Complete final deliverable body when this card directly produces the final answer",
+                    False,
+                ),
+                "artifact_markdown": (
+                    str,
+                    "Complete markdown deliverable body when this card creates a markdown artifact",
+                    False,
+                ),
                 "evidence": ([str], "Evidence produced or used by this card", False),
                 "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
                 "diagnostics": ([dict], "Optional card diagnostics", False),
@@ -1128,7 +1158,9 @@ class AgentTask:
         schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
         result_status = self._taskboard_terminal_status(revision, schedule)
         evidence_view = build_task_board_evidence_view(revision).to_dict()
-        if result_status != "completed":
+        candidate_final_result = self._taskboard_candidate_final_result(revision)
+        can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
+        if result_status != "completed" and not can_attempt_degraded_final:
             self.status = "blocked" if result_status == "blocked" else "error"
             self.result = {
                 "status": self.status,
@@ -1146,11 +1178,13 @@ class AgentTask:
             await self._emit("agent_task.blocked", self.result)
             return {"terminal": True, "status": self.status}
 
-        candidate_final_result = self._taskboard_candidate_final_result(revision)
         final = await self._request_taskboard_final(
             revision,
             evidence_view,
             candidate_final_result=candidate_final_result,
+            board_status=result_status,
+            schedule=schedule,
+            allow_degraded_final=result_status != "completed",
         )
         final = self._normalize_taskboard_final_result(final, candidate_final_result)
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
@@ -1163,10 +1197,13 @@ class AgentTask:
             "execution_strategy": self.execution_strategy,
             "final_result": final.get("final_result", ""),
             "reason": final.get("reason", ""),
+            "missing_criteria": final.get("missing_criteria", []),
             "taskboard": {
                 "revision": revision.to_dict(),
                 "schedule": schedule.to_dict(),
                 "evidence_view": evidence_view,
+                "terminal_status": result_status,
+                "degraded_finalization_attempted": result_status != "completed",
             },
         }
         await self._record_phase(
@@ -1187,6 +1224,9 @@ class AgentTask:
         evidence_view: Mapping[str, Any],
         *,
         candidate_final_result: str = "",
+        board_status: str = "completed",
+        schedule: Any = None,
+        allow_degraded_final: bool = False,
     ) -> dict[str, Any]:
         request = self.agent.create_temp_request()
         request.input(
@@ -1194,6 +1234,9 @@ class AgentTask:
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
+                "board_status": board_status,
+                "allow_degraded_final": allow_degraded_final,
+                "schedule": DataFormatter.sanitize(schedule.to_dict() if schedule is not None else {}),
                 "taskboard_evidence_view": DataFormatter.sanitize(evidence_view),
                 "revision": DataFormatter.sanitize(revision.to_dict()),
                 "candidate_final_result": self._compact_verifier_prompt_value(candidate_final_result),
@@ -1205,7 +1248,11 @@ class AgentTask:
             "Verify every success criterion. Use the hot evidence view for summaries and preserve cold refs "
             "as evidence pointers; do not invent unsupported facts. When candidate_final_result contains a "
             "complete answer/report/artifact body that satisfies the criteria, preserve it as final_result "
-            "instead of rewriting it into a shorter summary."
+            "instead of rewriting it into a shorter summary. "
+            "If allow_degraded_final is true, the board has stopped with failed, blocked, skipped, or pending "
+            "cards. You may still accept only when the completed/degraded evidence is enough to satisfy the "
+            "user goal and success criteria with explicit missing-source or degraded-source boundaries in "
+            "the final_result. If critical evidence is missing, set accepted=false and explain the missing criteria."
         )
         request.output(
             {
@@ -1229,23 +1276,34 @@ class AgentTask:
         for card in cards:
             depended_on.update(str(card_id) for card_id in getattr(card, "depends_on", ()) or ())
         leaf_ids = {str(getattr(card, "id", "")) for card in cards if str(getattr(card, "id", "")) not in depended_on}
-        candidates: list[str] = []
+        structured_candidates: list[str] = []
+        leaf_fallback_candidates: list[str] = []
+        fallback_candidates: list[str] = []
         for card_id, result in card_results.items():
             if str(getattr(result, "status", "")) != "completed":
                 continue
-            if leaf_ids and str(card_id) not in leaf_ids:
+            preview = getattr(result, "preview", None)
+            structured_candidate = self._candidate_final_result_from_execution_result(
+                preview,
+                include_answer=False,
+            )
+            if structured_candidate:
+                structured_candidates.append(structured_candidate)
                 continue
-            candidate = self._candidate_final_result_from_execution_result(getattr(result, "preview", None))
-            if candidate:
-                candidates.append(candidate)
-        if not candidates:
-            for result in card_results.values():
-                if str(getattr(result, "status", "")) != "completed":
-                    continue
-                candidate = self._candidate_final_result_from_execution_result(getattr(result, "preview", None))
-                if candidate:
-                    candidates.append(candidate)
-        return max(candidates, key=len, default="")
+            fallback_candidate = self._candidate_final_result_from_execution_result(
+                preview,
+                include_answer=True,
+            )
+            if not fallback_candidate:
+                continue
+            fallback_candidates.append(fallback_candidate)
+            if not leaf_ids or str(card_id) in leaf_ids:
+                leaf_fallback_candidates.append(fallback_candidate)
+        if structured_candidates:
+            return max(structured_candidates, key=len, default="")
+        if leaf_fallback_candidates:
+            return max(leaf_fallback_candidates, key=len, default="")
+        return max(fallback_candidates, key=len, default="")
 
     @classmethod
     def _normalize_taskboard_final_result(cls, final: dict[str, Any], candidate_final_result: str) -> dict[str, Any]:
@@ -1299,6 +1357,16 @@ class AgentTask:
             ticks = self.max_iterations
         return max(1, ticks)
 
+    def _taskboard_concurrency(self) -> int | None:
+        value = self._taskboard_option("taskboard_concurrency")
+        if value is None:
+            return None
+        try:
+            concurrency = int(value)
+        except (TypeError, ValueError):
+            return None
+        return concurrency if concurrency > 0 else None
+
     def _taskboard_option_timeout(self, key: str) -> float | None:
         value = self._taskboard_option(key)
         if value is None:
@@ -1313,20 +1381,36 @@ class AgentTask:
 
     @staticmethod
     def _taskboard_revision_completed(revision: Any) -> bool:
-        card_ids = {card.id for card in revision.graph.cards}
-        completed = {
-            card_id
-            for card_id, result in revision.card_results.items()
-            if str(result.status) == "completed"
-        }
-        return bool(card_ids) and card_ids.issubset(completed)
+        cards = list(revision.graph.cards)
+        if not cards:
+            return False
+        for card in cards:
+            result = revision.card_results.get(card.id)
+            status = str(result.status if result is not None else card.status).strip().lower()
+            if task_board_card_required(card):
+                if status != "completed":
+                    return False
+            elif status not in {"completed", "failed", "blocked", "skipped"}:
+                return False
+        return True
+
+    @staticmethod
+    def _taskboard_can_attempt_degraded_final(revision: Any, schedule: Any) -> bool:
+        if getattr(schedule, "runnable_card_ids", ()):
+            return False
+        return any(str(result.status).strip().lower() == "completed" for result in revision.card_results.values())
 
     @staticmethod
     def _taskboard_terminal_status(revision: Any, schedule: Any) -> str:
-        statuses = {str(result.status) for result in revision.card_results.values()}
-        if "failed" in statuses:
+        card_by_id = revision.graph.card_by_id()
+        required_statuses = {
+            card_id: str(result.status)
+            for card_id, result in revision.card_results.items()
+            if task_board_card_required(card_by_id[card_id])
+        }
+        if "failed" in required_statuses.values():
             return "failed"
-        if "blocked" in statuses or schedule.blocked_card_ids:
+        if "blocked" in required_statuses.values() or schedule.blocked_card_ids:
             return "blocked"
         if AgentTask._taskboard_revision_completed(revision):
             return "completed"
@@ -2548,19 +2632,27 @@ class AgentTask:
         )
 
     @classmethod
-    def _candidate_final_result_from_execution_result(cls, execution_result: Any) -> str:
+    def _candidate_final_result_from_execution_result(
+        cls,
+        execution_result: Any,
+        *,
+        include_answer: bool = True,
+    ) -> str:
         if isinstance(execution_result, Mapping):
-            for key in (
+            keys: tuple[str, ...] = (
                 "candidate_final_result",
                 "final_result",
                 "artifact_markdown",
                 "artifact_html",
-                "answer",
-                "result",
-            ):
+            )
+            if include_answer:
+                keys = keys + ("answer", "result")
+            for key in keys:
                 value = execution_result.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+            if not include_answer:
+                return ""
             step_result = execution_result.get("step_result")
             if isinstance(step_result, str) and len(step_result.strip()) > 200:
                 return step_result.strip()

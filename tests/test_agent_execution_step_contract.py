@@ -509,6 +509,66 @@ class MockFlatActionRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockFlatParallelActionRequester(MockAgentExecutionRequester):
+    name = "MockFlatParallelActionRequester"
+    action_planning_calls = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockFlatParallelActionRequester.action_planning_calls = 0
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "actions",
+                "step_instruction": "Collect independent evidence from two framework Actions.",
+                "expected_evidence": "Both independent action results are present.",
+                "rationale": "The actions are independent and can run in the same bounded step.",
+            }
+        elif "next_action" in text and "execution_commands" in text:
+            MockFlatParallelActionRequester.action_planning_calls += 1
+            if MockFlatParallelActionRequester.action_planning_calls == 1:
+                payload = {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "Collect evidence A.",
+                            "action_id": "slow_a",
+                            "action_input": {},
+                        },
+                        {
+                            "purpose": "Collect evidence B.",
+                            "action_id": "slow_b",
+                            "action_input": {},
+                        },
+                    ],
+                }
+            else:
+                payload = {"next_action": "response", "execution_commands": []}
+        elif "[ACTION RESULTS]" in text:
+            payload = {
+                "step_result": "parallel action evidence collected",
+                "evidence": ["slow_a executed", "slow_b executed"],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "both independent action results are present",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "flat parallel action accepted result",
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockFlatEvidenceCandidateRequester(MockAgentExecutionRequester):
     name = "MockFlatEvidenceCandidateRequester"
     report = "# Weekly Report\n\n" + ("Detailed section with grounded evidence.\n" * 80)
@@ -835,6 +895,13 @@ def _create_flat_action_agent(name: str = "agent-execution-flat-action"):
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def _create_flat_parallel_action_agent(name: str = "agent-execution-flat-parallel-action"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockFlatParallelActionRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
 def _create_flat_evidence_candidate_agent(name: str = "agent-execution-flat-evidence-candidate"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -1005,6 +1072,53 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
     assert step_execution["action_scope_source"] == "planner_capabilities"
     assert set(action_ids) == {"probe_action"}
     assert action_ids
+
+
+@pytest.mark.asyncio
+async def test_flat_actions_shape_fans_out_multiple_commands_in_one_step(tmp_path):
+    agent = _create_flat_parallel_action_agent("execution-flat-action-fanout").use_workspace(tmp_path / "workspace")
+    active = 0
+    max_active = 0
+
+    async def run_probe(label: str) -> dict[str, str]:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return {"status": "ok", "label": label}
+
+    @agent.action_func
+    async def slow_a() -> dict[str, str]:
+        return await run_probe("a")
+
+    @agent.action_func
+    async def slow_b() -> dict[str, str]:
+        return await run_probe("b")
+
+    execution = (
+        agent.create_task(
+            goal="Collect two independent action evidence records.",
+            success_criteria=["Both independent action results are collected."],
+            execution="flat",
+            max_iterations=1,
+        )
+        .use_actions(["slow_a", "slow_b"])
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    action_logs = task_meta["iterations"][0]["execution_meta"]["logs"]["action_logs"]
+    if isinstance(action_logs, dict):
+        action_ids = list(action_logs.keys())
+    else:
+        action_ids = [item.get("action_id") for item in action_logs]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert max_active == 2
+    assert set(action_ids) == {"slow_a", "slow_b"}
 
 
 @pytest.mark.asyncio
@@ -1601,6 +1715,29 @@ async def test_agent_execution_default_stream_meta_uses_execution_id_and_lineage
     assert any(item.path == "route.selected" for item in stream_items)
     assert all(item.meta["execution_id"] == meta["execution_id"] for item in stream_items if item.meta)
     assert all("execution_mode" not in item.meta for item in stream_items if item.meta)
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_context_progress_is_published_to_stream():
+    agent = _create_agent("execution-progress-stream")
+    execution = agent.input("progress probe").create_execution()
+
+    execution.execution_context.record_progress(
+        stage="action_runtime",
+        status="started",
+        event_type="action_runtime.started",
+        meta={"action_id": "web_search"},
+    )
+    await asyncio.sleep(0)
+
+    progress_items = [item for item in execution.stream.items if item.path == "runtime.progress.action_runtime.started"]
+    assert progress_items
+    item = progress_items[-1]
+    assert item.source == "agent_execution"
+    assert (item.meta or {})["stream_kind"] == "runtime_progress"
+    assert item.value["stage"] == "action_runtime"
+    assert item.value["status"] == "started"
+    assert item.value["meta"]["action_id"] == "web_search"
 
 
 @pytest.mark.asyncio

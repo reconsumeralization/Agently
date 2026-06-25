@@ -150,11 +150,14 @@ def resolve_task_board_planning_policy(
             "Use existing TaskBoard card results, artifact refs, file refs, and scoped readback before planning or executing another evidence-gathering action.",
             "When dependency evidence already contains the needed facts or cold refs, prefer synthesis, comparison, or local repair over re-gathering the same external evidence.",
             "Re-gather evidence only when the current card objective requires fresh evidence, the existing evidence is missing, stale, contradictory, or readback diagnostics show it cannot be used.",
+            "Make card completion conditions outcome-based. Do not make a provider, endpoint, file format, or auxiliary guidance source a hard dependency unless the user goal explicitly requires that exact source or artifact.",
+            "Mark auxiliary evidence, style guidance, optional cross-checks, or replaceable source attempts as optional or degradable so downstream synthesis can continue with diagnostics when core evidence is sufficient.",
         ),
         repair_orchestration_guidance=(
             "When review localizes a defect, prefer the smallest repair that can fix the affected card output or artifact while preserving valid evidence.",
             "Do not turn a localized defect into broad repair work that repeats completed evidence-gathering cards.",
             "Use board results, diagnostics, and refs to carry localized repair context forward.",
+            "When a card fails but enough alternative evidence exists, prefer a bounded partial result with explicit diagnostics over blocking the whole board.",
         ),
         metadata=dict(metadata or {}),
     )
@@ -172,6 +175,11 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                 "evidence_to_use": ([str], "Evidence sources or upstream refs this card expects to use.", False),
                 "done_when": (str, "Completion condition for this card.", True),
                 "allowed_execution_shape": (str, "Optional owned execution shape hint such as auto, model, action, or task_dag.", False),
+                "failure_policy": (
+                    str,
+                    "required, optional, or degradable. Required failure blocks dependents. Optional/degradable failure may unblock dependents with diagnostics when enough core evidence exists.",
+                    False,
+                ),
             }
         ],
         "reflection_points": ([str], "Review, correction, or decision points judged necessary by the model.", False),
@@ -327,6 +335,7 @@ def _card_from_planning_item(value: Any) -> TaskBoardCard:
     evidence_to_use = _str_list(value.get("evidence_to_use"))
     action_block = str(value.get("action_block") or "").strip()
     done_when = str(value.get("done_when") or "").strip()
+    failure_policy = _failure_policy(value.get("failure_policy"))
     return TaskBoardCard(
         id=card_id,
         objective=objective,
@@ -338,10 +347,13 @@ def _card_from_planning_item(value: Any) -> TaskBoardCard:
             "action_block": action_block,
             "evidence_to_use": evidence_to_use,
             "done_when": done_when,
+            "failure_policy": failure_policy,
         },
+        failure_policy=failure_policy,
         metadata={
             "action_block": action_block,
             "done_when": done_when,
+            "failure_policy": failure_policy,
         },
     )
 
@@ -383,6 +395,26 @@ def _str_list(value: Any) -> list[str]:
         return result
     text = str(value).strip()
     return [text] if text else []
+
+
+def _failure_policy(value: Any) -> str:
+    text = str(value or "required").strip().lower().replace("-", "_")
+    aliases = {
+        "must": "required",
+        "mandatory": "required",
+        "critical": "required",
+        "nice_to_have": "optional",
+        "best_effort": "optional",
+        "non_blocking": "optional",
+        "nonblocking": "optional",
+        "soft": "degradable",
+        "fallback": "degradable",
+        "degrade": "degradable",
+    }
+    normalized = aliases.get(text, text)
+    if normalized not in {"required", "optional", "degradable"}:
+        return "required"
+    return normalized
 
 
 def _mapping_tuple(value: Any) -> tuple[Mapping[str, Any], ...]:

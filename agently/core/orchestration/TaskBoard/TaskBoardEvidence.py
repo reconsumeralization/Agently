@@ -125,6 +125,7 @@ def build_task_board_evidence_view(
                 "objective": card.objective,
                 "depends_on": list(card.depends_on),
                 "required_outputs": list(card.required_outputs),
+                "failure_policy": card.failure_policy,
                 "output_digest": result.output_digest if result is not None else None,
                 "preview": preview,
                 "artifact_refs": card_artifact_refs,

@@ -32,6 +32,7 @@ TaskBoardCardStatus: TypeAlias = Literal[
     "skipped",
 ]
 TaskBoardStatus: TypeAlias = Literal["running", "completed", "blocked", "failed"]
+TaskBoardCardFailurePolicy: TypeAlias = Literal["required", "optional", "degradable"]
 
 
 def _clean_str(value: Any) -> str | None:
@@ -74,6 +75,26 @@ def _mapping_tuple(value: Any) -> tuple[Mapping[str, Any], ...]:
     return ({"value": value},)
 
 
+def _failure_policy(value: Any) -> str:
+    text = str(value or "required").strip().lower().replace("-", "_")
+    aliases = {
+        "must": "required",
+        "mandatory": "required",
+        "critical": "required",
+        "nice_to_have": "optional",
+        "best_effort": "optional",
+        "non_blocking": "optional",
+        "nonblocking": "optional",
+        "soft": "degradable",
+        "fallback": "degradable",
+        "degrade": "degradable",
+    }
+    normalized = aliases.get(text, text)
+    if normalized not in {"required", "optional", "degradable"}:
+        return "required"
+    return normalized
+
+
 @dataclass(frozen=True)
 class TaskBoardCard:
     id: str
@@ -84,6 +105,7 @@ class TaskBoardCard:
     allowed_execution_shape: str = "auto"
     policy_scope_refs: tuple[str, ...] = field(default_factory=tuple)
     evidence_contract: Mapping[str, Any] = field(default_factory=dict)
+    failure_policy: TaskBoardCardFailurePolicy | str = "required"
     status: TaskBoardCardStatus | str = "pending"
     metadata: Mapping[str, Any] = field(default_factory=dict)
     schema_version: str = TASK_BOARD_SCHEMA_VERSION
@@ -109,6 +131,11 @@ class TaskBoardCard:
             allowed_execution_shape=str(value.get("allowed_execution_shape") or "auto"),
             policy_scope_refs=_str_tuple(value.get("policy_scope_refs")),
             evidence_contract=_mapping(value.get("evidence_contract")),
+            failure_policy=_failure_policy(
+                value.get("failure_policy")
+                or _mapping(value.get("evidence_contract")).get("failure_policy")
+                or _mapping(value.get("metadata")).get("failure_policy")
+            ),
             status=str(value.get("status") or "pending"),
             metadata=_mapping(value.get("metadata")),
             schema_version=str(value.get("schema_version") or TASK_BOARD_SCHEMA_VERSION),
@@ -131,6 +158,7 @@ class TaskBoardCard:
             "allowed_execution_shape": self.allowed_execution_shape,
             "policy_scope_refs": list(self.policy_scope_refs),
             "evidence_contract": dict(self.evidence_contract),
+            "failure_policy": self.failure_policy,
             "status": self.status,
             "metadata": dict(self.metadata),
         }

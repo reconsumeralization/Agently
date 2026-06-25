@@ -194,6 +194,7 @@ class AgentExecution:
             execution_id=self.id,
             lineage=self.lineage,
         ).bind_execution(self)
+        self.execution_context.set_progress_callback(self._publish_runtime_progress)
         self._error: BaseException | None = None
         self._selected_route: tuple[str, dict[str, Any]] | None = None
         self._seen_action_log_keys: set[str] = set()
@@ -275,6 +276,7 @@ class AgentExecution:
             execution_id=self.id,
             lineage=self.lineage,
         ).bind_execution(self)
+        self.execution_context.set_progress_callback(self._publish_runtime_progress)
         self._selected_route = None
         self.route_info = {}
         self.route_plan = {}
@@ -282,6 +284,24 @@ class AgentExecution:
 
     def _build_effective_options(self) -> dict[str, Any]:
         return build_effective_options(self)
+
+    async def _publish_runtime_progress(self, event: dict[str, Any]):
+        stage = str(event.get("stage") or "runtime").strip() or "runtime"
+        status = str(event.get("status") or "progress").strip() or "progress"
+        path_stage = stage.replace("/", ".").replace(" ", "_")
+        path_status = status.replace("/", ".").replace(" ", "_")
+        await self.stream.emit(
+            f"runtime.progress.{path_stage}.{path_status}",
+            event,
+            route=str(self.route_info.get("selected_route") or ""),
+            source="agent_execution",
+            meta={
+                "stream_kind": "runtime_progress",
+                "event_type": event.get("event_type"),
+                "stage": stage,
+                "status": status,
+            },
+        )
 
     def configure_options(self, options: Any):
         return configure_execution_options(self, options)

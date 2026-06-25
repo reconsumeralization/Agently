@@ -118,6 +118,7 @@ from .task_dag import (
 from .task_board import (
     TASK_BOARD_SCHEMA_VERSION,
     TaskBoardCard,
+    TaskBoardCardFailurePolicy,
     TaskBoardCardResult,
     TaskBoardCardStatus,
     TaskBoardGraph,

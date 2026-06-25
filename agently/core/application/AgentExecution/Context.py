@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
 from agently.types.data import (
@@ -163,6 +164,7 @@ class AgentExecutionContext:
         self.last_progress_at = self.started_at
         self.last_progress_event: dict[str, Any] | None = None
         self.stage_events: list[dict[str, Any]] = []
+        self._progress_callback: Callable[[dict[str, Any]], Any] | None = None
         self.action_scope: dict[str, Any] = {}
         self.action_artifact_recall_records: list[dict[str, Any]] = []
         # Depth of this AgentExecution in a nested agent-step chain (root = 0).
@@ -315,6 +317,30 @@ class AgentExecutionContext:
         self.last_progress_at = now
         self.last_progress_event = event
         self.stage_events.append(event)
+        self._notify_progress(event)
+
+    def set_progress_callback(self, callback: Callable[[dict[str, Any]], Any] | None):
+        self._progress_callback = callback
+
+    def _notify_progress(self, event: dict[str, Any]):
+        callback = self._progress_callback
+        if callback is None:
+            return
+        try:
+            result = callback(dict(event))
+        except Exception:
+            return
+        if result is None:
+            return
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            if hasattr(result, "__await__"):
+                task = loop.create_task(result)
+                task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        except Exception:
+            return
 
     def raise_if_limit_exceeded(self):
         if not self.limit_events:

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from agently.core import (
@@ -10,6 +12,7 @@ from agently.core import (
     coerce_task_board_planning_result,
     resolve_task_board_planning_policy,
 )
+from agently.core.application.AgentTask.Task import AgentTask
 from agently.types.data import TaskBoardCardResult, TaskBoardPatch
 
 
@@ -124,6 +127,201 @@ def test_task_board_schedule_waits_for_completed_dependencies():
     assert next_revision.card_results["collect"].file_refs[0]["path"] == "facts.md"
 
 
+def test_task_board_required_failed_dependency_blocks_downstream():
+    revision = TaskBoardRevision.create(
+        board_id="required-failure",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "required-failure-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect required facts."},
+                    {"id": "final", "objective": "Write final answer.", "depends_on": ["collect"]},
+                ],
+            }
+        ),
+    )
+    failed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision="rev-0",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "failed",
+                        "preview": "source unavailable",
+                    },
+                },
+            ),
+        ),
+    )
+
+    schedule = TaskBoardValidator().schedule(failed_revision)
+
+    assert schedule.runnable_card_ids == ()
+    assert schedule.blocked_card_ids == ("final",)
+    assert not AgentTask._taskboard_revision_completed(failed_revision)
+
+
+def test_task_board_optional_failed_dependency_unblocks_downstream_with_diagnostics():
+    revision = TaskBoardRevision.create(
+        board_id="optional-failure",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "optional-failure-graph",
+                "cards": [
+                    {
+                        "id": "style_guidance",
+                        "objective": "Read optional writing guidance.",
+                        "failure_policy": "optional",
+                    },
+                    {
+                        "id": "final",
+                        "objective": "Write final answer.",
+                        "depends_on": ["style_guidance"],
+                    },
+                ],
+            }
+        ),
+    )
+    failed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision="rev-0",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "style_guidance",
+                        "status": "failed",
+                        "preview": "guidance lookup timed out",
+                    },
+                },
+            ),
+        ),
+    )
+
+    schedule = TaskBoardValidator().schedule(failed_revision)
+
+    assert schedule.runnable_card_ids == ("final",)
+    assert schedule.blocked_card_ids == ()
+    assert schedule.diagnostics[0]["code"] == "taskboard.degraded_dependency_satisfied"
+    assert schedule.diagnostics[0]["failure_policy"] == "optional"
+
+    completed_revision = TaskBoardValidator().apply_patch(
+        failed_revision,
+        TaskBoardPatch(
+            base_revision="rev-1",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final",
+                        "status": "completed",
+                        "preview": "final with missing guidance boundary",
+                    },
+                },
+            ),
+        ),
+    )
+    assert AgentTask._taskboard_revision_completed(completed_revision)
+
+
+def test_task_board_final_candidate_prefers_structured_deliverable_over_review_leaf():
+    revision = TaskBoardRevision.create(
+        board_id="final-candidate",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "final-candidate-graph",
+                "cards": [
+                    {"id": "draft", "objective": "Write the final report."},
+                    {"id": "review", "objective": "Review the final report.", "depends_on": ["draft"]},
+                ],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision="rev-0",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": {
+                            "answer": "Drafted the report.",
+                            "artifact_markdown": "# Actual Report\n\nThis is the complete deliverable.",
+                        },
+                    },
+                },
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "review",
+                        "status": "completed",
+                        "preview": {
+                            "answer": "Review complete. All required sections are present.",
+                        },
+                    },
+                },
+            ),
+        ),
+    )
+
+    task = AgentTask.__new__(AgentTask)
+
+    assert (
+        AgentTask._taskboard_candidate_final_result(task, completed_revision)
+        == "# Actual Report\n\nThis is the complete deliverable."
+    )
+
+
+def test_task_board_final_candidate_keeps_leaf_answer_as_last_resort():
+    revision = TaskBoardRevision.create(
+        board_id="final-candidate-fallback",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "final-candidate-fallback-graph",
+                "cards": [
+                    {"id": "draft", "objective": "Prepare notes."},
+                    {"id": "final", "objective": "Answer from notes.", "depends_on": ["draft"]},
+                ],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision="rev-0",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": {"answer": "Intermediate notes that are longer than the final."},
+                    },
+                },
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final",
+                        "status": "completed",
+                        "preview": {"answer": "Final answer."},
+                    },
+                },
+            ),
+        ),
+    )
+
+    task = AgentTask.__new__(AgentTask)
+
+    assert AgentTask._taskboard_candidate_final_result(task, completed_revision) == "Final answer."
+
+
 def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
     revision = _revision()
     cold_ref = {
@@ -218,6 +416,7 @@ def test_task_board_planning_result_builds_valid_revision():
                     "depends_on": [],
                     "evidence_to_use": ["ticket_id", "invoice_id"],
                     "done_when": "Ticket and invoice evidence are available.",
+                    "failure_policy": "degradable",
                 },
                 {
                     "id": "decide",
@@ -241,7 +440,9 @@ def test_task_board_planning_result_builds_valid_revision():
     assert [card.id for card in result.revision.graph.cards] == ["collect", "decide"]
     assert result.revision.graph.cards[0].input_refs == ("ticket_id", "invoice_id")
     assert result.revision.graph.cards[0].evidence_contract["action_block"] == "Collect ticket and invoice evidence."
+    assert result.revision.graph.cards[0].failure_policy == "degradable"
     assert result.revision.graph.cards[1].depends_on == ("collect",)
+    assert result.revision.graph.cards[1].failure_policy == "required"
     assert result.revision.graph.cards[1].allowed_execution_shape == "model"
     assert result.revision.metadata["completion_gate"] == "Final decision cites collected evidence."
     assert result.planning_policy.effort_profile.name == "medium"
@@ -340,7 +541,44 @@ async def test_task_board_explicit_simple_task_still_uses_task_board_process():
 
 
 @pytest.mark.asyncio
-async def test_task_board_serial_tick_preserves_failure_and_stops_current_tick():
+async def test_task_board_tick_fans_out_independent_cards_by_default():
+    active = 0
+    max_active = 0
+
+    async def handler(context: TaskBoardContext):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return {"status": "completed", "preview": f"done:{ context.card.id }"}
+
+    board = TaskBoard(
+        TaskBoardRevision.create(
+            board_id="default-fanout",
+            graph={
+                "graph_id": "default-fanout-graph",
+                "cards": [
+                    {"id": "a", "objective": "Run A."},
+                    {"id": "b", "objective": "Run B."},
+                ],
+            },
+        ),
+        handler=handler,
+    )
+
+    tick = await board.async_run_tick(timeout=1)
+
+    assert max_active == 2
+    assert set(tick.revision.card_results) == {"a", "b"}
+    assert tick.revision.card_results["a"].preview == "done:a"
+    assert tick.revision.card_results["b"].preview == "done:b"
+    assert tick.triggerflow_snapshot["runtime_topology"]["fanout"] == "dynamic_emit_when"
+    assert tick.triggerflow_snapshot["runtime_topology"]["card_requested_event"].startswith("task_board.card.requested.")
+
+
+@pytest.mark.asyncio
+async def test_task_board_tick_does_not_cancel_independent_card_on_required_failure():
     seen: list[str] = []
 
     async def handler(context: TaskBoardContext):
@@ -363,13 +601,44 @@ async def test_task_board_serial_tick_preserves_failure_and_stops_current_tick()
         handler=handler,
     )
 
-    tick = await board.async_run_tick(timeout=1)
+    tick = await board.async_run_tick(timeout=1, concurrency=1)
 
-    assert seen == ["first"]
+    assert set(seen) == {"first", "second"}
     assert tick.revision.revision_id == "rev-1"
     assert tick.revision.card_results["first"].status == "failed"
-    assert "second" not in tick.revision.card_results
+    assert tick.revision.card_results["second"].status == "completed"
     assert tick.card_results["first"].preview == "network timeout"
+
+
+@pytest.mark.asyncio
+async def test_task_board_tick_continues_after_optional_failure():
+    seen: list[str] = []
+
+    async def handler(context: TaskBoardContext):
+        seen.append(context.card.id)
+        if context.card.id == "optional":
+            return {"status": "failed", "preview": "optional lookup timeout"}
+        return {"status": "completed", "preview": "independent work completed"}
+
+    board = TaskBoard(
+        TaskBoardRevision.create(
+            board_id="optional-failure-continues",
+            graph={
+                "graph_id": "optional-failure-continues-graph",
+                "cards": [
+                    {"id": "optional", "objective": "Try optional evidence.", "failure_policy": "optional"},
+                    {"id": "second", "objective": "Independent follow-up."},
+                ],
+            },
+        ),
+        handler=handler,
+    )
+
+    tick = await board.async_run_tick(timeout=1, concurrency=1)
+
+    assert set(seen) == {"optional", "second"}
+    assert tick.revision.card_results["optional"].status == "failed"
+    assert tick.revision.card_results["second"].status == "completed"
 
 
 @pytest.mark.asyncio
