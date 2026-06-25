@@ -17,6 +17,7 @@ from .TriggerFlow import TriggerFlow
 from .BluePrint import TriggerFlowBlueprint
 from .Execution import TriggerFlowExecution
 from .ExecutionResult import TriggerFlowExecutionResult
+from .SignalNet import TriggerFlowSignalNet
 from .RecoveryDiagnostics import diagnose_runtime_event_records, project_runtime_event_record
 from .Chunk import TriggerFlowChunk
 from .Process import TriggerFlowProcess

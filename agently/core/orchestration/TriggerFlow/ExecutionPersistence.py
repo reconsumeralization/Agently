@@ -85,6 +85,7 @@ class TriggerFlowExecutionPersistence:
             "ready": result_ready,
             "value": execution._to_serializable_value(result) if result_ready else None,
         }
+        signal_net = execution._signal_net.to_snapshot()
         resource_keys = sorted(str(key) for key in execution.get_runtime_resources().keys())
         managed_resource_keys = sorted(
             str(handle.get("resource_key", ""))
@@ -112,6 +113,7 @@ class TriggerFlowExecutionPersistence:
             sub_flow_frames=sub_flow_frames,
             last_signal=last_signal,
             result_state=result_state,
+            signal_net=signal_net,
             resource_keys=resource_keys,
             managed_resource_keys=managed_resource_keys,
             execution_resource_requirement_ids=execution_resource_requirement_ids,
@@ -310,6 +312,7 @@ class TriggerFlowExecutionPersistence:
         sub_flow_frames: dict[str, Any],
         last_signal: dict[str, Any] | None,
         result_state: dict[str, Any],
+        signal_net: dict[str, Any],
         resource_keys: list[str],
         managed_resource_keys: list[str],
         execution_resource_requirement_ids: list[str],
@@ -341,6 +344,7 @@ class TriggerFlowExecutionPersistence:
             "intervention": intervention,
             "sub_flow_frames": sub_flow_frames,
             "last_signal": last_signal,
+            "signal_net": signal_net,
             "result": result_state,
             "durable_system_state": durable_system_state,
             "resource_requirements": resource_requirements,
@@ -397,6 +401,7 @@ class TriggerFlowExecutionPersistence:
             durable_system_state = {}
         sub_flow_frames = snapshot_state.get("sub_flow_frames", {})
         last_signal_state = snapshot_state.get("last_signal", None)
+        signal_net_state = snapshot_state.get("signal_net", {})
         result_state = snapshot_state.get("result", {})
         execution_id = snapshot_state.get("execution_id", execution.id)
         run_context_state = snapshot_state.get("run_context", None)
@@ -469,6 +474,7 @@ class TriggerFlowExecutionPersistence:
         execution._runtime_data.set(INTERVENTIONS_STATE_KEY, execution._to_serializable_value(interventions))
         execution._system_runtime_data.set("sub_flow_frames", sub_flow_frames)
         execution._system_runtime_data.set("last_signal", last_signal_state)
+        execution._signal_net.load_snapshot(signal_net_state if isinstance(signal_net_state, dict) else {})
         self._restore_durable_system_state(durable_system_state)
         execution._set_status(status)
         execution._auto_close = bool(snapshot_state.get("auto_close", execution._auto_close))
@@ -567,6 +573,24 @@ class TriggerFlowExecutionPersistence:
         resolved_resource_keys: set[str] = set()
         diagnostics: list[dict[str, Any]] = self._snapshot_contract_diagnostics(snapshot_state)
         diagnostics.extend(self._resume_ledger_diagnostics(snapshot_state))
+        missing_dynamic_event_handlers = execution._signal_net.snapshot_missing_handler_ids(
+            snapshot_state.get("signal_net", {})
+        )
+        for binding_id in missing_dynamic_event_handlers:
+            resource_key = f"dynamic_event_handler:{ binding_id }"
+            missing_resource_keys.add(resource_key)
+            diagnostics.append(
+                {
+                    "code": "triggerflow.signal_net.missing_dynamic_handler",
+                    "severity": "warning",
+                    "message": (
+                        f"Dynamic event binding '{ binding_id }' requires a registered "
+                        "handler before TriggerFlow load can be ready."
+                    ),
+                    "resource_key": resource_key,
+                    "details": {"binding_id": binding_id},
+                }
+            )
         snapshot_errors = [
             diagnostic
             for diagnostic in diagnostics

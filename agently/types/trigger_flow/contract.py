@@ -129,6 +129,7 @@ class TriggerFlowExecutionSnapshot(TypedDict, total=False):
     intervention: dict[str, Any]
     sub_flow_frames: dict[str, Any]
     last_signal: dict[str, Any] | None
+    signal_net: dict[str, Any]
     result: dict[str, Any]
     durable_system_state: dict[str, Any]
     resource_requirements: list[TriggerFlowResourceRequirement]
