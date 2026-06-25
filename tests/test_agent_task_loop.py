@@ -115,6 +115,24 @@ def _create_agent(name: str = "agent-task-loop-test"):
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def test_agent_language_policy_normalizes_and_reaches_execution_prompt():
+    agent = _create_agent("agent-language-policy")
+
+    agent.language("简体中文")
+    execution = agent.create_execution().language("chinese")
+
+    agent_policy = agent.agent_prompt.get("options.language_policy")
+    execution_policy = execution.prompt_snapshot.get("options", {}).get("language_policy")
+
+    assert agent_policy is not None
+    assert execution_policy is not None
+    assert agent_policy["language"] == "zh-CN"
+    assert agent_policy["search_region"] == "cn-zh"
+    assert execution_policy["language"] == "zh-CN"
+    assert execution_policy["accept_language"].startswith("zh-CN")
+    assert "Language policy" in execution.request.prompt.to_text()
+
+
 @pytest.mark.asyncio
 async def test_agent_goal_success_criteria_uses_task_execution_path(tmp_path):
     MockAgentTaskRequester.reset()
@@ -413,6 +431,40 @@ async def test_agent_task_loop_progress_model_uses_configured_language(tmp_path)
     ]
 
     assert any("progress_language: zh-CN" in call for call in MockAgentTaskRequester.calls)
+    assert progress_items
+    assert all((item.meta or {}).get("progress_language") == "zh-CN" for item in progress_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_loop_uses_agent_language_policy(tmp_path):
+    MockAgentTaskRequester.reset()
+    agent = _create_agent("agent-task-loop-language-policy")
+    agent.language("中文")
+
+    task = agent.create_task(
+        task_id="language-policy-task",
+        goal="Repair a legacy Agently script so it runs on the current API.",
+        success_criteria=["The script runs successfully."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        limits={"max_model_requests": 1},
+        options={
+            "agent_task": {
+                "stream_progress": True,
+                "progress_model_key": "progress-narrator",
+                "progress_timeout_seconds": 5,
+            },
+        },
+    )
+
+    stream_items = [item async for item in task.get_async_generator(type="instant")]
+    progress_items = [
+        item
+        for item in stream_items
+        if (item.meta or {}).get("stream_kind") == "progress"
+    ]
+
+    assert any("language_policy" in call and "search_region: cn-zh" in call for call in MockAgentTaskRequester.calls)
     assert progress_items
     assert all((item.meta or {}).get("progress_language") == "zh-CN" for item in progress_items)
 

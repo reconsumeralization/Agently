@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
 from agently.utils import DataFormatter
+from agently.utils.LanguagePolicy import language_policy_from_prompt_snapshot
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
@@ -127,6 +128,9 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             "execution_prompt_snapshot",
             DataFormatter.sanitize(dict(prompt_snapshot)),
         )
+        language_policy = language_policy_from_prompt_snapshot(prompt_snapshot)
+        if language_policy is not None:
+            agent_task_options.setdefault("language_policy", dict(language_policy))
 
     if not isinstance(task, AgentTask):
         task = AgentTask(

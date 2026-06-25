@@ -79,6 +79,16 @@ def test_agent_use_actions_accepts_search_package():
     assert result.get("data") == [{"title": "Agently", "href": "https://example.com", "body": "limit=2"}]
 
 
+def test_agent_language_policy_updates_builtin_search_default_region():
+    agent = Agently.create_agent()
+    agent.language("中文")
+    search = Search(timeout=1)
+
+    agent.use_actions(search, always=True)
+
+    assert search.region == "cn-zh"
+
+
 def test_agent_use_actions_accepts_browse_package():
     agent = Agently.create_agent()
     browse = Browse(enable_playwright=False, enable_bs4=False)
@@ -97,6 +107,16 @@ def test_agent_use_actions_accepts_browse_package():
     result = agent.action.execute_action("browse", {"url": "https://example.com"})
     assert result.get("status") == "success"
     assert result.get("data") == "content from https://example.com"
+
+
+def test_agent_language_policy_updates_builtin_browse_accept_language():
+    agent = Agently.create_agent()
+    agent.language("zh-CN")
+    browse = Browse(enable_playwright=False, enable_bs4=False)
+
+    agent.use_actions(browse, always=True)
+
+    assert browse.headers["Accept-Language"].startswith("zh-CN")
 
 
 def test_browse_action_failure_is_structured_error_not_success_text():

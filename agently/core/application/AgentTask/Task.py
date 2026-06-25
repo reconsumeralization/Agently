@@ -37,6 +37,11 @@ from agently.core.orchestration.TaskBoard.TaskBoardValidation import task_board_
 from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult, TaskBoardRevision
 from agently.types.trigger_flow import TriggerFlowRuntimeData
 from agently.utils import DataFormatter, FunctionShifter
+from agently.utils.LanguagePolicy import (
+    apply_language_policy_to_prompt,
+    language_policy_from_prompt_snapshot,
+    resolve_language_policy,
+)
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -1042,7 +1047,9 @@ class AgentTask:
             self._taskboard_effort(),
             metadata={"execution_strategy": self.execution_strategy, "task_id": self.id},
         )
+        language_policy = self._language_policy()
         request = self.agent.create_temp_request()
+        self._apply_language_policy_to_request(request, language_policy)
         request.input(
             {
                 "task_id": self.id,
@@ -1052,6 +1059,7 @@ class AgentTask:
                 "execution_prompt": self._execution_prompt_context(),
                 "planning_policy": policy.to_prompt_payload(),
                 "planner_capabilities": self._planner_capabilities(),
+                "language_policy": language_policy,
             }
         )
         request.instruct(
@@ -1112,6 +1120,7 @@ class AgentTask:
         readback_records = self._taskboard_action_artifact_recall_records(evidence_view)
         max_attempts = self._taskboard_card_max_attempts()
         previous_errors: list[dict[str, Any]] = []
+        language_policy = self._language_policy()
         for attempt_index in range(1, max_attempts + 1):
             execution = self.agent.create_execution(
                 lineage={
@@ -1156,8 +1165,10 @@ class AgentTask:
                     },
                     "context_pack": DataFormatter.sanitize(context_pack),
                     "execution_prompt": self._execution_prompt_context(),
+                    "language_policy": language_policy,
                 }
             )
+            execution.language(language_policy.get("language", "auto"))
             execution.instruct(
                 "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
                 "Use TaskBoard evidence view as the hot summary; request full content only through available "
@@ -1320,7 +1331,9 @@ class AgentTask:
             ).to_dict()
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
+        language_policy = self._language_policy()
         request = self.agent.create_temp_request()
+        self._apply_language_policy_to_request(request, language_policy)
         request.input(
             {
                 "task_id": self.id,
@@ -1335,6 +1348,7 @@ class AgentTask:
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "planning_policy": context.planning_policy.to_prompt_payload() if context.planning_policy is not None else {},
+                "language_policy": language_policy,
             }
         )
         request.instruct(
@@ -1801,7 +1815,9 @@ class AgentTask:
         schedule: Any = None,
         allow_degraded_final: bool = False,
     ) -> dict[str, Any]:
+        language_policy = self._language_policy()
         request = self.agent.create_temp_request()
+        self._apply_language_policy_to_request(request, language_policy)
         request.input(
             {
                 "task_id": self.id,
@@ -1814,6 +1830,7 @@ class AgentTask:
                 "revision": DataFormatter.sanitize(revision.to_dict()),
                 "candidate_final_result": self._compact_verifier_prompt_value(candidate_final_result),
                 "execution_prompt": self._execution_prompt_context(),
+                "language_policy": language_policy,
             }
         )
         request.instruct(
@@ -2288,6 +2305,27 @@ class AgentTask:
             return {}
         return cast(dict[str, Any], DataFormatter.sanitize(dict(raw)))
 
+    def _language_policy(self) -> dict[str, Any]:
+        raw_policy = self._agent_task_option("language_policy", None)
+        if raw_policy is None:
+            raw_policy = self._agent_task_option("language", None)
+        if raw_policy is None:
+            raw_policy = language_policy_from_prompt_snapshot(self.options.get("execution_prompt_snapshot"))
+        if raw_policy is None:
+            getter = getattr(getattr(self.agent, "settings", None), "get", None)
+            if callable(getter):
+                raw_policy = getter("agent.language_policy", None)
+        progress_language = (
+            self._agent_task_option("progress_language", None)
+            or self._agent_task_option("stream_progress_language", None)
+        )
+        if isinstance(raw_policy, Mapping):
+            return dict(resolve_language_policy(base=raw_policy, progress_language=progress_language))
+        return dict(resolve_language_policy(raw_policy or "auto", progress_language=progress_language))
+
+    def _apply_language_policy_to_request(self, request: Any, policy: Mapping[str, Any] | None = None) -> None:
+        apply_language_policy_to_prompt(getattr(request, "prompt", request), policy or self._language_policy())
+
     def _normalize_step_plan(self, plan: Any) -> dict[str, Any]:
         normalized: dict[str, Any]
         if isinstance(plan, dict):
@@ -2666,6 +2704,8 @@ class AgentTask:
 
     async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         request = self.agent.create_temp_request()
+        language_policy = self._language_policy()
+        self._apply_language_policy_to_request(request, language_policy)
         planner_capabilities = self._planner_capabilities()
         execution_prompt = self._execution_prompt_context()
         previous_iterations = self._iteration_prompt_summaries()
@@ -2683,6 +2723,7 @@ class AgentTask:
                 "execution_policy": self._step_execution_policy(),
                 "execution_strategy": self.execution_strategy,
                 "planner_capabilities": planner_capabilities,
+                "language_policy": language_policy,
             }
         )
         # Explanatory note only (not a guarantee): the hard guarantee is the
@@ -2899,6 +2940,7 @@ class AgentTask:
         )
         self._bind_action_workspace(execution)
         step_execution = self._configure_step_execution(execution, plan)
+        language_policy = self._language_policy()
         execution.input(
             {
                 "task_id": self.id,
@@ -2910,8 +2952,10 @@ class AgentTask:
                 "execution_strategy": self.execution_strategy,
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
+                "language_policy": language_policy,
             }
         )
+        execution.language(language_policy.get("language", "auto"))
         execution.instruct(
             (
                 "Execute exactly one bounded step for the AgentTask. "
@@ -3338,6 +3382,8 @@ class AgentTask:
         )
         candidate_final_result = self._candidate_final_result_from_execution_result(execution_result)
         request = self.agent.create_temp_request()
+        language_policy = self._language_policy()
+        self._apply_language_policy_to_request(request, language_policy)
         request.input(
             {
                 "task_id": self.id,
@@ -3359,6 +3405,7 @@ class AgentTask:
                 "context_pack": self._compact_context_pack_for_verifier(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "previous_iterations": self._iteration_prompt_summaries(),
+                "language_policy": language_policy,
             }
         )
         request.instruct(
@@ -4589,11 +4636,8 @@ class AgentTask:
         )
 
     def _progress_language(self) -> str:
-        language = (
-            self._agent_task_option("progress_language", None)
-            or self._agent_task_option("stream_progress_language", None)
-        )
-        if language is None:
+        language = self._language_policy().get("progress_language")
+        if language in (None, "", "auto"):
             getter = getattr(getattr(self.agent, "settings", None), "get", None)
             if callable(getter):
                 language = getter("agent_task.progress.language", "auto")

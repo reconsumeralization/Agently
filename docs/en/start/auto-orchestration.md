@@ -142,6 +142,8 @@ consume data, text, stream, metadata, status, and task refs through
 `AgentTask` as a second public lifecycle.
 
 ```python
+agent.language("en")
+
 execution = agent.create_task(
     goal="Upgrade a legacy Agently script so it runs on the current 4.1.x API.",
     success_criteria=[
@@ -160,7 +162,7 @@ execution = agent.create_task(
             # Optional: use a separate model key to narrate progress from snapshots.
             # Omit this key to use template progress with no model requests.
             # "progress_model_key": "cheap-progress-model",
-            # Optional: override the global agent_task.progress.language setting.
+            # Optional compatibility alias for progress narration only.
             # "progress_language": "en",
         },
     },
@@ -206,9 +208,12 @@ emitted snapshot and task metadata. Model-generated progress is streamed as
 `stream_kind="progress_delta"` delta events while the sentence is being written,
 then emitted once as a complete `stream_kind="progress"` item for stable logs
 and UI state. Set `options={"agent_task": {"progress_language": "zh-CN"}}` to
-control one execution, or set the global default with
-`Agently.set_settings("agent_task.progress.language", "zh-CN")`; `auto` keeps
-the framework default. The main loop does not produce extra fields for progress
+control progress narration for one execution, or set `agent.language("zh-CN")`
+as the preferred Agent-level policy for final output, process text, progress
+text, and Search/Browse locale hints. `execution.language("zh-CN")` applies the
+same policy to one AgentExecution draft. `progress_language` and
+`agent_task.progress.language` remain compatibility controls for progress text
+only; `auto` keeps the framework default. The main loop does not produce extra fields for progress
 narration and does not wait for progress narration to finish.
 Progress narrator failures are side-channel diagnostics and warning-level
 runtime events; they do not turn the main execution into `model.request_failed`.

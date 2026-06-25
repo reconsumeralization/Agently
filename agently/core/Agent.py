@@ -27,6 +27,7 @@ from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input
 from agently.core.model.ModelRequestResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
 from agently.utils import DataFormatter, FunctionShifter, Settings
+from agently.utils.LanguagePolicy import apply_language_policy_to_prompt, resolve_language_policy
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
@@ -142,6 +143,10 @@ class _AgentDefinitionBuilder:
         self._agent.options(options, always=True)
         return self
 
+    def language(self, *args: Any, **kwargs: Any):
+        self._agent.language(*args, **kwargs)
+        return self
+
 
 class BaseAgent:
     def __init__(
@@ -193,6 +198,29 @@ class BaseAgent:
     def configure_policy_approval(self, *, handler: str | None = None):
         if handler is not None:
             self.settings.set("policy_approval.handler", str(handler))
+        return self
+
+    def language(
+        self,
+        language: Any = "auto",
+        *,
+        output: Any = None,
+        process: Any = None,
+        progress: Any = None,
+        search_region: Any = None,
+        accept_language: Any = None,
+    ) -> Self:
+        policy = resolve_language_policy(
+            language,
+            output_language=output,
+            process_language=process,
+            progress_language=progress,
+            search_region=search_region,
+            accept_language=accept_language,
+        )
+        self.settings.set("agent.language_policy", cast(Any, dict(policy)))
+        self.settings.set("agent_task.progress.language", policy.get("progress_language", policy.get("language", "auto")))
+        apply_language_policy_to_prompt(self.agent_prompt, policy)
         return self
 
     def activate_model(self, model_key: str | None = None):
@@ -936,6 +964,12 @@ class BaseAgent:
         if workspace is not None:
             cast(Any, self).use_workspace(workspace)
         normalized_execution = AgentTask.normalize_execution_strategy(execution)
+        resolved_options = dict(options or {})
+        language_policy = self.settings.get("agent.language_policy", None)
+        if isinstance(language_policy, Mapping):
+            agent_task_options = dict(resolved_options.get("agent_task") or {})
+            agent_task_options.setdefault("language_policy", dict(language_policy))
+            resolved_options["agent_task"] = agent_task_options
         task_options = {
             "goal": goal,
             "success_criteria": success_criteria,
@@ -946,7 +980,7 @@ class BaseAgent:
             "context_profile": context_profile,
             "context_budget": context_budget,
             "limits": limits,
-            "options": options,
+            "options": resolved_options if resolved_options else options,
             "task_id": task_id,
         }
         agent_execution = self.create_execution(

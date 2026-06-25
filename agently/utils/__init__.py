@@ -34,6 +34,15 @@ from .StreamingJSONCompleter import StreamingJSONCompleter
 from .StreamingJSONParser import StreamingJSONParser
 from .PythonSandbox import PythonSandbox
 from .TimeInfo import TimeInfo
+from .LanguagePolicy import (
+    LanguagePolicy,
+    apply_language_policy_to_prompt,
+    language_policy_from_options,
+    language_policy_from_prompt_snapshot,
+    language_policy_prompt,
+    normalize_language,
+    resolve_language_policy,
+)
 from .DeprecationWarnings import (
     DeprecationWarnings,
     warn_deprecated_once,

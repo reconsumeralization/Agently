@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar, cast
 
@@ -176,6 +177,10 @@ class ActionExtension(BaseAgent):
         for action_item in self._normalize_action_items(actions):
             register_actions = getattr(action_item, "register_actions", None)
             if callable(register_actions):
+                language_policy = self.settings.get("agent.language_policy", None)
+                apply_language_policy = getattr(action_item, "apply_language_policy", None)
+                if isinstance(language_policy, Mapping) and callable(apply_language_policy):
+                    apply_language_policy(language_policy)
                 names.extend(self._normalize_registered_action_ids(register_actions(self.action, tags=[agent_tag])))
                 continue
             if isinstance(action_item, str):

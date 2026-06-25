@@ -119,6 +119,13 @@ disconnects such as incomplete chunked reads, timeouts, connection resets, and
 proxy handshakes; it is not a substitute for a long-term unavailable network or
 an unreachable proxy.
 
+When an Agent-level language policy is set with `agent.language("zh-CN")`,
+registered Search/Browse packages receive compatible locale defaults unless the
+package was configured explicitly. Search uses the policy as a default
+`region` hint such as `cn-zh`; Browse uses it as an `Accept-Language` header.
+The policy is guidance for query/source recall and process text, not a
+replacement for task-specific source requirements.
+
 Browse preserves direct `Browse.browse(url)` compatibility by returning text,
 but the registered `browse` Action uses structured results. If all Browse
 backends fail, the Action result is `status="error"` with backend diagnostics

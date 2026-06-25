@@ -422,6 +422,10 @@ class AgentExecution:
         self._draft.set_prompt_options(options, always=always)
         return self._refresh_prompt_snapshot()
 
+    def language(self, *args: Any, **kwargs: Any):
+        self._draft.language(*args, **kwargs)
+        return self._refresh_prompt_snapshot()
+
     def use_dynamic_task(self, *args: Any, **kwargs: Any):
         if args:
             raise TypeError("AgentExecution.use_dynamic_task(...) accepts keyword arguments only.")

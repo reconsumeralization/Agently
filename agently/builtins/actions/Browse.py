@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Literal
 import hashlib
 import json
@@ -234,6 +235,11 @@ class Browse:
         self.retry_backoff_seconds = (
             max(0.0, float(retry_backoff_seconds)) if isinstance(retry_backoff_seconds, (int, float)) else 0.25
         )
+
+    def apply_language_policy(self, policy: Mapping[str, Any]) -> None:
+        accept_language = policy.get("accept_language") if isinstance(policy, Mapping) else None
+        if accept_language is not None and str(accept_language).strip() and "Accept-Language" not in self.headers:
+            self.headers["Accept-Language"] = str(accept_language).strip()
 
     def register_actions(
         self,

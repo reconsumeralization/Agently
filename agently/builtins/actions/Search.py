@@ -14,6 +14,7 @@
 
 
 from typing import Any, Literal
+from collections.abc import Mapping
 import time
 
 from agently.utils import LazyImport, FunctionShifter
@@ -140,6 +141,11 @@ class Search:
             max(0.0, float(retry_backoff_seconds)) if isinstance(retry_backoff_seconds, (int, float)) else 0.25
         )
         self._extra_options = options or {}
+
+    def apply_language_policy(self, policy: Mapping[str, Any]) -> None:
+        region = policy.get("search_region") if isinstance(policy, Mapping) else None
+        if region is not None and str(region).strip() and self.region == "us-en":
+            self.region = str(region).strip()  # type: ignore[assignment]
 
     def _get_ddgs(self):
         if self.ddgs is None:
