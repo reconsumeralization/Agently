@@ -62,6 +62,33 @@ gate 被声明两遍。它不是 runtime signal 去重。
 如果某个 chunk 发三次 `Tick`，`when("Tick")` 就应该响应三次。这正是
 `emit_nowait(...)` + `when(...)` 能支撑动态 To-Do executor、依赖 join、side branch 和 reflection loop 的原因。
 
+### 执行阶段动态 signal overlay
+
+TriggerFlow 也可以通过内部 SignalNet 承载执行阶段的动态 signal binding。
+这是 execution overlay，不是 definition mutation：flow definition 和它的
+fingerprint 保持静态；某一次 `TriggerFlowExecution` 的 snapshot 记录该次运行中
+产生的动态 binding 和 signal attempt。
+
+动态 binding 面向框架拥有的编排场景，例如 TaskBoard card fan-out：可运行的工作项在
+执行过程中被发现，每条分支可能继续 emit 后续 signal，最终由 join/synthesis 等待。
+可持久化的动态 binding 必须使用可恢复 handler 引用。匿名 closure、coroutine 栈、
+socket、半截模型流都不是进程重启后的恢复对象。
+
+当应用或框架 owner 需要给当前 execution 追加 handler、但不想修改可复用 flow
+definition 时，使用 `execution.on_signal(...)`：
+
+```python
+binding_id = execution.on_signal(
+    "CardRequested",
+    run_card,
+    binding_id="taskboard.run_card",
+)
+execution.off_signal(binding_id)
+```
+
+Event Center 仍然是独立观察层：RuntimeEvent 可以记录 SignalNet dispatch 和恢复事实，
+但 Event Center 不拥有控制流。
+
 多依赖 join 使用：
 
 ```python

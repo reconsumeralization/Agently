@@ -64,6 +64,37 @@ event. If a chunk emits `Tick` three times, `when("Tick")` should react three
 times. This is what makes `emit_nowait(...)` + `when(...)` useful for dynamic
 To-Do executors, dependency joins, side branches, and reflection loops.
 
+### Execution-stage dynamic signal overlay
+
+TriggerFlow can also carry execution-stage dynamic signal bindings through its
+internal SignalNet. This is an execution overlay, not a definition mutation: the
+flow definition and its fingerprint stay static, while one `TriggerFlowExecution`
+snapshot records the dynamic bindings and signal attempts created during that
+run.
+
+Dynamic bindings are for framework-owned orchestration such as TaskBoard card
+fan-out, where runnable work items are discovered during execution and each
+branch may emit follow-up signals before a join/synthesis point. Durable dynamic
+bindings must use recoverable handler references. Anonymous closures, coroutine
+stacks, sockets, and half-read model streams are not restored after process
+restart.
+
+Use `execution.on_signal(...)` when the application or framework owner needs to
+add a handler to the current execution without changing the reusable flow
+definition:
+
+```python
+binding_id = execution.on_signal(
+    "CardRequested",
+    run_card,
+    binding_id="taskboard.run_card",
+)
+execution.off_signal(binding_id)
+```
+
+Event Center remains separate: RuntimeEvent records may observe SignalNet
+dispatch and recovery facts, but Event Center does not own control flow.
+
 For multi-dependency joins, use:
 
 ```python
