@@ -1,5 +1,5 @@
 import sqlite3
-from typing import Any
+from typing import Any, cast
 import importlib
 
 import pytest
@@ -99,6 +99,76 @@ def test_agent_use_actions_accepts_browse_package():
     assert result.get("data") == "content from https://example.com"
 
 
+def test_browse_action_failure_is_structured_error_not_success_text():
+    agent = Agently.create_agent()
+    browse = Browse(enable_pyautogui=False, enable_playwright=False, enable_bs4=False)
+    agent.use_actions(browse)
+
+    result = agent.action.execute_action("browse", {"url": "https://example.com/nope"})
+
+    assert result.get("status") == "error"
+    assert result.get("success") is False
+    assert result.get("ok") is False
+    assert result.get("data") is None
+    assert "Can not browse" in str(result.get("error", ""))
+    diagnostics = result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    assert diagnostics
+    assert diagnostics[0].get("code") == "browse_backend_failed"
+    assert result.get("meta", {}).get("provider") == "builtins.actions.Browse"
+
+
+def test_browse_raw_body_fallback_strips_data_uri_hot_content():
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(
+        '<html><body><img src="data:image/png;base64,AAAA'
+        + ("B" * 2000)
+        + '"><div data-payload="'
+        + ("C" * 800)
+        + '">tiny</div></body></html>',
+        "html.parser",
+    )
+
+    content = Browse._extract_text_from_soup(soup, min_length=50)
+
+    assert "data:image" not in content
+    assert "BBBB" not in content
+    assert "CCCC" not in content
+
+
+def test_browse_action_retries_transient_backend_error():
+    agent = Agently.create_agent()
+    browse = Browse(
+        fallback_order=("bs4",),
+        enable_playwright=False,
+        enable_bs4=True,
+        min_content_length=10,
+        max_attempts=2,
+        retry_backoff_seconds=0,
+    )
+    calls: list[str] = []
+
+    async def fake_bs4(url: str):
+        calls.append(url)
+        if len(calls) == 1:
+            return "Can not browse 'https://example.com'.\tError: incomplete chunked read"
+        return "Recovered page content with enough text."
+
+    browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
+    agent.use_actions(browse)
+
+    result = agent.action.execute_action("browse", {"url": "https://example.com"})
+
+    assert len(calls) == 2
+    assert result.get("status") == "partial_success"
+    assert result.get("success") is True
+    assert result.get("data") == "Recovered page content with enough text."
+    diagnostic = result.get("diagnostics", [])[0]
+    assert diagnostic.get("code") == "browse_backend_failed"
+    assert diagnostic.get("retryable") is True
+
+
 @pytest.mark.asyncio
 async def test_action_runtime_default_planning_uses_configured_model_key(monkeypatch):
     import agently.core as agently_core
@@ -156,6 +226,206 @@ async def test_action_runtime_default_planning_uses_configured_model_key(monkeyp
 
     assert seen_model_keys == ["task-main"]
     assert decision["next_action"] == "response"
+
+
+@pytest.mark.asyncio
+async def test_browse_recovers_http_to_https_and_returns_link_diagnostics():
+    browse = Browse(
+        fallback_order=("bs4",),
+        enable_playwright=False,
+        enable_bs4=True,
+        min_content_length=10,
+        max_attempts=1,
+        retry_backoff_seconds=0,
+    )
+    calls: list[str] = []
+
+    async def fake_bs4(url: str):
+        calls.append(url)
+        if url.startswith("http://"):
+            return "Can not browse 'http://example.com'.\tError: connection refused"
+        return {
+            "ok": True,
+            "content_kind": "html",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "text/html",
+            "content": "Recovered official page with enough readable content.",
+            "links": [{"url": "https://example.com/101/1010/10261.html", "text": "Official syllabus"}],
+            "canonical_links": ["https://example.com/"],
+        }
+
+    browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="http://example.com")
+
+    assert calls[:2] == ["http://example.com", "https://example.com"]
+    assert result["status"] == "partial_success"
+    assert result["success"] is True
+    assert result["data"]["selected_url"] == "https://example.com"
+    assert result["data"]["links"][0]["text"] == "Official syllabus"
+    assert result["meta"]["retry_candidates"][1]["reason"] == "same_host_https"
+    assert result["diagnostics"][0]["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_browse_rejects_waf_shell_and_continues_protocol_candidates():
+    browse = Browse(
+        fallback_order=("bs4",),
+        enable_playwright=False,
+        enable_bs4=True,
+        min_content_length=10,
+        max_attempts=1,
+        retry_backoff_seconds=0,
+    )
+    calls: list[str] = []
+
+    async def fake_bs4(url: str):
+        calls.append(url)
+        if url.startswith("http://"):
+            return {
+                "ok": True,
+                "content_kind": "html",
+                "requested_url": url,
+                "url": url,
+                "status": 200,
+                "media_type": "text/html",
+                "content": (
+                    '<body><div id="errorCodeTitle"></div><div id="errorCodeInfo"></div>'
+                    '<a href="https://yundun.console.aliyun.com/?p=waf#/waf/cn/dashboard/index" '
+                    'id="waf"></a></body>'
+                ),
+                "links": [],
+                "canonical_links": [],
+            }
+        return {
+            "ok": True,
+            "content_kind": "html",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "text/html",
+            "content": "Recovered official page with enough readable content.",
+            "links": [{"url": "https://example.com/official.html", "text": "Official page"}],
+            "canonical_links": ["https://example.com/"],
+        }
+
+    browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="http://example.com")
+
+    assert calls[:2] == ["http://example.com", "https://example.com"]
+    assert result["success"] is True
+    assert result["data"]["selected_url"] == "https://example.com"
+    assert result["data"]["content"] == "Recovered official page with enough readable content."
+    assert result["diagnostics"][0]["message"].startswith("blocked_or_error_page")
+
+
+@pytest.mark.asyncio
+async def test_browse_materializes_remote_file_to_workspace(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "browse-workspace")
+    browse = Browse(
+        fallback_order=("bs4",),
+        enable_playwright=False,
+        enable_bs4=True,
+        min_content_length=10,
+        max_attempts=1,
+    )
+    pdf_bytes = b"%PDF-1.4\nfake pdf bytes\n%%EOF"
+
+    async def fake_bs4(url: str):
+        return {
+            "ok": True,
+            "content_kind": "remote_file",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "application/pdf",
+            "headers": {"content-type": "application/pdf"},
+            "content_bytes": pdf_bytes,
+        }
+
+    browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="https://example.com/syllabus.pdf", workspace=workspace)
+
+    assert result["success"] is True
+    assert result["status"] in {"success", "partial_success"}
+    assert result["data"]["kind"] == "remote_file"
+    assert result["data"]["media_type"] == "application/pdf"
+    assert result["file_refs"][0]["path"].startswith("downloads/syllabus-")
+    assert (workspace.files_root / result["file_refs"][0]["path"]).is_file()
+    assert result["data"]["read_preview"]["path"] == result["file_refs"][0]["path"]
+    assert "content_bytes" not in str(result)
+
+
+def test_browse_action_executor_uses_settings_workspace_for_remote_file(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "browse-action-workspace")
+    agent = Agently.create_agent()
+    cast(Any, agent.settings).set("action.workspace", workspace)
+    browse = Browse(
+        fallback_order=("bs4",),
+        enable_playwright=False,
+        enable_bs4=True,
+        min_content_length=10,
+        max_attempts=1,
+    )
+
+    async def fake_bs4(url: str):
+        return {
+            "ok": True,
+            "content_kind": "remote_file",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "application/pdf",
+            "headers": {"content-type": "application/pdf"},
+            "content_bytes": b"%PDF-1.4\nexecutor fake\n%%EOF",
+        }
+
+    browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
+    agent.use_actions(browse)
+
+    result = agent.action.execute_action("browse", {"url": "https://example.com/syllabus.pdf"})
+
+    assert result.get("success") is True
+    file_refs = result.get("file_refs", [])
+    assert isinstance(file_refs, list)
+    assert file_refs[0]["path"].startswith("downloads/syllabus-")
+    assert (workspace.files_root / file_refs[0]["path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_browse_remote_file_without_workspace_fails_closed():
+    browse = Browse(
+        fallback_order=("bs4",),
+        enable_playwright=False,
+        enable_bs4=True,
+        min_content_length=10,
+        max_attempts=1,
+    )
+
+    async def fake_bs4(url: str):
+        return {
+            "ok": True,
+            "content_kind": "remote_file",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "application/pdf",
+            "headers": {"content-type": "application/pdf"},
+            "content_bytes": b"%PDF-1.4\nfake\n%%EOF",
+        }
+
+    browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="https://example.com/syllabus.pdf")
+
+    assert result["success"] is False
+    assert result["status"] == "blocked"
+    assert result["diagnostics"][0]["code"] == "browse.remote_file.workspace_required"
+    assert "content_bytes" not in str(result)
 
 
 @pytest.mark.asyncio
@@ -433,6 +703,39 @@ def test_search_package_reports_partial_success_when_fallback_recovers(monkeypat
     assert result.get("diagnostics", [])[0].get("code") == "search_backend_failed"
 
 
+def test_search_package_retries_transient_backend_error(monkeypatch):
+    calls: list[str] = []
+
+    class FakeDDGS:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text(self, query: str, **kwargs):
+            calls.append(str(kwargs.get("backend")))
+            if len(calls) == 1:
+                raise RuntimeError("incomplete chunked read")
+            return [{"title": query, "href": "https://example.com", "body": "retried"}]
+
+    class FakeDDGSModule:
+        DDGS = FakeDDGS
+
+    search_module = importlib.import_module("agently.builtins.actions.Search")
+    monkeypatch.setattr(search_module.LazyImport, "import_package", lambda *args, **kwargs: FakeDDGSModule)
+
+    agent = Agently.create_agent().use_actions(
+        Search(backend="yahoo", max_attempts=2, retry_backoff_seconds=0)
+    )
+
+    result = agent.action.execute_action("search", {"query": "Agently", "max_results": 2})
+
+    assert calls == ["yahoo", "yahoo"]
+    assert result.get("status") == "partial_success"
+    assert result.get("data") == [{"title": "Agently", "href": "https://example.com", "body": "retried"}]
+    diagnostic = result.get("diagnostics", [])[0]
+    assert diagnostic.get("code") == "search_backend_failed"
+    assert diagnostic.get("retryable") is True
+
+
 def test_search_package_continues_after_empty_backend(monkeypatch):
     class FakeDDGS:
         def __init__(self, *args, **kwargs):
@@ -479,3 +782,19 @@ def test_search_package_treats_no_results_as_empty_success(monkeypatch):
 
     assert result.get("status") == "success"
     assert result.get("data") == []
+
+
+def test_search_action_executor_awaits_async_fallback_methods():
+    agent = Agently.create_agent()
+    search = Search(timeout=1)
+
+    async def fake_search_arxiv(query: str, max_results: int | None = 10):
+        return {"query": query, "max_results": max_results}
+
+    search.search_arxiv = fake_search_arxiv
+    agent.use_actions(search)
+
+    result = agent.action.execute_action("search_arxiv", {"query": "agents", "max_results": 3})
+
+    assert result.get("status") == "success"
+    assert result.get("data") == {"query": "agents", "max_results": 3}

@@ -249,10 +249,10 @@
         "AgentExecution.get_response",
         "Agent.get_response",
         "ModelResponse",
-        "ModelResponseResult"
+        "ModelRequestResult"
       ],
       "contract": "get_result() is the recommended reusable facade for text, data, metadata, and streaming readers. Agent quick prompt chains return AgentExecutionResult; direct ModelRequest calls return ModelRequestResult. get_response() remains a compatibility alias. ModelRequestResult.result points to itself so older response.result reader chains continue to work.",
-      "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); data = result.get_data(). ModelResponseResult remains a 4.1.x compatibility alias for ModelRequestResult, and direct ModelResponse construction remains deprecated for removal in Agently 4.2."
+      "compatibility_policy": "Recommended documentation, examples, and Skills guidance use result = agent.input(...).output(...).get_result(); data = result.get_data(). ModelResponseResult is no longer a public facade or compatibility alias; use ModelRequestResult. Direct ModelResponse construction remains deprecated for removal in Agently 4.2."
     },
     "agent_execution_task_loop": {
       "status": "in-development",

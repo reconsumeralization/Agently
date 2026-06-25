@@ -23,7 +23,7 @@ from agently import (
     SkillRuntimeStreamItem as RootSkillRuntimeStreamItem,
     StreamingData as RootStreamingData,
 )
-from agently.core import AgentExecutionResult, BaseAgent, ModelRequestResult, ModelResponseResult
+from agently.core import AgentExecutionResult, BaseAgent, ModelRequestResult
 from agently.types.data import (
     AgentExecutionStreamData,
     AgentlyModelResultEvent,
@@ -54,16 +54,18 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
 
         execution = agent.create_execution().input("hello").output({"reply": (str,)})
         assert_type(execution, AgentExecution)
-        assert_type(execution.get_generator(type="delta"), Generator[AgentExecutionStreamData, None, None])
+        assert_type(execution.get_generator(), Generator[str, None, None])
+        assert_type(execution.get_generator(type="delta"), Generator[str, None, None])
         assert_type(execution.get_generator(type="instant"), Generator[AgentExecutionStreamData, None, None])
         assert_type(execution.get_generator(type="specific"), Generator[AgentExecutionStreamData, None, None])
-        assert_type(execution.get_generator(type="all"), Generator[AgentExecutionStreamData, None, None])
+        assert_type(execution.get_generator(type="all"), Generator[tuple[str, AgentExecutionStreamData], None, None])
         assert_type(execution.get_generator(type="original"), Generator[AgentExecutionStreamData, None, None])
 
-        assert_type(execution.get_async_generator(type="delta"), AsyncGenerator[AgentExecutionStreamData, None])
+        assert_type(execution.get_async_generator(), AsyncGenerator[str, None])
+        assert_type(execution.get_async_generator(type="delta"), AsyncGenerator[str, None])
         assert_type(execution.get_async_generator(type="instant"), AsyncGenerator[AgentExecutionStreamData, None])
         assert_type(execution.get_async_generator(type="specific"), AsyncGenerator[AgentExecutionStreamData, None])
-        assert_type(execution.get_async_generator(type="all"), AsyncGenerator[AgentExecutionStreamData, None])
+        assert_type(execution.get_async_generator(type="all"), AsyncGenerator[tuple[str, AgentExecutionStreamData], None])
         assert_type(execution.get_async_generator(type="original"), AsyncGenerator[AgentExecutionStreamData, None])
 
         result: ModelRequestResult = agent.create_request().input("hello").get_result()
@@ -72,7 +74,6 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
 
         compat_result: ModelRequestResult = agent.create_request().input("hello").get_response()
         assert_type(compat_result.result.get_text(), str)
-        assert_type(cast(ModelResponseResult, result), ModelRequestResult)
 
 
 def test_public_handler_type_aliases():
@@ -91,7 +92,9 @@ def test_agent_execution_stream_protocol_contract():
     if TYPE_CHECKING:
         execution = cast(AgentExecution, object())
 
+        assert_type(execution.get_async_generator(), AsyncGenerator[str, None])
         assert_type(execution.get_async_generator(type="instant"), AsyncGenerator[AgentExecutionStreamData, None])
+        assert_type(execution.get_generator(), Generator[str, None, None])
         assert_type(execution.get_generator(type="instant"), Generator[AgentExecutionStreamData, None, None])
 
 

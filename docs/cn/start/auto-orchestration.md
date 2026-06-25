@@ -279,9 +279,10 @@ meta = await execution.async_get_meta()
 
 execution 对象沿用模型 response 的消费风格：`get_data`、`get_text`、
 `get_meta`、`get_generator` 以及对应 async 方法。
-execution stream 产出的是 `agently.types.data` 里的
-`AgentExecutionStreamData`。它保留熟悉的 `path`、`value`、`delta`、
-`is_complete` 字段，并增加过程级事件需要的 route metadata。
+默认 stream 是 `type="delta"`，产出纯文本字符串；模型流式请求重放时会产出保留的
+`"<$retry>{reason}</$retry>"` 边界标记。需要结构化执行事件时使用
+`type="instant"`：`AgentExecutionStreamData` 保留熟悉的 `path`、`value`、
+`delta`、`is_complete` 字段，并增加过程级事件需要的 route metadata。
 
 `create_execution()` 创建一个 AgentExecution draft。只有 prompt 的 draft 会作为
 直接模型请求执行。当开发者自己编写循环，或 task strategy 需要一个有边界的单步执行时，

@@ -13,8 +13,8 @@ runs it, and returns the parsed data. For everything more interesting — text,
 metadata, streaming, reuse, status, or task refs — go through `get_result()`.
 Quick prompt chains return an `AgentExecutionResult`; direct
 `agent.create_request(...).get_result()` returns `ModelRequestResult`.
-`ModelResponseResult` is a deprecated 4.1.x compatibility alias; direct
-`ModelResponse` construction is deprecated as well.
+`ModelResponseResult` is no longer a public result facade. Direct
+`ModelResponse` construction remains deprecated as well.
 
 ## Two consumption styles
 
@@ -76,9 +76,8 @@ related `Response` aliases remain available from `agently.types.data` for
 compatibility, but they are not re-exported from the `agently` root. The
 `Result` names are the recommended API.
 
-`ModelRequestResult` is the canonical result class. The historical
-`ModelResponseResult` import remains a compatibility alias only; do not use it
-in new annotations, docs, or examples.
+`ModelRequestResult` is the canonical result class. Do not import or annotate
+with the historical `ModelResponseResult` name.
 
 ### Delta example
 
@@ -113,11 +112,13 @@ when downstream work should wait until the field is closed.
 
 ### AgentExecution projection
 
-`AgentExecutionStreamData` is an execution-level projection, not a
-`ModelRequestResult` or a string delta. When an execution owns a model request,
-it preserves model attempt facts as structured stream items. In particular,
+`AgentExecutionStreamData` is an execution-level structured projection, not a
+`ModelRequestResult`. When an execution owns a model request, `instant` / `all`
+streams preserve model attempt facts as structured stream items. In particular,
 `$status` carries retry/failure/completion state and its `meta` includes
 `response_id`, `request_run_id`, `model_run_id`, and `attempt_index`.
+`type="delta"` is the plain text projection; it yields strings and uses
+`"<$retry>{reason}</$retry>"` to mark a replay boundary.
 
 ```python
 execution = agent.input("Summarize the incident update.")
@@ -128,9 +129,10 @@ async for item in execution.get_async_generator(type="instant"):
         print(item.delta, end="", flush=True)
 ```
 
-The direct `ModelRequestResult` delta marker `"<$retry>{reason}</$retry>"` is not
-projected into an AgentExecution delta. Execution consumers should use the
-structured `$status` item instead.
+The no-argument execution generator defaults to the same `delta` projection, so
+`execution.get_generator()` and `execution.get_async_generator()` yield strings.
+Use `type="instant"` or `type="all"` when the consumer needs the structured
+`$status` item instead of the text marker.
 
 For shared-output CLI rendering, do not treat `.is_complete` as a global
 display-order barrier. A structured parser often confirms that one path is

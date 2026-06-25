@@ -25,7 +25,6 @@ from .Prompt import Prompt
 from .ModelRequestRunner import ModelRequestRunner
 from .ModelRequestResult import ModelRequestResult
 from .ModelResponse import ModelResponse
-from .ModelResponseResult import ModelResponseResult
 from .AttachmentInput import ImageDetail, build_image_attachment
 
 if TYPE_CHECKING:
@@ -680,5 +679,4 @@ __all__ = [
     "ModelRequest",
     "ModelRequestResult",
     "ModelResponse",
-    "ModelResponseResult",
 ]

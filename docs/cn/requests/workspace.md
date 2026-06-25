@@ -272,6 +272,13 @@ MCP client、renderer lifecycle owner、OCR engine 或 model requester。
 await agent.workspace.write_file("notes/todo.txt", "ship docs")
 read_result = await agent.workspace.read_file("notes/todo.txt", max_bytes=4096)
 
+materialized = await agent.workspace.materialize_file(
+    "downloads/syllabus.pdf",
+    pdf_bytes,
+    source={"kind": "remote_download", "url": "https://example.com/syllabus.pdf"},
+    media_type="application/pdf",
+)
+
 export_result = await agent.workspace.export_file(
     "report.md",
     "report.pdf",
@@ -284,6 +291,12 @@ export_result = await agent.workspace.export_file(
 未知 binary 文件会返回 `readable=False` 和结构化 diagnostics，不会用 replacement
 character 伪造文本。`search_files` 也只搜索通过同一 handler registry 判定为 readable
 text 的文件。
+
+`materialize_file(...)` 用于框架或应用拥有的受控 bytes 物化，例如 Browse action
+把远程 PDF 下载到 Workspace 的 `downloads/` 后，再由后续 `read_file(...)` 通过
+handler registry 解析。它记录 `bytes`、`sha256`、`media_type`、diagnostics 和
+file refs，但它本身不解析 PDF/Office/Image 内容，也不改变 `write_file(...)` 的纯文本
+写入契约。
 
 内置可选 handler 覆盖：
 

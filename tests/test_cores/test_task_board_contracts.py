@@ -654,7 +654,11 @@ def test_task_board_tick_finalize_incomplete_snapshot_preserves_collected_result
     assert result.revision.revision_id == "rev-1"
     assert result.revision.card_results["a"].status == "completed"
     assert result.revision.card_results["a"].preview == "A finished before close failure."
+    assert result.revision.card_results["b"].status == "failed"
+    assert result.revision.card_results["b"].metadata["interrupted"] is True
+    assert result.revision.card_results["b"].diagnostics[0]["code"] == "taskboard.tick.card_interrupted"
     assert result.revision.diagnostics[-1]["code"] == "taskboard.tick.incomplete_snapshot"
+    assert result.revision.diagnostics[-1]["interrupted_card_ids"] == ["b"]
     assert result.triggerflow_snapshot["status"] == "failed"
 
 

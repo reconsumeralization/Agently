@@ -529,8 +529,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                 'AgentExecution.get_response',
                                                                 'Agent.get_response',
                                                                 'ModelRequestResult',
-                                                                'ModelResponse',
-                                                                'ModelResponseResult'],
+                                                                'ModelResponse'],
                                                     'contract': 'get_result() is the recommended reusable facade for '
                                                                 'text, data, metadata, and streaming readers. Agent '
                                                                 'quick prompt chains return AgentExecutionResult; '
@@ -544,10 +543,11 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                             'data = result.get_data(). Code that '
                                                                             'already calls get_response() and then '
                                                                             'reader methods or response.result reader '
-                                                                            'chains remains supported. Direct '
-                                                                            'ModelResponseResult is a compatibility alias, and '
-                                                                            'ModelResponse construction is deprecated for removal '
-                                                                            'in Agently 4.2.'},
+                                                                            'chains remains supported. ModelResponseResult is '
+                                                                            'no longer a public facade or compatibility alias; '
+                                                                            'use ModelRequestResult. Direct ModelResponse '
+                                                                            'construction is deprecated for removal in '
+                                                                            'Agently 4.2.'},
                    'agent_execution_task_loop': {'status': 'released',
                                                  'surface': ['Agent.goal',
                                                              'Agent.goals',

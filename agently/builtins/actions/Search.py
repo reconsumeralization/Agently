@@ -14,6 +14,7 @@
 
 
 from typing import Any, Literal
+import time
 
 from agently.utils import LazyImport, FunctionShifter
 
@@ -118,6 +119,8 @@ class Search:
         fallback_backends: list[str] | tuple[str, ...] | str | None = None,
         search_fallback_backends: list[str] | tuple[str, ...] | str | None = None,
         news_fallback_backends: list[str] | tuple[str, ...] | str | None = None,
+        max_attempts: int = 2,
+        retry_backoff_seconds: float = 0.25,
         options: dict[str, Any] | None = None,
     ):
         self.proxy = proxy
@@ -132,6 +135,10 @@ class Search:
             "search": search_fallback_backends if search_fallback_backends is not None else fallback_backends,
             "news": news_fallback_backends if news_fallback_backends is not None else fallback_backends,
         }
+        self.max_attempts = max(1, int(max_attempts)) if isinstance(max_attempts, int) else 2
+        self.retry_backoff_seconds = (
+            max(0.0, float(retry_backoff_seconds)) if isinstance(retry_backoff_seconds, (int, float)) else 0.25
+        )
         self._extra_options = options or {}
 
     def _get_ddgs(self):
@@ -310,7 +317,7 @@ class Search:
                 max_results=kwargs.get("max_results", 10),
             )
         method = getattr(self, method_name)
-        return method(**kwargs)
+        return await FunctionShifter.asyncify(method)(**kwargs)
 
     async def search_wikipedia(
         self,
@@ -360,61 +367,73 @@ class Search:
         empty_backends: list[str] = []
         candidates = self._candidate_backends(category)
         for backend in self._candidate_backends(category):
-            try:
-                result = method(
-                    query=query,
-                    timelimit=timelimit,
-                    max_results=max_results,
-                    backend=backend,
-                    region=self.region,
-                    **self._extra_options,
-                )
-            except Exception as error:
-                errors.append(
-                    {
-                        "backend": backend,
-                        "type": error.__class__.__name__,
-                        "message": str(error),
+            for attempt_index in range(self.max_attempts):
+                try:
+                    result = method(
+                        query=query,
+                        timelimit=timelimit,
+                        max_results=max_results,
+                        backend=backend,
+                        region=self.region,
+                        **self._extra_options,
+                    )
+                except Exception as error:
+                    retryable = self._is_transient_error(error)
+                    errors.append(
+                        {
+                            "backend": backend,
+                            "attempt_index": str(attempt_index),
+                            "retryable": str(retryable),
+                            "type": error.__class__.__name__,
+                            "message": str(error),
+                        }
+                    )
+                    if retryable and attempt_index + 1 < self.max_attempts:
+                        if self.retry_backoff_seconds > 0:
+                            time.sleep(self.retry_backoff_seconds)
+                        continue
+                    break
+                results = result if isinstance(result, list) else list(result) if result is not None else []
+                if results:
+                    diagnostics = [
+                        {
+                            "code": "search_backend_failed",
+                            "backend": item["backend"],
+                            "attempt_index": int(item.get("attempt_index", "0")),
+                            "retryable": item.get("retryable") == "True",
+                            "error_type": item["type"],
+                            "message": item["message"],
+                        }
+                        for item in errors
+                    ]
+                    diagnostics.extend(
+                        {
+                            "code": "search_backend_empty",
+                            "backend": backend_name,
+                            "message": "Backend returned no parsed results.",
+                        }
+                        for backend_name in empty_backends
+                    )
+                    status = "partial_success" if diagnostics else "success"
+                    return {
+                        "ok": True,
+                        "success": True,
+                        "status": status,
+                        "data": results,
+                        "result": results,
+                        "diagnostics": diagnostics,
+                        "meta": {
+                            "provider": "ddgs",
+                            "category": category,
+                            "backend": backend,
+                            "attempted_backends": candidates,
+                            "max_attempts": self.max_attempts,
+                            "failed_backends": [item["backend"] for item in errors],
+                            "empty_backends": empty_backends,
+                        },
                     }
-                )
-                continue
-            results = result if isinstance(result, list) else list(result) if result is not None else []
-            if results:
-                diagnostics = [
-                    {
-                        "code": "search_backend_failed",
-                        "backend": item["backend"],
-                        "error_type": item["type"],
-                        "message": item["message"],
-                    }
-                    for item in errors
-                ]
-                diagnostics.extend(
-                    {
-                        "code": "search_backend_empty",
-                        "backend": backend_name,
-                        "message": "Backend returned no parsed results.",
-                    }
-                    for backend_name in empty_backends
-                )
-                status = "partial_success" if diagnostics else "success"
-                return {
-                    "ok": True,
-                    "success": True,
-                    "status": status,
-                    "data": results,
-                    "result": results,
-                    "diagnostics": diagnostics,
-                    "meta": {
-                        "provider": "ddgs",
-                        "category": category,
-                        "backend": backend,
-                        "attempted_backends": candidates,
-                        "failed_backends": [item["backend"] for item in errors],
-                        "empty_backends": empty_backends,
-                    },
-                }
-            empty_backends.append(backend)
+                empty_backends.append(backend)
+                break
         if errors and all(self._is_no_results_message(item["message"]) for item in errors):
             errors = []
         if errors:
@@ -441,6 +460,7 @@ class Search:
                 "category": category,
                 "backend": None,
                 "attempted_backends": candidates,
+                "max_attempts": self.max_attempts,
                 "failed_backends": [],
                 "empty_backends": empty_backends,
             },
@@ -486,6 +506,29 @@ class Search:
     @staticmethod
     def _is_no_results_message(message: str) -> bool:
         return "No results found" in message
+
+    @staticmethod
+    def _is_transient_error(error: Exception | str) -> bool:
+        message = str(error).lower()
+        error_name = error.__class__.__name__.lower() if isinstance(error, Exception) else ""
+        transient_markers = (
+            "timeout",
+            "timed out",
+            "connection",
+            "connect",
+            "network",
+            "reset",
+            "disconnect",
+            "incomplete chunked read",
+            "chunked",
+            "broken pipe",
+            "temporarily unavailable",
+            "temporary failure",
+            "proxy",
+            "ssl",
+            "tls",
+        )
+        return any(marker in message or marker in error_name for marker in transient_markers)
 
     async def search_arxiv(
         self,

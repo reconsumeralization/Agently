@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
 from agently.utils import DataFormatter
@@ -175,7 +175,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         task_id=task.id,
     )
 
-    async for item in task.get_async_generator():
+    async for item in task.get_async_generator(type="instant"):
         await execution.stream.bridge_agent_task_item(item, route="agent_task")
 
     task_meta = await task.async_meta()
@@ -211,7 +211,16 @@ def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, 
     capabilities: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(candidate_id: str, kind: str, route: str, guidance_access: str, *, mode: str = "", description: str = "") -> None:
+    def add(
+        candidate_id: str,
+        kind: str,
+        route: str,
+        guidance_access: str,
+        *,
+        mode: str = "",
+        description: str = "",
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
         candidate_id = str(candidate_id or "").strip()
         if not candidate_id or (candidate_id, kind) in seen:
             return
@@ -225,6 +234,10 @@ def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, 
         }
         if mode:
             entry["mode"] = mode
+        if meta:
+            for key in ("side_effect_level", "replay_safe"):
+                if key in meta:
+                    entry[key] = DataFormatter.sanitize(meta[key])
         capabilities.append(entry)
 
     # Actions -> model_request route, no model-facing guidance beyond their spec.
@@ -238,6 +251,7 @@ def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, 
                 "model_request",
                 "none",
                 description=str(action.get("desc") or action.get("description") or ""),
+                meta=action,
             )
     except Exception:
         pass

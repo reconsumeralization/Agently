@@ -67,7 +67,7 @@ ACCOUNT_SIGNAL: dict[str, Any] = {
 
 async def collect_stream_paths(execution: Any) -> list[str]:
     paths: list[str] = []
-    async for item in execution.get_async_generator():
+    async for item in execution.get_async_generator(type="instant"):
         path = str(getattr(item, "path", ""))
         if path:
             paths.append(path)

@@ -314,9 +314,11 @@ meta = await execution.async_get_meta()
 
 The execution object follows the same consumption style as model responses:
 `get_data`, `get_text`, `get_meta`, `get_generator`, and async equivalents.
-Execution streams yield `AgentExecutionStreamData` from `agently.types.data`.
-This type keeps the familiar `path`, `value`, `delta`, and `is_complete` fields
-and adds route metadata for process-level events.
+The default stream is `type="delta"` and yields plain text strings, including
+the reserved `"<$retry>{reason}</$retry>"` boundary when a model stream is
+replayed. Use `type="instant"` for structured execution events:
+`AgentExecutionStreamData` keeps the familiar `path`, `value`, `delta`, and
+`is_complete` fields and adds route metadata for process-level events.
 
 `create_execution()` creates an AgentExecution draft. Ordinary prompt-only
 drafts run as direct model requests. When a developer-owned loop or task

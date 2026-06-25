@@ -1014,7 +1014,7 @@ class AgentExecution:
 
     async def get_async_generator(
         self,
-        type: Literal["instant", "streaming_parse", "all"] | str | None = "instant",
+        type: Literal["delta", "instant", "streaming_parse", "all"] | str | None = "delta",
         content: Any = None,
         **_: Any,
     ) -> AsyncGenerator[Any, None]:

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
@@ -25,8 +26,10 @@ from agently.types.data.workspace import (
     WorkspaceBackendCapabilities,
     WorkspaceContentSegment,
     WorkspaceFileExportResult,
+    WorkspaceFileDiagnostic,
     WorkspaceFileReadResult,
     WorkspaceFileWriteResult,
+    WorkspaceFileInfo,
     WorkspaceFilePolicyMetadata,
     WorkspaceLeaseRef,
     WorkspaceLinkRef,
@@ -542,6 +545,70 @@ class Workspace:
             handler=handler,
             options=options,
         )
+
+    async def materialize_file(
+        self,
+        path: str | Path,
+        content: bytes,
+        *,
+        source: dict[str, Any] | None = None,
+        media_type: str | None = None,
+        overwrite: bool = False,
+    ) -> WorkspaceFileWriteResult:
+        """Materialize trusted bytes into the Workspace file boundary.
+
+        This is intentionally separate from write_file(...), whose public
+        contract stays plain-text handler-backed writes. Materialization is for
+        framework-owned remote file downloads and binary evidence refs.
+        """
+        if self.capabilities().get("read_only"):
+            raise PermissionError("Workspace is read-only; materialize_file(...) is blocked.")
+        if not isinstance(content, (bytes, bytearray)):
+            raise TypeError("Workspace.materialize_file(...) requires bytes content.")
+        target = self.resolve_file_path(path)
+        if target.exists() and not overwrite:
+            raise FileExistsError(f"Workspace file already exists: { path }")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        raw = bytes(content)
+        target.write_bytes(raw)
+        relative_path = str(target.relative_to(self.files_root))
+        file_info: WorkspaceFileInfo = self.manager.inspect_file_path(target, relative_path=relative_path)
+        if media_type and not file_info.get("media_type"):
+            file_info = cast(WorkspaceFileInfo, dict(file_info))
+            file_info["media_type"] = str(media_type)
+        diagnostics: list[WorkspaceFileDiagnostic] = []
+        if source:
+            diagnostics.append(
+                {
+                    "code": "workspace.file.materialized",
+                    "message": "File bytes were materialized into the Workspace file boundary.",
+                    "handler_id": "workspace.materialize_file",
+                    "detail": {"source": dict(source)},
+                }
+            )
+        return {
+            "ok": True,
+            "writable": True,
+            "path": relative_path,
+            "bytes": int(file_info.get("bytes", len(raw))),
+            "sha256": str(file_info.get("sha256") or hashlib.sha256(raw).hexdigest()),
+            "media_type": file_info.get("media_type"),
+            "content_kind": str(file_info.get("content_kind", "unknown")),
+            "encoding": None,
+            "mode": "materialize",
+            "handler_id": "workspace.materialize_file",
+            "diagnostics": diagnostics,
+            "file_refs": [
+                {
+                    "path": relative_path,
+                    "bytes": int(file_info.get("bytes", len(raw))),
+                    "sha256": str(file_info.get("sha256") or hashlib.sha256(raw).hexdigest()),
+                    "media_type": file_info.get("media_type"),
+                    "content_kind": str(file_info.get("content_kind", "unknown")),
+                    "role": "download",
+                }
+            ],
+        }
 
     async def export_file(
         self,

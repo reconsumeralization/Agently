@@ -23,7 +23,7 @@ the lower-level lifecycle substrate. This script proves the public task API:
     agent.use_actions(...)
     await agent.async_use_mcp(...)
     agent.use_skills(...)
-    agent.goal(...).effort(...).input(...).output(...).get_async_generator()
+    agent.goal(...).effort(...).input(...).output(...).get_async_generator(type="instant")
 
 No final business artifact is canned in this file. The model must use the
 mounted capabilities and satisfy the semantic judge.
@@ -412,7 +412,7 @@ async def main() -> None:
     print(f"[setup] installed_skill={COCOON_SKILL_ID} source={COCOON_SKILL_SOURCE}")
     print(f"[setup] registered_actions={sorted(action_ids(agent))}")
     with trace_path.open("w", encoding="utf-8") as trace_file:
-        async for item in execution.get_async_generator():
+        async for item in execution.get_async_generator(type="instant"):
             stream_items.append(item)
             trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
             trace_file.flush()

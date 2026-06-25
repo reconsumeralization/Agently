@@ -567,7 +567,7 @@ async def main(argv: list[str] | None = None):
     stream_items = []
     try:
         with stream_trace_path.open("w", encoding="utf-8") as trace_file:
-            async for item in execution.get_async_generator():
+            async for item in execution.get_async_generator(type="instant"):
                 stream_items.append(item)
                 trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
                 trace_file.flush()

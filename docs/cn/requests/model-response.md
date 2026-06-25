@@ -12,8 +12,8 @@ keywords: Agently, result, get_result, get_data, get_text, get_meta, generator, 
 解析后的 data。其他更有意思的事（text、metadata、流式、复用、status 或 task
 refs）都走 `get_result()`。quick prompt 链返回 `AgentExecutionResult`；直接
 `agent.create_request(...).get_result()` 返回 `ModelRequestResult`。
-`ModelResponseResult` 是 4.1.x 的 deprecated compatibility alias；直接构造
-`ModelResponse` 也已 deprecated。
+`ModelResponseResult` 不再作为公开 result facade；直接构造 `ModelResponse` 也仍然
+deprecated。
 
 ## 两种消费方式
 
@@ -74,9 +74,8 @@ meta = result.get_meta()        # 已缓存
 `Response` 别名会继续在 `agently.types.data` 里兼容，但不会从 `agently`
 根入口重新导出。推荐使用 `Result` 命名。
 
-`ModelRequestResult` 是 canonical result class。历史的
-`ModelResponseResult` import 只保留为 compatibility alias；新注解、文档和示例
-都不应使用它。
+`ModelRequestResult` 是 canonical result class。不要再导入或用历史的
+`ModelResponseResult` 名称做类型注解。
 
 ### Delta 例子
 
@@ -111,11 +110,12 @@ for item in gen:
 
 ### AgentExecution 投影
 
-`AgentExecutionStreamData` 是 execution 层的投影，不是
-`ModelRequestResult`，也不是字符串 delta。一个 execution 持有模型请求时，模型
-attempt 的事实会作为结构化 stream item 保留下来：`$status` 表达 retry、失败和
+`AgentExecutionStreamData` 是 execution 层的结构化投影，不是
+`ModelRequestResult`。一个 execution 持有模型请求时，`instant` / `all` 流会把模型
+attempt 的事实作为结构化 stream item 保留下来：`$status` 表达 retry、失败和
 完成状态，`meta` 带有 `response_id`、`request_run_id`、`model_run_id` 与
-`attempt_index`。
+`attempt_index`。`type="delta"` 是纯文本投影，产出字符串，并用
+`"<$retry>{reason}</$retry>"` 标记重放边界。
 
 ```python
 execution = agent.input("总结这份事故更新。")
@@ -126,8 +126,10 @@ async for item in execution.get_async_generator(type="instant"):
         print(item.delta, end="", flush=True)
 ```
 
-直接消费 `ModelRequestResult` delta 时的 `"<$retry>{reason}</$retry>"` 标记不会被
-投影进 AgentExecution delta。execution 的消费者应读取结构化 `$status` item。
+无参 execution generator 默认也是同一个 `delta` 投影，所以
+`execution.get_generator()` 和 `execution.get_async_generator()` 都产出字符串。
+consumer 需要结构化 `$status` 而不是文本标记时，使用 `type="instant"` 或
+`type="all"`。
 
 如果多个字段共用一个 CLI 输出区域，不要把 `.is_complete` 当成全局展示顺序屏障。
 结构化 parser 往往是因为已经看到下一个 path 开始，才确认上一个 path 已关闭，

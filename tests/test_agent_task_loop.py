@@ -10,6 +10,7 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
+from agently.core.application.AgentTask import AgentTask
 from agently.types.data import AgentlyRequestData
 from agently.utils import DataFormatter, Settings
 from examples.agent_task.interview_question_preparation import judge_interview_semantics
@@ -236,7 +237,7 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     )
 
     result_facade = task.get_result()
-    stream_items = [item async for item in result_facade.get_async_generator()]
+    stream_items = [item async for item in result_facade.get_async_generator(type="instant")]
     result = await result_facade.async_get_data()
     execution_meta = await result_facade.async_get_meta()
     meta = await task.meta()
@@ -332,7 +333,7 @@ async def test_agent_task_loop_progress_stream_is_opt_in(tmp_path):
         limits={"max_model_requests": 1},
     )
 
-    stream_items = [item async for item in task.stream()]
+    stream_items = [item async for item in task.get_async_generator(type="instant")]
 
     assert not any((item.meta or {}).get("stream_kind") == "progress" for item in stream_items)
     assert any((item.meta or {}).get("stream_kind") == "snapshot" for item in stream_items)
@@ -359,7 +360,7 @@ async def test_agent_task_loop_progress_model_uses_snapshot_background(tmp_path)
         },
     )
 
-    stream_items = [item async for item in task.stream()]
+    stream_items = [item async for item in task.get_async_generator(type="instant")]
     progress_items = [
         item
         for item in stream_items
@@ -404,7 +405,7 @@ async def test_agent_task_loop_progress_model_uses_configured_language(tmp_path)
         },
     )
 
-    stream_items = [item async for item in task.stream()]
+    stream_items = [item async for item in task.get_async_generator(type="instant")]
     progress_items = [
         item
         for item in stream_items
@@ -455,7 +456,7 @@ async def test_agent_task_loop_progress_model_omits_developer_diagnostics(tmp_pa
     assert task.workspace is not None
     monkeypatch.setattr(task.workspace, "build_context", noisy_context_pack)
 
-    stream_items = [item async for item in task.stream()]
+    stream_items = [item async for item in task.get_async_generator(type="instant")]
     progress_calls = [
         call
         for call in MockAgentTaskRequester.calls
@@ -824,6 +825,62 @@ async def test_agent_task_loop_blocks_when_verifier_requires_block(tmp_path):
     assert meta["diagnostics"]["phases"][-1]["diagnostics"]["artifact_status"] == "blocked"
 
 
+def test_agent_task_verifier_block_continues_when_untried_read_action_exists(tmp_path):
+    agent = _create_agent("agent-task-block-continuation").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Collect official source evidence and produce a report.",
+        success_criteria=["The report is grounded in source evidence."],
+        execution="flat",
+        max_iterations=2,
+        options={
+            "planner_capabilities": [
+                {
+                    "id": "web_search",
+                    "kind": "action",
+                    "side_effect_level": "read",
+                    "replay_safe": True,
+                },
+                {
+                    "id": "browse",
+                    "kind": "action",
+                    "side_effect_level": "read",
+                    "replay_safe": True,
+                },
+            ]
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": False,
+            "requires_block": True,
+            "reason": "Search failed to locate source evidence.",
+            "failure_analysis": "The current evidence-gathering step failed.",
+            "acceptance_delta": ["Official source evidence is still missing."],
+            "missing_criteria": ["Official source evidence is missing."],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "",
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "action_ids": ["web_search"],
+            "failed_actions": ["web_search"],
+            "blocked_actions": [],
+            "approval_required_actions": [],
+        },
+    )
+
+    assert verification["is_complete"] is False
+    assert verification["requires_block"] is False
+    assert "untried_read_action_available" in verification["guard_reasons"]
+    assert "requires_block_true" not in verification["guard_reasons"]
+    assert verification["continuation_opportunities"]["untried_action_ids"] == ["browse"]
+    assert verification["replan_instruction"] == "Plan another bounded evidence-gathering step before blocking."
+    assert task.diagnostics["verification_continuations"][0]["untried_action_ids"] == ["browse"]
+
+
 @pytest.mark.asyncio
 async def test_agent_task_loop_verification_guard_replans_when_missing_criteria_is_present(tmp_path):
     class CompleteWithMissingRequester(MockAgentTaskRequester):
@@ -881,7 +938,7 @@ async def test_agent_task_loop_verification_guard_replans_when_missing_criteria_
         max_iterations=2,
     )
 
-    stream_items = [item async for item in task.stream()]
+    stream_items = [item async for item in task.get_async_generator(type="instant")]
     result = await task.run()
     meta = await task.meta()
 
@@ -952,7 +1009,7 @@ async def test_agent_task_loop_verification_guard_replans_when_final_result_miss
         max_iterations=2,
     )
 
-    stream_items = [item async for item in task.stream()]
+    stream_items = [item async for item in task.get_async_generator(type="instant")]
     result = await task.run()
     meta = await task.meta()
 
@@ -1030,13 +1087,12 @@ async def test_agent_task_loop_verification_guard_replans_on_failed_action_evide
 
     cast(Any, task)._agent_task_step_overrides = {"_execute_step": fake_execute}
 
-    stream_items = [item async for item in task.stream()]
     result = await task.run()
     meta = await task.meta()
 
     assert result["status"] == "completed"
     assert result["iterations"] == 2
-    assert any(item.path.endswith(".replan") for item in stream_items)
+    assert any(phase["phase"] == "replanned" for phase in meta["diagnostics"]["phases"])
     first_verification = meta["iterations"][0]["verification"]
     assert first_verification["is_complete"] is False
     assert "execution_risk_actions_present" in first_verification["guard_reasons"]
@@ -1424,7 +1480,7 @@ async def test_agent_task_loop_progress_model_failure_is_side_channel(tmp_path):
 
 
 async def _collect_stream(task) -> list[Any]:
-    return [item async for item in task.stream()]
+    return [item async for item in task.get_async_generator(type="instant")]
 
 
 def _capability_gate_agent(name: str):

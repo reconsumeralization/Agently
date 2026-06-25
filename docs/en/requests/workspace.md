@@ -290,6 +290,13 @@ executor, MCP client, renderer lifecycle owner, OCR engine, or model requester.
 await agent.workspace.write_file("notes/todo.txt", "ship docs")
 read_result = await agent.workspace.read_file("notes/todo.txt", max_bytes=4096)
 
+materialized = await agent.workspace.materialize_file(
+    "downloads/syllabus.pdf",
+    pdf_bytes,
+    source={"kind": "remote_download", "url": "https://example.com/syllabus.pdf"},
+    media_type="application/pdf",
+)
+
 export_result = await agent.workspace.export_file(
     "report.md",
     "report.pdf",
@@ -303,6 +310,13 @@ returns bounded content with `bytes`, `sha256`, `offset`, `read_bytes`,
 `readable=False` with diagnostics instead of replacement-character content.
 `search_files` only searches files that are readable text through the same
 handler registry.
+
+`materialize_file(...)` is for framework-owned or application-owned byte
+materialization, such as a Browse action downloading a remote PDF into
+`downloads/` before a later `read_file(...)` parses it through the handler
+registry. It records `bytes`, `sha256`, `media_type`, diagnostics, and file
+refs, but it does not parse PDF/Office/image content itself and does not change
+the plain-text contract of `write_file(...)`.
 
 Built-in optional handlers cover:
 

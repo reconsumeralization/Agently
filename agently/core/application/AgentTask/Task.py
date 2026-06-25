@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import time
@@ -33,7 +34,8 @@ from agently.core.orchestration import (
     task_board_planning_output_schema,
 )
 from agently.core.orchestration.TaskBoard.TaskBoardValidation import task_board_card_required
-from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult
+from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult, TaskBoardRevision
+from agently.types.trigger_flow import TriggerFlowRuntimeData
 from agently.utils import DataFormatter, FunctionShifter
 
 if TYPE_CHECKING:
@@ -64,6 +66,23 @@ _AGENT_TASK_EXECUTION_STRATEGY_ALIASES = {
     "board": "taskboard",
     "taskboard_evidenceview": "taskboard",
 }
+
+
+def _is_retry_status_marker_source(path: str, value: Any) -> bool:
+    return (
+        (path == "$status" or path.endswith(".$status"))
+        and isinstance(value, Mapping)
+        and value.get("status") == "failed"
+        and value.get("retry") is True
+    )
+
+
+def _format_retry_marker(value: Any) -> str:
+    reason = value.get("reason") if isinstance(value, Mapping) else None
+    text = str(reason).strip() if reason is not None else ""
+    if not text:
+        text = "Retrying model request."
+    return f"<$retry>{html.escape(text, quote=False)}</$retry>"
 
 _STEP_EXECUTION_SHAPES = {
     "direct",
@@ -619,6 +638,8 @@ class AgentTask:
                 "requires_block": verification.get("requires_block"),
                 "reason": verification.get("reason"),
                 "missing_criteria": verification.get("missing_criteria", []),
+                "failure_analysis": verification.get("failure_analysis", ""),
+                "acceptance_delta": verification.get("acceptance_delta", []),
                 "replan_instruction": verification.get("replan_instruction", ""),
                 "repair_constraints": verification.get("repair_constraints", []),
                 "next_step_requirements": verification.get("next_step_requirements", []),
@@ -743,6 +764,8 @@ class AgentTask:
             f"agent_task.iteration.{iteration_index}.replan",
             {
                 "reason": verification.get("reason"),
+                "failure_analysis": verification.get("failure_analysis", ""),
+                "acceptance_delta": verification.get("acceptance_delta", []),
                 "replan_instruction": verification.get("replan_instruction"),
                 "repair_constraints": verification.get("repair_constraints", []),
                 "next_step_requirements": verification.get("next_step_requirements", []),
@@ -754,6 +777,8 @@ class AgentTask:
             iteration=iteration_index,
             diagnostics={
                 "reason": verification.get("reason"),
+                "failure_analysis": verification.get("failure_analysis", ""),
+                "acceptance_delta": verification.get("acceptance_delta", []),
                 "replan_instruction": verification.get("replan_instruction"),
                 "repair_constraints": verification.get("repair_constraints", []),
                 "next_step_requirements": verification.get("next_step_requirements", []),
@@ -818,45 +843,128 @@ class AgentTask:
                 "planning_policy": planning_result.planning_policy.to_prompt_payload(),
             },
         )
+        lifecycle_flow = TriggerFlow(name=f"agent-task-taskboard-lifecycle-{ self.id }")
+        tick_requested_event = f"agent_task.taskboard.lifecycle.tick.requested.{ self.id }"
+        finalize_requested_event = f"agent_task.taskboard.lifecycle.finalize.requested.{ self.id }"
+        revision_state_key = "taskboard_revision_json"
 
-        for tick_index in range(1, self._taskboard_max_ticks() + 1):
+        def _board_from_revision(revision: TaskBoardRevision | Mapping[str, Any]) -> TaskBoard:
+            return TaskBoard(
+                revision,
+                handler=lambda context: self._run_taskboard_card(context, context_pack),
+                planning_policy=planning_result.planning_policy,
+            )
+
+        def _pack_revision_state(revision: TaskBoardRevision | Mapping[str, Any]) -> str:
+            effective_revision = TaskBoardRevision.from_value(revision)
+            return json.dumps(effective_revision.to_dict(), ensure_ascii=False, sort_keys=True)
+
+        def _unpack_revision_state(data: TriggerFlowRuntimeData[Any, Any, Any]) -> TaskBoardRevision:
+            raw_revision = data.get_state(revision_state_key, None, inherit=False)
+            if isinstance(raw_revision, str) and raw_revision.strip():
+                return TaskBoardRevision.from_value(json.loads(raw_revision))
+            if isinstance(raw_revision, Mapping):
+                return TaskBoardRevision.from_value(raw_revision)
+            return TaskBoardRevision.from_value(board.revision)
+
+        async def start_lifecycle(data: TriggerFlowRuntimeData[Any, Any, Any]):
+            max_ticks = self._taskboard_max_ticks()
+            topology = {
+                "driver": "triggerflow_taskboard_lifecycle",
+                "tick_requested_event": tick_requested_event,
+                "finalize_requested_event": finalize_requested_event,
+                "max_ticks": max_ticks,
+                "tick_fanout": "taskboard_runtime_signal_net",
+            }
+            await data.async_set_state(revision_state_key, _pack_revision_state(board.revision), emit=False)
+            await data.async_set_state("tick_index", 1, emit=False)
+            await data.async_set_state("max_ticks", max_ticks, emit=False)
+            await data.async_set_state("runtime_topology", topology, emit=False)
+            await self._record_phase(
+                "taskboard_lifecycle_started",
+                iteration=iteration_index,
+                diagnostics={
+                    "revision_id": board.revision.revision_id,
+                    "runtime_topology": topology,
+                },
+            )
+            await self._emit(
+                "agent_task.taskboard.lifecycle.started",
+                {
+                    "revision_id": board.revision.revision_id,
+                    "runtime_topology": topology,
+                },
+            )
+            await data.async_emit_nowait(tick_requested_event, {"tick_index": 1})
+            return {"runtime_topology": topology}
+
+        async def run_lifecycle_tick(data: TriggerFlowRuntimeData[Any, Any, Any]):
+            if data.get_state("terminal_result", None, inherit=False) is not None:
+                return data.get_state("terminal_result", inherit=False)
+            if data.get_state("final_result", None, inherit=False) is not None:
+                return data.get_state("final_result", inherit=False)
+            payload = data.input if isinstance(data.input, Mapping) else {}
+            try:
+                tick_index = int(payload.get("tick_index") or data.get_state("tick_index", 1, inherit=False) or 1)
+            except (TypeError, ValueError):
+                tick_index = 1
+            max_ticks = data.get_state("max_ticks", self._taskboard_max_ticks(), inherit=False)
+            try:
+                max_ticks_int = int(max_ticks)
+            except (TypeError, ValueError):
+                max_ticks_int = self._taskboard_max_ticks()
             if self._task_deadline_exceeded():
-                return await self._terminate_timed_out(tick_index, stage="taskboard_tick")
-            schedule = board.schedule()
+                result = await self._terminate_timed_out(tick_index, stage="taskboard_tick")
+                await data.async_set_state("terminal_result", result, emit=False)
+                return result
+
+            revision = _unpack_revision_state(data)
+            current_board = _board_from_revision(revision)
+            schedule = current_board.schedule()
             tick_concurrency = self._taskboard_concurrency()
             await self._emit(
                 f"agent_task.taskboard.tick.{tick_index}.scheduled",
                 {
                     "schedule": schedule.to_dict(),
-                    "evidence_view": build_task_board_evidence_view(board.revision).to_dict(),
+                    "evidence_view": build_task_board_evidence_view(current_board.revision).to_dict(),
                     "concurrency": tick_concurrency,
                 },
             )
             if not schedule.runnable_card_ids:
-                break
+                await data.async_set_state(revision_state_key, _pack_revision_state(current_board.revision), emit=False)
+                await data.async_set_state("terminal_reason", "no_runnable_cards", emit=False)
+                await data.async_emit_nowait(finalize_requested_event, {"tick_index": tick_index})
+                return {"terminal": False, "status": "ready_to_finalize"}
+
             tick_timeout = self._taskboard_tick_timeout()
             try:
                 tick_result = await self._await_task_deadline(
-                    board.async_run_tick(timeout=tick_timeout, concurrency=tick_concurrency),
+                    current_board.async_run_tick(timeout=tick_timeout, concurrency=tick_concurrency),
                     stage="taskboard_tick",
                 )
             except _AgentTaskDeadlineExceeded as error:
-                return await self._terminate_timed_out(
+                result = await self._terminate_timed_out(
                     tick_index,
                     stage=error.stage,
                     reason=error.reason,
                     limit_name=error.limit_name,
                     timeout_seconds=error.timeout_seconds,
                 )
+                await data.async_set_state("terminal_result", result, emit=False)
+                return result
             except TimeoutError:
-                return await self._terminate_timed_out(
+                result = await self._terminate_timed_out(
                     tick_index,
                     stage="taskboard_tick",
                     reason=f"TaskBoard tick timed out after {tick_timeout} seconds.",
                     limit_name="taskboard_tick_timeout_seconds",
                     timeout_seconds=tick_timeout,
                 )
-            board.revision = tick_result.revision
+                await data.async_set_state("terminal_result", result, emit=False)
+                return result
+
+            await data.async_set_state(revision_state_key, _pack_revision_state(tick_result.revision), emit=False)
+            await data.async_set_state("tick_index", tick_index + 1, emit=False)
             await self._emit(
                 f"agent_task.taskboard.tick.{tick_index}.completed",
                 {
@@ -875,21 +983,59 @@ class AgentTask:
                     "runnable_card_ids": list(tick_result.schedule.runnable_card_ids),
                     "completed_card_ids": list(tick_result.schedule.completed_card_ids),
                     "concurrency": tick_concurrency,
+                    "runtime_topology": {
+                        "driver": "triggerflow_taskboard_lifecycle",
+                        "tick": DataFormatter.sanitize(tick_result.triggerflow_snapshot.get("runtime_topology", {})),
+                    },
                 },
             )
             if self._taskboard_revision_completed(tick_result.revision):
-                break
+                await data.async_set_state("terminal_reason", "board_completed", emit=False)
+                await data.async_emit_nowait(finalize_requested_event, {"tick_index": tick_index})
+            elif tick_index >= max_ticks_int:
+                await data.async_set_state("terminal_reason", "max_ticks_reached", emit=False)
+                await data.async_emit_nowait(finalize_requested_event, {"tick_index": tick_index})
+            else:
+                await data.async_emit_nowait(tick_requested_event, {"tick_index": tick_index + 1})
+            return tick_result.revision.to_dict()
 
-        try:
-            return await self._finalize_taskboard(board.revision)
-        except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(
-                self.max_iterations,
-                stage=error.stage,
-                reason=error.reason,
-                limit_name=error.limit_name,
-                timeout_seconds=error.timeout_seconds,
-            )
+        async def finalize_lifecycle(data: TriggerFlowRuntimeData[Any, Any, Any]):
+            if data.get_state("terminal_result", None, inherit=False) is not None:
+                return data.get_state("terminal_result", inherit=False)
+            if data.get_state("final_result", None, inherit=False) is not None:
+                return data.get_state("final_result", inherit=False)
+            revision = _unpack_revision_state(data)
+            try:
+                result = await self._finalize_taskboard(revision)
+            except _AgentTaskDeadlineExceeded as error:
+                result = await self._terminate_timed_out(
+                    self.max_iterations,
+                    stage=error.stage,
+                    reason=error.reason,
+                    limit_name=error.limit_name,
+                    timeout_seconds=error.timeout_seconds,
+                )
+                await data.async_set_state("terminal_result", result, emit=False)
+                return result
+            await data.async_set_state("final_result", result, emit=False)
+            return result
+
+        lifecycle_flow.to(start_lifecycle, name="task_board.lifecycle.start")
+        lifecycle_flow.when(tick_requested_event).to(run_lifecycle_tick, name="task_board.lifecycle.tick")
+        lifecycle_flow.when(finalize_requested_event).to(finalize_lifecycle, name="task_board.lifecycle.finalize")
+
+        execution = lifecycle_flow.create_execution(auto_close=False, concurrency=1)
+        await execution.async_start(board.revision.to_dict())
+        snapshot = await execution.async_close()
+        result = snapshot.get("terminal_result") or snapshot.get("final_result")
+        if isinstance(result, Mapping):
+            return dict(result)
+        raw_revision = snapshot.get(revision_state_key)
+        if isinstance(raw_revision, str) and raw_revision.strip():
+            revision = TaskBoardRevision.from_value(json.loads(raw_revision))
+        else:
+            revision = TaskBoardRevision.from_value(board.revision)
+        return await self._finalize_taskboard(revision)
 
     async def _request_taskboard_plan(self, context_pack: "WorkspaceContextPackage"):
         policy = resolve_task_board_planning_policy(
@@ -948,6 +1094,12 @@ class AgentTask:
             return await self._run_taskboard_control_card(context, context_pack)
         return await self._run_taskboard_agent_card(context, context_pack)
 
+    def _bind_action_workspace(self, execution: Any) -> None:
+        request = getattr(execution, "request", None)
+        set_settings = getattr(request, "set_settings", None)
+        if callable(set_settings):
+            set_settings("action.workspace", self.workspace)
+
     async def _run_taskboard_agent_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
         evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
         try:
@@ -958,131 +1110,205 @@ class AgentTask:
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
         readback_records = self._taskboard_action_artifact_recall_records(evidence_view)
-        execution = self.agent.create_execution(
-            lineage={
-                "task_id": self.id,
-                "iteration_id": f"taskboard:{context.card.id}",
-                "step_id": "taskboard_card",
-                "scope": {"strategy_phase": "taskboard_card_execution", "card_id": context.card.id},
-            },
-            limits=self.limits,
-            options=self.options,
-        )
-        if readback_records:
-            set_recall_records = getattr(execution.execution_context, "set_action_artifact_recall_records", None)
-            if callable(set_recall_records):
-                set_recall_records(readback_records, source="AgentTaskTaskBoard.evidence_view")
-        execution.route_policy({
-            "allowed_routes": ["model_request"],
-            "on_violation": "block",
-            "owner": "AgentTaskTaskBoard",
-            "step_execution_shape": "taskboard_card",
-        })
-        execution.input(
-            {
-                "task_id": self.id,
-                "goal": self.goal,
-                "success_criteria": self.success_criteria,
-                "card": context.card.to_dict(),
-                "dependency_results": {
-                    key: value.to_dict() for key, value in dict(context.dependency_results).items()
+        max_attempts = self._taskboard_card_max_attempts()
+        previous_errors: list[dict[str, Any]] = []
+        for attempt_index in range(1, max_attempts + 1):
+            execution = self.agent.create_execution(
+                lineage={
+                    "task_id": self.id,
+                    "iteration_id": f"taskboard:{context.card.id}:attempt:{attempt_index}",
+                    "step_id": "taskboard_card",
+                    "scope": {
+                        "strategy_phase": "taskboard_card_execution",
+                        "card_id": context.card.id,
+                        "attempt_index": attempt_index,
+                    },
                 },
-                "taskboard_evidence_view": evidence_view,
-                "available_readback": self._taskboard_available_readback(evidence_view),
-                "context_pack": DataFormatter.sanitize(context_pack),
-                "execution_prompt": self._execution_prompt_context(),
-            }
-        )
-        execution.instruct(
-            "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
-            "Use TaskBoard evidence view as the hot summary; request full content only through available "
-            "Workspace or Action refs when needed. If available_readback lists Action artifact refs and a "
-            "bounded preview is insufficient, call read_action_artifact with the artifact_id and action_call_id "
-            "before blocking on missing evidence. Return card-local evidence and remaining work. "
-            "If the card's original method fails but equivalent evidence or a bounded fallback is available, "
-            "return status completed with diagnostics that explain the degraded source boundary. Only return "
-            "failed or blocked when the card cannot produce the required outcome or the missing evidence is "
-            "truly critical. If this card produces the user-facing deliverable, put the complete deliverable "
-            "body in artifact_markdown, candidate_final_result, or final_result. Review or verification cards "
-            "must not put review notes in those deliverable fields unless they include the full corrected "
-            "deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask own lifecycle completion."
-        )
-        execution.output(
-            {
-                "status": (str, "completed, blocked, or failed for this card", False),
-                "answer": (str, "Card-local result or artifact summary", True),
-                "candidate_final_result": (
-                    str,
-                    "Complete user-facing deliverable body when this card directly produces one",
-                    False,
-                ),
-                "final_result": (
-                    str,
-                    "Complete final deliverable body when this card directly produces the final answer",
-                    False,
-                ),
-                "artifact_markdown": (
-                    str,
-                    "Complete markdown deliverable body when this card creates a markdown artifact",
-                    False,
-                ),
-                "evidence": ([str], "Evidence produced or used by this card", False),
-                "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
-                "diagnostics": ([dict], "Optional card diagnostics", False),
-            },
-            format="json",
-        )
-        await self._emit(
-            f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.execution.started",
-            {"execution_id": execution.id, "card_id": context.card.id},
-        )
-        stream_task = asyncio.create_task(self._bridge_taskboard_card_execution_stream(context.card.id, execution))
-        try:
-            card_output = await self._await_taskboard_card_execution(
-                execution.async_get_data(),
-                card_id=context.card.id,
-                stage="data",
+                limits=self.limits,
+                options=self.options,
             )
-            execution_meta = await self._await_taskboard_card_execution(
-                execution.async_get_meta(),
-                card_id=context.card.id,
-                stage="meta",
+            self._bind_action_workspace(execution)
+            if readback_records:
+                set_recall_records = getattr(execution.execution_context, "set_action_artifact_recall_records", None)
+                if callable(set_recall_records):
+                    set_recall_records(readback_records, source="AgentTaskTaskBoard.evidence_view")
+            execution.route_policy({
+                "allowed_routes": ["model_request"],
+                "on_violation": "block",
+                "owner": "AgentTaskTaskBoard",
+                "step_execution_shape": "taskboard_card",
+            })
+            execution.input(
+                {
+                    "task_id": self.id,
+                    "goal": self.goal,
+                    "success_criteria": self.success_criteria,
+                    "card": context.card.to_dict(),
+                    "dependency_results": {
+                        key: value.to_dict() for key, value in dict(context.dependency_results).items()
+                    },
+                    "taskboard_evidence_view": evidence_view,
+                    "available_readback": self._taskboard_available_readback(evidence_view),
+                    "previous_attempt_errors": previous_errors,
+                    "attempt": {
+                        "attempt_index": attempt_index,
+                        "max_attempts": max_attempts,
+                    },
+                    "context_pack": DataFormatter.sanitize(context_pack),
+                    "execution_prompt": self._execution_prompt_context(),
+                }
             )
-            await stream_task
-        except Exception as error:
-            if not stream_task.done():
-                stream_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
+            execution.instruct(
+                "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
+                "Use TaskBoard evidence view as the hot summary; request full content only through available "
+                "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
+                "the same failing source or method when a bounded fallback can satisfy the card. If available_readback "
+                "lists Action artifact refs and a bounded preview is insufficient, call read_action_artifact with "
+                "the artifact_id and action_call_id before blocking on missing evidence. Return card-local evidence "
+                "and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
+                "is available, return status completed with diagnostics that explain the degraded source boundary. "
+                "Only return failed or blocked when the card cannot produce the required outcome or the missing "
+                "evidence is truly critical. If this card produces the user-facing deliverable, put the complete "
+                "deliverable body in artifact_markdown, candidate_final_result, or final_result when it fits the "
+                "bounded output. For long reports, exam papers, or multi-section deliverables, write sections to "
+                "Workspace files through the available file actions, read them back for sha/bytes/preview, and return "
+                "artifact_manifest plus file_refs instead of forcing the full body through one JSON field. Review or "
+                "verification cards must not put review notes in those deliverable fields unless they include the "
+                "full corrected deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask "
+                "own lifecycle completion."
+            )
+            execution.output(
+                {
+                    "status": (str, "completed, blocked, or failed for this card", False),
+                    "answer": (str, "Card-local result or artifact summary", True),
+                    "candidate_final_result": (
+                        str,
+                        "Complete user-facing deliverable body when this card directly produces one",
+                        False,
+                    ),
+                    "final_result": (
+                        str,
+                        "Complete final deliverable body when this card directly produces the final answer",
+                        False,
+                    ),
+                    "artifact_markdown": (
+                        str,
+                        "Complete markdown deliverable body when this card creates a markdown artifact",
+                        False,
+                    ),
+                    "artifact_manifest": (
+                        dict,
+                        "Workspace artifact manifest for sectioned or file-backed deliverables",
+                        False,
+                    ),
+                    "file_refs": (
+                        [dict],
+                        "Workspace file refs produced or read back by this card",
+                        False,
+                    ),
+                    "evidence": ([str], "Evidence produced or used by this card", False),
+                    "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
+                    "diagnostics": ([dict], "Optional card diagnostics", False),
+                },
+                format="json",
+            )
+            await self._emit(
+                f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.execution.started",
+                {
+                    "execution_id": execution.id,
+                    "card_id": context.card.id,
+                    "attempt_index": attempt_index,
+                    "max_attempts": max_attempts,
+                },
+            )
+            stream_task = asyncio.create_task(self._bridge_taskboard_card_execution_stream(context.card.id, execution))
+            try:
+                card_output = await self._await_taskboard_card_execution(
+                    execution.async_get_data(),
+                    card_id=context.card.id,
+                    stage="data",
+                )
+                execution_meta = await self._await_taskboard_card_execution(
+                    execution.async_get_meta(),
+                    card_id=context.card.id,
+                    stage="meta",
+                )
                 await stream_task
-            return self._failed_taskboard_card_result(
-                card_id=context.card.id,
-                error=error,
-                execution_id=str(getattr(execution, "id", "") or "") or None,
+            except Exception as error:
+                if not stream_task.done():
+                    stream_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await stream_task
+                execution_id = str(getattr(execution, "id", "") or "") or None
+                retry_diagnostic = self._taskboard_card_retry_diagnostic(
+                    card_id=context.card.id,
+                    error=error,
+                    execution_id=execution_id,
+                    attempt_index=attempt_index,
+                    max_attempts=max_attempts,
+                )
+                previous_errors.append(retry_diagnostic)
+                if attempt_index < max_attempts and self._taskboard_card_error_retryable(error):
+                    self.diagnostics.setdefault("taskboard_card_retries", []).append(retry_diagnostic)
+                    await self._emit(
+                        f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.execution.retry",
+                        retry_diagnostic,
+                    )
+                    continue
+                return self._failed_taskboard_card_result(
+                    card_id=context.card.id,
+                    error=error,
+                    execution_id=execution_id,
+                )
+            summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
+            card_status = self._taskboard_card_status(card_output, execution_meta)
+            diagnostics = []
+            if isinstance(card_output, Mapping):
+                raw_diagnostics = card_output.get("diagnostics")
+                if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+                    diagnostics.extend(dict(item) if isinstance(item, Mapping) else {"value": item} for item in raw_diagnostics)
+            output_file_refs: list[Any] = []
+            if isinstance(card_output, Mapping):
+                raw_file_refs = card_output.get("file_refs")
+                if isinstance(raw_file_refs, Sequence) and not isinstance(raw_file_refs, str | bytes | bytearray):
+                    output_file_refs.extend(DataFormatter.sanitize(item) for item in raw_file_refs)
+                artifact_manifest = card_output.get("artifact_manifest")
+                if isinstance(artifact_manifest, Mapping):
+                    manifest_refs = artifact_manifest.get("file_refs")
+                    if isinstance(manifest_refs, Sequence) and not isinstance(manifest_refs, str | bytes | bytearray):
+                        output_file_refs.extend(DataFormatter.sanitize(item) for item in manifest_refs)
+            diagnostics.append(
+                {
+                    "execution_id": execution_meta.get("execution_id"),
+                    "route": DataFormatter.sanitize(execution_meta.get("route", {})),
+                    "evidence_summary": DataFormatter.sanitize(summary),
+                    "attempt_index": attempt_index,
+                    "max_attempts": max_attempts,
+                    "previous_attempt_errors": previous_errors,
+                }
             )
-        summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
-        card_status = self._taskboard_card_status(card_output, execution_meta)
-        diagnostics = []
-        if isinstance(card_output, Mapping):
-            raw_diagnostics = card_output.get("diagnostics")
-            if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
-                diagnostics.extend(dict(item) if isinstance(item, Mapping) else {"value": item} for item in raw_diagnostics)
-        diagnostics.append(
-            {
-                "execution_id": execution_meta.get("execution_id"),
-                "route": DataFormatter.sanitize(execution_meta.get("route", {})),
-                "evidence_summary": DataFormatter.sanitize(summary),
-            }
-        )
-        return TaskBoardCardResult(
+            return TaskBoardCardResult(
+                card_id=context.card.id,
+                status=card_status,
+                preview=DataFormatter.sanitize(card_output),
+                artifact_refs=tuple(
+                    [
+                        *(summary.get("artifact_refs", []) if isinstance(summary.get("artifact_refs"), list) else []),
+                        *output_file_refs,
+                    ]
+                ),
+                diagnostics=tuple(diagnostics),
+                metadata={
+                    "execution_id": execution_meta.get("execution_id"),
+                    "execution_strategy": self.execution_strategy,
+                    "attempt_index": attempt_index,
+                    "max_attempts": max_attempts,
+                },
+            )
+        return self._failed_taskboard_card_result(
             card_id=context.card.id,
-            status=card_status,
-            preview=DataFormatter.sanitize(card_output),
-            artifact_refs=tuple(summary.get("artifact_refs", []) if isinstance(summary.get("artifact_refs"), list) else []),
-            diagnostics=tuple(diagnostics),
-            metadata={
-                "execution_id": execution_meta.get("execution_id"),
-                "execution_strategy": self.execution_strategy,
-            },
+            error=RuntimeError("TaskBoard card execution exhausted retry attempts."),
+            execution_id=None,
         )
 
     async def _run_taskboard_control_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
@@ -1400,7 +1626,7 @@ class AgentTask:
 
     async def _bridge_taskboard_card_execution_stream(self, card_id: str, execution: Any) -> None:
         try:
-            async for item in execution.get_async_generator():
+            async for item in execution.get_async_generator(type="instant"):
                 await self._emit_taskboard_card_execution_stream_item(card_id, execution, item)
         except asyncio.CancelledError:
             raise
@@ -1695,6 +1921,59 @@ class AgentTask:
         if timeout is not None:
             return timeout
         return self._task_request_timeout()
+
+    def _taskboard_card_max_attempts(self) -> int:
+        value = self._taskboard_option("taskboard_card_max_attempts")
+        try:
+            attempts = int(value) if value is not None else 2
+        except (TypeError, ValueError):
+            attempts = 2
+        return min(max(1, attempts), 5)
+
+    def _taskboard_card_error_retryable(self, error: Exception) -> bool:
+        if self._is_timeout_error(error):
+            return True
+        text = f"{ error.__class__.__name__}: { str(error) }".lower()
+        retry_markers = (
+            "429",
+            "chunked",
+            "connect",
+            "connection",
+            "eof",
+            "parse_failed",
+            "rate limit",
+            "request failed",
+            "request_failed",
+            "temporarily",
+            "timeout",
+            "tls",
+        )
+        return any(marker in text for marker in retry_markers)
+
+    def _taskboard_card_retry_diagnostic(
+        self,
+        *,
+        card_id: str,
+        error: Exception,
+        execution_id: str | None,
+        attempt_index: int,
+        max_attempts: int,
+    ) -> dict[str, Any]:
+        message = str(error) or error.__class__.__name__
+        return {
+            "type": error.__class__.__name__,
+            "code": "taskboard.card.timeout" if self._is_timeout_error(error) else "taskboard.card.execution_error",
+            "message": message[:1000],
+            "card_id": card_id,
+            "execution_id": execution_id,
+            "execution_strategy": self.execution_strategy,
+            "stage": "taskboard_card",
+            "attempt_index": attempt_index,
+            "max_attempts": max_attempts,
+            "retry_scheduled": attempt_index < max_attempts,
+            "timeout_seconds": self._taskboard_card_timeout() if self._is_timeout_error(error) else None,
+            "status": "retrying" if attempt_index < max_attempts else "failed",
+        }
 
     def _taskboard_max_ticks(self) -> int:
         value = self._taskboard_option("taskboard_max_ticks")
@@ -2251,6 +2530,10 @@ class AgentTask:
             }
             if item.get("mode"):
                 entry["mode"] = str(item.get("mode"))
+            if "side_effect_level" in item:
+                entry["side_effect_level"] = str(item.get("side_effect_level") or "")
+            if "replay_safe" in item:
+                entry["replay_safe"] = self._normalize_bool(item.get("replay_safe"), default=False)
             capabilities.append(entry)
         return capabilities
 
@@ -2298,6 +2581,44 @@ class AgentTask:
                 requirement["criterion_id"] = str(item.get("criterion_id"))
             requirements.append(requirement)
         return requirements
+
+    def _untried_read_action_continuation(
+        self,
+        execution_evidence_summary: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        read_action_ids = {
+            str(item.get("id") or "").strip()
+            for item in self._planner_capabilities()
+            if isinstance(item, Mapping)
+            and str(item.get("kind") or "").strip() == "action"
+            and str(item.get("id") or "").strip()
+            and (
+                str(item.get("side_effect_level") or "").strip().lower() == "read"
+                or bool(item.get("replay_safe")) is True
+            )
+        }
+        if not read_action_ids:
+            return {}
+        used_action_ids = set(self._normalize_string_list(execution_evidence_summary.get("action_ids")))
+        used_action_ids.update(self._satisfied_capabilities)
+        untried_action_ids = sorted(read_action_ids - used_action_ids)
+        if not untried_action_ids:
+            return {}
+        blocked_actions = self._normalize_string_list(execution_evidence_summary.get("blocked_actions"))
+        approval_required_actions = self._normalize_string_list(
+            execution_evidence_summary.get("approval_required_actions")
+        )
+        if blocked_actions or approval_required_actions:
+            return {}
+        failed_actions = self._normalize_string_list(execution_evidence_summary.get("failed_actions"))
+        unsafe_failed_actions = [action_id for action_id in failed_actions if action_id not in read_action_ids]
+        if unsafe_failed_actions:
+            return {}
+        return {
+            "reason": "read_action_continuation_available",
+            "untried_action_ids": untried_action_ids,
+            "failed_read_action_ids": sorted(action_id for action_id in failed_actions if action_id in read_action_ids),
+        }
 
     def _evaluate_capability_evidence(self) -> tuple[list[str], list[dict[str, Any]]]:
         """Deterministically check structured evidence requirements.
@@ -2391,15 +2712,19 @@ class AgentTask:
             "Plan the next bounded AgentExecution step for this AgentTask. "
             "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
-            "When repair_context is present, treat repair_constraints and next_step_requirements as hard planning inputs "
-            "for the next bounded step. The verifier does not choose tools or routes; the planner must choose a valid "
-            "bounded step that directly addresses those constraints without repeating an unrelated previous step. "
+            "When repair_context is present, use it as verification feedback: understand why prior work was incomplete, "
+            "compare the acceptance delta, and then choose the next bounded step. The verifier does not choose tools, "
+            "routes, execution shapes, or exact methods; the planner owns the next action while respecting grounded "
+            "acceptance facts and deterministic guards. "
             f"Set execution_shape to {allowed_shapes}. "
             "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
             + strategy_note
             + capability_note
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
             "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
+            " For long deliverables, choose deliverable_mode='workspace_artifact' or "
+            "'sectioned_workspace_artifact' and instruct the execution step to write/read back Workspace files instead "
+            "of forcing the whole artifact through one JSON string."
         )
         request.output(
             {
@@ -2411,6 +2736,11 @@ class AgentTask:
                 "step_instruction": (str, "Instruction for one bounded AgentExecution step", True),
                 "expected_evidence": (str, "Evidence this step should produce", True),
                 "rationale": (str, "Why this is the next step", True),
+                "deliverable_mode": (
+                    str,
+                    "inline_final, workspace_artifact, or sectioned_workspace_artifact for expected deliverables",
+                    False,
+                ),
                 "step_scope": (
                     dict,
                     "Optional structured scope: {allowed_capability_ids: [...]}; empty means no restriction",
@@ -2567,6 +2897,7 @@ class AgentTask:
             limits=self.limits,
             options=self.options,
         )
+        self._bind_action_workspace(execution)
         step_execution = self._configure_step_execution(execution, plan)
         execution.input(
             {
@@ -2589,7 +2920,10 @@ class AgentTask:
                 "Respect the caller-provided execution_prompt context and output contract when present. "
                 "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
                 "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
-                "of burying the only copy inside evidence. Do not claim final completion unless evidence supports it."
+                "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "
+                "is workspace_artifact or sectioned_workspace_artifact, write the artifact to Workspace files, read back "
+                "sha/bytes/preview, and return artifact_manifest plus file_refs while keeping JSON as control data. "
+                "Do not claim final completion unless evidence supports it."
             )
         )
         execution.output(
@@ -2600,6 +2934,17 @@ class AgentTask:
                     "Complete answer/report/artifact body produced by this step when it may satisfy the final task",
                     False,
                 ),
+                "artifact_markdown": (
+                    str,
+                    "Complete markdown deliverable body when this step creates one and it fits bounded output",
+                    False,
+                ),
+                "artifact_manifest": (
+                    dict,
+                    "Workspace artifact manifest for file-backed or sectioned deliverables",
+                    False,
+                ),
+                "file_refs": ([dict], "Workspace file refs produced or read back by this step", False),
                 "evidence": ([str], "Evidence produced by the step", True),
                 "remaining_work": ([str], "Known remaining work, empty when none"),
             },
@@ -2643,7 +2988,7 @@ class AgentTask:
 
     async def _bridge_step_execution_stream(self, iteration_index: int, execution: Any) -> None:
         try:
-            async for item in execution.get_async_generator():
+            async for item in execution.get_async_generator(type="instant"):
                 await self._emit_step_execution_stream_item(iteration_index, execution, item)
         except asyncio.CancelledError:
             raise
@@ -2873,6 +3218,8 @@ class AgentTask:
                     "verification": {
                         "is_complete": verification.get("is_complete"),
                         "reason": verification.get("reason", ""),
+                        "failure_analysis": verification.get("failure_analysis", ""),
+                        "acceptance_delta": verification.get("acceptance_delta", []),
                         "missing_criteria": verification.get("missing_criteria", []),
                         "replan_instruction": verification.get("replan_instruction", ""),
                         "repair_constraints": verification.get("repair_constraints", []),
@@ -2913,18 +3260,22 @@ class AgentTask:
             return []
 
         missing_criteria = normalize_list(verification.get("missing_criteria"))
+        acceptance_delta = normalize_list(verification.get("acceptance_delta"))
         repair_constraints = normalize_list(verification.get("repair_constraints"))
         next_step_requirements = normalize_list(verification.get("next_step_requirements"))
         replan_instruction = str(verification.get("replan_instruction") or "").strip()
-        if not any([missing_criteria, repair_constraints, next_step_requirements, replan_instruction]):
+        failure_analysis = str(verification.get("failure_analysis") or "").strip()
+        if not any([missing_criteria, acceptance_delta, repair_constraints, next_step_requirements, replan_instruction, failure_analysis]):
             return {}
         return {
             "source_iteration": latest.get("iteration"),
             "verification_ref": latest.get("verification_ref"),
             "reason": str(verification.get("reason") or ""),
+            "failure_analysis": failure_analysis,
+            "acceptance_delta": acceptance_delta,
             "missing_criteria": missing_criteria,
-            "repair_constraints": repair_constraints,
-            "next_step_requirements": next_step_requirements,
+            "advisory_repair_constraints": repair_constraints,
+            "advisory_next_step_requirements": next_step_requirements,
             "replan_instruction": replan_instruction,
         }
 
@@ -3029,10 +3380,11 @@ class AgentTask:
             "use it as final_result; the caller or host may persist final_result to the requested file path after "
             "verification. Do not require a Workspace file artifact unless the success criteria explicitly require a "
             "Workspace write/readback action. "
-            "If evidence is incomplete, set is_complete=false and give concrete repair_constraints and "
-            "next_step_requirements for the planner. These fields describe what must be fixed or produced next; "
-            "do not use them to choose tools, routes, or execution shapes unless a success criterion explicitly "
-            "requires a specific capability. Also include a short human-readable replan_instruction. "
+            "If evidence is incomplete, set is_complete=false and explain failure_analysis and acceptance_delta: "
+            "why the task is not accepted, which acceptance facts are missing or weak, and what evidence boundary "
+            "blocked verification. The verifier does not choose tools, routes, execution shapes, or exact methods. "
+            "repair_constraints and next_step_requirements are advisory compatibility fields only; keep them factual "
+            "and do not turn them into a narrow tool script. Also include a short human-readable replan_instruction. "
             "Set requires_block=true only when the task cannot continue."
         )
         request.output(
@@ -3040,15 +3392,25 @@ class AgentTask:
                 "is_complete": (bool, "True only when all success criteria are satisfied", True),
                 "requires_block": (bool, "True only when the task cannot continue", True),
                 "reason": (str, "Concise verification reason", True),
+                "failure_analysis": (
+                    str,
+                    "Why the current result is incomplete or unacceptable; empty when complete",
+                    False,
+                ),
+                "acceptance_delta": (
+                    [str],
+                    "Specific acceptance facts or evidence gaps that remain unsatisfied",
+                    False,
+                ),
                 "missing_criteria": ([str], "Unmet or weak criteria, empty when none"),
                 "replan_instruction": (str, "Instruction for the next planning round when incomplete"),
                 "repair_constraints": (
                     [str],
-                    "Verifier-owned constraints the next planner step must satisfy; not a tool or route plan",
+                    "Advisory factual constraints; not a tool, route, or execution-shape plan",
                 ),
                 "next_step_requirements": (
                     [str],
-                    "Observable requirements for the next bounded step output or evidence",
+                    "Advisory observable requirements for future evidence; not a hard method script",
                 ),
                 "final_result_required": (bool, "True when the goal expects a concrete returned final deliverable"),
                 "final_result": (str, "Final business result when complete"),
@@ -3061,6 +3423,8 @@ class AgentTask:
                 "is_complete": False,
                 "requires_block": False,
                 "reason": str(verification),
+                "failure_analysis": str(verification),
+                "acceptance_delta": self.success_criteria,
                 "missing_criteria": self.success_criteria,
                 "replan_instruction": "Run another bounded step with stronger evidence.",
                 "repair_constraints": self.success_criteria,
@@ -3249,6 +3613,8 @@ class AgentTask:
             "is_complete": self._normalize_bool(verification.get("is_complete"), default=False),
             "requires_block": self._normalize_bool(verification.get("requires_block"), default=False),
             "reason": str(verification.get("reason") or ""),
+            "failure_analysis": str(verification.get("failure_analysis") or verification.get("reason") or ""),
+            "acceptance_delta": self._normalize_string_list(verification.get("acceptance_delta")),
             "missing_criteria": self._normalize_string_list(verification.get("missing_criteria")),
             "replan_instruction": str(verification.get("replan_instruction") or ""),
             "repair_constraints": self._normalize_string_list(verification.get("repair_constraints")),
@@ -3279,6 +3645,10 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Execution step status is {execution_status}{detail}.",
             ]
+            normalized["acceptance_delta"] = self._merge_string_lists(
+                normalized.get("acceptance_delta"),
+                [f"Execution step status is {execution_status}{detail}."],
+            )
         replan_signals = [
             dict(signal)
             for signal in execution_evidence_summary.get("replan_signals", [])
@@ -3298,6 +3668,10 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 str(blocking_signal.get("reason") or "Execution emitted a blocked ReplanSignal."),
             ]
+            normalized["acceptance_delta"] = self._merge_string_lists(
+                normalized.get("acceptance_delta"),
+                [str(blocking_signal.get("reason") or "Execution emitted a blocked ReplanSignal.")],
+            )
         actionable_signals = [
             signal
             for signal in replan_signals
@@ -3328,6 +3702,10 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Unresolved execution risk actions: {', '.join(risky_actions)}",
             ]
+            normalized["acceptance_delta"] = self._merge_string_lists(
+                normalized.get("acceptance_delta"),
+                [f"Unresolved execution risk actions: {', '.join(risky_actions)}"],
+            )
         # Accumulate satisfied required capabilities across iterations, then guard
         # on what is still missing for the whole task rather than per-step.
         self._satisfied_required_actions.update(
@@ -3357,6 +3735,10 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Missing required capability evidence: {', '.join(missing_required)}",
             ]
+            normalized["acceptance_delta"] = self._merge_string_lists(
+                normalized.get("acceptance_delta"),
+                [f"Missing required capability evidence: {', '.join(missing_required)}"],
+            )
         # Load-bearing structured capability-evidence gate
         # (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC). A deterministic
         # correspondence check between authored, structured requirements (which
@@ -3375,6 +3757,10 @@ class AgentTask:
                 *normalized["missing_criteria"],
                 f"Missing required capability evidence: {', '.join(missing_capability_evidence)}",
             ]
+            normalized["acceptance_delta"] = self._merge_string_lists(
+                normalized.get("acceptance_delta"),
+                [f"Missing required capability evidence: {', '.join(missing_capability_evidence)}"],
+            )
             missing_required = [*missing_required, *missing_capability_evidence]
         if unenforced_requirements:
             self.diagnostics.setdefault("unenforced_evidence_requirements", []).extend(unenforced_requirements)
@@ -3397,6 +3783,39 @@ class AgentTask:
                     *normalized["missing_criteria"],
                     "Final result is missing.",
                 ]
+                normalized["acceptance_delta"] = self._merge_string_lists(
+                    normalized.get("acceptance_delta"),
+                    ["Final result is missing."],
+                )
+        continuation = self._untried_read_action_continuation(execution_evidence_summary)
+        if normalized["requires_block"] and continuation:
+            normalized["requires_block"] = False
+            guard_reasons = [reason for reason in guard_reasons if reason != "requires_block_true"]
+            guard_reasons.append("untried_read_action_available")
+            normalized["continuation_opportunities"] = continuation
+            untried = ", ".join(continuation.get("untried_action_ids") or [])
+            message = (
+                "Verifier requested blocking, but read-only evidence capabilities remain untried"
+                + (f": {untried}." if untried else ".")
+            )
+            normalized["acceptance_delta"] = self._merge_string_lists(
+                normalized.get("acceptance_delta"),
+                [message],
+            )
+            normalized["missing_criteria"] = self._merge_string_lists(
+                normalized.get("missing_criteria"),
+                [message],
+            )
+            if not normalized["replan_instruction"]:
+                normalized["replan_instruction"] = "Plan another bounded evidence-gathering step before blocking."
+            self.diagnostics.setdefault("verification_continuations", []).append(
+                {
+                    "task_id": self.id,
+                    "reason": continuation.get("reason"),
+                    "untried_action_ids": continuation.get("untried_action_ids", []),
+                    "failed_read_action_ids": continuation.get("failed_read_action_ids", []),
+                }
+            )
         if guard_reasons:
             normalized["guard_reasons"] = guard_reasons
             if not normalized["replan_instruction"]:
@@ -3415,6 +3834,10 @@ class AgentTask:
         normalized["next_step_requirements"] = self._merge_string_lists(
             normalized.get("next_step_requirements"),
             [normalized.get("replan_instruction")] if normalized.get("replan_instruction") else [],
+        )
+        normalized["acceptance_delta"] = self._merge_string_lists(
+            normalized.get("acceptance_delta"),
+            normalized.get("missing_criteria"),
         )
         for key, value in verification.items():
             normalized.setdefault(key, DataFormatter.sanitize(value))
@@ -3844,10 +4267,19 @@ class AgentTask:
             return asyncio.run(self.async_meta())
         return self.async_meta()
 
-    async def get_async_generator(self, *_, **__) -> AsyncGenerator[AgentExecutionStreamData, None]:
+    async def get_async_generator(
+        self,
+        type: Literal["delta", "instant", "streaming_parse", "all"] | str | None = "delta",
+        content: Any = None,
+        **__,
+    ) -> AsyncGenerator[Any, None]:
+        if content is not None and type is None:
+            type = content
         if self._completed:
             for item in self._stream_items:
-                yield item
+                projected = self._project_stream_item(item, type)
+                if projected is not None:
+                    yield projected
             return
         queue: asyncio.Queue[Any] = asyncio.Queue()
         for item in self._stream_items:
@@ -3859,14 +4291,33 @@ class AgentTask:
                 item = await queue.get()
                 if item is None:
                     break
-                yield item
+                projected = self._project_stream_item(item, type)
+                if projected is not None:
+                    yield projected
             await start_task
         finally:
             if queue in self._stream_queues:
                 self._stream_queues.remove(queue)
 
-    def _get_generator(self, *args: Any, **kwargs: Any) -> Generator[AgentExecutionStreamData, None, None]:
+    def _get_generator(self, *args: Any, **kwargs: Any) -> Generator[Any, None, None]:
         return FunctionShifter.syncify_async_generator(self.get_async_generator(*args, **kwargs))
+
+    @staticmethod
+    def _project_stream_item(item: Any, type: Any) -> Any:
+        if type == "all":
+            return ("agent_task", item)
+        if type == "delta":
+            path = str(getattr(item, "path", "") or "")
+            value = getattr(item, "value", None)
+            if _is_retry_status_marker_source(path, value):
+                return _format_retry_marker(value)
+            if getattr(item, "event_type", None) != "delta":
+                return None
+            delta = getattr(item, "delta", None)
+            if delta is None:
+                return None
+            return str(delta)
+        return item
 
     async def _emit_progress(
         self,

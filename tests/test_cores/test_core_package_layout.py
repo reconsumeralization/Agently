@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from pathlib import Path
 
 
@@ -17,7 +18,6 @@ def test_core_root_exports_remain_stable():
         ModelRequest,
         ModelRequestResult,
         ModelResponse,
-        ModelResponseResult,
         PluginManager,
         Prompt,
         RuntimeEvent,
@@ -41,7 +41,9 @@ def test_core_root_exports_remain_stable():
     assert ModelRequest.__name__ == "ModelRequest"
     assert ModelRequestResult.__name__ == "ModelRequestResult"
     assert ModelResponse.__name__ == "ModelResponse"
-    assert ModelResponseResult is ModelRequestResult
+    import agently.core as agently_core
+
+    assert not hasattr(agently_core, "ModelResponseResult")
     assert PluginManager.__name__ == "PluginManager"
     assert Prompt.__name__ == "Prompt"
     assert RuntimeEvent.__name__ == "RuntimeEvent"
@@ -74,7 +76,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.operation.Action import Action, Tool
     from agently.core.operation.ExecutionResource import ExecutionResourceManager
     from agently.core.extension import ExtensionHandlers, PluginManager
-    from agently.core.model import ModelRequest, ModelRequestResult, ModelResponse, ModelResponseResult, Prompt
+    from agently.core.model import ModelRequest, ModelRequestResult, ModelResponse, Prompt
     from agently.core.application.DynamicTask import DynamicTask
     from agently.core.orchestration.TaskBoard import TaskBoard
     from agently.core.orchestration.TaskDAG import TaskDAGExecutor
@@ -89,8 +91,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.model.ModelRequest").ModelRequest is ModelRequest
     assert importlib.import_module("agently.core.model.ModelRequestResult").ModelRequestResult is ModelRequestResult
     assert importlib.import_module("agently.core.model.ModelResponse").ModelResponse is ModelResponse
-    assert importlib.import_module("agently.core.model.ModelResponseResult").ModelResponseResult is ModelRequestResult
-    assert ModelResponseResult is ModelRequestResult
+    assert importlib.util.find_spec("agently.core.model.ModelResponseResult") is None
     assert importlib.import_module("agently.core.model.Prompt").Prompt is Prompt
     assert importlib.import_module("agently.core.model.AttemptRunner").AttemptRunner is AttemptRunner
     assert importlib.import_module("agently.core.runtime.EventCenter").EventCenter is EventCenter

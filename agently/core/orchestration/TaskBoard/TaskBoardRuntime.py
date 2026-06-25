@@ -336,11 +336,32 @@ class TaskBoard:
             if isinstance(collected_payload, Mapping):
                 for value in collected_payload.values():
                     collected_results.append(TaskBoardCardResult.from_value(value))
+            collected_ids = {result.card_id for result in collected_results}
+            expected_payload = snapshot.get("expected_card_ids")
+            if isinstance(expected_payload, Sequence) and not isinstance(
+                expected_payload, str | bytes | bytearray
+            ):
+                expected_card_ids = [str(card_id) for card_id in expected_payload if str(card_id)]
+            else:
+                expected_card_ids = [str(card_id) for card_id in schedule.runnable_card_ids if str(card_id)]
+            missing_results = [
+                _interrupted_card_result(
+                    card_id=card_id,
+                    previous_revision=previous_revision,
+                    snapshot=snapshot,
+                )
+                for card_id in expected_card_ids
+                if card_id not in collected_ids
+            ]
+            collected_results.extend(missing_results)
             diagnostic = {
                 "code": "taskboard.tick.incomplete_snapshot",
                 "message": "TriggerFlow tick closed before a finalized TaskBoard revision was written.",
                 "snapshot_status": snapshot.get("status"),
                 "pending_tasks_cancelled": snapshot.get("pending_tasks_cancelled"),
+                "expected_card_ids": expected_card_ids,
+                "collected_card_ids": sorted(collected_ids),
+                "interrupted_card_ids": [result.card_id for result in missing_results],
             }
             operations: list[Mapping[str, Any]] = [
                 {"op": "record_card_result", "result": result.to_dict()} for result in collected_results
@@ -445,6 +466,35 @@ def _apply_card_results(
         evidence_refs=tuple(evidence_refs),
     )
     return apply_task_board_patch(revision, patch)
+
+
+def _interrupted_card_result(
+    *,
+    card_id: str,
+    previous_revision: TaskBoardRevision,
+    snapshot: Mapping[str, Any],
+) -> TaskBoardCardResult:
+    diagnostic = {
+        "code": "taskboard.tick.card_interrupted",
+        "message": "TaskBoard card did not produce a result before the tick closed.",
+        "card_id": card_id,
+        "board_id": previous_revision.board_id,
+        "revision_id": previous_revision.revision_id,
+        "snapshot_status": snapshot.get("status"),
+        "pending_tasks_cancelled": snapshot.get("pending_tasks_cancelled"),
+        "status": "failed",
+    }
+    return TaskBoardCardResult(
+        card_id=card_id,
+        status="failed",
+        preview="TaskBoard card execution interrupted before producing a result.",
+        diagnostics=(diagnostic,),
+        metadata={
+            "status": "failed",
+            "interrupted": True,
+            "source": "task_board.tick.incomplete_snapshot",
+        },
+    )
 
 def _coerce_card_result(card_id: str, value: Any) -> TaskBoardCardResult:
     if isinstance(value, TaskBoardCardResult):

@@ -14,6 +14,7 @@
 
 from pathlib import Path
 from typing import Any, Literal
+import hashlib
 import json
 import os
 import platform
@@ -53,6 +54,34 @@ _URL_PUNCT_TRANSLATION = str.maketrans(
 
 
 class Browse:
+    REMOTE_FILE_EXTENSIONS = {
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+    }
+    REMOTE_FILE_MEDIA_TYPES = {
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+    }
+
     PRIMARY_CONTENT_SELECTORS = (
         "[data-agently-main]",
         '[data-testid="markdown-body"]',
@@ -114,6 +143,20 @@ class Browse:
 
     BS4_STRATEGY_MIN_LENGTH = 20
 
+    BLOCKED_PAGE_MARKERS = (
+        "web application firewall",
+        "website is temporarily inaccessible",
+        "protocol and port for the website are not added",
+        "yundun.console.aliyun.com",
+        "errorcodetitle",
+        "errorcodeinfo",
+        'id="waf"',
+        "access denied",
+        "request blocked",
+        "captcha",
+        "errorcode:",
+    )
+
     def __init__(
         self,
         proxy: str | None = None,
@@ -146,6 +189,8 @@ class Browse:
         playwright_screenshot_path: str | None = None,
         use_browser_environment: bool = False,
         browser_environment_config: dict[str, Any] | None = None,
+        max_attempts: int = 2,
+        retry_backoff_seconds: float = 0.25,
     ):
         self.proxy = proxy
         self.timeout = timeout
@@ -185,6 +230,10 @@ class Browse:
         self.playwright_screenshot_path = playwright_screenshot_path
         self.use_browser_environment = use_browser_environment
         self.browser_environment_config = dict(browser_environment_config or {})
+        self.max_attempts = max(1, int(max_attempts)) if isinstance(max_attempts, int) else 2
+        self.retry_backoff_seconds = (
+            max(0.0, float(retry_backoff_seconds)) if isinstance(retry_backoff_seconds, (int, float)) else 0.25
+        )
 
     def register_actions(
         self,
@@ -219,9 +268,17 @@ class Browse:
                     },
                 }
             )
+        browse_desc = (
+            "Browse an accessible web page and return its main readable content. "
+            "Protocol guidance: when an http URL, bare domain, root path, or guessed path returns "
+            "a blocked/WAF/error page, short content, status such as 410, or an empty shell, try the "
+            "same host through https and canonical entry pages before concluding the whole domain is "
+            "unreachable. When the returned content includes same-site navigation links, prefer "
+            "following those links over inventing path names."
+        )
         action.register_action(
             action_id=action_id,
-            desc="Browse an accessible web page and return its main readable content.",
+            desc=browse_desc,
             kwargs={"url": (str, "Accessible URL.")},
             executor=action.create_action_executor("BrowseActionExecutor", browse=self),
             tags=tags,
@@ -246,6 +303,33 @@ class Browse:
         normalized = normalized.strip(' "\'`')
         normalized = re.sub(r"[,;:!?]+$", "", normalized)
         return normalized
+
+    def _candidate_urls(self, url: str) -> list[dict[str, Any]]:
+        normalized = self._normalize_url(url)
+        if not normalized:
+            return []
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"}:
+            normalized = f"https://{normalized.lstrip('/')}"
+            parsed = urlparse(normalized)
+        candidates: list[dict[str, Any]] = []
+
+        def add(candidate: str, *, reason: str, downgraded: bool = False):
+            if not candidate:
+                return
+            if candidate not in [item["url"] for item in candidates]:
+                candidates.append({"url": candidate, "reason": reason, "security_downgrade": downgraded})
+
+        add(normalized, reason="requested")
+        if parsed.scheme == "http":
+            add(parsed._replace(scheme="https").geturl(), reason="same_host_https")
+        elif parsed.scheme == "https":
+            add(parsed._replace(scheme="http").geturl(), reason="same_host_http", downgraded=True)
+        if not parsed.path or parsed.path == "/":
+            for scheme in ("https", "http"):
+                base = parsed._replace(scheme=scheme, path="/", params="", query="", fragment="").geturl()
+                add(base, reason="canonical_root", downgraded=scheme == "http")
+        return candidates
 
     def _normalize_content(self, content: str) -> str:
         normalized = str(content or "").replace("\u00a0", " ").replace("\r\n", "\n").replace("\r", "\n")
@@ -307,6 +391,16 @@ class Browse:
         return len(re.sub(r"\s+", "", str(content or ""))) >= max(1, int(min_length))
 
     @classmethod
+    def _blocked_page_reason(cls, content: str) -> str:
+        text = re.sub(r"\s+", " ", str(content or "")).strip().lower()
+        if not text:
+            return ""
+        for marker in cls.BLOCKED_PAGE_MARKERS:
+            if marker in text:
+                return f"blocked_or_error_page: {marker}"
+        return ""
+
+    @classmethod
     def _collect_text(cls, root, *, remove_tags: tuple[str, ...], filter_noise: bool):
         for removable in root.find_all(remove_tags):
             removable.decompose()
@@ -340,6 +434,20 @@ class Browse:
         return "\n".join(normalized_lines).strip()
 
     @classmethod
+    def _sanitize_raw_body_fallback(cls, root) -> str:
+        for node in root.find_all(("img", "picture", "source", "svg", "canvas", "video", "audio", "iframe")):
+            node.decompose()
+        for node in root.find_all(True):
+            for attr, value in list(getattr(node, "attrs", {}).items()):
+                values = value if isinstance(value, list) else [value]
+                text = " ".join(str(item) for item in values)
+                if "data:" in text or len(text) > 512:
+                    del node.attrs[attr]
+        raw_body = str(root)
+        raw_body = re.sub(r"data:[^\\s\"']{128,}", "data:[omitted]", raw_body)
+        return raw_body
+
+    @classmethod
     def _extract_text_from_soup(cls, soup, min_length: int | None = None) -> str:
         threshold = cls.BS4_STRATEGY_MIN_LENGTH if min_length is None else max(1, int(min_length))
 
@@ -359,7 +467,7 @@ class Browse:
 
         # Strategy 3 (body fallback): return raw body html when structured extraction is still too thin.
         body = cls._pick_body_root(soup)
-        raw_body = str(body)
+        raw_body = cls._sanitize_raw_body_fallback(body)
         if raw_body:
             return raw_body
         return ""
@@ -378,6 +486,393 @@ class Browse:
             if isinstance(result.get("html_body"), str):
                 return self._normalize_content(result["html_body"])
         return ""
+
+    @staticmethod
+    def _media_type_from_content_type(content_type: str) -> str | None:
+        media_type = str(content_type or "").split(";", 1)[0].strip().lower()
+        return media_type or None
+
+    @classmethod
+    def _looks_like_remote_file(cls, *, url: str, media_type: str | None, content: bytes) -> bool:
+        extension = Path(urlparse(str(url or "")).path).suffix.lower()
+        if extension in cls.REMOTE_FILE_EXTENSIONS:
+            return True
+        if media_type in cls.REMOTE_FILE_MEDIA_TYPES:
+            return True
+        return content.startswith(b"%PDF-") or content.startswith(b"PK\x03\x04")
+
+    @staticmethod
+    def _filename_from_response(url: str, headers: Any) -> str:
+        try:
+            disposition = str(headers.get("content-disposition", "") or headers.get("Content-Disposition", ""))
+        except Exception:
+            disposition = ""
+        match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', disposition, flags=re.I)
+        if match:
+            name = match.group(1).strip()
+        else:
+            name = Path(urlparse(url).path).name
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+        return name or "download.bin"
+
+    @staticmethod
+    def _download_workspace_path(url: str, content: bytes, headers: Any) -> str:
+        filename = Browse._filename_from_response(url, headers)
+        digest = hashlib.sha256(content).hexdigest()[:16]
+        stem = Path(filename).stem or "download"
+        suffix = Path(filename).suffix or ".bin"
+        return f"downloads/{stem}-{digest}{suffix}"
+
+    @staticmethod
+    def _extract_links_from_soup(soup: Any, *, base_url: str, max_links: int) -> list[dict[str, str]]:
+        links: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor.get("href", "")).strip()
+            if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+                continue
+            absolute = urljoin(base_url, href)
+            parsed = urlparse(absolute)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            if absolute in seen:
+                continue
+            seen.add(absolute)
+            text = " ".join(str(anchor.get_text(" ", strip=True) or "").split())
+            links.append({"url": absolute, "text": text})
+            if max_links > 0 and len(links) >= max_links:
+                break
+        return links
+
+    @staticmethod
+    def _extract_canonical_links(soup: Any, *, base_url: str) -> list[str]:
+        links: list[str] = []
+        for selector in ('link[rel="canonical"]', 'meta[property="og:url"]'):
+            for node in soup.select(selector):
+                value = str(node.get("href") or node.get("content") or "").strip()
+                if not value:
+                    continue
+                absolute = urljoin(base_url, value)
+                if absolute not in links:
+                    links.append(absolute)
+        return links
+
+    @staticmethod
+    def _attempt_diagnostics(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        diagnostics: list[dict[str, Any]] = []
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            backend = str(item.get("backend", "unknown"))
+            reason = str(item.get("reason", "failed"))
+            if item.get("ok") is True and item.get("security_downgrade") is True:
+                diagnostics.append(
+                    {
+                        "code": "browse_security_downgrade",
+                        "backend": backend,
+                        "attempt_index": int(item.get("attempt_index", 0) or 0),
+                        "retryable": False,
+                        "message": reason,
+                        "detail": {
+                            key: item.get(key)
+                            for key in ("url", "candidate_reason", "security_downgrade", "status")
+                            if key in item
+                        },
+                    }
+                )
+                continue
+            diagnostics.append(
+                {
+                    "code": "browse_backend_failed",
+                    "backend": backend,
+                    "attempt_index": int(item.get("attempt_index", 0) or 0),
+                    "retryable": bool(item.get("retryable", False)),
+                    "message": reason,
+                    "detail": {
+                        key: item.get(key)
+                        for key in ("url", "candidate_reason", "security_downgrade", "status")
+                        if key in item
+                    },
+                }
+            )
+        return diagnostics
+
+    @staticmethod
+    def _reason_text(attempts: list[dict[str, Any]]) -> str:
+        reasons: list[str] = []
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            backend = str(item.get("backend", "unknown"))
+            reason = str(item.get("reason", "failed"))
+            reasons.append(f"{backend}: {reason}")
+        return " | ".join(reasons) if reasons else "unknown error"
+
+    @staticmethod
+    def _is_transient_error(error: Exception | str) -> bool:
+        message = str(error).lower()
+        error_name = error.__class__.__name__.lower() if isinstance(error, Exception) else ""
+        transient_markers = (
+            "timeout",
+            "timed out",
+            "connection",
+            "connect",
+            "network",
+            "reset",
+            "disconnect",
+            "incomplete chunked read",
+            "chunked",
+            "broken pipe",
+            "temporarily unavailable",
+            "temporary failure",
+            "proxy",
+            "ssl",
+            "tls",
+        )
+        return any(marker in message or marker in error_name for marker in transient_markers)
+
+    async def _materialize_remote_file_trace(self, trace: dict[str, Any], workspace: Any) -> dict[str, Any]:
+        content = trace.get("content_bytes")
+        content = content if isinstance(content, (bytes, bytearray)) else b""
+        selected_url = str(trace.get("url") or trace.get("normalized_url") or "")
+        media_type = str(trace.get("media_type") or "") or None
+        if not content:
+            return {
+                "ok": False,
+                "success": False,
+                "status": "error",
+                "data": None,
+                "result": None,
+                "error": "Remote file response did not contain bytes to materialize.",
+                "diagnostics": [
+                    {
+                        "code": "browse.remote_file.empty",
+                        "message": "Remote file response did not contain bytes to materialize.",
+                    }
+                ],
+                "meta": {
+                    "provider": "builtins.actions.Browse",
+                    "method": "browse",
+                    "selected_url": selected_url,
+                    "content_kind": "remote_file",
+                },
+            }
+        if workspace is None or not callable(getattr(workspace, "materialize_file", None)):
+            return {
+                "ok": False,
+                "success": False,
+                "status": "blocked",
+                "data": None,
+                "result": None,
+                "error": "Remote file response requires a Workspace binding before it can be read.",
+                "diagnostics": [
+                    {
+                        "code": "browse.remote_file.workspace_required",
+                        "message": "Remote file response requires a Workspace binding before it can be materialized and read.",
+                        "detail": {
+                            "selected_url": selected_url,
+                            "media_type": media_type,
+                            "bytes": len(content),
+                        },
+                    }
+                ],
+                "meta": {
+                    "provider": "builtins.actions.Browse",
+                    "method": "browse",
+                    "selected_url": selected_url,
+                    "content_kind": "remote_file",
+                },
+            }
+        headers = trace.get("headers") if isinstance(trace.get("headers"), dict) else {}
+        path = self._download_workspace_path(selected_url, bytes(content), headers)
+        materialized = await workspace.materialize_file(
+            path,
+            bytes(content),
+            source={
+                "kind": "remote_browse_download",
+                "url": selected_url,
+                "requested_url": trace.get("requested_url"),
+                "backend": trace.get("backend"),
+            },
+            media_type=media_type,
+            overwrite=False,
+        )
+        read_preview: dict[str, Any] = {}
+        try:
+            read_result = await workspace.read_file(materialized["path"], max_bytes=4000)
+            read_preview = {
+                "ok": read_result.get("ok"),
+                "readable": read_result.get("readable"),
+                "path": read_result.get("path"),
+                "content": read_result.get("content", ""),
+                "truncated": read_result.get("truncated"),
+                "bytes": read_result.get("bytes"),
+                "read_bytes": read_result.get("read_bytes"),
+                "sha256": read_result.get("sha256"),
+                "media_type": read_result.get("media_type"),
+                "content_kind": read_result.get("content_kind"),
+                "handler_id": read_result.get("handler_id"),
+                "diagnostics": read_result.get("diagnostics", []),
+            }
+        except Exception as error:
+            read_preview = {
+                "ok": False,
+                "readable": False,
+                "path": materialized["path"],
+                "content": "",
+                "diagnostics": [
+                    {
+                        "code": "browse.remote_file.read_preview_failed",
+                        "message": str(error),
+                    }
+                ],
+            }
+        file_refs = list(materialized.get("file_refs", []))
+        data = {
+            "kind": "remote_file",
+            "source_url": selected_url,
+            "selected_url": selected_url,
+            "requested_url": trace.get("requested_url"),
+            "media_type": materialized.get("media_type") or media_type,
+            "bytes": materialized.get("bytes", len(content)),
+            "sha256": materialized.get("sha256"),
+            "path": materialized.get("path"),
+            "file_refs": file_refs,
+            "read_preview": read_preview,
+        }
+        return {
+            "ok": True,
+            "success": True,
+            "status": "success" if read_preview.get("ok") else "partial_success",
+            "data": data,
+            "result": data,
+            "file_refs": file_refs,
+            "diagnostics": [
+                *list(materialized.get("diagnostics", [])),
+                *list(read_preview.get("diagnostics", [])),
+            ],
+            "meta": {
+                "provider": "builtins.actions.Browse",
+                "method": "browse",
+                "selected_url": selected_url,
+                "content_kind": "remote_file",
+                "attempts": [
+                    {
+                        key: item.get(key)
+                        for key in ("backend", "attempt_index", "url", "candidate_reason", "ok", "status")
+                        if isinstance(item, dict) and key in item
+                    }
+                    for item in trace.get("attempts", [])
+                    if isinstance(item, dict)
+                ],
+            },
+        }
+
+    async def _execute_action_method(self, method_name: str = "browse", **kwargs: Any) -> dict[str, Any]:
+        workspace = kwargs.pop("workspace", None)
+        custom_method = self.__dict__.get(method_name)
+        if callable(custom_method):
+            from agently.utils import FunctionShifter
+
+            output = await FunctionShifter.asyncify(custom_method)(**kwargs)
+            if isinstance(output, dict) and "status" in output:
+                return output
+            return {
+                "ok": True,
+                "success": True,
+                "status": "success",
+                "data": output,
+                "result": output,
+                "diagnostics": [],
+                "meta": {
+                    "provider": "custom",
+                    "method": method_name,
+                },
+            }
+        if method_name != "browse":
+            method = getattr(self, method_name)
+            output = await method(**kwargs)
+            if isinstance(output, dict) and "status" in output:
+                return output
+            return {
+                "ok": True,
+                "success": True,
+                "status": "success",
+                "data": output,
+                "result": output,
+                "diagnostics": [],
+                "meta": {
+                    "provider": "builtins.actions.Browse",
+                    "method": method_name,
+                },
+            }
+
+        url = str(kwargs.get("url", ""))
+        trace = await self._browse_with_trace(url)
+        attempts = trace.get("attempts", [])
+        attempts = attempts if isinstance(attempts, list) else []
+        diagnostics = self._attempt_diagnostics(attempts)
+        meta = {
+            "provider": "builtins.actions.Browse",
+            "method": "browse",
+            "requested_url": trace.get("requested_url", url),
+            "normalized_url": trace.get("normalized_url", self._normalize_url(url)),
+            "backend": trace.get("backend"),
+            "attempted_backends": list(self.fallback_order),
+            "max_attempts": self.max_attempts,
+            "failed_backends": [
+                str(item.get("backend", "unknown"))
+                for item in attempts
+                if isinstance(item, dict) and item.get("ok") is not True
+            ],
+            "content_format": self.response_mode,
+            "selected_url": trace.get("url", trace.get("normalized_url")),
+            "retry_candidates": trace.get("retry_candidates", []),
+            "canonical_links": trace.get("canonical_links", []),
+            "links": trace.get("links", []),
+        }
+        if trace.get("content_kind") == "remote_file":
+            return await self._materialize_remote_file_trace(trace, workspace)
+        if trace.get("ok"):
+            content = str(trace.get("content", "") or "")
+            status = "partial_success" if diagnostics else "success"
+            data: Any = content
+            if trace.get("links") or trace.get("canonical_links"):
+                data = {
+                    "content": content,
+                    "selected_url": trace.get("url", trace.get("normalized_url")),
+                    "canonical_links": trace.get("canonical_links", []),
+                    "links": trace.get("links", []),
+                }
+            return {
+                "ok": True,
+                "success": True,
+                "status": status,
+                "data": data,
+                "result": data,
+                "diagnostics": diagnostics,
+                "meta": meta,
+            }
+
+        reason_text = self._reason_text(attempts)
+        error = f"Can not browse '{self._normalize_url(url)}'. Fallback failed: {reason_text}"
+        return {
+            "ok": False,
+            "success": False,
+            "status": "error",
+            "data": None,
+            "result": None,
+            "error": error,
+            "diagnostics": diagnostics
+            or [
+                {
+                    "code": "browse_backend_failed",
+                    "backend": "all",
+                    "message": reason_text,
+                }
+            ],
+            "meta": meta,
+        }
 
     def _resolve_browser_app(self, os_name: str) -> str:
         if self.pyautogui_browser_app and self.pyautogui_browser_app.strip():
@@ -767,7 +1262,7 @@ class Browse:
                 "error": str(e),
             }
 
-    async def _bs4_browse(self, url: str) -> str:
+    async def _bs4_browse(self, url: str) -> str | dict[str, Any]:
         LazyImport.import_package("httpx")
         LazyImport.import_package("bs4", install_name="beautifulsoup4")
 
@@ -784,11 +1279,40 @@ class Browse:
                 if page.status_code == 301 and target_url.startswith("http:"):
                     target_url = target_url.replace("http:", "https:")
                     page = await client.get(target_url, headers=self.headers)
+                final_url = str(page.url)
+                media_type = self._media_type_from_content_type(str(page.headers.get("content-type", "")))
+                if self._looks_like_remote_file(url=final_url, media_type=media_type, content=page.content):
+                    return {
+                        "ok": True,
+                        "content_kind": "remote_file",
+                        "requested_url": target_url,
+                        "url": final_url,
+                        "status": page.status_code,
+                        "media_type": media_type,
+                        "headers": dict(page.headers),
+                        "content_bytes": bytes(page.content),
+                    }
                 soup = BeautifulSoup(page.content, "html.parser")
                 content = self._extract_text_from_soup(soup, min_length=self.min_content_length)
                 content = self._normalize_content(content)
+                links = self._extract_links_from_soup(
+                    soup,
+                    base_url=final_url,
+                    max_links=self.playwright_max_links,
+                )
+                canonical_links = self._extract_canonical_links(soup, base_url=final_url)
                 if content:
-                    return content
+                    return {
+                        "ok": True,
+                        "content_kind": "html",
+                        "requested_url": target_url,
+                        "url": final_url,
+                        "status": page.status_code,
+                        "media_type": media_type,
+                        "content": content,
+                        "links": links,
+                        "canonical_links": canonical_links,
+                    }
                 return f"Can not fetch any content from {target_url}!"
         except Exception as e:
             return f"Can not browse '{target_url}'.\tError: {str(e)}"
@@ -796,6 +1320,7 @@ class Browse:
     async def _browse_with_trace(self, url: str) -> dict[str, Any]:
         requested_url = str(url or "")
         normalized_url = self._normalize_url(requested_url)
+        candidates = self._candidate_urls(normalized_url)
         attempts: list[dict[str, Any]] = []
 
         for backend in self.fallback_order:
@@ -806,56 +1331,154 @@ class Browse:
             if backend == "bs4" and not self.enable_bs4:
                 continue
 
-            try:
-                if backend == "pyautogui":
-                    result = await self._pyautogui_open_and_read_url(normalized_url)
-                elif backend == "playwright":
-                    result = await self._playwright_open(normalized_url)
-                elif backend == "bs4":
-                    result = await self._bs4_browse(normalized_url)
-                else:
-                    attempts.append({"backend": backend, "ok": False, "reason": "Unknown backend"})
-                    continue
+            for candidate in candidates or [{"url": normalized_url, "reason": "requested", "security_downgrade": False}]:
+                candidate_url = str(candidate.get("url") or normalized_url)
+                candidate_reason = str(candidate.get("reason") or "requested")
+                security_downgrade = bool(candidate.get("security_downgrade"))
+                for attempt_index in range(self.max_attempts):
+                    try:
+                        if backend == "pyautogui":
+                            result = await self._pyautogui_open_and_read_url(candidate_url)
+                        elif backend == "playwright":
+                            result = await self._playwright_open(candidate_url)
+                        elif backend == "bs4":
+                            result = await self._bs4_browse(candidate_url)
+                        else:
+                            attempts.append(
+                                {
+                                    "backend": backend,
+                                    "attempt_index": attempt_index,
+                                    "url": candidate_url,
+                                    "candidate_reason": candidate_reason,
+                                    "security_downgrade": security_downgrade,
+                                    "ok": False,
+                                    "retryable": False,
+                                    "reason": "Unknown backend",
+                                }
+                            )
+                            break
 
-                content = self._extract_content_from_result(result)
-                ok = bool(content) and len(content) >= self.min_content_length
+                        content = self._extract_content_from_result(result)
+                        is_remote_file = isinstance(result, dict) and result.get("content_kind") == "remote_file"
+                        blocked_reason = "" if is_remote_file else self._blocked_page_reason(content)
+                        ok = is_remote_file or (
+                            bool(content) and len(content) >= self.min_content_length and not blocked_reason
+                        )
 
-                if not ok:
-                    reason = "content_empty_or_too_short"
-                    if isinstance(result, dict):
-                        error = str(result.get("error", "") or "").strip()
-                        if error:
-                            reason = error
-                    elif isinstance(result, str) and result.startswith("Can not "):
-                        reason = result
-                    attempts.append({"backend": backend, "ok": False, "reason": reason})
-                    continue
+                        if not ok:
+                            reason = blocked_reason or "content_empty_or_too_short"
+                            if isinstance(result, dict):
+                                error = str(result.get("error", "") or "").strip()
+                                if error:
+                                    reason = error
+                                elif result.get("status") and not blocked_reason:
+                                    reason = f"HTTP status { result.get('status') } produced no readable content"
+                            elif isinstance(result, str) and result.startswith("Can not "):
+                                reason = result
+                            retryable = self._is_transient_error(reason)
+                            attempts.append(
+                                {
+                                    "backend": backend,
+                                    "attempt_index": attempt_index,
+                                    "url": candidate_url,
+                                    "candidate_reason": candidate_reason,
+                                    "security_downgrade": security_downgrade,
+                                    "ok": False,
+                                    "retryable": retryable,
+                                    "reason": reason,
+                                }
+                            )
+                            if retryable and attempt_index + 1 < self.max_attempts:
+                                if self.retry_backoff_seconds > 0:
+                                    time.sleep(self.retry_backoff_seconds)
+                                continue
+                            break
 
-                trace = {
-                    "ok": True,
-                    "backend": backend,
-                    "requested_url": requested_url,
-                    "normalized_url": normalized_url,
-                    "content_format": self.response_mode,
-                    "content": content,
-                    "attempts": attempts,
-                }
-                if isinstance(result, dict):
-                    trace.update(
-                        {
-                            "url": result.get("url") or normalized_url,
-                            "title": result.get("title", ""),
-                            "status": result.get("status"),
-                            "raw_result": result,
+                        trace = {
+                            "ok": True,
+                            "backend": backend,
+                            "requested_url": requested_url,
+                            "normalized_url": normalized_url,
+                            "candidate_url": candidate_url,
+                            "candidate_reason": candidate_reason,
+                            "security_downgrade": security_downgrade,
+                            "content_format": self.response_mode,
+                            "content": content,
+                            "attempts": attempts,
+                            "retry_candidates": candidates,
                         }
-                    )
-                else:
-                    trace.update({"url": normalized_url, "title": "", "status": None, "raw_result": result})
-                return trace
-            except ImportError as e:
-                attempts.append({"backend": backend, "ok": False, "reason": f"ImportError: {str(e)}"})
-            except Exception as e:
-                attempts.append({"backend": backend, "ok": False, "reason": str(e)})
+                        if isinstance(result, dict):
+                            trace.update(
+                                {
+                                    "url": result.get("url") or candidate_url,
+                                    "title": result.get("title", ""),
+                                    "status": result.get("status"),
+                                    "content_kind": result.get("content_kind", "html"),
+                                    "media_type": result.get("media_type"),
+                                    "headers": result.get("headers", {}),
+                                    "content_bytes": result.get("content_bytes"),
+                                    "links": result.get("links", []),
+                                    "canonical_links": result.get("canonical_links", []),
+                                    "raw_result": result,
+                                }
+                            )
+                        else:
+                            trace.update(
+                                {
+                                    "url": candidate_url,
+                                    "title": "",
+                                    "status": None,
+                                    "content_kind": "html",
+                                    "raw_result": result,
+                                }
+                            )
+                        if security_downgrade:
+                            attempts.append(
+                                {
+                                    "backend": backend,
+                                    "attempt_index": attempt_index,
+                                    "url": candidate_url,
+                                    "candidate_reason": candidate_reason,
+                                    "security_downgrade": True,
+                                    "ok": True,
+                                    "retryable": False,
+                                    "reason": "Browse succeeded through an http fallback after https was unavailable.",
+                                }
+                            )
+                        return trace
+                    except ImportError as e:
+                        attempts.append(
+                            {
+                                "backend": backend,
+                                "attempt_index": attempt_index,
+                                "url": candidate_url,
+                                "candidate_reason": candidate_reason,
+                                "security_downgrade": security_downgrade,
+                                "ok": False,
+                                "retryable": False,
+                                "reason": f"ImportError: {str(e)}",
+                            }
+                        )
+                        break
+                    except Exception as e:
+                        retryable = self._is_transient_error(e)
+                        attempts.append(
+                            {
+                                "backend": backend,
+                                "attempt_index": attempt_index,
+                                "url": candidate_url,
+                                "candidate_reason": candidate_reason,
+                                "security_downgrade": security_downgrade,
+                                "ok": False,
+                                "retryable": retryable,
+                                "reason": str(e),
+                            }
+                        )
+                        if retryable and attempt_index + 1 < self.max_attempts:
+                            if self.retry_backoff_seconds > 0:
+                                time.sleep(self.retry_backoff_seconds)
+                            continue
+                        break
 
         return {
             "ok": False,
@@ -863,6 +1486,7 @@ class Browse:
             "normalized_url": normalized_url,
             "content": "",
             "attempts": attempts,
+            "retry_candidates": candidates,
             "error": "All browse backends failed.",
         }
 
@@ -871,12 +1495,7 @@ class Browse:
         if trace.get("ok"):
             return trace.get("content", "")
 
-        reasons = []
-        for item in trace.get("attempts", []):
-            if not isinstance(item, dict):
-                continue
-            backend = str(item.get("backend", "unknown"))
-            reason = str(item.get("reason", "failed"))
-            reasons.append(f"{backend}: {reason}")
-        reason_text = " | ".join(reasons) if reasons else "unknown error"
+        attempts = trace.get("attempts", [])
+        attempts = attempts if isinstance(attempts, list) else []
+        reason_text = self._reason_text(attempts)
         return f"Can not browse '{self._normalize_url(url)}'.\tFallback failed: {reason_text}"

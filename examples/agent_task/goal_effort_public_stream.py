@@ -115,7 +115,7 @@ async def main() -> None:
     print(f"[setup] provider={provider} progress_language={progress_language}")
     print(f"[setup] workspace={workspace_dir}")
     with trace_path.open("w", encoding="utf-8") as trace_file:
-        async for item in execution.get_async_generator():
+        async for item in execution.get_async_generator(type="instant"):
             stream_items.append(item)
             trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
             trace_file.flush()

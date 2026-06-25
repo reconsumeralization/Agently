@@ -16,7 +16,6 @@ from .Prompt import Prompt
 from .AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint, is_core_attempt_runner_entrypoint
 from .ModelRequestResult import ModelRequestResult
 from .ModelResponse import ModelResponse
-from .ModelResponseResult import ModelResponseResult
 from .ModelRequest import ModelRequest, _UNSET, _resolve_quick_prompt_input
 from .AttachmentInput import ImageDetail, build_image_attachment, image_file_to_data_url
 
@@ -28,7 +27,6 @@ __all__ = [
     "ModelRequest",
     "ModelRequestResult",
     "ModelResponse",
-    "ModelResponseResult",
     "ImageDetail",
     "build_image_attachment",
     "image_file_to_data_url",

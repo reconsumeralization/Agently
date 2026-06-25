@@ -50,7 +50,7 @@ async def _run_goal_pursuit_case(
     trace_path = workspace_dir / "outputs" / f"{task_id}_stream.jsonl"
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     with trace_path.open("w", encoding="utf-8") as trace_file:
-        async for item in execution.get_async_generator():
+        async for item in execution.get_async_generator(type="instant"):
             stream_items.append(item)
             trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
 

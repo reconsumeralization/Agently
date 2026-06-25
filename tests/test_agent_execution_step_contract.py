@@ -430,6 +430,8 @@ class MockFlatRepairConstraintRequester(MockAgentExecutionRequester):
                     "is_complete": False,
                     "requires_block": False,
                     "reason": "The draft includes 15 items but the task asks for 5-8.",
+                    "failure_analysis": "The candidate artifact overshoots the accepted item count.",
+                    "acceptance_delta": ["The report must include 5-8 news items, not 15."],
                     "missing_criteria": ["The report must include 5-8 news items, not 15."],
                     "repair_constraints": ["Reduce the report to 5-8 news items."],
                     "next_step_requirements": ["Revise the candidate report; do not restart evidence gathering."],
@@ -442,6 +444,8 @@ class MockFlatRepairConstraintRequester(MockAgentExecutionRequester):
                     "is_complete": True,
                     "requires_block": False,
                     "reason": "The repaired report now has 6 items.",
+                    "failure_analysis": "",
+                    "acceptance_delta": [],
                     "missing_criteria": [],
                     "repair_constraints": [],
                     "next_step_requirements": [],
@@ -809,6 +813,60 @@ class MockTaskBoardSlowCardRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardRetryCardRequester"
+    card_calls = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockTaskBoardRetryCardRequester.card_calls = 0
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Exercise card retry.",
+                "cards": [
+                    {
+                        "id": "retry",
+                        "action_block": "Collect evidence with one transient timeout.",
+                        "objective": "Collect retry evidence.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "Retry evidence is collected.",
+                        "allowed_execution_shape": "model",
+                    }
+                ],
+                "reflection_points": [],
+                "completion_gate": "The retry card completes.",
+                "why_this_effort_shape": "One retried card is enough for this regression.",
+                "risk_notes": [],
+            }
+        elif "Execute exactly one TaskBoard card" in text:
+            MockTaskBoardRetryCardRequester.card_calls += 1
+            if MockTaskBoardRetryCardRequester.card_calls == 1:
+                await asyncio.sleep(0.2)
+            payload = {
+                "status": "completed",
+                "answer": "retried card completed",
+                "evidence": ["retry evidence"],
+                "remaining_work": [],
+                "diagnostics": [],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": True,
+                "reason": "retry card evidence satisfies the criterion",
+                "final_result": "taskboard retry accepted result",
+                "missing_criteria": [],
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardReadbackRequester"
     last_action_id = ""
@@ -996,6 +1054,13 @@ def _create_taskboard_slow_card_agent(name: str = "agent-execution-taskboard-slo
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def _create_taskboard_retry_card_agent(name: str = "agent-execution-taskboard-retry-card"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardRetryCardRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
 def _create_taskboard_readback_agent(name: str = "agent-execution-taskboard-readback"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -1087,6 +1152,8 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
     assert result["accepted"] is True
     assert result["final_result"] == "repaired accepted result"
     assert first_verification["is_complete"] is False
+    assert first_verification["failure_analysis"] == "The candidate artifact overshoots the accepted item count."
+    assert "The report must include 5-8 news items, not 15." in first_verification["acceptance_delta"]
     assert "Reduce the report to 5-8 news items." in first_verification["repair_constraints"]
     assert "The report must include 5-8 news items, not 15." in first_verification["repair_constraints"]
     assert (
@@ -1099,7 +1166,8 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
     )
     assert second_plan["step_instruction"].startswith("Revise the candidate report")
     assert "repair_context" in second_plan_prompt
-    assert "repair_constraints" in second_plan_prompt
+    assert "advisory_repair_constraints" in second_plan_prompt
+    assert "acceptance_delta" in second_plan_prompt
     assert "Reduce the report to 5-8 news items." in second_plan_prompt
     assert "Revise the candidate report; do not restart evidence gathering." in second_plan_prompt
 
@@ -1265,11 +1333,12 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
         max_iterations=2,
     )
 
-    stream_items = [item async for item in execution.get_async_generator()]
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
+    phases = task_meta["diagnostics"]["phases"]
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
@@ -1278,6 +1347,11 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
     assert meta["route"]["selected_route"] == "agent_task"
     assert meta["task_refs"]["execution_strategy"] == "taskboard"
     assert task_meta["execution_strategy"] == "taskboard"
+    lifecycle_phase = next(phase for phase in phases if phase["phase"] == "taskboard_lifecycle_started")
+    tick_phase = next(phase for phase in phases if phase["phase"] == "taskboard_tick")
+    assert lifecycle_phase["diagnostics"]["runtime_topology"]["driver"] == "triggerflow_taskboard_lifecycle"
+    assert tick_phase["diagnostics"]["runtime_topology"]["driver"] == "triggerflow_taskboard_lifecycle"
+    assert tick_phase["diagnostics"]["runtime_topology"]["tick"]["fanout"] == "signal_net_dynamic_overlay"
     assert taskboard["revision"]["card_results"]["collect"]["status"] == "completed"
     assert taskboard["evidence_view"]["cards"][0]["card_id"] == "collect"
     assert "content" not in taskboard["evidence_view"]["cards"][0]["artifact_refs"]
@@ -1302,7 +1376,7 @@ async def test_taskboard_control_card_uses_single_model_request_without_child_ex
         max_iterations=2,
     )
 
-    stream_items = [item async for item in execution.get_async_generator()]
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -1385,7 +1459,7 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
         .use_actions(["produce_large_evidence"])
     )
 
-    stream_items = [item async for item in execution.get_async_generator()]
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -1442,6 +1516,41 @@ async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
+    agent = _create_taskboard_retry_card_agent("execution-taskboard-card-retry").use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Run a board card that should recover after one transient timeout.",
+        success_criteria=["The board records retry evidence and still returns a final result."],
+        execution="taskboard",
+        max_iterations=2,
+        options={
+            "request_timeout_seconds": 5.0,
+            "agent_task": {
+                "taskboard_card_timeout_seconds": 0.05,
+                "taskboard_card_max_attempts": 2,
+            },
+        },
+    )
+
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    taskboard = task_meta["result"]["taskboard"]
+    retry_result = taskboard["revision"]["card_results"]["retry"]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["final_result"] == "taskboard retry accepted result"
+    assert retry_result["status"] == "completed"
+    assert retry_result["metadata"]["attempt_index"] == 2
+    assert retry_result["metadata"]["max_attempts"] == 2
+    assert task_meta["diagnostics"]["taskboard_card_retries"][0]["code"] == "taskboard.card.timeout"
+    assert any(item.path == "agent_task.taskboard.card.retry.execution.retry" for item in stream_items)
+
+
+@pytest.mark.asyncio
 async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(tmp_path):
     skill_pack = _install_site_skill(tmp_path)
     agent = _create_goal_pursuit_agent("execution-first-goal-chain").use_workspace(tmp_path / "workspace")
@@ -1454,7 +1563,7 @@ async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(t
         .effort("low")
     )
 
-    stream_items = [item async for item in execution.get_async_generator()]
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
     meta = await execution.async_get_meta()
 
     assert type(execution).__name__ == "AgentExecution"
@@ -1997,6 +2106,13 @@ async def test_agent_execution_plain_text_model_request_streams_model_delta():
     assert any(item.path == "model.delta" and item.event_type == "delta" for item in stream_items)
     assert any(item.path == "model.text" for item in stream_items)
     assert meta["route"]["selected_route"] == "model_request"
+
+    delta_chunks = [chunk async for chunk in execution.get_async_generator(type="delta")]
+    assert delta_chunks
+    assert all(isinstance(chunk, str) for chunk in delta_chunks)
+
+    default_chunks = [chunk async for chunk in execution.get_async_generator()]
+    assert default_chunks == delta_chunks
 
 
 @pytest.mark.asyncio

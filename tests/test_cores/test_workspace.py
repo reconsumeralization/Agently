@@ -315,6 +315,21 @@ async def test_workspace_file_io_text_read_write_binary_and_policy(tmp_path):
     assert read["sha256"] == hashlib.sha256(b"hello world").hexdigest()
     assert read["file_refs"][0]["path"] == "notes/todo.txt"
 
+    materialized = await workspace.materialize_file(
+        "downloads/remote.txt",
+        b"downloaded official syllabus",
+        source={"kind": "test_download", "url": "https://example.com/syllabus.txt"},
+        media_type="text/plain",
+    )
+    assert materialized["ok"] is True
+    assert materialized["path"] == "downloads/remote.txt"
+    assert materialized["bytes"] == len(b"downloaded official syllabus")
+    assert materialized["sha256"] == hashlib.sha256(b"downloaded official syllabus").hexdigest()
+    assert materialized["file_refs"][0]["role"] == "download"
+    materialized_read = await workspace.read_file("downloads/remote.txt")
+    assert materialized_read["ok"] is True
+    assert materialized_read["content"] == "downloaded official syllabus"
+
     (workspace.files_root / "payload.bin").write_bytes(b"\x00\xffbinary")
     binary = await workspace.read_file("payload.bin")
     assert binary["ok"] is False
@@ -327,6 +342,8 @@ async def test_workspace_file_io_text_read_write_binary_and_policy(tmp_path):
     read_only = WorkspaceManager().create(tmp_path / "readonly", mode="read_only")
     with pytest.raises(PermissionError, match="read-only"):
         await read_only.write_file("blocked.txt", "nope")
+    with pytest.raises(PermissionError, match="read-only"):
+        await read_only.materialize_file("blocked.bin", b"nope")
 
 
 @pytest.mark.asyncio

@@ -112,6 +112,29 @@ Action result uses `status="partial_success"` with `success=True` and backend
 diagnostics. Treat that as usable evidence plus observability, not as an
 `action.failed` terminal condition.
 
+Search and Browse accept explicit `proxy=` and `timeout=` configuration on the
+package object. They also retry transient transport failures once by default
+(`max_attempts=2`, `retry_backoff_seconds=0.25`). This covers short network
+disconnects such as incomplete chunked reads, timeouts, connection resets, and
+proxy handshakes; it is not a substitute for a long-term unavailable network or
+an unreachable proxy.
+
+Browse preserves direct `Browse.browse(url)` compatibility by returning text,
+but the registered `browse` Action uses structured results. If all Browse
+backends fail, the Action result is `status="error"` with backend diagnostics
+rather than a successful `"Can not browse ..."` text artifact.
+
+The registered Browse Action also owns basic URL recovery and remote-file
+handoff. Bare domains and same-host `http` / `https` candidates are tried before
+the action gives up, and structured results include the selected URL, retry
+candidates, canonical links, same-site links, attempts, and any security
+downgrade diagnostic. When Browse receives a PDF, Office file, image, or other
+download-like binary response and the current execution has a bound Workspace,
+it materializes the bytes into `downloads/` and returns file refs plus bounded
+`read_file` preview. Browse does not parse the document itself; Workspace file
+IO handlers own that later read. Without a bound Workspace, remote-file Browse
+fails closed instead of sending raw bytes into the model hot path.
+
 For shell access, prefer `agent.enable_shell(...)`, which mounts a managed
 `run_bash` action. `Cmd` remains available as a low-level compatibility package
 and as an implementation helper for Bash execution.

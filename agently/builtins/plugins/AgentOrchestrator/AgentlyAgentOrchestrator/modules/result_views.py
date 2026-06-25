@@ -15,8 +15,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Generator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
@@ -75,7 +76,7 @@ async def async_get_meta(owner: "AgentExecution") -> dict[str, Any]:
 
 async def get_async_generator(
     owner: "AgentExecution",
-    type: Literal["instant", "streaming_parse", "all"] | str | None = "instant",
+    type: Literal["delta", "instant", "streaming_parse", "all"] | str | None = "delta",
     content: Any = None,
     **_: Any,
 ) -> AsyncGenerator[Any, None]:
@@ -83,7 +84,9 @@ async def get_async_generator(
         type = content
     if owner._completed:
         for item in owner.stream.items:
-            yield ("agent_execution", item) if type == "all" else item
+            projected = _project_stream_item(item, type)
+            if projected is not None:
+                yield projected
         return
     queue: asyncio.Queue[Any] = asyncio.Queue()
     for item in owner.stream.items:
@@ -96,11 +99,47 @@ async def get_async_generator(
             item = await queue.get()
             if item is None:
                 break
-            yield ("agent_execution", item) if type == "all" else item
+            projected = _project_stream_item(item, type)
+            if projected is not None:
+                yield projected
         await start_task
     finally:
         if queue in owner.stream.queues:
             owner.stream.queues.remove(queue)
+
+
+def _project_stream_item(item: Any, type: Any) -> Any:
+    if type == "all":
+        return ("agent_execution", item)
+    if type == "delta":
+        path = str(getattr(item, "path", "") or "")
+        value = getattr(item, "value", None)
+        if _is_retry_status_marker_source(path, value):
+            return _format_retry_marker(value)
+        if getattr(item, "event_type", None) != "delta":
+            return None
+        delta = getattr(item, "delta", None)
+        if delta is None:
+            return None
+        return str(delta)
+    return item
+
+
+def _is_retry_status_marker_source(path: str, value: Any) -> bool:
+    return (
+        (path == "$status" or path.endswith(".$status"))
+        and isinstance(value, Mapping)
+        and value.get("status") == "failed"
+        and value.get("retry") is True
+    )
+
+
+def _format_retry_marker(value: Any) -> str:
+    reason = value.get("reason") if isinstance(value, Mapping) else None
+    text = str(reason).strip() if reason is not None else ""
+    if not text:
+        text = "Retrying model request."
+    return f"<$retry>{html.escape(text, quote=False)}</$retry>"
 
 
 def _retrieve_generator_start_exception(task: "asyncio.Task[Any]") -> None:

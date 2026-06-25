@@ -28,7 +28,7 @@ Agently.set_settings("OpenAICompatible", {
 | `api_key` | bearer token; omit for local servers that don't require auth |
 | `model` | provider-specific model name |
 | `model_type` | `"chat"` (default) or `"completion"` for legacy completion endpoints |
-| `request_retry` | transient transport retry policy; defaults to `{"max_attempts": 2, "after_output": false}` |
+| `request_retry` | transient transport retry policy; defaults to `{"max_attempts": 2, "after_output": true}` |
 | `request_options` | extra dict forwarded to the underlying HTTP client (timeouts, headers) |
 
 The full set lives in the [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/) package. The public plugin class is exported from `plugin.py`, while request building, credentials, transport, handler binding, and response mapping live under its private `modules/` package.
@@ -89,21 +89,19 @@ You can also set request-level overrides via the request chain — see [Settings
 If a particular provider doesn't fully implement OpenAI semantics for one of these (e.g., a quirky streaming format), the underlying plugin tries to be tolerant; report concrete cases via issues.
 
 For transient transport failures such as a connection reset or provider-side
-disconnect before any output is emitted, `OpenAICompatible` retries the same
-request once by default. This does not change the selected model, prompt, or
-structured output format. Set `"request_retry": {"max_attempts": 1}` or
-`"request_retry": False` to disable that replay.
-
-Once output has started, provider-level retry remains conservative so text-only
-stream consumers do not accidentally concatenate partial content with a replay.
-Set `request_retry.after_output=True` only when the relevant consumers process
-the reserved `$status` record, handle the plain-delta
-`"<$retry>{reason}</$retry>"` marker, or read a final result:
+disconnect, `OpenAICompatible` retries the same request once by default. This
+does not change the selected model, prompt, or structured output format. The
+default also covers failures after partial output has already streamed, so
+stream consumers must process the reserved `$status` record, handle the
+plain-delta `"<$retry>{reason}</$retry>"` marker, or read only a final result.
+Set `"request_retry": {"max_attempts": 1}` or `"request_retry": False` to
+disable replay. Set `request_retry.after_output=False` only when a consumer
+cannot reset provisional output after a retry boundary:
 
 ```python
 agent.set_settings("OpenAICompatible.request_retry", {
     "max_attempts": 2,
-    "after_output": True,
+    "after_output": False,
 })
 ```
 

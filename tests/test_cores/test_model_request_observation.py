@@ -7,7 +7,7 @@ import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.builtins.plugins.ResponseParser.AgentlyResponseParser import AgentlyResponseParser
-from agently.core import ModelRequest, ModelRequestResult, ModelResponseResult, PluginManager
+from agently.core import ModelRequest, ModelRequestResult, PluginManager
 from agently.core.model.AttemptRunner import core_attempt_runner_entrypoint
 from agently.core.runtime.RuntimeEvents import (
     async_emit_action_flow_observation,
@@ -501,7 +501,6 @@ def test_get_result_is_primary_model_request_facade():
     result = request.get_result()
 
     assert isinstance(result, ModelRequestResult)
-    assert ModelResponseResult is ModelRequestResult
     assert result.result is result
     assert result.id == result.response_id
 
@@ -631,6 +630,14 @@ async def test_agent_execution_projects_model_status_and_lineage_for_plain_delta
     model_run_ids = {item.meta["model_run_id"] for item in model_items if item.meta is not None}
     assert len(response_ids) == len(request_run_ids) == len(model_run_ids) == 1
     assert all(item.source == "model_request" and item.route == "model_request" for item in model_items)
+
+    delta_execution = _create_handler_driven_agent().input("after-output retry")
+    delta_chunks = [chunk async for chunk in delta_execution.get_async_generator(type="delta")]
+    assert delta_chunks == [
+        '{"reply": "partial',
+        "<$retry>handler stream broke</$retry>",
+        '{"reply": "done"}',
+    ]
 
 
 def test_delta_retry_marker_escapes_provider_reason():
@@ -1116,15 +1123,19 @@ async def test_trigger_flow_runtime_context_auto_inherits_parent_run_for_agent_a
             request.input("Provide a direct request summary.")
             agent_text = await execution.async_get_text()
             request_text = await request.async_get_text()
-            return {
+            final = {
                 "agent_text": agent_text,
                 "request_text": request_text,
             }
+            await data.async_set_state("final", final)
+            return final
 
-        flow.to(run_inside_flow).end()
+        flow.to(run_inside_flow)
 
-        result = await flow.async_start("start")
-        final = result.get("$final_result", result)
+        execution = flow.create_execution(auto_close=False)
+        await execution.async_start("start")
+        result = await execution.async_close()
+        final = result["final"]
 
         assert "Morning briefing prepared." in final["agent_text"]
         assert "Morning briefing prepared." in final["request_text"]
@@ -1187,15 +1198,25 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
                     "request_text": request_text,
                 }
 
-            return await helper()
+            final = await helper()
+            await data.async_set_state("final", final)
+            return final
 
-        sub_flow.to(summarize_candidate).end()
+        sub_flow.to(summarize_candidate)
 
         flow = TriggerFlow(name="daily-news-root-flow")
-        flow.to_sub_flow(sub_flow, capture={"input": "value"}, write_back={"value": "result"}).end()
+        async def store_sub_flow_result(data: TriggerFlowRuntimeData):
+            await data.async_set_state("final", data.value)
+            return data.value
 
-        result = await flow.async_start("topic")
-        final = result.get("$final_result", result)
+        flow.to_sub_flow(sub_flow, capture={"input": "value"}, write_back={"value": "result.final"}).to(
+            store_sub_flow_result
+        )
+
+        execution = flow.create_execution(auto_close=False)
+        await execution.async_start("topic")
+        result = await execution.async_close()
+        final = result["final"]
 
         assert "Morning briefing prepared." in final["agent_text"]
         assert "Morning briefing prepared." in final["request_text"]
@@ -1278,7 +1299,7 @@ async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_canc
             await asyncio.sleep(0.05)
             raise RuntimeError("branch boom")
 
-        flow.batch(slow_branch, fail_branch).end()
+        flow.batch(slow_branch, fail_branch)
 
         with pytest.raises(RuntimeError, match="branch boom"):
             await flow.async_start("start")
@@ -1333,7 +1354,7 @@ async def test_trigger_flow_for_each_failure_waits_for_sibling_cleanup():
             await asyncio.sleep(0.05)
             raise RuntimeError("for_each branch boom")
 
-        flow.to(prepare_items).for_each(concurrency=2).to(analyze_item).end_for_each().end()
+        flow.to(prepare_items).for_each(concurrency=2).to(analyze_item).end_for_each()
 
         with pytest.raises(RuntimeError, match="for_each branch boom"):
             await flow.async_start("start")

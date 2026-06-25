@@ -46,7 +46,7 @@ class OpenAICompatibleHandlersMixin:
 
     def _get_request_retry_after_output(self) -> bool:
         retry_config = self.plugin_settings.get("request_retry", None)
-        return bool(retry_config.get("after_output", False)) if isinstance(retry_config, dict) else False
+        return bool(retry_config.get("after_output", True)) if isinstance(retry_config, dict) else True
 
     @staticmethod
     def _is_retryable_provider_error(error: BaseException) -> bool:

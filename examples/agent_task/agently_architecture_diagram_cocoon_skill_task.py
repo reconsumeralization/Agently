@@ -411,7 +411,7 @@ async def main() -> None:
     stream_trace_path = workspace_dir / "outputs" / "agently_architecture_diagram_cocoon_stream.jsonl"
     stream_trace_path.parent.mkdir(parents=True, exist_ok=True)
     with stream_trace_path.open("w", encoding="utf-8") as trace_file:
-        async for item in execution.get_async_generator():
+        async for item in execution.get_async_generator(type="instant"):
             stream_items.append(item)
             trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
             trace_file.flush()
