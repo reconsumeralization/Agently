@@ -115,6 +115,108 @@ def _create_agent(name: str = "agent-task-loop-test"):
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-helper")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-helper"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    execution_meta = {"logs": {}}
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_markdown": "# Actual Report\n\nThis content must exist on disk.",
+            "artifact_manifest": {
+                "path": "reports/final.md",
+                "file_refs": [{"path": "fake-final.md", "sha256": "fake"}],
+            },
+            "file_refs": [{"path": "model-claimed.md", "sha256": "fake"}],
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.workspace_artifact",
+    )
+
+    assert (workspace.files_root / "reports/final.md").read_text(encoding="utf-8").startswith("# Actual Report")
+    assert delivered["file_refs"][0]["path"] == "reports/final.md"
+    assert delivered["file_refs"][0]["source"] == "test.workspace_artifact"
+    assert delivered["artifact_manifest"]["sha256"] == delivered["file_refs"][0]["sha256"]
+    assert delivered["diagnostics"][0]["code"] == "agent_task.workspace_artifact.untrusted_model_file_refs"
+    assert execution_meta["logs"]["artifact_refs"][0]["path"] == "reports/final.md"
+    assert execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"] == "reports/final.md"
+
+
+@pytest.mark.asyncio
+async def test_agent_task_flat_workspace_artifact_delivery_before_verification(tmp_path):
+    class WorkspaceArtifactRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                assert "reports/final.md" in text
+                assert "agent_task.workspace_artifact.untrusted_model_file_refs" in text
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "trusted Workspace readback evidence is present",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result_required": True,
+                    "final_result": "Delivered final report at reports/final.md.",
+                }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {
+                    "execution_shape": "direct",
+                    "step_instruction": "produce the final report body for framework Workspace delivery",
+                    "expected_evidence": "trusted Workspace artifact readback",
+                    "rationale": "the task requires a file deliverable",
+                    "deliverable_mode": "workspace_artifact",
+                }
+            elif "Execute exactly one bounded step" in text:
+                payload = {
+                    "step_result": "prepared final report body",
+                    "artifact_markdown": "# Delivered Report\n\nThe framework must write this report.",
+                    "artifact_manifest": {
+                        "path": "reports/final.md",
+                        "file_refs": [{"path": "test fake ref"}],
+                    },
+                    "file_refs": [{"path": "test fake ref"}],
+                    "evidence": ["report body is ready for framework delivery"],
+                    "remaining_work": [],
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-workspace-artifact-plugins")
+    plugin_manager.register("ModelRequester", WorkspaceArtifactRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-workspace-artifact")
+    task = agent.create_task(
+        task_id="workspace-artifact-flat",
+        goal="Create the final report as a Workspace artifact.",
+        success_criteria=["A final report file is written and read back."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    result = await task.run()
+    meta = await task.meta()
+
+    assert result["status"] == "completed"
+    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace").with_scope_node(
+        "tasks",
+        "workspace-artifact-flat",
+    )
+    assert (await task_scoped_workspace.read_file("reports/final.md"))["content"].startswith("# Delivered Report")
+    delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
+    assert delivery["status"] == "delivered"
+    assert delivery["file_refs"][0]["path"] == "reports/final.md"
+    assert meta["iterations"][0]["verification"]["reason"] == "trusted Workspace readback evidence is present"
+
+
 def test_agent_language_policy_normalizes_and_reaches_execution_prompt():
     agent = _create_agent("agent-language-policy")
 
@@ -1650,6 +1752,9 @@ async def test_execution_exception_becomes_verifier_visible_failed_evidence(tmp_
             return self
 
         def output(self, value, *, format=None):
+            return self
+
+        def language(self, value):
             return self
 
         async def async_get_data(self):

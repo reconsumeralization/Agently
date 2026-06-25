@@ -228,6 +228,14 @@ the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`)
 is a partial artifact (`accepted=False`, `artifact_status="partial"`), not a
 completed business result.
 
+When a bounded step or TaskBoard card returns `artifact_markdown` or a sectioned
+`artifact_manifest`, AgentTask writes the deliverable through the bound
+Workspace and immediately reads it back for `path`, `bytes`, `sha256`, bounded
+preview, and `file_refs`. Model-declared `file_refs` are diagnostics only until
+the framework has produced this Workspace readback evidence. This keeps long
+reports and exam papers out of the hot JSON control plane while preserving a
+real `final.md` or other deliverable for host-side review.
+
 `examples/agent_task/goal_effort_public_stream.py` is the public-chain
 streaming proof for this contract. It runs
 `.goal(...).effort(...).input(...).output(...).strategy("task")`, consumes

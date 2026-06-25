@@ -115,6 +115,7 @@ _TASKBOARD_READBACK_CARD_SHAPES = {
     "evidence_readback",
 }
 _TASKBOARD_READBACK_PREVIEW_CHARS = 4000
+_WORKSPACE_ARTIFACT_PREVIEW_BYTES = 4000
 
 # Upper bound on the in-memory stream replay buffer for late subscribers.
 _STREAM_REPLAY_LIMIT = 5000
@@ -554,6 +555,12 @@ class AgentTask:
         }
         if execution_failed:
             self._record_failed_execution_shape(plan, execution_meta)
+        execution_result = await self._deliver_workspace_artifact(
+            execution_result,
+            plan=plan,
+            execution_meta=execution_meta,
+            source=f"agent_task.iteration.{iteration_index}.workspace_artifact",
+        )
         await self._emit_snapshot(
             iteration_index,
             "execution",
@@ -1108,6 +1115,220 @@ class AgentTask:
         if callable(set_settings):
             set_settings("action.workspace", self.workspace)
 
+    @staticmethod
+    def _workspace_artifact_manifest_path(manifest: Mapping[str, Any] | None) -> str:
+        if isinstance(manifest, Mapping):
+            for key in ("path", "output_path", "file_path"):
+                value = str(manifest.get(key) or "").strip()
+                if value:
+                    return value
+            deliverables = manifest.get("deliverables")
+            if isinstance(deliverables, Sequence) and not isinstance(deliverables, str | bytes | bytearray):
+                for item in deliverables:
+                    if isinstance(item, Mapping):
+                        value = str(item.get("path") or item.get("output_path") or "").strip()
+                        if value:
+                            return value
+        return "final.md"
+
+    @classmethod
+    def _workspace_artifact_manifest_content(cls, manifest: Mapping[str, Any] | None) -> str:
+        if not isinstance(manifest, Mapping):
+            return ""
+        for key in ("content", "markdown", "body", "text"):
+            value = manifest.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        sections = manifest.get("sections")
+        if not isinstance(sections, Sequence) or isinstance(sections, str | bytes | bytearray):
+            return ""
+        chunks: list[str] = []
+        for section in sections:
+            if isinstance(section, str):
+                text = section.strip()
+                if text:
+                    chunks.append(text)
+                continue
+            if not isinstance(section, Mapping):
+                continue
+            title = str(section.get("title") or section.get("name") or "").strip()
+            body = ""
+            for key in ("content", "markdown", "body", "text"):
+                value = section.get(key)
+                if isinstance(value, str) and value.strip():
+                    body = value.strip()
+                    break
+            if not body:
+                continue
+            if title and not body.lstrip().startswith("#"):
+                chunks.append(f"## {title}\n\n{body}")
+            else:
+                chunks.append(body)
+        return "\n\n".join(chunks).strip()
+
+    @staticmethod
+    def _workspace_artifact_untrusted_refs(result: Mapping[str, Any], manifest: Mapping[str, Any] | None) -> list[Any]:
+        refs: list[Any] = []
+        raw_refs = result.get("file_refs")
+        if isinstance(raw_refs, Sequence) and not isinstance(raw_refs, str | bytes | bytearray):
+            refs.extend(raw_refs)
+        if isinstance(manifest, Mapping):
+            manifest_refs = manifest.get("file_refs")
+            if isinstance(manifest_refs, Sequence) and not isinstance(manifest_refs, str | bytes | bytearray):
+                refs.extend(manifest_refs)
+        return refs
+
+    @staticmethod
+    def _append_workspace_artifact_meta(execution_meta: Mapping[str, Any] | None, refs: list[dict[str, Any]]) -> None:
+        if not refs or not isinstance(execution_meta, dict):
+            return
+        logs = execution_meta.setdefault("logs", {})
+        if not isinstance(logs, dict):
+            logs = {}
+            execution_meta["logs"] = logs
+        artifact_refs = logs.setdefault("artifact_refs", [])
+        if not isinstance(artifact_refs, list):
+            artifact_refs = []
+            logs["artifact_refs"] = artifact_refs
+        artifact_refs.extend(DataFormatter.sanitize(refs))
+        workspace_refs = execution_meta.setdefault("workspace_refs", {})
+        if not isinstance(workspace_refs, dict):
+            workspace_refs = {}
+            execution_meta["workspace_refs"] = workspace_refs
+        workspace_refs.setdefault("agent_task_artifacts", []).extend(DataFormatter.sanitize(refs))
+        logs["workspace_refs"] = workspace_refs
+
+    async def _deliver_workspace_artifact(
+        self,
+        execution_result: Any,
+        *,
+        plan: Mapping[str, Any] | None = None,
+        execution_meta: Mapping[str, Any] | None = None,
+        source: str = "agent_task.workspace_artifact",
+    ) -> Any:
+        if not isinstance(execution_result, Mapping):
+            return execution_result
+        result = dict(execution_result)
+        manifest = result.get("artifact_manifest")
+        manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
+        diagnostics: list[Any] = []
+        raw_diagnostics = result.get("diagnostics")
+        if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+            diagnostics.extend(raw_diagnostics)
+        elif raw_diagnostics:
+            diagnostics.append(raw_diagnostics)
+
+        untrusted_refs = self._workspace_artifact_untrusted_refs(result, manifest_dict)
+        if untrusted_refs:
+            diagnostics.append(
+                {
+                    "code": "agent_task.workspace_artifact.untrusted_model_file_refs",
+                    "message": "Model-declared file_refs are diagnostics only; trusted file refs require Workspace write/readback.",
+                    "file_refs": DataFormatter.sanitize(untrusted_refs),
+                }
+            )
+        result["file_refs"] = []
+        if manifest_dict:
+            manifest_dict.pop("file_refs", None)
+            result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
+
+        content = ""
+        for key in ("artifact_markdown", "artifact_html"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                content = value.strip()
+                break
+        if not content:
+            content = self._workspace_artifact_manifest_content(manifest_dict)
+        deliverable_mode = str((plan or {}).get("deliverable_mode") or "").strip()
+        if not content and deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
+            for key in ("candidate_final_result", "final_result", "answer"):
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    content = value.strip()
+                    break
+        if not content:
+            if diagnostics:
+                result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            return DataFormatter.sanitize(result)
+
+        path = self._workspace_artifact_manifest_path(manifest_dict)
+        delivery_record: dict[str, Any] = {
+            "source": source,
+            "path": path,
+            "status": "started",
+            "mode": deliverable_mode or "artifact_markdown",
+        }
+        try:
+            write_result = await self.workspace.write_file(path, content, append=False)
+            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+        except Exception as error:
+            delivery_record.update(
+                {
+                    "status": "failed",
+                    "error": {"type": error.__class__.__name__, "message": str(error)},
+                }
+            )
+            diagnostics.append(
+                {
+                    "code": "agent_task.workspace_artifact.write_failed",
+                    "message": str(error) or error.__class__.__name__,
+                    "path": path,
+                    "source": source,
+                }
+            )
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+            result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
+            return DataFormatter.sanitize(result)
+
+        ref = {
+            "path": str(read_result.get("path") or write_result.get("path") or path),
+            "bytes": int(read_result.get("bytes") or write_result.get("bytes") or 0),
+            "sha256": str(read_result.get("sha256") or write_result.get("sha256") or ""),
+            "media_type": read_result.get("media_type") or write_result.get("media_type"),
+            "content_kind": str(read_result.get("content_kind") or write_result.get("content_kind") or "text"),
+            "role": "workspace_artifact",
+            "source": source,
+            "preview": str(read_result.get("content") or ""),
+            "truncated": bool(read_result.get("truncated")),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "handler_id": read_result.get("handler_id"),
+        }
+        delivery_record.update(
+            {
+                "status": "delivered",
+                "write": DataFormatter.sanitize(write_result),
+                "readback": {
+                    "path": ref["path"],
+                    "bytes": ref["bytes"],
+                    "sha256": ref["sha256"],
+                    "truncated": ref["truncated"],
+                    "read_bytes": ref["read_bytes"],
+                    "handler_id": ref["handler_id"],
+                },
+                "file_refs": [DataFormatter.sanitize(ref)],
+            }
+        )
+        trusted_refs = [DataFormatter.sanitize(ref)]
+        result["file_refs"] = trusted_refs
+        manifest_dict.update(
+            {
+                "path": ref["path"],
+                "bytes": ref["bytes"],
+                "sha256": ref["sha256"],
+                "file_refs": trusted_refs,
+                "source": source,
+            }
+        )
+        result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
+        result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
+        if diagnostics:
+            result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        self._append_workspace_artifact_meta(execution_meta, trusted_refs)
+        self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+        return DataFormatter.sanitize(result)
+
     async def _run_taskboard_agent_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
         evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
         try:
@@ -1181,9 +1402,10 @@ class AgentTask:
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
                 "evidence is truly critical. If this card produces the user-facing deliverable, put the complete "
                 "deliverable body in artifact_markdown, candidate_final_result, or final_result when it fits the "
-                "bounded output. For long reports, exam papers, or multi-section deliverables, write sections to "
-                "Workspace files through the available file actions, read them back for sha/bytes/preview, and return "
-                "artifact_manifest plus file_refs instead of forcing the full body through one JSON field. Review or "
+                "bounded output. For long reports, exam papers, or multi-section deliverables, return artifact_markdown "
+                "or an artifact_manifest with sections/content instead of forcing the full body through one JSON field. "
+                "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
+                "for deliverables. Review or "
                 "verification cards must not put review notes in those deliverable fields unless they include the "
                 "full corrected deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask "
                 "own lifecycle completion."
@@ -1214,7 +1436,7 @@ class AgentTask:
                     ),
                     "file_refs": (
                         [dict],
-                        "Workspace file refs produced or read back by this card",
+                        "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
                         False,
                     ),
                     "evidence": ([str], "Evidence produced or used by this card", False),
@@ -1271,6 +1493,11 @@ class AgentTask:
                     error=error,
                     execution_id=execution_id,
                 )
+            card_output = await self._deliver_workspace_artifact(
+                card_output,
+                execution_meta=cast(dict[str, Any], execution_meta),
+                source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
+            )
             summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
             card_status = self._taskboard_card_status(card_output, execution_meta)
             diagnostics = []
@@ -1358,7 +1585,9 @@ class AgentTask:
             "and preserve cold refs as pointers. If bounded previews are insufficient, set next_board_action to "
             "'readback' or 'repair' and explain the exact missing refs or gaps instead of inventing facts. "
             "When the card can produce the user-facing deliverable, put the complete deliverable body in "
-            "artifact_markdown, candidate_final_result, or final_result. Also return whether the card is sufficient "
+            "artifact_markdown, candidate_final_result, or final_result. For sectioned artifacts, return an "
+            "artifact_manifest with sections/content; AgentTask will write/read back Workspace files and produce "
+            "trusted file_refs. Do not invent file_refs for deliverables. Also return whether the card is sufficient "
             "and what continuation, if any, the board should consider."
         )
         request.output(
@@ -1378,6 +1607,16 @@ class AgentTask:
                 "artifact_markdown": (
                     str,
                     "Complete markdown deliverable body when this card creates a markdown artifact",
+                    False,
+                ),
+                "artifact_manifest": (
+                    dict,
+                    "Artifact manifest proposal for sectioned or file-backed deliverables",
+                    False,
+                ),
+                "file_refs": (
+                    [dict],
+                    "Existing evidence refs only; model-declared deliverable refs are untrusted until framework write/readback",
                     False,
                 ),
                 "sufficient": (bool, "True when this card has enough evidence to satisfy its objective", False),
@@ -1411,6 +1650,10 @@ class AgentTask:
                 error=error,
                 execution_id=None,
             )
+        card_output = await self._deliver_workspace_artifact(
+            card_output,
+            source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
+        )
         diagnostics = []
         if isinstance(card_output, Mapping):
             raw_diagnostics = card_output.get("diagnostics")
@@ -1426,10 +1669,16 @@ class AgentTask:
             }
         )
         card_status = self._taskboard_control_card_status(card_output)
+        output_file_refs: list[Any] = []
+        if isinstance(card_output, Mapping):
+            raw_file_refs = card_output.get("file_refs")
+            if isinstance(raw_file_refs, Sequence) and not isinstance(raw_file_refs, str | bytes | bytearray):
+                output_file_refs.extend(DataFormatter.sanitize(item) for item in raw_file_refs)
         return TaskBoardCardResult(
             card_id=context.card.id,
             status=card_status,
             preview=DataFormatter.sanitize(card_output),
+            artifact_refs=tuple(output_file_refs),
             diagnostics=tuple(diagnostics),
             patch_proposal=dict(card_output["patch_proposal"])
             if isinstance(card_output, Mapping) and isinstance(card_output.get("patch_proposal"), Mapping)
@@ -2764,8 +3013,9 @@ class AgentTask:
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
             "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
             " For long deliverables, choose deliverable_mode='workspace_artifact' or "
-            "'sectioned_workspace_artifact' and instruct the execution step to write/read back Workspace files instead "
-            "of forcing the whole artifact through one JSON string."
+            "'sectioned_workspace_artifact' and instruct the execution step to return artifact_markdown or an "
+            "artifact_manifest. AgentTask will write/read back Workspace files; the model must not self-declare "
+            "trusted file_refs for a deliverable."
         )
         request.output(
             {
@@ -2965,8 +3215,9 @@ class AgentTask:
                 "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
                 "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
                 "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "
-                "is workspace_artifact or sectioned_workspace_artifact, write the artifact to Workspace files, read back "
-                "sha/bytes/preview, and return artifact_manifest plus file_refs while keeping JSON as control data. "
+                "is workspace_artifact or sectioned_workspace_artifact, return artifact_markdown or an artifact_manifest "
+                "with sections/content; AgentTask will write/read back Workspace files and produce trusted file_refs. "
+                "Do not invent file_refs for deliverables. "
                 "Do not claim final completion unless evidence supports it."
             )
         )
@@ -2988,7 +3239,11 @@ class AgentTask:
                     "Workspace artifact manifest for file-backed or sectioned deliverables",
                     False,
                 ),
-                "file_refs": ([dict], "Workspace file refs produced or read back by this step", False),
+                "file_refs": (
+                    [dict],
+                    "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
+                    False,
+                ),
                 "evidence": ([str], "Evidence produced by the step", True),
                 "remaining_work": ([str], "Known remaining work, empty when none"),
             },
@@ -3424,9 +3679,8 @@ class AgentTask:
             "When marking complete, put every required final deliverable in final_result; if final_result_required is "
             "true and final_result would omit a required deliverable, keep is_complete=false and ask for a replan. "
             "When candidate_final_result contains a complete answer/report/artifact body that satisfies the criteria, "
-            "use it as final_result; the caller or host may persist final_result to the requested file path after "
-            "verification. Do not require a Workspace file artifact unless the success criteria explicitly require a "
-            "Workspace write/readback action. "
+            "use it as final_result. When the plan or success criteria require a Workspace artifact, accept only "
+            "trusted Workspace write/readback refs from execution evidence; model-declared file_refs are diagnostics. "
             "If evidence is incomplete, set is_complete=false and explain failure_analysis and acceptance_delta: "
             "why the task is not accepted, which acceptance facts are missing or weak, and what evidence boundary "
             "blocked verification. The verifier does not choose tools, routes, execution shapes, or exact methods. "

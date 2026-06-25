@@ -208,6 +208,13 @@ progress model 只接收 operator-safe snapshot；底层 Workspace/SQLite fallba
 有用的 Workspace 文件或 checkpoint，但它只是 partial artifact
 （`accepted=False`、`artifact_status="partial"`），不是已完成的业务结果。
 
+当某个 bounded step 或 TaskBoard card 返回 `artifact_markdown` 或分段
+`artifact_manifest` 时，AgentTask 会通过绑定的 Workspace 写入交付物，并立刻
+readback `path`、`bytes`、`sha256`、有界 preview 和 `file_refs`。模型声明的
+`file_refs` 只作为 diagnostics，只有框架完成 Workspace 写入和读回后才是可信
+证据。这样长报告、试卷等制品不会被强塞进 JSON 热路径，同时仍保留真实
+`final.md` 或其他成品文件供 host 复核。
+
 `examples/agent_task/goal_effort_public_stream.py` 是这个合同的公开链式 API
 流式证明。它运行
 `.goal(...).effort(...).input(...).output(...).strategy("task")`，消费
