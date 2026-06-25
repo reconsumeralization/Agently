@@ -52,10 +52,10 @@ class TriggerFlowDynamicSignalBinding:
 
 
 class TriggerFlowSignalNet:
-    """Execution-owned dynamic signal overlay for TriggerFlow.
+    """Execution-owned dynamic event overlay for TriggerFlow.
 
     The blueprint keeps static flow definition. SignalNet records execution-time
-    dynamic bindings and signal attempts so save/load can reconstruct the
+    dynamic event bindings and signal attempts so save/load can reconstruct the
     runtime overlay without mutating the definition fingerprint.
     """
 
@@ -83,7 +83,7 @@ class TriggerFlowSignalNet:
         normalized_ref = self._normalize_handler_ref(handler, binding_id=binding_id, handler_ref=handler_ref)
         if durable and not is_callable_ref_exportable(normalized_ref):
             raise ValueError(
-                "TriggerFlow dynamic signal handler must be a recoverable handler ref; "
+                "TriggerFlow dynamic event handler must be a recoverable handler ref; "
                 f"got { render_callable_ref(normalized_ref) }."
             )
         resolved_binding_id = str(binding_id or normalized_ref.get("name") or render_callable_ref(normalized_ref))

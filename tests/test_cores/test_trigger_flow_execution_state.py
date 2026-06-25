@@ -116,7 +116,7 @@ async def test_trigger_flow_signal_net_dynamic_binding_fanout_and_join():
     flow.to(prepare)
     flow.when("dynamic.done").to(finish).end()
     execution = flow.create_execution(auto_close=False, concurrency=3)
-    execution.on_signal(
+    execution.on(
         "dynamic.item",
         dynamic_item,
         binding_id="test.dynamic_item",
@@ -137,7 +137,7 @@ def test_trigger_flow_signal_net_rejects_anonymous_durable_handler():
     execution = flow.create_execution(auto_close=False)
 
     with pytest.raises(ValueError, match="recoverable handler ref"):
-        execution.on_signal("dynamic.item", lambda data: None)
+        execution.on("dynamic.item", lambda data: None)
 
 
 @pytest.mark.asyncio
@@ -148,7 +148,7 @@ async def test_trigger_flow_signal_net_snapshot_requires_dynamic_handler_before_
         await data.async_set_state("seen", data.value)
 
     execution = flow.create_execution(auto_close=False)
-    execution.on_signal(
+    execution.on(
         "dynamic.item",
         dynamic_handler,
         binding_id="test.dynamic_load_handler",
@@ -159,10 +159,10 @@ async def test_trigger_flow_signal_net_snapshot_requires_dynamic_handler_before_
     missing_report = missing_handler_execution.inspect_load(saved_state)
     assert missing_report["ready"] is False
     assert missing_report["status"] == "missing_resources"
-    assert "dynamic_signal_handler:test.dynamic_load_handler" in missing_report["missing_resource_keys"]
+    assert "dynamic_event_handler:test.dynamic_load_handler" in missing_report["missing_resource_keys"]
 
     restored_execution = flow.create_execution(auto_close=False)
-    restored_execution.on_signal(
+    restored_execution.on(
         "dynamic.item",
         dynamic_handler,
         binding_id="test.dynamic_load_handler",

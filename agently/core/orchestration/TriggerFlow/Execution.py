@@ -2672,7 +2672,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._mark_activity()
         return None
 
-    def _register_dynamic_signal_handler(
+    def on(
         self,
         trigger_event: str,
         handler: Any,
@@ -2693,49 +2693,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             durable=durable,
         )
 
-    def on_signal(
-        self,
-        trigger_event: str,
-        handler: Any,
-        *,
-        trigger_type: TriggerFlowSignalType = "event",
-        binding_id: str | None = None,
-        handler_ref: dict[str, Any] | str | None = None,
-        metadata: dict[str, Any] | None = None,
-        durable: bool = True,
-    ):
-        return self._register_dynamic_signal_handler(
-            trigger_event,
-            handler,
-            trigger_type=trigger_type,
-            binding_id=binding_id,
-            handler_ref=handler_ref,
-            metadata=metadata,
-            durable=durable,
-        )
-
-    def register_dynamic_signal_handler(
-        self,
-        trigger_event: str,
-        handler: Any,
-        *,
-        trigger_type: TriggerFlowSignalType = "event",
-        binding_id: str | None = None,
-        handler_ref: dict[str, Any] | str | None = None,
-        metadata: dict[str, Any] | None = None,
-        durable: bool = True,
-    ):
-        return self.on_signal(
-            trigger_event,
-            handler,
-            trigger_type=trigger_type,
-            binding_id=binding_id,
-            handler_ref=handler_ref,
-            metadata=metadata,
-            durable=durable,
-        )
-
-    def _unregister_dynamic_signal_handler(
+    def off(
         self,
         binding_id: str,
         *,
@@ -2743,32 +2701,6 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         trigger_event: str | None = None,
     ):
         return self._signal_net.unregister_dynamic_handler(
-            binding_id,
-            trigger_type=trigger_type,
-            trigger_event=trigger_event,
-        )
-
-    def off_signal(
-        self,
-        binding_id: str,
-        *,
-        trigger_type: TriggerFlowSignalType | None = None,
-        trigger_event: str | None = None,
-    ):
-        return self._unregister_dynamic_signal_handler(
-            binding_id,
-            trigger_type=trigger_type,
-            trigger_event=trigger_event,
-        )
-
-    def unregister_dynamic_signal_handler(
-        self,
-        binding_id: str,
-        *,
-        trigger_type: TriggerFlowSignalType | None = None,
-        trigger_event: str | None = None,
-    ):
-        return self.off_signal(
             binding_id,
             trigger_type=trigger_type,
             trigger_event=trigger_event,

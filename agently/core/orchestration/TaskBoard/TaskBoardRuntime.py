@@ -110,6 +110,7 @@ class TaskBoard:
         flow = TriggerFlow(name=f"{ self.name }-tick-{ previous_revision.revision_id }")
         card_requested_event = f"task_board.card.requested.{ previous_revision.revision_id }"
         cards_completed_event = f"task_board.cards.completed.{ previous_revision.revision_id }"
+        card_run_binding_id = f"task_board.tick.run_card.{ previous_revision.revision_id }"
         collect_lock = asyncio.Lock()
 
         async def prepare_tick(data: TriggerFlowRuntimeData[Any, Any, Any]):
@@ -126,9 +127,10 @@ class TaskBoard:
             await data.async_set_state(
                 "runtime_topology",
                 {
-                    "fanout": "dynamic_emit_when",
+                    "fanout": "signal_net_dynamic_overlay",
                     "card_requested_event": card_requested_event,
                     "cards_completed_event": cards_completed_event,
+                    "card_run_binding_id": card_run_binding_id,
                     "concurrency": concurrency,
                 },
             )
@@ -152,15 +154,11 @@ class TaskBoard:
                 await data.async_emit_nowait(card_requested_event, {"card_id": card_id})
             return {"runnable_card_ids": list(schedule.runnable_card_ids)}
 
-        async def run_card_branch(data: TriggerFlowRuntimeData[Any, Any, Any]):
+        async def run_card_and_collect(data: TriggerFlowRuntimeData[Any, Any, Any]):
             card_payload = data.input if isinstance(data.input, Mapping) else {}
             card_id = str(card_payload.get("card_id") or "")
             card = card_by_id[card_id]
             result = await self._async_run_card(previous_revision, schedule, card)
-            return result.to_dict()
-
-        async def collect_card_result(data: TriggerFlowRuntimeData[Any, Any, Any]):
-            result = TaskBoardCardResult.from_value(data.input)
             async with collect_lock:
                 collected = data.get_state("collected_card_results", {}, inherit=False)
                 if not isinstance(collected, dict):
@@ -193,12 +191,19 @@ class TaskBoard:
             return next_revision.to_dict()
 
         flow.to(prepare_tick, name="task_board.tick.prepare")
-        flow.when(card_requested_event).to(
-            run_card_branch,
-            name="task_board.tick.run_card",
-        ).to(collect_card_result, name="task_board.tick.collect_card")
         flow.when(cards_completed_event).to(apply_results, name="task_board.tick.apply")
         execution = flow.create_execution(auto_close=False, concurrency=concurrency)
+        execution.on(
+            card_requested_event,
+            run_card_and_collect,
+            binding_id=card_run_binding_id,
+            handler_ref="task_board.tick.run_card",
+            metadata={
+                "board_id": previous_revision.board_id,
+                "revision_id": previous_revision.revision_id,
+                "role": "task_board_card_fanout",
+            },
+        )
         await execution.async_start(previous_revision.to_dict())
         snapshot = await execution.async_close(timeout=timeout)
         next_revision = TaskBoardRevision.from_value(snapshot["revision"])

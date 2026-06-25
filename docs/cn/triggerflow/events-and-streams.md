@@ -51,42 +51,42 @@ asyncio.run(main())
 - `data.emit_nowait(event, payload)` 是 fire-and-forget 同步版本 —— chunk 不等被触发的 handler 跑完就返回。
 - 多个 `when("Event")` 分支会同时触发。
 
-### Definition 安全 vs runtime signal
+### Definition 安全 vs runtime 事件投递
 
 正常 Python import 会按相同模块名在每个进程里执行一次 flow module。TriggerFlow
 的重复定义保护是第二层防线：当应用代码显式把同一段 `.to(...)` / `.when(...)`
 装配再次执行到同一个 flow 对象上时，避免同一条图边或同一个生成的 `when(...)`
-gate 被声明两遍。它不是 runtime signal 去重。
+gate 被声明两遍。它不是 runtime event 去重。
 
 在一次 execution 中，每一次 `emit` / `emit_nowait` 调用仍然是一次业务事件。
 如果某个 chunk 发三次 `Tick`，`when("Tick")` 就应该响应三次。这正是
 `emit_nowait(...)` + `when(...)` 能支撑动态 To-Do executor、依赖 join、side branch 和 reflection loop 的原因。
 
-### 执行阶段动态 signal overlay
+### 执行阶段动态事件绑定
 
-TriggerFlow 也可以通过内部 SignalNet 承载执行阶段的动态 signal binding。
-这是 execution overlay，不是 definition mutation：flow definition 和它的
+TriggerFlow 也可以通过 `execution.on(...)` 给某一次正在运行的 execution 追加事件
+handler。这是 execution overlay，不是 definition mutation：flow definition 和它的
 fingerprint 保持静态；某一次 `TriggerFlowExecution` 的 snapshot 记录该次运行中
-产生的动态 binding 和 signal attempt。
+产生的动态 binding 和 event attempt。
 
 动态 binding 面向框架拥有的编排场景，例如 TaskBoard card fan-out：可运行的工作项在
-执行过程中被发现，每条分支可能继续 emit 后续 signal，最终由 join/synthesis 等待。
+执行过程中被发现，每条分支可能继续 emit 后续事件，最终由 join/synthesis 等待。
 可持久化的动态 binding 必须使用可恢复 handler 引用。匿名 closure、coroutine 栈、
 socket、半截模型流都不是进程重启后的恢复对象。
 
 当应用或框架 owner 需要给当前 execution 追加 handler、但不想修改可复用 flow
-definition 时，使用 `execution.on_signal(...)`：
+definition 时，使用 `execution.on(...)`：
 
 ```python
-binding_id = execution.on_signal(
+binding_id = execution.on(
     "CardRequested",
     run_card,
     binding_id="taskboard.run_card",
 )
-execution.off_signal(binding_id)
+execution.off(binding_id)
 ```
 
-Event Center 仍然是独立观察层：RuntimeEvent 可以记录 SignalNet dispatch 和恢复事实，
+Event Center 仍然是独立观察层：RuntimeEvent 可以记录动态 event dispatch 和恢复事实，
 但 Event Center 不拥有控制流。
 
 多依赖 join 使用：
@@ -97,8 +97,8 @@ flow.when(["done:a", "done:b"], mode="and").to(continue_after_both)
 
 join 状态属于单个 execution，不能跨 execution 泄漏，也不应放进共享 flow data。
 
-chunk 内部 emit 的信号会携带 parent signal id，并继承当前 aggregation scope。
-这样 `batch`、`for_each` 以及 chunk 内部 fan-out 产生的信号，在
+chunk 内部 emit 的事件会携带 execution correlation metadata，并继承当前 aggregation scope。
+这样 `batch`、`for_each` 以及 chunk 内部 fan-out 产生的事件，在
 `when(..., mode="and")` join 时会保留同一组关联。没有共同 runtime scope 的外部
 emit 是彼此独立的业务事件；如果 host 需要把外部提交的 `A` / `B` 事件按同一个业务对象
 join，应让它们经过同一个有 scope 的 flow stage，或在 payload 中携带显式

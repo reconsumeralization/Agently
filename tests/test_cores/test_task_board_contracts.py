@@ -573,8 +573,9 @@ async def test_task_board_tick_fans_out_independent_cards_by_default():
     assert set(tick.revision.card_results) == {"a", "b"}
     assert tick.revision.card_results["a"].preview == "done:a"
     assert tick.revision.card_results["b"].preview == "done:b"
-    assert tick.triggerflow_snapshot["runtime_topology"]["fanout"] == "dynamic_emit_when"
+    assert tick.triggerflow_snapshot["runtime_topology"]["fanout"] == "signal_net_dynamic_overlay"
     assert tick.triggerflow_snapshot["runtime_topology"]["card_requested_event"].startswith("task_board.card.requested.")
+    assert tick.triggerflow_snapshot["runtime_topology"]["card_run_binding_id"].startswith("task_board.tick.run_card.")
 
 
 @pytest.mark.asyncio

@@ -573,18 +573,18 @@ class TriggerFlowExecutionPersistence:
         resolved_resource_keys: set[str] = set()
         diagnostics: list[dict[str, Any]] = self._snapshot_contract_diagnostics(snapshot_state)
         diagnostics.extend(self._resume_ledger_diagnostics(snapshot_state))
-        missing_dynamic_signal_handlers = execution._signal_net.snapshot_missing_handler_ids(
+        missing_dynamic_event_handlers = execution._signal_net.snapshot_missing_handler_ids(
             snapshot_state.get("signal_net", {})
         )
-        for binding_id in missing_dynamic_signal_handlers:
-            resource_key = f"dynamic_signal_handler:{ binding_id }"
+        for binding_id in missing_dynamic_event_handlers:
+            resource_key = f"dynamic_event_handler:{ binding_id }"
             missing_resource_keys.add(resource_key)
             diagnostics.append(
                 {
                     "code": "triggerflow.signal_net.missing_dynamic_handler",
                     "severity": "warning",
                     "message": (
-                        f"Dynamic SignalNet binding '{ binding_id }' requires a registered "
+                        f"Dynamic event binding '{ binding_id }' requires a registered "
                         "handler before TriggerFlow load can be ready."
                     ),
                     "resource_key": resource_key,
