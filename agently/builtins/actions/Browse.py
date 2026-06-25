@@ -188,7 +188,7 @@ class Browse:
         playwright_headless: bool = True,
         playwright_timeout: int = 30000,
         playwright_user_agent: str | None = None,
-        playwright_include_links: bool = False,
+        playwright_include_links: bool = True,
         playwright_max_links: int = 120,
         playwright_screenshot_path: str | None = None,
         use_browser_environment: bool = False,

@@ -148,6 +148,69 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_prefers_complete_body(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-complete-body")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-complete-body"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    full_body = "# Complete Report\n\n" + "\n".join(f"Section {index}: complete content." for index in range(20))
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "answer": full_body,
+            "artifact_markdown": "# Short Report\n\nSee candidate_final_result for details.",
+            "artifact_manifest": {"path": "reports/final.md"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact",
+    )
+
+    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    assert written == full_body
+    assert delivered["workspace_artifact_delivery"]["content_key"] == "answer"
+    assert delivered["file_refs"][0]["bytes"] == len(full_body.encode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_preserves_existing_full_body(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-preserve-body")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-preserve-body"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    full_body = "# Complete Report\n\n" + "\n".join(f"Section {index}: complete content." for index in range(80))
+    first = await task._deliver_workspace_artifact(
+        {
+            "answer": full_body,
+            "artifact_manifest": {"path": "reports/final.md"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact.initial",
+    )
+    short_control_note = "Existing final.md already satisfies the output contract."
+    second = await task._deliver_workspace_artifact(
+        {
+            "artifact_markdown": short_control_note,
+            "artifact_manifest": {"path": "reports/final.md"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact.followup",
+    )
+
+    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    assert written == full_body
+    assert first["file_refs"][0]["sha256"] == second["file_refs"][0]["sha256"]
+    assert second["workspace_artifact_delivery"]["status"] == "preserved_existing"
+    assert second["workspace_artifact_delivery"]["content_key"] == "artifact_markdown"
+    assert second["diagnostics"][0]["code"] == "agent_task.workspace_artifact.preserved_existing"
+
+
+@pytest.mark.asyncio
 async def test_agent_task_flat_workspace_artifact_delivery_before_verification(tmp_path):
     class WorkspaceArtifactRequester(MockAgentTaskRequester):
         name = "WorkspaceArtifactRequester"
@@ -299,6 +362,75 @@ async def test_agent_task_workspace_artifact_refs_survive_incomplete_verificatio
     readback = await task_scoped_workspace.read_file("reports/partial.md")
     assert "这是一份仍需补证据的报告草稿" in readback["content"]
     assert "## 待补充证据" in readback["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_body(tmp_path):
+    class WorkspaceArtifactStreamDraftRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactStreamDraftRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Write only the final Markdown artifact body for the AgentTask" in text:
+                yield "message", "# Streamed Report\n\n"
+                yield "message", "This body was written through the framework artifact draft stream.\n"
+                return
+            if "Verify the task against every success criterion" in text:
+                assert "reports/final.md" in text
+                assert "agent_task.workspace_artifact.stream_drafted" in text
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "trusted streamed Workspace artifact readback is present",
+                    "missing_criteria": [],
+                    "replan_instruction": "",
+                    "final_result": "Delivered final report at reports/final.md.",
+                }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {
+                    "execution_shape": "direct",
+                    "step_instruction": "prepare the final report; framework may stream-draft the file body if needed",
+                    "expected_evidence": "trusted Workspace artifact readback",
+                    "rationale": "the task requires a file deliverable",
+                    "deliverable_mode": "sectioned_workspace_artifact",
+                }
+            elif "Execute exactly one bounded step" in text:
+                payload = {
+                    "step_result": "ready to generate reports/final.md as a Workspace artifact",
+                    "evidence": ["source evidence has been collected"],
+                    "remaining_work": [],
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-stream-draft-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="agent-task-workspace-artifact-stream-draft-plugins")
+    plugin_manager.register("ModelRequester", WorkspaceArtifactStreamDraftRequester, activate=True)
+    agent = Agently.AgentType(plugin_manager, parent_settings=settings, name="agent-task-workspace-artifact-stream-draft")
+    task = agent.create_task(
+        task_id="workspace-artifact-stream-draft",
+        goal="Create the final report as a Workspace artifact.",
+        success_criteria=["A final report file is written and read back."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    result = await task.run()
+    meta = await task.meta()
+
+    assert result["status"] == "completed"
+    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace").with_scope_node(
+        "tasks",
+        "workspace-artifact-stream-draft",
+    )
+    readback = await task_scoped_workspace.read_file("final.md")
+    assert "Streamed Report" in readback["content"]
+    delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
+    assert delivery["status"] == "delivered"
+    assert delivery["mode"] == "streamed_workspace_artifact"
+    assert delivery["file_refs"][0]["path"] == "final.md"
+    assert meta["iterations"][0]["verification"]["reason"] == "trusted streamed Workspace artifact readback is present"
 
 
 def test_agent_language_policy_normalizes_and_reaches_execution_prompt():
@@ -2182,6 +2314,148 @@ def test_execution_log_summary_infers_action_success_from_route_history():
     assert summary["action_statuses"]["read_file"] == "failed"
     assert summary["capability_evidence"]["actions"]["succeeded"] == ["write_file"]
     assert summary["capability_evidence"]["actions"]["failed"] == ["read_file"]
+
+
+def test_execution_log_summary_includes_nested_action_result_previews():
+    """AgentTask verifier evidence must include bounded Action observations
+    produced inside the TriggerFlow/Blocks bounded-step execution wrapper."""
+    from agently.core.application import AgentTask
+
+    summary = AgentTask._execution_log_summary(
+        {
+            "status": "completed",
+            "logs": {"action_logs": {}, "route_logs": {}},
+            "blocks": {
+                "evidence": {
+                    "execution_block_results": [
+                        {
+                            "output": {
+                                "execution_meta": {
+                                    "status": "completed",
+                                    "logs": {
+                                        "action_logs": [
+                                            {
+                                                "action_id": "browse",
+                                                "status": "success",
+                                                "action_call_id": "call-1",
+                                                "model_digest": {
+                                                    "result_preview": {
+                                                        "selected_url": "https://example.test/syllabus",
+                                                        "content": (
+                                                            ("Navigation link " * 160)
+                                                            + "Official syllabus sections: "
+                                                            + "1. Foundations; 2. Model architecture."
+                                                        ),
+                                                    },
+                                                    "result_preview_meta": {
+                                                        "original_size": 120,
+                                                        "preview_size": 80,
+                                                        "truncated": False,
+                                                    },
+                                                },
+                                            }
+                                        ],
+                                        "route_logs": {},
+                                    },
+                                },
+                                "execution_result": {"step_result": "ok"},
+                            }
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert summary["action_ids"] == ["browse"]
+    assert summary["action_statuses"]["browse"] == "success"
+    assert summary["capability_evidence"]["actions"]["succeeded"] == ["browse"]
+    action = summary["actions"][0]
+    assert action["action_call_id"] == "call-1"
+    assert action["result_preview"]["selected_url"] == "https://example.test/syllabus"
+    assert "Official syllabus sections" in action["result_preview"]["content"]
+    assert action["result_preview_meta"]["truncated"] is False
+
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(summary)
+    verifier_action = verifier_summary["actions"][0]
+    assert verifier_action["result_preview"]["selected_url"] == "https://example.test/syllabus"
+    assert "Official syllabus sections" in verifier_action["result_preview"]["content"]
+    assert "Model architecture" in verifier_action["result_preview"]["content"]
+
+
+def test_cumulative_verifier_evidence_keeps_previous_iteration_action_previews(tmp_path):
+    agent = _create_agent("agent-task-cumulative-evidence").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Create a source-grounded report.",
+        success_criteria=["The report uses the most specific official source evidence."],
+        execution="flat",
+    )
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "execution_meta": {
+                "status": "completed",
+                "logs": {"action_logs": {}, "route_logs": {}},
+                "blocks": {
+                    "evidence": {
+                        "execution_block_results": [
+                            {
+                                "output": {
+                                    "execution_meta": {
+                                        "status": "completed",
+                                        "logs": {
+                                            "action_logs": [
+                                                {
+                                                    "action_id": "browse",
+                                                    "status": "success",
+                                                    "action_call_id": "call-specific",
+                                                    "model_digest": {
+                                                        "result_preview": {
+                                                            "selected_url": "https://example.test/specific",
+                                                            "content": (
+                                                                "Specific official syllabus: "
+                                                                "1. Foundations; 2. Model architecture."
+                                                            ),
+                                                        },
+                                                        "result_preview_meta": {"truncated": False},
+                                                    },
+                                                }
+                                            ],
+                                            "route_logs": {},
+                                        },
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+            },
+        }
+    )
+
+    cumulative = task._cumulative_execution_evidence_summary(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "write_file",
+                        "status": "success",
+                        "action_call_id": "call-write",
+                    }
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(cumulative)
+
+    actions = verifier_summary["actions"]
+    assert [action["id"] for action in actions] == ["browse", "write_file"]
+    browse_preview = actions[0]["result_preview"]
+    assert browse_preview["selected_url"] == "https://example.test/specific"
+    assert "Specific official syllabus" in browse_preview["content"]
 
 
 @pytest.mark.asyncio

@@ -464,6 +464,18 @@ class AgentlyResponseParser(ResponseParser):
         async for streaming_data in streaming_json_parser.flush_final_data(parsed_result):
             yield streaming_data
 
+    def _new_streaming_json_parser(self) -> StreamingJSONParser:
+        max_chars = self.settings.get("response.streaming_parse_max_incomplete_chars", None)
+        if max_chars is not None:
+            try:
+                max_chars = int(max_chars)
+            except (TypeError, ValueError):
+                max_chars = StreamingJSONParser.DEFAULT_MAX_INCOMPLETE_PARSE_CHARS
+        return StreamingJSONParser(
+            self._prompt_object.output,
+            max_incomplete_parse_chars=max_chars,
+        )
+
     async def _ensure_consumer(self):
         if self._response_consumer is None:
             async with self._consumer_lock:
@@ -680,7 +692,7 @@ class AgentlyResponseParser(ResponseParser):
         streaming_yaml_literal_parser = None
         if type in ("instant", "streaming_parse"):
             if self._prompt_object.output_format == "json":
-                streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+                streaming_json_parser = self._new_streaming_json_parser()
             elif self._prompt_object.output_format == "flat_markdown":
                 streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
             elif self._prompt_object.output_format == "hybrid":
@@ -717,7 +729,7 @@ class AgentlyResponseParser(ResponseParser):
                         if event == "status":
                             if self._should_reset_for_retry_status(data):
                                 if streaming_json_parser is not None:
-                                    streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+                                    streaming_json_parser = self._new_streaming_json_parser()
                                 if streaming_flat_markdown_parser is not None:
                                     streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
                                 if streaming_hybrid_parser is not None:
@@ -863,7 +875,7 @@ class AgentlyResponseParser(ResponseParser):
         streaming_yaml_literal_parser = None
         if type in ("instant", "streaming_parse"):
             if self._prompt_object.output_format == "json":
-                streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+                streaming_json_parser = self._new_streaming_json_parser()
             elif self._prompt_object.output_format == "flat_markdown":
                 streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
             elif self._prompt_object.output_format == "hybrid":
@@ -899,7 +911,7 @@ class AgentlyResponseParser(ResponseParser):
                     if event == "status":
                         if self._should_reset_for_retry_status(data):
                             if streaming_json_parser is not None:
-                                streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+                                streaming_json_parser = self._new_streaming_json_parser()
                             if streaming_flat_markdown_parser is not None:
                                 streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
                             if streaming_hybrid_parser is not None:

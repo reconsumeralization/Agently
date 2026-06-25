@@ -170,7 +170,11 @@ class Search:
         specs = [
             (
                 "search",
-                "Search the web with {query}.",
+                (
+                    "Search the web with {query}. If results include an official homepage, section index, "
+                    "or same-site entry page, browse those entry pages before concluding that a specific "
+                    "document is unavailable; search results are discovery hints, not complete site evidence."
+                ),
                 {
                     "query": (str, "Search query."),
                     "timelimit": ("d | w | m | y | None", "Optional time limit."),
@@ -180,7 +184,11 @@ class Search:
             ),
             (
                 "search_news",
-                "Search recent news with {query}.",
+                (
+                    "Search recent news with {query}. If results include an official homepage, section index, "
+                    "or same-site entry page, browse those entry pages before concluding that a specific "
+                    "document is unavailable; search results are discovery hints, not complete site evidence."
+                ),
                 {
                     "query": (str, "News search query."),
                     "timelimit": ("d | w | m | None", "Optional time limit."),

@@ -560,6 +560,9 @@ class AgentTask:
             plan=plan,
             execution_meta=execution_meta,
             source=f"agent_task.iteration.{iteration_index}.workspace_artifact",
+            context_pack=context_pack,
+            iteration_index=iteration_index,
+            allow_stream_draft=not execution_failed,
         )
         await self._emit_snapshot(
             iteration_index,
@@ -1205,6 +1208,10 @@ class AgentTask:
         plan: Mapping[str, Any] | None = None,
         execution_meta: Mapping[str, Any] | None = None,
         source: str = "agent_task.workspace_artifact",
+        context_pack: "WorkspaceContextPackage | None" = None,
+        iteration_index: int | None = None,
+        card_context: Any | None = None,
+        allow_stream_draft: bool = True,
     ) -> Any:
         if not isinstance(execution_result, Mapping):
             return execution_result
@@ -1232,33 +1239,116 @@ class AgentTask:
             manifest_dict.pop("file_refs", None)
             result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
 
-        content = ""
-        for key in ("artifact_markdown", "artifact_html"):
-            value = result.get(key)
-            if isinstance(value, str) and value.strip():
-                content = value.strip()
-                break
-        if not content:
-            content = self._workspace_artifact_manifest_content(manifest_dict)
         deliverable_mode = str((plan or {}).get("deliverable_mode") or "").strip()
-        if not content and deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
-            for key in ("candidate_final_result", "final_result", "answer"):
-                value = result.get(key)
-                if isinstance(value, str) and value.strip():
-                    content = value.strip()
-                    break
+        content, content_key = self._select_workspace_artifact_content(
+            result,
+            manifest_dict,
+            deliverable_mode=deliverable_mode,
+        )
+        path = self._workspace_artifact_manifest_path(manifest_dict)
+        if (
+            not content
+            and allow_stream_draft
+            and deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}
+        ):
+            stream_delivery = await self._stream_workspace_artifact_draft(
+                path=path,
+                plan=plan,
+                execution_result=result,
+                execution_meta=execution_meta,
+                source=source,
+                context_pack=context_pack,
+                iteration_index=iteration_index,
+                card_context=card_context,
+            )
+            if stream_delivery is not None:
+                trusted_refs = stream_delivery["file_refs"]
+                manifest_dict.update(
+                    {
+                        "path": trusted_refs[0]["path"],
+                        "bytes": trusted_refs[0]["bytes"],
+                        "sha256": trusted_refs[0]["sha256"],
+                        "file_refs": trusted_refs,
+                        "source": source,
+                    }
+                )
+                result["file_refs"] = trusted_refs
+                result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
+                result["workspace_artifact_delivery"] = DataFormatter.sanitize(stream_delivery)
+                diagnostics.append(
+                    {
+                        "code": "agent_task.workspace_artifact.stream_drafted",
+                        "message": "Workspace artifact body was generated through a dedicated text stream and written by AgentTask.",
+                        "path": trusted_refs[0]["path"],
+                        "source": source,
+                    }
+                )
+                result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+                self._append_workspace_artifact_meta(execution_meta, trusted_refs)
+                self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
+                    DataFormatter.sanitize(stream_delivery)
+                )
+                return DataFormatter.sanitize(result)
         if not content:
             if diagnostics:
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return DataFormatter.sanitize(result)
 
-        path = self._workspace_artifact_manifest_path(manifest_dict)
         delivery_record: dict[str, Any] = {
             "source": source,
             "path": path,
             "status": "started",
             "mode": deliverable_mode or "artifact_markdown",
+            "content_key": content_key,
         }
+        preserved = await self._preserve_existing_workspace_artifact_if_preferable(
+            path=path,
+            new_content=content,
+            source=source,
+            content_key=content_key,
+        )
+        if preserved is not None:
+            ref = preserved["file_ref"]
+            delivery_record.update(
+                {
+                    "status": "preserved_existing",
+                    "reason": "existing_workspace_artifact_is_substantially_larger",
+                    "existing_bytes": preserved["existing_bytes"],
+                    "new_bytes": preserved["new_bytes"],
+                    "file_refs": [DataFormatter.sanitize(ref)],
+                }
+            )
+            diagnostics.append(
+                {
+                    "code": "agent_task.workspace_artifact.preserved_existing",
+                    "message": (
+                        "Existing Workspace artifact was preserved because the proposed replacement was "
+                        "substantially smaller. Return a full replacement body to overwrite it."
+                    ),
+                    "path": path,
+                    "source": source,
+                    "content_key": content_key,
+                    "existing_bytes": preserved["existing_bytes"],
+                    "new_bytes": preserved["new_bytes"],
+                }
+            )
+            trusted_refs = [DataFormatter.sanitize(ref)]
+            result["file_refs"] = trusted_refs
+            manifest_dict.update(
+                {
+                    "path": ref["path"],
+                    "bytes": ref["bytes"],
+                    "sha256": ref["sha256"],
+                    "file_refs": trusted_refs,
+                    "source": source,
+                }
+            )
+            result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
+            result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
+            self._append_workspace_artifact_meta(execution_meta, trusted_refs)
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+            return DataFormatter.sanitize(result)
         try:
             write_result = await self.workspace.write_file(path, content, append=False)
             read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
@@ -1328,6 +1418,250 @@ class AgentTask:
         self._append_workspace_artifact_meta(execution_meta, trusted_refs)
         self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
         return DataFormatter.sanitize(result)
+
+    async def _preserve_existing_workspace_artifact_if_preferable(
+        self,
+        *,
+        path: str,
+        new_content: str,
+        source: str,
+        content_key: str,
+    ) -> dict[str, Any] | None:
+        new_bytes = len(new_content.encode("utf-8"))
+        if new_bytes <= 0:
+            return None
+        try:
+            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
+        existing_bytes = int(read_result.get("bytes") or 0)
+        if existing_bytes <= 0:
+            return None
+        if existing_bytes < max(new_bytes * 2, new_bytes + 1024):
+            return None
+        ref = {
+            "path": str(read_result.get("path") or path),
+            "bytes": existing_bytes,
+            "sha256": str(read_result.get("sha256") or ""),
+            "media_type": read_result.get("media_type"),
+            "content_kind": str(read_result.get("content_kind") or "text"),
+            "role": "workspace_artifact",
+            "source": source,
+            "preview": str(read_result.get("content") or ""),
+            "truncated": bool(read_result.get("truncated")),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "handler_id": read_result.get("handler_id"),
+        }
+        return {
+            "file_ref": DataFormatter.sanitize(ref),
+            "existing_bytes": existing_bytes,
+            "new_bytes": new_bytes,
+            "content_key": content_key,
+        }
+
+    @classmethod
+    def _select_workspace_artifact_content(
+        cls,
+        result: Mapping[str, Any],
+        manifest_dict: Mapping[str, Any],
+        *,
+        deliverable_mode: str,
+    ) -> tuple[str, str]:
+        manifest_content = cls._workspace_artifact_manifest_content(manifest_dict)
+        candidates: list[tuple[str, str]] = []
+        if manifest_content.strip():
+            candidates.append(("artifact_manifest", manifest_content.strip()))
+        for key in ("artifact_markdown", "artifact_html", "candidate_final_result", "final_result", "answer"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append((key, value.strip()))
+        if not candidates:
+            return "", ""
+        if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
+            # The Workspace file is the trusted deliverable. If the model emits a
+            # short display placeholder in artifact_markdown and the full body in
+            # answer/candidate_final_result, write the complete body instead.
+            key, content = max(candidates, key=lambda item: len(item[1]))
+            return content, key
+        for preferred_key in ("artifact_manifest", "artifact_markdown", "artifact_html", "candidate_final_result", "final_result", "answer"):
+            for key, content in candidates:
+                if key == preferred_key:
+                    return content, key
+        return candidates[0][1], candidates[0][0]
+
+    async def _stream_workspace_artifact_draft(
+        self,
+        *,
+        path: str,
+        plan: Mapping[str, Any] | None,
+        execution_result: Mapping[str, Any],
+        execution_meta: Mapping[str, Any] | None,
+        source: str,
+        context_pack: "WorkspaceContextPackage | None" = None,
+        iteration_index: int | None = None,
+        card_context: Any | None = None,
+    ) -> dict[str, Any] | None:
+        draft_execution = self.agent.create_execution(
+            lineage={
+                "task_id": self.id,
+                "iteration_id": f"iter-{iteration_index}" if iteration_index is not None else None,
+                "step_id": "workspace_artifact_draft",
+                "scope": {"strategy_phase": "agent_task_workspace_artifact_draft"},
+            },
+            limits=self.limits,
+            options=self.options,
+        )
+        draft_execution.route_policy(
+            {
+                "allowed_routes": ["model_request"],
+                "on_violation": "block",
+                "owner": "AgentTaskLoop",
+                "step_execution_shape": "workspace_artifact_draft",
+            }
+        )
+        language_policy = self._language_policy()
+        draft_execution.language(language_policy.get("language", "auto"))
+        draft_execution.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "execution_strategy": self.execution_strategy,
+                "artifact_path": path,
+                "plan": DataFormatter.sanitize(plan or {}),
+                "execution_result": DataFormatter.sanitize(execution_result),
+                "execution_meta_summary": self._execution_log_summary(execution_meta or {}),
+                "context_pack": DataFormatter.sanitize(context_pack or {}),
+                "card": DataFormatter.sanitize(getattr(card_context, "card", None).to_dict())
+                if card_context is not None and hasattr(getattr(card_context, "card", None), "to_dict")
+                else {},
+                "dependency_results": DataFormatter.sanitize(
+                    {
+                        key: value.to_dict() if hasattr(value, "to_dict") else value
+                        for key, value in dict(getattr(card_context, "dependency_results", {}) or {}).items()
+                    }
+                )
+                if card_context is not None
+                else {},
+                "language_policy": language_policy,
+            }
+        )
+        draft_execution.instruct(
+            (
+                "Write only the final Markdown artifact body for the AgentTask. "
+                "Do not output JSON, YAML, XML, code fences, file_refs, or a wrapper object. "
+                "Use only the provided task context, execution result, dependency results, and evidence summaries. "
+                "If the source evidence is incomplete, write a clear source-boundary section instead of fabricating facts. "
+                "The framework will stream your Markdown into the Workspace artifact path and read it back."
+            )
+        )
+
+        delivery_record: dict[str, Any] = {
+            "source": source,
+            "path": path,
+            "status": "started",
+            "mode": "streamed_workspace_artifact",
+            "draft_execution_id": str(getattr(draft_execution, "id", "") or ""),
+        }
+        wrote_any = False
+        bytes_written = 0
+        try:
+            async for delta in draft_execution.get_async_generator(type="delta"):
+                chunk = str(delta or "")
+                if not chunk:
+                    continue
+                await self.workspace.write_file(path, chunk, append=wrote_any)
+                wrote_any = True
+                bytes_written += len(chunk.encode("utf-8"))
+                if iteration_index is not None:
+                    await self._emit(
+                        f"agent_task.iteration.{iteration_index}.workspace_artifact_draft.delta",
+                        {"path": path, "bytes_written": bytes_written},
+                        event_type="delta",
+                        delta=chunk,
+                        is_complete=False,
+                        meta={
+                            "task_id": self.id,
+                            "iteration": iteration_index,
+                            "stage": "workspace_artifact_draft",
+                            "stream_kind": "workspace_artifact_draft",
+                            "path": path,
+                        },
+                    )
+            draft_meta = await draft_execution.async_get_meta()
+            delivery_record["draft_meta"] = {
+                "execution_id": draft_meta.get("execution_id"),
+                "status": draft_meta.get("status"),
+                "route": DataFormatter.sanitize(draft_meta.get("route")),
+            }
+        except Exception as error:
+            delivery_record.update(
+                {
+                    "status": "failed",
+                    "error": {"type": error.__class__.__name__, "message": str(error)},
+                    "bytes_written": bytes_written,
+                }
+            )
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+            return None
+        if not wrote_any:
+            delivery_record.update(
+                {
+                    "status": "failed",
+                    "error": {
+                        "type": "EmptyWorkspaceArtifactDraft",
+                        "message": "Workspace artifact draft stream produced no content.",
+                    },
+                    "bytes_written": bytes_written,
+                }
+            )
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+            return None
+
+        try:
+            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+        except Exception as error:
+            delivery_record.update(
+                {
+                    "status": "failed",
+                    "error": {"type": error.__class__.__name__, "message": str(error)},
+                    "bytes_written": bytes_written,
+                }
+            )
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+            return None
+
+        ref = {
+            "path": str(read_result.get("path") or path),
+            "bytes": int(read_result.get("bytes") or 0),
+            "sha256": str(read_result.get("sha256") or ""),
+            "media_type": read_result.get("media_type"),
+            "content_kind": str(read_result.get("content_kind") or "text"),
+            "role": "workspace_artifact",
+            "source": source,
+            "preview": str(read_result.get("content") or ""),
+            "truncated": bool(read_result.get("truncated")),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "handler_id": read_result.get("handler_id"),
+        }
+        delivery_record.update(
+            {
+                "status": "delivered",
+                "bytes_written": bytes_written,
+                "readback": {
+                    "path": ref["path"],
+                    "bytes": ref["bytes"],
+                    "sha256": ref["sha256"],
+                    "truncated": ref["truncated"],
+                    "read_bytes": ref["read_bytes"],
+                    "handler_id": ref["handler_id"],
+                },
+                "file_refs": [DataFormatter.sanitize(ref)],
+            }
+        )
+        return DataFormatter.sanitize(delivery_record)
 
     async def _run_taskboard_agent_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
         evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
@@ -1495,8 +1829,21 @@ class AgentTask:
                 )
             card_output = await self._deliver_workspace_artifact(
                 card_output,
+                plan={
+                    "deliverable_mode": "workspace_artifact"
+                    if isinstance(card_output, Mapping)
+                    and (
+                        card_output.get("artifact_manifest")
+                        or card_output.get("artifact_markdown")
+                        or card_output.get("candidate_final_result")
+                        or card_output.get("final_result")
+                    )
+                    else ""
+                },
                 execution_meta=cast(dict[str, Any], execution_meta),
                 source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
+                context_pack=context_pack,
+                card_context=context,
             )
             summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
             card_status = self._taskboard_card_status(card_output, execution_meta)
@@ -1588,7 +1935,10 @@ class AgentTask:
             "or final_result only when the complete body is short enough for the bounded output. For sectioned or "
             "long artifacts, prefer artifact_manifest with sections/content so JSON remains the control plane; "
             "AgentTask will write/read back Workspace files and produce "
-            "trusted file_refs. Do not invent file_refs for deliverables. Also return whether the card is sufficient "
+            "trusted file_refs. Do not invent file_refs for deliverables. If the task is source-grounded, include "
+            "the concrete source URLs, file paths, or evidence refs used by the deliverable in the deliverable body; "
+            "do not mention a source title without its verifier-visible URL/path when such a ref exists. "
+            "Also return whether the card is sufficient "
             "and what continuation, if any, the board should consider."
         )
         request.output(
@@ -1653,7 +2003,20 @@ class AgentTask:
             )
         card_output = await self._deliver_workspace_artifact(
             card_output,
+            plan={
+                "deliverable_mode": "workspace_artifact"
+                if isinstance(card_output, Mapping)
+                and (
+                    card_output.get("artifact_manifest")
+                    or card_output.get("artifact_markdown")
+                    or card_output.get("candidate_final_result")
+                    or card_output.get("final_result")
+                )
+                else ""
+            },
             source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
+            context_pack=context_pack,
+            card_context=context,
         )
         diagnostics = []
         if isinstance(card_output, Mapping):
@@ -2088,7 +2451,9 @@ class AgentTask:
             "Verify every success criterion. Use the hot evidence view for summaries and preserve cold refs "
             "as evidence pointers; do not invent unsupported facts. When candidate_final_result contains a "
             "complete answer/report/artifact body that satisfies the criteria, preserve it as final_result "
-            "instead of rewriting it into a shorter summary. "
+            "instead of rewriting it into a shorter summary. For source-grounded tasks, the final_result must include "
+            "the concrete source URLs, file paths, or evidence refs that support the deliverable; source titles or "
+            "general source names without verifier-visible URL/path refs are not enough when refs are available. "
             "If allow_degraded_final is true, the board has stopped with failed, blocked, skipped, or pending "
             "cards. You may still accept only when the completed/degraded evidence is enough to satisfy the "
             "user goal and success criteria with explicit missing-source or degraded-source boundaries in "
@@ -3007,6 +3372,12 @@ class AgentTask:
             "compare the acceptance delta, and then choose the next bounded step. The verifier does not choose tools, "
             "routes, execution shapes, or exact methods; the planner owns the next action while respecting grounded "
             "acceptance facts and deterministic guards. "
+            "For web discovery tasks, if the task context already names an official domain, homepage, or URL and "
+            "search results are empty, unstable, or inconclusive, plan a Browse step for that known entry point and "
+            "follow same-site navigation links before concluding that the required source is unavailable. Search "
+            "result snippets are discovery hints, not source evidence. Before using a search result snippet or a broad "
+            "announcement page as the source boundary, plan Browse/readback for the candidate page and relevant same-site "
+            "index/list/download/navigation pages so a more specific official source can be discovered. "
             f"Set execution_shape to {allowed_shapes}. "
             "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
             + strategy_note
@@ -3220,6 +3591,9 @@ class AgentTask:
                 "for long or multi-section deliverables; use artifact_markdown only for bounded short bodies. AgentTask "
                 "will write/read back Workspace files and produce trusted file_refs. "
                 "Do not invent file_refs for deliverables. "
+                "For web-source steps, treat Search results as discovery hints only. Browse official pages and follow "
+                "same-site index/list/download/navigation links before relying on a broad announcement page as the "
+                "source boundary. "
                 "Do not claim final completion unless evidence supports it."
             )
         )
@@ -3637,6 +4011,9 @@ class AgentTask:
         evidence_summary = self._compact_verifier_evidence_summary(
             self._execution_log_summary(execution_meta)
         )
+        cumulative_evidence_summary = self._compact_verifier_evidence_summary(
+            self._cumulative_execution_evidence_summary(execution_meta)
+        )
         candidate_final_result = self._candidate_final_result_from_execution_result(execution_result)
         request = self.agent.create_temp_request()
         language_policy = self._language_policy()
@@ -3658,6 +4035,7 @@ class AgentTask:
                 ),
                 "execution_meta": self._verification_execution_meta_summary(execution_meta, evidence_summary),
                 "execution_evidence_summary": evidence_summary,
+                "cumulative_execution_evidence_summary": cumulative_evidence_summary,
                 "capability_evidence_requirements": self._capability_evidence_requirements(),
                 "context_pack": self._compact_context_pack_for_verifier(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
@@ -3671,6 +4049,18 @@ class AgentTask:
             "Treat numeric criteria such as 'at least N' as exact counting rules and fail verification when the "
             "evidence does not meet the count. "
             "Require source/evidence references when the criteria ask for evidence. "
+            "Use both execution_evidence_summary and cumulative_execution_evidence_summary; the final verification "
+            "must account for evidence gathered in earlier iterations, not only the current write/finalize step. "
+            "For source-grounded tasks, compare the candidate's factual claims, named sections, coverage mappings, "
+            "quoted source titles, URLs, and artifact statements against verifier-visible evidence and bounded Action "
+            "result previews. A citation, source URL, or file ref alone does not ground a mismatched claim; the claim "
+            "must be supported by the referenced evidence content. When multiple same-site official sources are "
+            "available, prefer the most specific source that directly matches the task over broader announcement or "
+            "summary pages. Reject candidates that ignore a more specific verifier-visible source and ground the "
+            "deliverable only in a weaker source. Reject candidates that introduce unsupported source facts, syllabus "
+            "headings, repository details, dates, numbers, or report conclusions. "
+            "If bounded previews are enough to contradict the candidate, set is_complete=false. If the previews are "
+            "too truncated to verify a material claim, set is_complete=false and ask for scoped evidence readback. "
             "If execution metadata, action records, diagnostics, command output, or verifier-visible evidence shows "
             "a failed required action or failed validation command, do not mark complete. "
             "If a criterion requires a script, command, test, or external validation to pass, require explicit "
@@ -3805,6 +4195,113 @@ class AgentTask:
             "evidence_summary": dict(evidence_summary),
         }
 
+    def _cumulative_execution_evidence_summary(self, current_execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+        summaries: list[dict[str, Any]] = []
+        for iteration in self.iterations:
+            if not isinstance(iteration, Mapping):
+                continue
+            previous_meta = iteration.get("execution_meta")
+            if isinstance(previous_meta, Mapping):
+                summaries.append(self._execution_log_summary(dict(previous_meta)))
+        summaries.append(self._execution_log_summary(dict(current_execution_meta)))
+
+        combined: dict[str, Any] = {
+            "model_response_count": 0,
+            "action_log_count": 0,
+            "action_ids": [],
+            "action_statuses": {},
+            "actions": [],
+            "failed_actions": [],
+            "blocked_actions": [],
+            "approval_required_actions": [],
+            "required_actions": [],
+            "missing_required_actions": [],
+            "selected_skill_ids": [],
+            "required_skills": [],
+            "missing_required_skills": [],
+            "capabilities_used": [],
+            "capability_evidence": {
+                "actions": {"succeeded": [], "failed": []},
+                "skills": {"selected": []},
+                "artifacts": {"readback": []},
+                "validations": {"passed": [], "failed": []},
+            },
+            "artifact_refs": [],
+            "workspace_refs": {},
+            "errors": [],
+            "replan_signals": [],
+            "status": str(current_execution_meta.get("status") or ""),
+        }
+
+        for summary in summaries:
+            combined["model_response_count"] += int(summary.get("model_response_count") or 0)
+            actions = summary.get("actions")
+            if isinstance(actions, list):
+                combined["actions"].extend(actions)
+            artifact_refs = summary.get("artifact_refs")
+            if isinstance(artifact_refs, list):
+                combined["artifact_refs"].extend(artifact_refs)
+            errors = summary.get("errors")
+            if isinstance(errors, list):
+                combined["errors"].extend(errors)
+            replan_signals = summary.get("replan_signals")
+            if isinstance(replan_signals, list):
+                combined["replan_signals"].extend(replan_signals)
+            workspace_refs = summary.get("workspace_refs")
+            if isinstance(workspace_refs, Mapping):
+                self._merge_workspace_ref_summary(combined["workspace_refs"], workspace_refs)
+            for key in (
+                "action_ids",
+                "failed_actions",
+                "blocked_actions",
+                "approval_required_actions",
+                "required_actions",
+                "missing_required_actions",
+                "selected_skill_ids",
+                "required_skills",
+                "missing_required_skills",
+                "capabilities_used",
+            ):
+                combined[key] = self._merge_string_lists(combined.get(key), summary.get(key))
+            action_statuses = summary.get("action_statuses")
+            if isinstance(action_statuses, Mapping):
+                combined["action_statuses"].update(DataFormatter.sanitize(action_statuses))
+            capability_evidence = summary.get("capability_evidence")
+            if isinstance(capability_evidence, Mapping):
+                self._merge_capability_evidence_summary(combined["capability_evidence"], capability_evidence)
+
+        combined["actions"] = self._dedupe_action_records(combined["actions"])
+        combined["action_log_count"] = len(combined["actions"])
+        combined["artifact_refs"] = self._dedupe_ref_records(combined["artifact_refs"])
+        combined["errors"] = self._dedupe_jsonable_records(combined["errors"])
+        combined["replan_signals"] = self._dedupe_jsonable_records(combined["replan_signals"])
+        return DataFormatter.sanitize(combined)
+
+    @staticmethod
+    def _merge_workspace_ref_summary(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+        for key, value in source.items():
+            key_text = str(key)
+            if isinstance(value, list):
+                bucket = target.setdefault(key_text, [])
+                if isinstance(bucket, list):
+                    for item in value:
+                        if item not in bucket:
+                            bucket.append(item)
+                continue
+            if key_text not in target:
+                target[key_text] = value
+
+    @classmethod
+    def _merge_capability_evidence_summary(cls, target: dict[str, Any], source: Mapping[str, Any]) -> None:
+        for kind, value in source.items():
+            if not isinstance(value, Mapping):
+                continue
+            bucket = target.setdefault(str(kind), {})
+            if not isinstance(bucket, dict):
+                continue
+            for field, items in value.items():
+                bucket[str(field)] = cls._merge_string_lists(bucket.get(str(field)), items)
+
     @classmethod
     def _compact_context_pack_for_verifier(cls, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         compact = cls._compact_verifier_prompt_value(context_pack, max_chars=_VERIFIER_PROMPT_VALUE_CHARS)
@@ -3814,6 +4311,11 @@ class AgentTask:
     def _compact_verifier_evidence_summary(cls, summary: Mapping[str, Any]) -> dict[str, Any]:
         compact: dict[str, Any] = {}
         for key, value in summary.items():
+            if key == "actions" and isinstance(value, list):
+                compact[key] = [cls._compact_action_record_for_verifier(ref) for ref in value[:16]]
+                if len(value) > 16:
+                    compact[key].append({"omitted": len(value) - 16, "reason": "prompt_budget"})
+                continue
             if key == "artifact_refs" and isinstance(value, list):
                 compact[key] = [cls._compact_artifact_ref_for_verifier(ref) for ref in value[:24]]
                 if len(value) > 24:
@@ -3847,6 +4349,71 @@ class AgentTask:
         if "preview" in ref:
             compact["preview"] = cls._compact_verifier_prompt_value(ref.get("preview"), max_chars=600)
         return compact
+
+    @classmethod
+    def _compact_action_record_for_verifier(cls, record: Any) -> Any:
+        if not isinstance(record, Mapping):
+            return cls._compact_verifier_prompt_value(record, max_chars=900)
+        keep_keys = (
+            "id",
+            "name",
+            "status",
+            "action_type",
+            "kind",
+            "action_call_id",
+            "result_preview_meta",
+            "result_preview_sha256",
+        )
+        compact: dict[str, Any] = {key: record.get(key) for key in keep_keys if key in record}
+        if "result_preview" in record:
+            compact["result_preview"] = cls._compact_action_preview_value(record.get("result_preview"), max_chars=5200)
+        if isinstance(record.get("artifact_refs"), list):
+            refs = record.get("artifact_refs") or []
+            compact["artifact_refs"] = [cls._compact_artifact_ref_for_verifier(ref) for ref in refs[:4]]
+            if len(refs) > 4:
+                compact["artifact_refs"].append({"omitted": len(refs) - 4, "reason": "prompt_budget"})
+        if record.get("file_refs"):
+            compact["file_refs"] = cls._compact_verifier_prompt_value(record.get("file_refs"), max_chars=1000)
+        return compact
+
+    @classmethod
+    def _compact_action_preview_value(
+        cls,
+        value: Any,
+        *,
+        max_chars: int,
+        depth: int = 0,
+    ) -> Any:
+        value = DataFormatter.sanitize(value)
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return cls._truncate_prompt_text_middle(value, max_chars)
+        if depth >= 4:
+            return cls._truncate_prompt_text_middle(value, max_chars)
+        if isinstance(value, list):
+            limit = 12
+            return [
+                cls._compact_action_preview_value(item, max_chars=max(360, max_chars // 2), depth=depth + 1)
+                for item in value[:limit]
+            ] + ([{"omitted": len(value) - limit, "reason": "prompt_budget"}] if len(value) > limit else [])
+        if isinstance(value, dict):
+            compacted: dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= 36:
+                    compacted["omitted"] = {"count": len(value) - 36, "reason": "prompt_budget"}
+                    break
+                key_text = str(key)
+                item_chars = max_chars
+                if key_text in {"content", "raw", "text", "output", "result", "data", "body", "preview"}:
+                    item_chars = max(1600, max_chars)
+                compacted[key_text] = cls._compact_action_preview_value(
+                    item,
+                    max_chars=item_chars,
+                    depth=depth + 1,
+                )
+            return compacted
+        return cls._truncate_prompt_text_middle(value, max_chars)
 
     @classmethod
     def _compact_verifier_prompt_value(
@@ -3904,6 +4471,17 @@ class AgentTask:
         if len(text) <= max_chars:
             return text
         return text[: max(0, max_chars - 32)].rstrip() + "\n[truncated for verifier prompt]"
+
+    @staticmethod
+    def _truncate_prompt_text_middle(value: Any, max_chars: int) -> str:
+        text = str(value or "")
+        if len(text) <= max_chars:
+            return text
+        marker = "\n[truncated middle for verifier prompt]\n"
+        available = max(0, max_chars - len(marker))
+        head = max(1, available // 2)
+        tail = max(1, available - head)
+        return text[:head].rstrip() + marker + text[-tail:].lstrip()
 
     def _normalize_verification(
         self,
@@ -4976,7 +5554,7 @@ class AgentTask:
         logs = execution_meta.get("logs", {})
         if not isinstance(logs, dict):
             logs = {}
-        action_records = AgentTask._collect_action_records(logs)
+        action_records = AgentTask._collect_execution_action_records(execution_meta)
         action_ids = [record["id"] for record in action_records if record.get("id")]
         action_statuses = {
             record["id"]: record.get("status", "")
@@ -5141,22 +5719,113 @@ class AgentTask:
                 skill_ids.append(skill_id)
         return skill_ids
 
+    @classmethod
+    def _collect_execution_action_records(
+        cls,
+        execution_meta: Mapping[str, Any],
+        *,
+        depth: int = 0,
+    ) -> list[dict[str, Any]]:
+        logs = execution_meta.get("logs", {})
+        records = cls._collect_action_records(logs if isinstance(logs, dict) else {})
+        if depth >= 3:
+            return cls._dedupe_action_records(records)
+
+        blocks = execution_meta.get("blocks")
+        if not isinstance(blocks, Mapping):
+            return cls._dedupe_action_records(records)
+        evidence = blocks.get("evidence")
+        if not isinstance(evidence, Mapping):
+            return cls._dedupe_action_records(records)
+        for key in ("execution_block_results", "plan_block_results"):
+            block_results = evidence.get(key)
+            if not isinstance(block_results, Sequence) or isinstance(block_results, (str, bytes, bytearray)):
+                continue
+            for block_result in block_results:
+                if not isinstance(block_result, Mapping):
+                    continue
+                output = block_result.get("output")
+                if not isinstance(output, Mapping):
+                    continue
+                nested_meta = output.get("execution_meta")
+                if isinstance(nested_meta, Mapping):
+                    records.extend(cls._collect_execution_action_records(nested_meta, depth=depth + 1))
+                nested_result = output.get("execution_result")
+                if isinstance(nested_result, Mapping):
+                    nested_result_meta = nested_result.get("execution_meta")
+                    if isinstance(nested_result_meta, Mapping):
+                        records.extend(cls._collect_execution_action_records(nested_result_meta, depth=depth + 1))
+        return cls._dedupe_action_records(records)
+
     @staticmethod
-    def _collect_action_records(logs: dict[str, Any]) -> list[dict[str, str]]:
-        records: list[dict[str, str]] = []
+    def _dedupe_action_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for record in records:
+            action_id = str(record.get("id") or record.get("name") or "")
+            call_id = str(record.get("action_call_id") or "")
+            preview_sha = str(record.get("result_preview_sha256") or "")
+            preview = str(record.get("result_preview") or "")
+            if len(preview) > 120:
+                preview = preview[:120]
+            key = (action_id, call_id, preview_sha, preview)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(dict(record))
+        return deduped
+
+    @staticmethod
+    def _dedupe_ref_records(records: Sequence[Any]) -> list[Any]:
+        deduped: list[Any] = []
+        seen: set[str] = set()
+        for record in records:
+            if isinstance(record, Mapping):
+                key = "|".join(
+                    str(record.get(field) or "")
+                    for field in ("artifact_id", "action_call_id", "path", "sha256", "source_url")
+                )
+                if not key.strip("|"):
+                    key = json.dumps(DataFormatter.sanitize(record), ensure_ascii=False, sort_keys=True)
+            else:
+                key = str(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(record)
+        return deduped
+
+    @staticmethod
+    def _dedupe_jsonable_records(records: Sequence[Any]) -> list[Any]:
+        deduped: list[Any] = []
+        seen: set[str] = set()
+        for record in records:
+            try:
+                key = json.dumps(DataFormatter.sanitize(record), ensure_ascii=False, sort_keys=True)
+            except Exception:
+                key = str(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(record)
+        return deduped
+
+    @classmethod
+    def _collect_action_records(cls, logs: dict[str, Any]) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
 
         def add_entries(entries: Any) -> None:
             if isinstance(entries, dict):
                 for action_id, record in entries.items():
                     if isinstance(record, dict):
-                        records.append(AgentTask._compact_action_record(action_id, record))
+                        records.append(cls._compact_action_record(action_id, record))
                     else:
                         records.append({"id": str(action_id), "name": str(action_id), "status": str(record or "")})
             elif isinstance(entries, list):
                 for item in entries:
                     if isinstance(item, dict):
                         action_id = item.get("action_id") or item.get("id") or item.get("name") or ""
-                        records.append(AgentTask._compact_action_record(action_id, item))
+                        records.append(cls._compact_action_record(action_id, item))
 
         add_entries(logs.get("action_logs", {}))
         route_logs = logs.get("route_logs", {})
@@ -5167,8 +5836,8 @@ class AgentTask:
                 add_entries(route_output.get("history", []))
         return records
 
-    @staticmethod
-    def _compact_action_record(action_id: Any, record: dict[str, Any]) -> dict[str, str]:
+    @classmethod
+    def _compact_action_record(cls, action_id: Any, record: dict[str, Any]) -> dict[str, Any]:
         normalized_id = str(action_id or record.get("action_id") or record.get("id") or record.get("name") or "")
         status = str(record.get("status") or "").strip()
         if not status:
@@ -5176,13 +5845,52 @@ class AgentTask:
                 status = "failed"
             elif "result" in record or "artifact" in record:
                 status = "success"
-        return {
+        compact: dict[str, Any] = {
             "id": normalized_id,
             "name": str(record.get("name") or normalized_id),
             "status": status,
             "action_type": str(record.get("action_type") or record.get("type") or ""),
             "kind": str(record.get("kind") or ""),
         }
+        action_call_id = str(record.get("action_call_id") or record.get("call_id") or "").strip()
+        if action_call_id:
+            compact["action_call_id"] = action_call_id
+
+        model_digest = record.get("model_digest")
+        if not isinstance(model_digest, Mapping):
+            raw = record.get("raw")
+            if isinstance(raw, Mapping) and isinstance(raw.get("model_digest"), Mapping):
+                model_digest = raw.get("model_digest")
+        digest = model_digest if isinstance(model_digest, Mapping) else record
+
+        result_preview = digest.get("result_preview") if isinstance(digest, Mapping) else None
+        if result_preview is None and isinstance(record.get("result_preview"), (Mapping, Sequence, str)):
+            result_preview = record.get("result_preview")
+        if result_preview is not None:
+            compact["result_preview"] = cls._compact_action_preview_value(result_preview, max_chars=5200)
+        result_preview_meta = digest.get("result_preview_meta") if isinstance(digest, Mapping) else None
+        if result_preview_meta is None:
+            result_preview_meta = record.get("result_preview_meta")
+        if result_preview_meta is not None:
+            compact["result_preview_meta"] = cls._compact_verifier_prompt_value(result_preview_meta, max_chars=500)
+
+        for key in ("artifact_refs", "file_refs"):
+            value = digest.get(key) if isinstance(digest, Mapping) else None
+            if value is None:
+                value = record.get(key)
+            if key == "artifact_refs" and isinstance(value, list):
+                compact[key] = [cls._compact_artifact_ref_for_verifier(ref) for ref in value[:8]]
+                if len(value) > 8:
+                    compact[key].append({"omitted": len(value) - 8, "reason": "prompt_budget"})
+            elif key == "file_refs" and value:
+                compact[key] = cls._compact_verifier_prompt_value(value, max_chars=1200)
+
+        preview_meta = compact.get("result_preview_meta")
+        if isinstance(preview_meta, Mapping):
+            sha = preview_meta.get("sha256") or preview_meta.get("result_sha256")
+            if sha:
+                compact["result_preview_sha256"] = str(sha)
+        return compact
 
     @staticmethod
     def _action_ids_by_status(records: list[dict[str, str]], statuses: set[str]) -> list[str]:

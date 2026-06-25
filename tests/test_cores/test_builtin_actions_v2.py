@@ -226,6 +226,7 @@ def test_browse_default_fallback_prefers_playwright_curl_then_bs4():
 
     assert browse.fallback_order == ("playwright", "curl", "bs4")
     assert browse.enable_curl is True
+    assert browse.playwright_include_links is True
 
 
 def test_browse_text_extraction_tolerates_missing_node_attrs():

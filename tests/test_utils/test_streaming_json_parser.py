@@ -1,3 +1,5 @@
+import importlib
+
 import pytest
 from agently.utils.StreamingJSONParser import StreamingJSONParser, StreamingData
 
@@ -191,3 +193,39 @@ async def test_streaming_json_parser_root_list_schema():
     assert tags_done is not None
     assert tags_done.value == ["world", "top"]
     assert any(e.path == "[0].title" and e.delta for e in delta_events)
+
+
+@pytest.mark.asyncio
+async def test_streaming_json_parser_skips_large_incomplete_parse(monkeypatch):
+    schema = {"report": (str,)}
+    parser = StreamingJSONParser(schema, max_incomplete_parse_chars=32)
+
+    def fail_if_called(_value):
+        raise AssertionError("large incomplete JSON should not be parsed incrementally")
+
+    parser_module = importlib.import_module("agently.utils.StreamingJSONParser")
+    monkeypatch.setattr(parser_module.json5, "loads", fail_if_called)
+
+    events = []
+    async for item in parser.parse_chunk('{"report": "' + ("x" * 128)):
+        events.append(item)
+
+    assert len(events) == 1
+    assert events[0].path == "$status"
+    assert events[0].value["status"] == "streaming_parse_deferred"
+    assert events[0].value["reason"] == "large_json_incremental_parse"
+
+
+@pytest.mark.asyncio
+async def test_streaming_json_parser_parses_large_complete_payload_after_threshold():
+    schema = {"report": (str,)}
+    parser = StreamingJSONParser(schema, max_incomplete_parse_chars=32)
+
+    events = []
+    async for item in parser.parse_chunk('{"report": "' + ("x" * 128) + '"}'):
+        events.append(item)
+    async for item in parser.finalize():
+        events.append(item)
+
+    assert any(item.path == "$status" for item in events)
+    assert any(item.path == "report" and item.event_type == "done" for item in events)
