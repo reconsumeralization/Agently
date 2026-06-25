@@ -67,6 +67,7 @@ from .Control import (
     TRIGGER_FLOW_LIFECYCLE_SEALED,
 )
 from .Signal import TriggerFlowSignal, TriggerFlowSignalType
+from .SignalNet import TriggerFlowSignalNet
 from .ExecutionState import INTERVENTIONS_STATE_KEY, TriggerFlowInterventionMode
 from .ExecutionResult import TriggerFlowExecutionResult
 from .ExecutionInterrupts import TriggerFlowExecutionInterrupts
@@ -189,6 +190,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._task_origins: dict[asyncio.Task[Any], str] = {}
         self._accepted_signal_ids: set[str] = set()
+        self._signal_net = TriggerFlowSignalNet(self)
         self._active_runtime_operation_count = 0
         self._active_handler_count = 0
         self._auto_close_task: asyncio.Task[Any] | None = None
@@ -2414,7 +2416,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if not self._accepts_signal_in_current_lifecycle(signal):
             await self._reject_signal(signal)
             return None
-        self._accepted_signal_ids.add(signal.id)
+        self._signal_net.accept_signal(signal)
         self._mark_activity()
         token = self._without_current_concurrency_permit_context()
         try:
@@ -2456,7 +2458,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if not self._accepts_signal_in_current_lifecycle(signal):
             loop.create_task(self._reject_signal(signal))
             return None
-        self._accepted_signal_ids.add(signal.id)
+        self._signal_net.accept_signal(signal)
         self._mark_activity()
         token = self._without_current_concurrency_permit_context()
         try:
@@ -2473,17 +2475,25 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._active_runtime_operation_count += 1
         self._mark_activity()
         try:
-            return await self._async_dispatch_signal_inner(signal)
+            result = await self._async_dispatch_signal_inner(signal)
+            self._signal_net.mark_completed(signal)
+            return result
+        except asyncio.CancelledError:
+            self._signal_net.mark_interrupted(signal, reason="dispatch cancelled")
+            raise
+        except BaseException as error:
+            self._signal_net.mark_failed(signal, error)
+            raise
         finally:
             self._active_runtime_operation_count -= 1
             self._mark_activity()
 
     async def _async_dispatch_signal_inner(self, signal: TriggerFlowSignal):
-        signal_preaccepted = signal.id in self._accepted_signal_ids
+        signal_preaccepted = self._signal_net.is_accepted(signal.id)
         if not self._accepts_signal_in_current_lifecycle(signal, preaccepted=signal_preaccepted):
             await self._reject_signal(signal)
             return None
-        self._accepted_signal_ids.discard(signal.id)
+        self._signal_net.mark_running(signal)
 
         self._mark_activity()
         await self._resume_interrupts_for_signal(signal)
@@ -2495,10 +2505,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             payload=signal.to_debug_dict(),
         )
         tasks = []
-        handlers = self._handlers[signal.trigger_type]
+        signal_handlers = list(self._signal_net.iter_handlers(signal, self._handlers))
 
-        if signal.trigger_event in handlers:
-            for handler_id, handler in handlers[signal.trigger_event].items():
+        if signal_handlers:
+            for handler_id, handler in signal_handlers:
                 operator = self._get_handler_operator(handler_id)
                 chunk_run_context = self._create_chunk_run_context(operator, signal) if operator is not None else None
                 await self._emit_runtime_event(
@@ -2661,6 +2671,40 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 raise
         self._mark_activity()
         return None
+
+    def on(
+        self,
+        trigger_event: str,
+        handler: Any,
+        *,
+        trigger_type: TriggerFlowSignalType = "event",
+        binding_id: str | None = None,
+        handler_ref: dict[str, Any] | str | None = None,
+        metadata: dict[str, Any] | None = None,
+        durable: bool = True,
+    ):
+        return self._signal_net.register_dynamic_handler(
+            trigger_event,
+            handler,
+            trigger_type=trigger_type,
+            binding_id=binding_id,
+            handler_ref=handler_ref,
+            metadata=metadata,
+            durable=durable,
+        )
+
+    def off(
+        self,
+        binding_id: str,
+        *,
+        trigger_type: TriggerFlowSignalType | None = None,
+        trigger_event: str | None = None,
+    ):
+        return self._signal_net.unregister_dynamic_handler(
+            binding_id,
+            trigger_type=trigger_type,
+            trigger_event=trigger_event,
+        )
 
     # Change Runtime Data
     async def _async_change_runtime_data(
