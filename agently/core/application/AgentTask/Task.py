@@ -951,10 +951,9 @@ class AgentTask:
                 await data.async_emit_nowait(finalize_requested_event, {"tick_index": tick_index})
                 return {"terminal": False, "status": "ready_to_finalize"}
 
-            tick_timeout = self._taskboard_tick_timeout()
             try:
                 tick_result = await self._await_task_deadline(
-                    current_board.async_run_tick(timeout=tick_timeout, concurrency=tick_concurrency),
+                    current_board.async_run_tick(timeout=None, concurrency=tick_concurrency),
                     stage="taskboard_tick",
                 )
             except _AgentTaskDeadlineExceeded as error:
@@ -971,9 +970,9 @@ class AgentTask:
                 result = await self._terminate_timed_out(
                     tick_index,
                     stage="taskboard_tick",
-                    reason=f"TaskBoard tick timed out after {tick_timeout} seconds.",
+                    reason="TaskBoard tick timed out.",
                     limit_name="taskboard_tick_timeout_seconds",
-                    timeout_seconds=tick_timeout,
+                    timeout_seconds=self._taskboard_tick_timeout(),
                 )
                 await data.async_set_state("terminal_result", result, emit=False)
                 return result

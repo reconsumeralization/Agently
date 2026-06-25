@@ -1516,6 +1516,41 @@ async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_taskboard_tick_timeout_does_not_cancel_running_cards(tmp_path):
+    agent = _create_taskboard_slow_card_agent("execution-taskboard-tick-timeout-does-not-cancel").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Run a slow TaskBoard card without tick-level cancellation.",
+        success_criteria=["The slow card is allowed to finish under its card timeout."],
+        execution="taskboard",
+        max_iterations=1,
+        options={
+            "request_timeout_seconds": 5.0,
+            "agent_task": {
+                "taskboard_tick_timeout_seconds": 0.05,
+                "taskboard_card_timeout_seconds": 1.5,
+            },
+        },
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    revision = task_meta["result"]["taskboard"]["revision"]
+    slow_result = revision["card_results"]["slow"]
+
+    assert result["status"] == "completed"
+    assert slow_result["status"] == "completed"
+    assert slow_result["preview"]["answer"] == "slow card eventually completed"
+    assert not any(
+        isinstance(diagnostic, dict) and diagnostic.get("code") == "taskboard.tick.card_interrupted"
+        for diagnostic in revision.get("diagnostics", [])
+    )
+
+
+@pytest.mark.asyncio
 async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
     agent = _create_taskboard_retry_card_agent("execution-taskboard-card-retry").use_workspace(tmp_path / "workspace")
 
