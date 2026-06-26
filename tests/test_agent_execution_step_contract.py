@@ -779,6 +779,74 @@ class MockTaskBoardControlRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardSectionedArtifactRequester"
+    tail_marker = "SECTIONED-ARTIFACT-END-MARKER"
+    first_section = (
+        "# Sectioned Report\n\n"
+        "This report is intentionally long enough to require a Workspace-backed sectioned artifact.\n\n"
+        + ("Source-grounded analysis paragraph with bounded evidence refs.\n" * 120)
+    )
+    second_section = (
+        "The second section carries the complete body that should not be streamed back through "
+        "TaskBoard tick payloads or finalizer hot input.\n\n"
+        + ("Detailed finding with supporting source boundary.\n" * 120)
+        + tail_marker
+    )
+    full_report = f"{first_section}\n\n## Details\n\n{second_section}"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Write a sectioned report through a control card.",
+                "cards": [
+                    {
+                        "id": "synthesize",
+                        "action_block": "Synthesize the final sectioned deliverable.",
+                        "objective": "Produce the complete sectioned Markdown deliverable.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "The complete sectioned report is available in Workspace.",
+                        "allowed_execution_shape": "control",
+                    }
+                ],
+                "reflection_points": ["Ensure the artifact is complete and backed by Workspace readback."],
+                "completion_gate": "The sectioned artifact is written and accepted.",
+                "why_this_effort_shape": "One control card can write the final sectioned report.",
+                "risk_notes": [],
+            }
+        elif "Execute one TaskBoard control card with a single structured model request" in text:
+            payload = {
+                "status": "completed",
+                "answer": "sectioned report manifest prepared",
+                "artifact_manifest": {
+                    "path": "final.md",
+                    "sections": [
+                        {"id": "summary", "title": "Summary", "content": self.first_section},
+                        {"id": "details", "title": "Details", "content": self.second_section},
+                    ],
+                },
+                "sufficient": True,
+                "next_board_action": "finalize",
+                "gaps": [],
+                "evidence": ["sectioned evidence summary"],
+                "remaining_work": [],
+                "diagnostics": [{"kind": "control", "message": "sectioned manifest returned"}],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": True,
+                "reason": "sectioned Workspace artifact satisfies the criterion",
+                "final_result": "# Sectioned Report",
+                "missing_criteria": [],
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardFinalCandidateRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardFinalCandidateRequester"
     full_report = (
@@ -918,7 +986,7 @@ class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
         elif "Execute exactly one TaskBoard card" in text:
             MockTaskBoardRetryCardRequester.card_calls += 1
             if MockTaskBoardRetryCardRequester.card_calls == 1:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
             payload = {
                 "status": "completed",
                 "answer": "retried card completed",
@@ -1122,6 +1190,13 @@ def _create_taskboard_control_agent(name: str = "agent-execution-taskboard-contr
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockTaskBoardControlRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_sectioned_artifact_agent(name: str = "agent-execution-taskboard-sectioned-artifact"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardSectionedArtifactRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -1615,6 +1690,58 @@ async def test_taskboard_control_card_uses_single_model_request_without_child_ex
 
 
 @pytest.mark.asyncio
+async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tmp_path):
+    agent = _create_taskboard_sectioned_artifact_agent("execution-taskboard-sectioned-artifact").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Produce a sectioned final report.",
+        success_criteria=["The complete sectioned final report is written and accepted."],
+        execution="taskboard",
+        max_iterations=2,
+    )
+
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    taskboard = task_meta["result"]["taskboard"]
+    deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
+    delivered = next(item for item in deliveries if item.get("status") == "delivered")
+    tick_completed_items = [
+        item for item in stream_items if str(getattr(item, "path", "")).endswith(".completed")
+        and ".taskboard.tick." in str(getattr(item, "path", ""))
+    ]
+    final_requests = [
+        request for request in MockAgentExecutionRequester.requests
+        if "Synthesize the final result for this TaskBoard task" in request
+    ]
+    marker = MockTaskBoardSectionedArtifactRequester.tail_marker
+    expected_workspace_body = (
+        f"{MockTaskBoardSectionedArtifactRequester.first_section.strip()}\n\n"
+        f"## Details\n\n{MockTaskBoardSectionedArtifactRequester.second_section.strip()}"
+    )
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert marker in result["final_result"]
+    assert delivered["mode"] == "sectioned_workspace_artifact"
+    assert delivered["readback"]["bytes"] == len(expected_workspace_body.encode("utf-8"))
+    assert delivered["readback"]["sha256"]
+    assert taskboard["revision"]["card_results"]["synthesize"]["preview"]["workspace_artifact_delivery"]["mode"] == (
+        "sectioned_workspace_artifact"
+    )
+    assert tick_completed_items
+    for item in tick_completed_items:
+        value_text = json.dumps(DataFormatter.sanitize(getattr(item, "value", None)), ensure_ascii=False)
+        assert marker not in value_text
+        assert len(value_text) < 20000
+    assert final_requests
+    assert marker not in final_requests[-1]
+
+
+@pytest.mark.asyncio
 async def test_taskboard_final_preserves_complete_candidate_from_terminal_card(tmp_path):
     agent = _create_taskboard_final_candidate_agent("execution-taskboard-final-candidate").use_workspace(
         tmp_path / "workspace"
@@ -1765,7 +1892,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
         options={
             "request_timeout_seconds": 5.0,
             "agent_task": {
-                "taskboard_card_timeout_seconds": 0.1,
+                "taskboard_card_timeout_seconds": 0.3,
                 "taskboard_card_max_attempts": 2,
             },
         },

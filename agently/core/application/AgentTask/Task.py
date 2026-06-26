@@ -115,6 +115,8 @@ _TASKBOARD_READBACK_CARD_SHAPES = {
     "evidence_readback",
 }
 _TASKBOARD_READBACK_PREVIEW_CHARS = 4000
+_TASKBOARD_PROMPT_RESULT_CHARS = 1600
+_TASKBOARD_STREAM_SUMMARY_CHARS = 3000
 _WORKSPACE_ARTIFACT_PREVIEW_BYTES = 4000
 
 # Upper bound on the in-memory stream replay buffer for late subscribers.
@@ -942,13 +944,14 @@ class AgentTask:
             current_board = _board_from_revision(revision)
             schedule = current_board.schedule()
             tick_concurrency = self._taskboard_concurrency()
+            evidence_view = build_task_board_evidence_view(current_board.revision).to_dict()
             await self._emit(
                 f"agent_task.taskboard.tick.{tick_index}.scheduled",
-                {
-                    "schedule": schedule.to_dict(),
-                    "evidence_view": build_task_board_evidence_view(current_board.revision).to_dict(),
-                    "concurrency": tick_concurrency,
-                },
+                self._taskboard_scheduled_stream_payload(
+                    schedule=schedule,
+                    evidence_view=evidence_view,
+                    concurrency=tick_concurrency,
+                ),
             )
             if not schedule.runnable_card_ids:
                 await data.async_set_state(revision_state_key, _pack_revision_state(current_board.revision), emit=False)
@@ -986,13 +989,7 @@ class AgentTask:
             await data.async_set_state("tick_index", tick_index + 1, emit=False)
             await self._emit(
                 f"agent_task.taskboard.tick.{tick_index}.completed",
-                {
-                    "revision": tick_result.revision.to_dict(),
-                    "schedule": tick_result.schedule.to_dict(),
-                    "card_results": {key: value.to_dict() for key, value in tick_result.card_results.items()},
-                    "evidence_view": build_task_board_evidence_view(tick_result.revision).to_dict(),
-                    "runtime_topology": DataFormatter.sanitize(tick_result.triggerflow_snapshot.get("runtime_topology", {})),
-                },
+                self._taskboard_completed_stream_payload(tick_result),
             )
             await self._record_phase(
                 "taskboard_tick",
@@ -1122,6 +1119,183 @@ class AgentTask:
         if callable(set_settings):
             set_settings("action.workspace", self.workspace)
 
+    @classmethod
+    def _compact_taskboard_card_result_for_prompt(cls, result: Any) -> dict[str, Any]:
+        try:
+            effective = TaskBoardCardResult.from_value(result)
+        except Exception:
+            return {
+                "status": "unknown",
+                "preview": cls._compact_verifier_prompt_value(result, max_chars=_TASKBOARD_PROMPT_RESULT_CHARS),
+            }
+        artifact_refs = [cls._compact_artifact_ref_for_verifier(ref) for ref in list(effective.artifact_refs)[:12]]
+        if len(effective.artifact_refs) > 12:
+            artifact_refs.append({"omitted": len(effective.artifact_refs) - 12, "reason": "prompt_budget"})
+        file_refs = [cls._compact_artifact_ref_for_verifier(ref) for ref in list(effective.file_refs)[:12]]
+        if len(effective.file_refs) > 12:
+            file_refs.append({"omitted": len(effective.file_refs) - 12, "reason": "prompt_budget"})
+        diagnostics = list(effective.diagnostics)
+        compact = {
+            "schema_version": effective.schema_version,
+            "card_id": effective.card_id,
+            "status": effective.status,
+            "output_digest": effective.output_digest,
+            "preview": cls._compact_verifier_prompt_value(
+                effective.preview,
+                max_chars=_TASKBOARD_PROMPT_RESULT_CHARS,
+            ),
+            "artifact_refs": artifact_refs,
+            "file_refs": file_refs,
+            "diagnostics": cls._compact_verifier_prompt_value(diagnostics[:8], max_chars=1200),
+            "metadata": cls._compact_verifier_prompt_value(effective.metadata, max_chars=1000),
+        }
+        if len(diagnostics) > 8:
+            compact["diagnostics_omitted"] = {"count": len(diagnostics) - 8, "reason": "prompt_budget"}
+        return compact
+
+    @classmethod
+    def _compact_taskboard_card_result_for_stream(cls, result: Any) -> dict[str, Any]:
+        try:
+            effective = TaskBoardCardResult.from_value(result)
+        except Exception:
+            return {
+                "status": "unknown",
+                "preview": cls._compact_verifier_prompt_value(result, max_chars=700),
+            }
+        artifact_refs = [cls._compact_artifact_ref_for_verifier(ref) for ref in list(effective.artifact_refs)[:4]]
+        file_refs = [cls._compact_artifact_ref_for_verifier(ref) for ref in list(effective.file_refs)[:4]]
+        return {
+            "schema_version": effective.schema_version,
+            "card_id": effective.card_id,
+            "status": effective.status,
+            "output_digest": effective.output_digest,
+            "preview": cls._compact_verifier_prompt_value(effective.preview, max_chars=700),
+            "artifact_refs": artifact_refs,
+            "artifact_refs_omitted": max(0, len(effective.artifact_refs) - 4),
+            "file_refs": file_refs,
+            "file_refs_omitted": max(0, len(effective.file_refs) - 4),
+            "diagnostics": cls._compact_verifier_prompt_value(list(effective.diagnostics)[:4], max_chars=700),
+            "metadata": cls._compact_verifier_prompt_value(effective.metadata, max_chars=500),
+        }
+
+    @classmethod
+    def _compact_taskboard_dependency_results(cls, dependency_results: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            str(card_id): cls._compact_taskboard_card_result_for_prompt(result)
+            for card_id, result in dict(dependency_results).items()
+        }
+
+    @classmethod
+    def _compact_taskboard_revision_for_prompt(
+        cls,
+        revision: Any,
+        *,
+        include_card_results: bool = True,
+    ) -> dict[str, Any]:
+        effective = TaskBoardRevision.from_value(revision)
+        cards = []
+        for card in effective.graph.cards:
+            cards.append(
+                {
+                    "id": card.id,
+                    "status": card.status,
+                    "objective": card.objective,
+                    "depends_on": list(card.depends_on),
+                    "required_outputs": list(card.required_outputs),
+                    "allowed_execution_shape": card.allowed_execution_shape,
+                    "failure_policy": card.failure_policy,
+                    "evidence_contract": cls._compact_verifier_prompt_value(
+                        card.evidence_contract,
+                        max_chars=800,
+                    ),
+                    "metadata": cls._compact_verifier_prompt_value(card.metadata, max_chars=800),
+                }
+            )
+        compact = {
+            "schema_version": effective.schema_version,
+            "board_id": effective.board_id,
+            "revision_id": effective.revision_id,
+            "status": effective.status,
+            "graph": {
+                "schema_version": effective.graph.schema_version,
+                "graph_id": effective.graph.graph_id,
+                "cards": cards,
+                "metadata": cls._compact_verifier_prompt_value(effective.graph.metadata, max_chars=1000),
+            },
+            "card_result_statuses": {
+                str(card_id): str(result.status)
+                for card_id, result in effective.card_results.items()
+            },
+            "evidence_refs": [
+                cls._compact_artifact_ref_for_verifier(ref)
+                for ref in list(effective.evidence_refs)[:16]
+            ],
+            "diagnostics": cls._compact_verifier_prompt_value(list(effective.diagnostics)[:16], max_chars=1600),
+            "metadata": cls._compact_verifier_prompt_value(effective.metadata, max_chars=1200),
+        }
+        if include_card_results:
+            compact["card_results"] = {
+                str(card_id): cls._compact_taskboard_card_result_for_prompt(result)
+                for card_id, result in effective.card_results.items()
+            }
+        return compact
+
+    @classmethod
+    def _compact_taskboard_revision_for_stream(cls, revision: Any) -> dict[str, Any]:
+        effective = TaskBoardRevision.from_value(revision)
+        return {
+            "schema_version": effective.schema_version,
+            "board_id": effective.board_id,
+            "revision_id": effective.revision_id,
+            "status": effective.status,
+            "graph_id": effective.graph.graph_id,
+            "cards": [
+                {
+                    "id": card.id,
+                    "status": card.status,
+                    "depends_on": list(card.depends_on),
+                    "failure_policy": card.failure_policy,
+                }
+                for card in effective.graph.cards
+            ],
+            "card_result_statuses": {
+                str(card_id): str(result.status)
+                for card_id, result in effective.card_results.items()
+            },
+        }
+
+    @classmethod
+    def _compact_taskboard_evidence_view_for_stream(cls, evidence_view: Mapping[str, Any]) -> Any:
+        return cls._compact_verifier_prompt_value(evidence_view, max_chars=_TASKBOARD_STREAM_SUMMARY_CHARS)
+
+    @classmethod
+    def _taskboard_scheduled_stream_payload(
+        cls,
+        *,
+        schedule: Any,
+        evidence_view: Mapping[str, Any],
+        concurrency: int | None,
+    ) -> dict[str, Any]:
+        return {
+            "schedule": DataFormatter.sanitize(schedule.to_dict()),
+            "evidence_view": cls._compact_taskboard_evidence_view_for_stream(evidence_view),
+            "concurrency": concurrency,
+        }
+
+    @classmethod
+    def _taskboard_completed_stream_payload(cls, tick_result: Any) -> dict[str, Any]:
+        evidence_view = build_task_board_evidence_view(tick_result.revision).to_dict()
+        return {
+            "revision": cls._compact_taskboard_revision_for_stream(tick_result.revision),
+            "schedule": DataFormatter.sanitize(tick_result.schedule.to_dict()),
+            "card_results": {
+                str(card_id): cls._compact_taskboard_card_result_for_stream(result)
+                for card_id, result in tick_result.card_results.items()
+            },
+            "evidence_view": cls._compact_taskboard_evidence_view_for_stream(evidence_view),
+            "runtime_topology": DataFormatter.sanitize(tick_result.triggerflow_snapshot.get("runtime_topology", {})),
+        }
+
     @staticmethod
     def _workspace_artifact_manifest_path(manifest: Mapping[str, Any] | None) -> str:
         if isinstance(manifest, Mapping):
@@ -1184,6 +1358,19 @@ class AgentTask:
             if isinstance(manifest_refs, Sequence) and not isinstance(manifest_refs, str | bytes | bytearray):
                 refs.extend(manifest_refs)
         return refs
+
+    @classmethod
+    def _workspace_artifact_delivery_mode(cls, result: Any) -> str:
+        if not isinstance(result, Mapping):
+            return ""
+        manifest = result.get("artifact_manifest")
+        if isinstance(manifest, Mapping):
+            return "sectioned_workspace_artifact"
+        for key in ("artifact_markdown", "artifact_html", "candidate_final_result", "final_result"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return "workspace_artifact"
+        return ""
 
     @staticmethod
     def _append_workspace_artifact_meta(execution_meta: Mapping[str, Any] | None, refs: list[dict[str, Any]]) -> None:
@@ -1732,9 +1919,7 @@ class AgentTask:
                     "goal": self.goal,
                     "success_criteria": self.success_criteria,
                     "card": context.card.to_dict(),
-                    "dependency_results": {
-                        key: value.to_dict() for key, value in dict(context.dependency_results).items()
-                    },
+                    "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                     "taskboard_evidence_view": evidence_view,
                     "available_readback": self._taskboard_available_readback(evidence_view),
                     "previous_attempt_errors": previous_errors,
@@ -1761,7 +1946,9 @@ class AgentTask:
                 "evidence is truly critical. If this card produces the user-facing deliverable, use candidate_final_result, "
                 "final_result, or artifact_markdown only when the complete body is short enough for the bounded output. "
                 "For long reports, exam papers, or multi-section deliverables, prefer artifact_manifest with "
-                "sections/content so the JSON stays a control plane instead of a giant body field. "
+                "sections/content so the JSON stays a control plane instead of a giant body field; each section "
+                "should carry title/content and the manifest should include path='final.md' unless a more specific "
+                "deliverable path is required. "
                 "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
                 "for deliverables. Review or "
                 "verification cards must not put review notes in those deliverable fields unless they include the "
@@ -1784,12 +1971,12 @@ class AgentTask:
                     ),
                     "artifact_markdown": (
                         str,
-                        "Short markdown deliverable body when this card creates a bounded markdown artifact",
+                        "Bounded short markdown deliverable only; use artifact_manifest.sections for long reports or exams",
                         False,
                     ),
                     "artifact_manifest": (
                         dict,
-                        "Workspace artifact manifest for sectioned or file-backed deliverables",
+                        "Preferred Workspace artifact manifest for sectioned or file-backed deliverables",
                         False,
                     ),
                     "file_refs": (
@@ -1853,17 +2040,7 @@ class AgentTask:
                 )
             card_output = await self._deliver_workspace_artifact(
                 card_output,
-                plan={
-                    "deliverable_mode": "workspace_artifact"
-                    if isinstance(card_output, Mapping)
-                    and (
-                        card_output.get("artifact_manifest")
-                        or card_output.get("artifact_markdown")
-                        or card_output.get("candidate_final_result")
-                        or card_output.get("final_result")
-                    )
-                    else ""
-                },
+                plan={"deliverable_mode": self._workspace_artifact_delivery_mode(card_output)},
                 execution_meta=cast(dict[str, Any], execution_meta),
                 source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
                 context_pack=context_pack,
@@ -1938,9 +2115,7 @@ class AgentTask:
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
                 "card": context.card.to_dict(),
-                "dependency_results": {
-                    key: value.to_dict() for key, value in dict(context.dependency_results).items()
-                },
+                "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                 "taskboard_evidence_view": evidence_view,
                 "available_readback": self._taskboard_available_readback(evidence_view),
                 "context_pack": DataFormatter.sanitize(context_pack),
@@ -1957,7 +2132,9 @@ class AgentTask:
             "'readback' or 'repair' and explain the exact missing refs or gaps instead of inventing facts. "
             "When the card can produce the user-facing deliverable, use artifact_markdown, candidate_final_result, "
             "or final_result only when the complete body is short enough for the bounded output. For sectioned or "
-            "long artifacts, prefer artifact_manifest with sections/content so JSON remains the control plane; "
+            "long artifacts, prefer artifact_manifest with sections/content so JSON remains the control plane; each "
+            "section should carry title/content and the manifest should include path='final.md' unless a more "
+            "specific deliverable path is required. "
             "AgentTask will write/read back Workspace files and produce "
             "trusted file_refs. Do not invent file_refs for deliverables. If the task is source-grounded, include "
             "the concrete source URLs, file paths, or evidence refs used by the deliverable in the deliverable body; "
@@ -1981,12 +2158,12 @@ class AgentTask:
                 ),
                 "artifact_markdown": (
                     str,
-                    "Short markdown deliverable body when this card creates a bounded markdown artifact",
+                    "Bounded short markdown deliverable only; use artifact_manifest.sections for long reports or exams",
                     False,
                 ),
                 "artifact_manifest": (
                     dict,
-                    "Artifact manifest proposal for sectioned or file-backed deliverables",
+                    "Preferred Workspace artifact manifest proposal for sectioned or file-backed deliverables",
                     False,
                 ),
                 "file_refs": (
@@ -2027,17 +2204,7 @@ class AgentTask:
             )
         card_output = await self._deliver_workspace_artifact(
             card_output,
-            plan={
-                "deliverable_mode": "workspace_artifact"
-                if isinstance(card_output, Mapping)
-                and (
-                    card_output.get("artifact_manifest")
-                    or card_output.get("artifact_markdown")
-                    or card_output.get("candidate_final_result")
-                    or card_output.get("final_result")
-                )
-                else ""
-            },
+            plan={"deliverable_mode": self._workspace_artifact_delivery_mode(card_output)},
             source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
             context_pack=context_pack,
             card_context=context,
@@ -2464,7 +2631,7 @@ class AgentTask:
                 "allow_degraded_final": allow_degraded_final,
                 "schedule": DataFormatter.sanitize(schedule.to_dict() if schedule is not None else {}),
                 "taskboard_evidence_view": DataFormatter.sanitize(evidence_view),
-                "revision": DataFormatter.sanitize(revision.to_dict()),
+                "revision": self._compact_taskboard_revision_for_prompt(revision),
                 "candidate_final_result": self._compact_verifier_prompt_value(candidate_final_result),
                 "execution_prompt": self._execution_prompt_context(),
                 "language_policy": language_policy,
@@ -4249,18 +4416,25 @@ class AgentTask:
         include_answer: bool = True,
     ) -> str:
         if isinstance(execution_result, Mapping):
-            keys: tuple[str, ...] = (
-                "candidate_final_result",
-                "final_result",
-                "artifact_markdown",
-                "artifact_html",
-            )
+            candidates: list[str] = []
+            for key in ("candidate_final_result", "final_result"):
+                value = execution_result.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.append(value.strip())
+            manifest = execution_result.get("artifact_manifest")
+            if isinstance(manifest, Mapping):
+                manifest_content = cls._workspace_artifact_manifest_content(manifest)
+                if manifest_content.strip():
+                    candidates.append(manifest_content.strip())
+            keys: tuple[str, ...] = ("artifact_markdown", "artifact_html")
             if include_answer:
                 keys = keys + ("answer", "result")
             for key in keys:
                 value = execution_result.get(key)
                 if isinstance(value, str) and value.strip():
-                    return value.strip()
+                    candidates.append(value.strip())
+            if candidates:
+                return max(candidates, key=len)
             if not include_answer:
                 return ""
             step_result = execution_result.get("step_result")
