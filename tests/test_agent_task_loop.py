@@ -482,6 +482,13 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
             elif "Execute exactly one bounded step" in text:
                 payload = {
                     "step_result": "ready to generate reports/final.md as a Workspace artifact",
+                    "answer": "A short control summary; the artifact_manifest describes the real deliverable.",
+                    "artifact_manifest": {
+                        "path": "final.md",
+                        "sections": [
+                            {"id": "report", "title": "Final report", "intent": "Write the complete deliverable."}
+                        ],
+                    },
                     "evidence": ["source evidence has been collected"],
                     "remaining_work": [],
                 }

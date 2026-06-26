@@ -114,7 +114,10 @@ _TASKBOARD_READBACK_CARD_SHAPES = {
     "cold_readback",
     "evidence_readback",
 }
-_TASKBOARD_READBACK_PREVIEW_CHARS = 4000
+_TASKBOARD_READBACK_PREVIEW_CHARS = 12000
+_TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS = 12000
+_TASKBOARD_DEPENDENCY_READBACK_MAX_REFS = 4
+_TASKBOARD_SOURCE_REFS_MAX = 16
 _TASKBOARD_PROMPT_RESULT_CHARS = 1600
 _TASKBOARD_STREAM_SUMMARY_CHARS = 3000
 _WORKSPACE_ARTIFACT_PREVIEW_BYTES = 4000
@@ -1355,6 +1358,20 @@ class AgentTask:
                 chunks.append(body)
         return "\n\n".join(chunks).strip()
 
+    @classmethod
+    def _workspace_artifact_manifest_needs_body(cls, manifest: Mapping[str, Any] | None) -> bool:
+        if not isinstance(manifest, Mapping):
+            return False
+        if cls._workspace_artifact_manifest_content(manifest).strip():
+            return False
+        sections = manifest.get("sections")
+        if isinstance(sections, Sequence) and not isinstance(sections, str | bytes | bytearray):
+            return bool(sections)
+        deliverables = manifest.get("deliverables")
+        if isinstance(deliverables, Sequence) and not isinstance(deliverables, str | bytes | bytearray):
+            return bool(deliverables)
+        return False
+
     @staticmethod
     def _workspace_artifact_untrusted_refs(result: Mapping[str, Any], manifest: Mapping[str, Any] | None) -> list[Any]:
         refs: list[Any] = []
@@ -1567,6 +1584,13 @@ class AgentTask:
             deliverable_mode=deliverable_mode,
         )
         prefer_stream_draft = bool((plan or {}).get("prefer_stream_draft"))
+        manifest_needs_body = self._workspace_artifact_manifest_needs_body(manifest_dict)
+        if (
+            deliverable_mode == "sectioned_workspace_artifact"
+            and manifest_needs_body
+            and content_key == "answer"
+        ):
+            prefer_stream_draft = True
         if prefer_stream_draft and content_key == "answer":
             content = ""
             content_key = ""
@@ -2064,6 +2088,10 @@ class AgentTask:
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
         readback_records = self._taskboard_action_artifact_recall_records(evidence_view)
+        dependency_readbacks = await self._taskboard_dependency_action_artifact_readbacks(
+            evidence_view,
+            card_id=str(getattr(context.card, "id", "") or ""),
+        )
         max_attempts = self._taskboard_card_max_attempts()
         previous_errors: list[dict[str, Any]] = []
         language_policy = self._language_policy()
@@ -2093,6 +2121,12 @@ class AgentTask:
                 "owner": "AgentTaskTaskBoard",
                 "step_execution_shape": "taskboard_card",
             })
+            source_refs = self._collect_taskboard_source_refs(
+                evidence_view,
+                dependency_readbacks,
+                context.dependency_results,
+                max_refs=_TASKBOARD_SOURCE_REFS_MAX,
+            )
             execution.input(
                 {
                     "task_id": self.id,
@@ -2101,7 +2135,9 @@ class AgentTask:
                     "card": context.card.to_dict(),
                     "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                     "taskboard_evidence_view": evidence_view,
+                    "dependency_readbacks": dependency_readbacks,
                     "available_readback": self._taskboard_available_readback(evidence_view),
+                    "source_refs": source_refs,
                     "previous_attempt_errors": previous_errors,
                     "attempt": {
                         "attempt_index": attempt_index,
@@ -2117,9 +2153,12 @@ class AgentTask:
                 "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
                 "Use TaskBoard evidence view as the hot summary; request full content only through available "
                 "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
-                "the same failing source or method when a bounded fallback can satisfy the card. If available_readback "
-                "lists Action artifact refs and a bounded preview is insufficient, call read_action_artifact with "
-                "the artifact_id and action_call_id before blocking on missing evidence. Return card-local evidence "
+                "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
+                "contains framework-prefetched bounded readback previews for dependency Action artifacts that were "
+                "structurally truncated or marked full_value_available; inspect those before declaring dependency "
+                "evidence missing. If available_readback lists Action artifact refs and the prefetched previews are "
+                "still insufficient, call read_action_artifact with the artifact_id and action_call_id before blocking "
+                "on missing evidence. Return card-local evidence "
                 "and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
                 "is available, return status completed with diagnostics that explain the degraded source boundary. "
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
@@ -2130,7 +2169,10 @@ class AgentTask:
                 "artifact_manifest, artifact_markdown, candidate_final_result, final_result, or answer. AgentTask "
                 "will stream the long body into Workspace and read it back. "
                 "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
-                "for deliverables. Review or "
+                "for deliverables. If the task is source-grounded, include concrete source URLs, file paths, or "
+                "evidence refs from source_refs/dependency_readbacks in the deliverable body; do not mention a "
+                "source title or local downloaded filename without its verifier-visible URL/path when such a ref "
+                "exists. Review or "
                 "verification cards must not put review notes in those deliverable fields unless they include the "
                 "full corrected deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask "
                 "own lifecycle completion."
@@ -2286,6 +2328,16 @@ class AgentTask:
             ).to_dict()
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
+        dependency_readbacks = await self._taskboard_dependency_action_artifact_readbacks(
+            evidence_view,
+            card_id=str(getattr(context.card, "id", "") or ""),
+        )
+        source_refs = self._collect_taskboard_source_refs(
+            evidence_view,
+            dependency_readbacks,
+            context.dependency_results,
+            max_refs=_TASKBOARD_SOURCE_REFS_MAX,
+        )
         language_policy = self._language_policy()
         request = self.agent.create_temp_request()
         self._apply_language_policy_to_request(request, language_policy)
@@ -2297,7 +2349,9 @@ class AgentTask:
                 "card": context.card.to_dict(),
                 "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                 "taskboard_evidence_view": evidence_view,
+                "dependency_readbacks": dependency_readbacks,
                 "available_readback": self._taskboard_available_readback(evidence_view),
+                "source_refs": source_refs,
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "planning_policy": context.planning_policy.to_prompt_payload() if context.planning_policy is not None else {},
@@ -2308,8 +2362,11 @@ class AgentTask:
             "Execute one TaskBoard control card with a single structured model request. "
             "This card is for synthesis, verification, finalization, or deciding the next board action; "
             "do not plan or call tools from this request. Use TaskBoardEvidenceView as the hot evidence summary "
-            "and preserve cold refs as pointers. If bounded previews are insufficient, set next_board_action to "
-            "'readback' or 'repair' and explain the exact missing refs or gaps instead of inventing facts. "
+            "and preserve cold refs as pointers. dependency_readbacks contains framework-prefetched bounded "
+            "readback previews for dependency Action artifacts that were structurally truncated or marked "
+            "full_value_available; inspect those before declaring dependency evidence missing. If bounded previews "
+            "and dependency_readbacks are insufficient, set next_board_action to 'readback' or 'repair' and explain "
+            "the exact missing refs or gaps instead of inventing facts. "
             "When the card can produce the user-facing deliverable, use artifact_markdown, candidate_final_result, "
             "or final_result only when the complete body is short enough for the bounded output. For sectioned or "
             "long artifacts, return only an artifact_manifest with path='final.md' plus section ids/titles/brief "
@@ -2427,6 +2484,21 @@ class AgentTask:
             }
         )
         card_status = self._taskboard_control_card_status(card_output)
+        patch_proposal = (
+            dict(card_output["patch_proposal"])
+            if isinstance(card_output, Mapping) and isinstance(card_output.get("patch_proposal"), Mapping)
+            else None
+        )
+        if patch_proposal is None and isinstance(card_output, Mapping):
+            patch_proposal = self._taskboard_control_auto_patch(context, card_output)
+            if patch_proposal is not None:
+                diagnostics.append(
+                    {
+                        "code": "taskboard.control.auto_readback_patch",
+                        "message": "Converted next_board_action=readback into a TaskBoardPatch with readback and continuation cards.",
+                        "card_id": context.card.id,
+                    }
+                )
         output_file_refs: list[Any] = []
         if isinstance(card_output, Mapping):
             raw_file_refs = card_output.get("file_refs")
@@ -2438,15 +2510,130 @@ class AgentTask:
             preview=DataFormatter.sanitize(card_output),
             artifact_refs=tuple(output_file_refs),
             diagnostics=tuple(diagnostics),
-            patch_proposal=dict(card_output["patch_proposal"])
-            if isinstance(card_output, Mapping) and isinstance(card_output.get("patch_proposal"), Mapping)
-            else None,
+            patch_proposal=patch_proposal,
             metadata={
                 "execution_kind": "taskboard_control_request",
                 "execution_strategy": self.execution_strategy,
                 "next_board_action": card_output.get("next_board_action") if isinstance(card_output, Mapping) else None,
             },
         )
+
+    @classmethod
+    def _taskboard_control_auto_patch(cls, context: Any, card_output: Mapping[str, Any]) -> dict[str, Any] | None:
+        next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
+        if next_action not in {"readback", "needs_readback"}:
+            return None
+        revision = getattr(context, "revision", None)
+        card = getattr(context, "card", None)
+        if revision is None or card is None:
+            return None
+        graph = getattr(revision, "graph", None)
+        if graph is None or not hasattr(graph, "card_by_id"):
+            return None
+        existing_ids = set(graph.card_by_id())
+        current_id = str(getattr(card, "id", "") or "").strip()
+        if not current_id:
+            return None
+
+        def safe_id(raw: str) -> str:
+            text = "".join(ch if ch.isalnum() or ch in {"_", ".", "-"} else "-" for ch in raw.strip())
+            text = text.strip(".-")
+            return text or "card"
+
+        def unique_id(prefix: str) -> str:
+            base = safe_id(prefix)[:80]
+            candidate = base
+            index = 1
+            while candidate in existing_ids:
+                index += 1
+                candidate = f"{base}-{index}"
+            existing_ids.add(candidate)
+            return candidate
+
+        readback_id = unique_id(f"{current_id}.readback")
+        continuation_id = unique_id(f"{current_id}.continue")
+        current_card = dict(card.to_dict() if hasattr(card, "to_dict") else {})
+        if not current_card:
+            return None
+        current_metadata = dict(current_card.get("metadata") or {})
+        current_metadata.update(
+            {
+                "superseded_by": continuation_id,
+                "auto_patch_reason": "next_board_action=readback",
+            }
+        )
+        current_card.update(
+            {
+                "failure_policy": "degradable",
+                "status": "blocked",
+                "metadata": current_metadata,
+            }
+        )
+        dependencies = list(getattr(card, "depends_on", ()) or [])
+        gaps = cls._normalize_string_list(card_output.get("gaps"))
+        remaining_work = cls._normalize_string_list(card_output.get("remaining_work"))
+        readback_objective = "Read scoped cold evidence required before continuing the blocked control card."
+        if gaps:
+            readback_objective = f"{readback_objective} Gaps: {'; '.join(gaps[:3])}"
+        continuation_objective = str(getattr(card, "objective", "") or "Continue the blocked TaskBoard card.").strip()
+        if remaining_work:
+            continuation_objective = f"{continuation_objective} Remaining work: {'; '.join(remaining_work[:3])}"
+        patch = {
+            "base_revision": str(getattr(revision, "revision_id", "") or ""),
+            "source": "agent_task.taskboard.control_auto_readback",
+            "operations": [
+                {"op": "update_card", "card": current_card},
+                {
+                    "op": "add_card",
+                    "card": {
+                        "id": readback_id,
+                        "objective": readback_objective,
+                        "depends_on": dependencies,
+                        "required_outputs": ["Bounded readback previews for verifier-visible cold evidence."],
+                        "allowed_execution_shape": "readback",
+                        "failure_policy": "required",
+                        "metadata": {
+                            "generated_by": "agent_task.taskboard.control_auto_readback",
+                            "source_card_id": current_id,
+                        },
+                    },
+                },
+                {
+                    "op": "add_card",
+                    "card": {
+                        "id": continuation_id,
+                        "objective": continuation_objective,
+                        "depends_on": [*dependencies, readback_id],
+                        "required_outputs": list(getattr(card, "required_outputs", ()) or ()),
+                        "allowed_execution_shape": str(getattr(card, "allowed_execution_shape", "") or "control"),
+                        "failure_policy": str(getattr(card, "failure_policy", "") or "required"),
+                        "metadata": {
+                            "generated_by": "agent_task.taskboard.control_auto_readback",
+                            "continues_card_id": current_id,
+                            "readback_card_id": readback_id,
+                        },
+                    },
+                },
+                {
+                    "op": "append_diagnostic",
+                    "diagnostic": {
+                        "code": "taskboard.control.auto_readback_patch",
+                        "card_id": current_id,
+                        "readback_card_id": readback_id,
+                        "continuation_card_id": continuation_id,
+                    },
+                },
+            ],
+            "diagnostics": [
+                {
+                    "code": "taskboard.control.auto_readback_patch",
+                    "card_id": current_id,
+                    "readback_card_id": readback_id,
+                    "continuation_card_id": continuation_id,
+                }
+            ],
+        }
+        return DataFormatter.sanitize(patch)
 
     async def _run_taskboard_readback_card(
         self,
@@ -3082,7 +3269,11 @@ class AgentTask:
         if not accepted:
             return final
         final_result = str(final.get("final_result") or "").strip()
-        if not final_result or cls._looks_like_candidate_prefix(final_result, candidate):
+        if (
+            not final_result
+            or cls._looks_like_candidate_prefix(final_result, candidate)
+            or cls._candidate_substantially_more_complete(final_result, candidate)
+        ):
             normalized = dict(final)
             normalized["final_result"] = candidate
             return normalized
@@ -3099,6 +3290,14 @@ class AgentTask:
         compact_value = " ".join(value.split())
         compact_candidate = " ".join(candidate.split())
         return len(compact_value) < len(compact_candidate) and compact_candidate.startswith(compact_value)
+
+    @staticmethod
+    def _candidate_substantially_more_complete(value: str, candidate: str) -> bool:
+        value = value.strip()
+        candidate = candidate.strip()
+        if len(candidate) < 1200 or len(value) >= len(candidate):
+            return False
+        return len(value) <= max(800, len(candidate) // 2)
 
     def _taskboard_effort(self) -> Any:
         agent_task_options = self.options.get("agent_task")
@@ -3330,11 +3529,122 @@ class AgentTask:
             return []
         return [dict(ref) for ref in refs if isinstance(ref, Mapping)]
 
+    @staticmethod
+    def _taskboard_dependency_ref_needs_readback(ref: Mapping[str, Any]) -> bool:
+        artifact_id = str(ref.get("artifact_id") or "").strip()
+        if not artifact_id:
+            return False
+        role = str(ref.get("role") or "").strip().lower()
+        if role and role not in {"output", "result", "artifact"}:
+            return False
+        if not bool(ref.get("available", True)) and not bool(ref.get("full_value_available")):
+            return False
+        if bool(ref.get("truncated")):
+            return True
+        try:
+            size = int(ref.get("bytes", ref.get("size", 0)) or 0)
+        except Exception:
+            size = 0
+        return bool(ref.get("full_value_available")) and size > _TASKBOARD_PROMPT_RESULT_CHARS
+
+    async def _taskboard_dependency_action_artifact_readbacks(
+        self,
+        evidence_view: Mapping[str, Any],
+        *,
+        card_id: str,
+    ) -> dict[str, Any]:
+        refs = [
+            ref
+            for ref in self._taskboard_readback_artifact_refs(evidence_view)
+            if self._taskboard_dependency_ref_needs_readback(ref)
+        ][:_TASKBOARD_DEPENDENCY_READBACK_MAX_REFS]
+        payload: dict[str, Any] = {
+            "schema_version": "agent_task_taskboard_dependency_readbacks/v1",
+            "card_id": card_id,
+            "ref_count": len(refs),
+            "readbacks": [],
+            "diagnostics": [],
+            "bounded": {
+                "preview_chars": _TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS,
+                "max_refs": _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS,
+            },
+        }
+        if not refs:
+            return payload
+
+        action = getattr(self.agent, "action", None)
+        reader = getattr(action, "async_read_action_artifact", None)
+        if not callable(reader):
+            payload["diagnostics"] = [
+                {
+                    "code": "taskboard.dependency_readback.reader_unavailable",
+                    "message": "Action artifact readback is unavailable on the bound Agent.",
+                    "ref_count": len(refs),
+                }
+            ]
+            return payload
+
+        await self._emit(
+            f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.dependency_readback.started",
+            {"card_id": card_id, "ref_count": len(refs)},
+        )
+        readbacks: list[dict[str, Any]] = []
+        diagnostics: list[dict[str, Any]] = []
+        for ref in refs:
+            artifact_id = str(ref.get("artifact_id") or "")
+            action_call_id = str(ref.get("action_call_id") or "")
+            try:
+                raw_readback = await self._await_taskboard_card_execution(
+                    cast(Awaitable[Any], reader(artifact_id, action_call_id or None)),
+                    card_id=card_id,
+                    stage="dependency_readback",
+                )
+            except Exception as error:
+                raw_readback = {
+                    "ok": False,
+                    "status": "error",
+                    "artifact_id": artifact_id,
+                    "action_call_id": action_call_id,
+                    "error": f"{ error.__class__.__name__}: { error }",
+                }
+            compact = self._compact_taskboard_action_artifact_readback(
+                raw_readback,
+                ref,
+                max_chars=_TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS,
+            )
+            readbacks.append(compact)
+            if not compact.get("ok"):
+                diagnostics.append(
+                    {
+                        "code": "taskboard.dependency_readback.ref_failed",
+                        "artifact_id": artifact_id,
+                        "action_call_id": action_call_id,
+                        "status": compact.get("status"),
+                        "error": compact.get("error"),
+                    }
+                )
+
+        payload["readbacks"] = readbacks
+        payload["diagnostics"] = diagnostics
+        payload["success_count"] = sum(1 for item in readbacks if item.get("ok"))
+        await self._emit(
+            f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.dependency_readback.completed",
+            {
+                "card_id": card_id,
+                "ref_count": len(refs),
+                "success_count": payload["success_count"],
+                "failed_count": len(readbacks) - int(payload["success_count"]),
+            },
+        )
+        return DataFormatter.sanitize(payload)
+
     @classmethod
     def _compact_taskboard_action_artifact_readback(
         cls,
         readback: Any,
         ref: Mapping[str, Any],
+        *,
+        max_chars: int = _TASKBOARD_READBACK_PREVIEW_CHARS,
     ) -> dict[str, Any]:
         if not isinstance(readback, Mapping):
             readback = {
@@ -3346,7 +3656,7 @@ class AgentTask:
         action_call_id = str(readback.get("action_call_id") or ref.get("action_call_id") or "")
         value = readback.get("value", readback.get("data", readback.get("result")))
         original_chars = cls._serialized_prompt_chars(value)
-        preview = cls._compact_verifier_prompt_value(value, max_chars=_TASKBOARD_READBACK_PREVIEW_CHARS)
+        preview = cls._compact_verifier_prompt_value(value, max_chars=max_chars)
         preview_chars = cls._serialized_prompt_chars(preview)
         compact: dict[str, Any] = {
             "ok": bool(readback.get("ok")),
@@ -3362,7 +3672,7 @@ class AgentTask:
                 "truncated": preview_chars < original_chars,
                 "original_chars": original_chars,
                 "preview_chars": preview_chars,
-                "limit_chars": _TASKBOARD_READBACK_PREVIEW_CHARS,
+                "limit_chars": max_chars,
             },
         }
         error = readback.get("error")
@@ -3402,6 +3712,106 @@ class AgentTask:
                 "the ActionRuntime read_action_artifact action."
             ),
         }
+
+    @classmethod
+    def _collect_taskboard_source_refs(
+        cls,
+        *values: Any,
+        max_refs: int = _TASKBOARD_SOURCE_REFS_MAX,
+    ) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        url_keys = {
+            "source_url",
+            "selected_url",
+            "requested_url",
+            "canonical_url",
+            "url",
+            "href",
+        }
+        metadata_keys = {
+            "path",
+            "sha256",
+            "bytes",
+            "size",
+            "media_type",
+            "role",
+            "source",
+            "artifact_id",
+            "action_call_id",
+            "label",
+            "title",
+        }
+
+        def normalize_url(raw: Any) -> str:
+            text = str(raw or "").strip()
+            if text.startswith("http://") or text.startswith("https://"):
+                return text
+            return ""
+
+        def add(candidate: Mapping[str, Any]) -> None:
+            if len(refs) >= max_refs:
+                return
+            record: dict[str, Any] = {}
+            for key in url_keys:
+                url = normalize_url(candidate.get(key))
+                if url:
+                    record[key] = url
+            path = str(candidate.get("path") or "").strip()
+            if path and len(path) <= 500:
+                record["path"] = path
+            for key in metadata_keys:
+                if key in record or key == "path":
+                    continue
+                item = candidate.get(key)
+                if item is None:
+                    continue
+                if isinstance(item, (str, int, float, bool)):
+                    text = str(item).strip()
+                    if text:
+                        record[key] = text[:500]
+            if not record:
+                return
+            if not any(key in record for key in url_keys) and not record.get("path"):
+                return
+            dedupe_key = "|".join(
+                str(record.get(field) or "")
+                for field in (
+                    "source_url",
+                    "selected_url",
+                    "requested_url",
+                    "canonical_url",
+                    "url",
+                    "href",
+                    "path",
+                    "sha256",
+                )
+            )
+            if dedupe_key in seen:
+                return
+            seen.add(dedupe_key)
+            refs.append(DataFormatter.sanitize(record))
+
+        def visit(value: Any, *, depth: int = 0) -> None:
+            if len(refs) >= max_refs or depth > 8:
+                return
+            if isinstance(value, Mapping):
+                add(value)
+                for item in value.values():
+                    if isinstance(item, (Mapping, list, tuple)):
+                        visit(item, depth=depth + 1)
+                return
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                for item in value:
+                    visit(item, depth=depth + 1)
+                    if len(refs) >= max_refs:
+                        break
+
+        for value in values:
+            visit(value)
+            if len(refs) >= max_refs:
+                break
+        return refs
 
     async def _build_context(self) -> "WorkspaceContextPackage":
         try:
