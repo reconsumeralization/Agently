@@ -1,5 +1,6 @@
 import pytest
 import json5
+import json
 from typing import Any, cast
 from agently.utils import DataFormatter, DataLocator, StreamingJSONCompleter
 
@@ -165,3 +166,39 @@ def test_locate_output_json_prefers_best_schema_match_over_think_draft():
     assert chosen_json is not None
     parsed = cast(dict[str, Any], json5.loads(chosen_json))
     assert parsed["action_items"][0]["task"] == "提交详细项目计划"
+
+
+def test_locate_output_json_uses_fast_path_for_long_direct_root(monkeypatch: pytest.MonkeyPatch):
+    long_content = "section body " * 20000
+    model_output = json.dumps(
+        {
+            "status": "completed",
+            "artifact_manifest": {
+                "sections": [
+                    {
+                        "path": "final.md",
+                        "content": long_content,
+                    }
+                ]
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    def fail_slow_scan(_text: str) -> list[str]:
+        raise AssertionError("direct root JSON should not use locate_all_json fallback")
+
+    monkeypatch.setattr(DataLocator, "locate_all_json", fail_slow_scan)
+
+    chosen_json = DataLocator.locate_output_json(
+        model_output,
+        {
+            "status": None,
+            "artifact_manifest": None,
+        },
+    )
+
+    assert chosen_json is not None
+    parsed = cast(dict[str, Any], json5.loads(chosen_json))
+    assert parsed["status"] == "completed"
+    assert parsed["artifact_manifest"]["sections"][0]["content"] == long_content

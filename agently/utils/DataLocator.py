@@ -192,13 +192,75 @@ class DataLocator:
                     return default
 
     @staticmethod
-    def locate_all_json(original_text: str) -> list[str]:
+    def _prepare_json_scan_text(original_text: str) -> str:
         pattern = r'"""(.*?)"""'
         original_text = re.sub(pattern, lambda match: json5.dumps(match.group(1)), original_text, flags=re.DOTALL)
-        original_text = original_text.replace("\"\"\"", "\"").replace("[OUTPUT]", "$<<OUTPUT>>")
+        return original_text.replace("\"\"\"", "\"").replace("[OUTPUT]", "$<<OUTPUT>>")
+
+    @staticmethod
+    def _restore_json_scan_text(original_text: str) -> str:
+        return original_text.replace("$<<OUTPUT>>", "[OUTPUT]")
+
+    @staticmethod
+    def _locate_direct_root_json(original_text: str) -> str | None:
+        original_text = DataLocator._prepare_json_scan_text(original_text)
+        start_index = None
+        for index, char in enumerate(original_text):
+            if char.isspace():
+                continue
+            start_index = index
+            break
+        if start_index is None or original_text[start_index] not in ("[", "{"):
+            return None
+
+        block_chars: list[str] = []
+        layer = 0
+        skip_next = False
+        in_quote = False
+        for index in range(start_index, len(original_text)):
+            char = original_text[index]
+            if skip_next:
+                skip_next = False
+                continue
+            if not in_quote:
+                if char == "\\":
+                    next_char = original_text[index + 1] if index + 1 < len(original_text) else ""
+                    skip_next = True
+                    if next_char == "\"":
+                        char = "\""
+                    else:
+                        continue
+                if char == "\"":
+                    in_quote = True
+                if char in ("[", "{"):
+                    layer += 1
+                elif char in ("]", "}"):
+                    layer -= 1
+                block_chars.append(char)
+            else:
+                if char == "\\":
+                    next_char = original_text[index + 1] if index + 1 < len(original_text) else ""
+                    if next_char:
+                        block_chars.append(char + next_char)
+                        skip_next = True
+                        continue
+                elif char == "\n":
+                    char = "\\n"
+                elif char == "\t":
+                    char = "\\t"
+                elif char == "\"":
+                    in_quote = False
+                block_chars.append(char)
+            if layer == 0:
+                return DataLocator._restore_json_scan_text("".join(block_chars))
+        return None
+
+    @staticmethod
+    def locate_all_json(original_text: str) -> list[str]:
+        original_text = DataLocator._prepare_json_scan_text(original_text)
         stage = 1
         json_blocks = []
-        block_num = 0
+        block_chars: list[str] = []
         layer = 0
         skip_next = False
         in_quote = False
@@ -211,7 +273,7 @@ class DataLocator:
                     skip_next = True
                     continue
                 if char == "[" or char == "{":
-                    json_blocks.append(char)
+                    block_chars = [char]
                     stage = 2
                     layer += 1
                     continue
@@ -219,7 +281,8 @@ class DataLocator:
                 if not in_quote:
                     if char == "\\":
                         skip_next = True
-                        if original_text[index + 1] == "\"":
+                        next_char = original_text[index + 1] if index + 1 < len(original_text) else ""
+                        if next_char == "\"":
                             char = "\""
                         else:
                             continue
@@ -231,26 +294,34 @@ class DataLocator:
                         layer -= 1
                     # elif char in ("\t", " ", "\n"):
                     # char = ""
-                    json_blocks[block_num] += char
+                    block_chars.append(char)
                 else:
                     if char == "\\":
-                        char += original_text[index + 1]
-                        skip_next = True
+                        next_char = original_text[index + 1] if index + 1 < len(original_text) else ""
+                        if next_char:
+                            block_chars.append(char + next_char)
+                            skip_next = True
+                            continue
                     elif char == "\n":
                         char = "\\n"
                     elif char == "\t":
                         char = "\\t"
                     elif char == "\"":
                         in_quote = not in_quote
-                    json_blocks[block_num] += char
+                    block_chars.append(char)
                 if layer == 0:
-                    json_blocks[block_num] = json_blocks[block_num].replace("$<<OUTPUT>>", "[OUTPUT]")
-                    block_num += 1
+                    json_blocks.append(DataLocator._restore_json_scan_text("".join(block_chars)))
+                    block_chars = []
                     stage = 1
+                    in_quote = False
         return json_blocks
 
     @staticmethod
     def locate_output_json(original_text: str, output_prompt_dict: "PromptOutputStructure"):
+        direct_json = DataLocator._locate_direct_root_json(original_text)
+        if direct_json is not None:
+            return direct_json
+
         all_json = DataLocator.locate_all_json(original_text)
         if len(all_json) == 0:
             return None
