@@ -25,6 +25,14 @@ to each execution. With an active `runtime.session_id`, the physical root is
 records are logical partitions inside that shared backend, and editable files
 use scoped subdirectories under `files/`.
 
+When a local Workspace is materialized, Agently writes an
+`AGENTLY_WORKSPACE.md` guide at the physical root and at each scoped editable
+`files_root`. The root guide explains `workspace.db`, `workspace.meta.json`,
+`content/`, and `files/`; the scoped file guide explains the current lineage and
+which directory external agents or Actions may edit. The filename intentionally
+is not `README.md` so cloned repositories and task deliverables can keep their
+own README semantics.
+
 ```python
 agent = Agently.create_agent("repo-worker")
 

@@ -22,6 +22,12 @@ evidence 或暴露 Workspace 文件区时 materialize。
 `.agently/workspaces/scripts/<script-scope>`。Agent、task 和 execution records 是这个
 共享 backend 内的逻辑分区，可编辑文件则放在 `files/` 下的作用域子目录里。
 
+local Workspace materialize 时，Agently 会在物理 root 和每个 scoped editable
+`files_root` 写入 `AGENTLY_WORKSPACE.md` 说明文件。root 说明会解释
+`workspace.db`、`workspace.meta.json`、`content/` 和 `files/` 的边界；scoped 文件区
+说明会解释当前 lineage，以及哪些目录可由外部 agent 或 Action 编辑。文件名刻意不叫
+`README.md`，避免和 clone 仓库、任务交付物自己的 README 语义冲突。
+
 ```python
 agent = Agently.create_agent("repo-worker")
 

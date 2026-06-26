@@ -12,6 +12,7 @@ from agently.builtins.tools import Cmd as LegacyCmd
 from agently.builtins.tools import Search as LegacySearch
 from agently.core.application.AgentExecution.Context import AgentExecutionContext
 from agently.core.runtime.RuntimeContext import bind_runtime_context
+from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME
 
 
 def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():
@@ -98,7 +99,7 @@ class FakeACPProvider:
 
 
 def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
-    agent = Agently.create_agent()
+    agent = Agently.create_agent().use_workspace(tmp_path / "workspace")
     provider = FakeACPProvider(
         [
             {"agent_id": "codex", "name": "Codex", "status": "ready", "endpoint": "local"},
@@ -106,7 +107,7 @@ def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
         ]
     )
 
-    agent.use_acp(root=tmp_path, provider=provider)
+    agent.use_acp(provider=provider)
 
     action_ids = {item.get("action_id") for item in agent.action.get_action_list(tags=[f"agent-{ agent.name }"])}
     assert {"acp_list_agents", "acp_run_task"}.issubset(action_ids)
@@ -124,7 +125,9 @@ def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
     assert run_result.get("status") == "success"
     assert run_result.get("agent_id") == "codex"
     assert run_result.get("data", {}).get("output") == "codex: inspect the current branch"
-    assert provider.runs[0]["working_dir"] == str(tmp_path.resolve())
+    assert provider.runs[0]["root"] == str(agent.workspace.files_root)
+    assert provider.runs[0]["working_dir"] == str(agent.workspace.files_root)
+    assert (agent.workspace.files_root / WORKSPACE_GUIDE_FILENAME).is_file()
 
 
 def test_agent_use_acp_skips_missing_or_failed_agents(tmp_path):
@@ -186,10 +189,10 @@ def test_agent_use_acp_registers_local_cli_adapter(tmp_path):
     assert "inspect files" in str(run_result.get("output", ""))
 
 
-def test_agent_use_acp_reuses_execution_session_scope(tmp_path):
-    agent = Agently.create_agent()
+@pytest.mark.asyncio
+async def test_acp_package_reuses_execution_session_scope(tmp_path):
     provider = FakeACPProvider([{"agent_id": "codex", "status": "ready"}])
-    agent.use_acp(root=tmp_path, provider=provider, session_scope="execution")
+    acp = ACP(root=tmp_path, provider=provider)
     execution_context = AgentExecutionContext(
         execution_id="exec-acp-session",
         lineage={},
@@ -197,14 +200,8 @@ def test_agent_use_acp_reuses_execution_session_scope(tmp_path):
     )
 
     with bind_runtime_context(agent_execution_context=execution_context):
-        first = agent.action.execute_action(
-            "acp_run_task",
-            {"agent_id": "codex", "task": "inspect one", "working_subdir": "."},
-        )
-        second = agent.action.execute_action(
-            "acp_run_task",
-            {"agent_id": "codex", "task": "inspect two", "working_subdir": "."},
-        )
+        first = await acp.async_run_task("codex", "inspect one", ".")
+        second = await acp.async_run_task("codex", "inspect two", ".")
 
     first_session = cast(dict[str, Any], first.get("acp_session", {}))
     second_session = cast(dict[str, Any], second.get("acp_session", {}))

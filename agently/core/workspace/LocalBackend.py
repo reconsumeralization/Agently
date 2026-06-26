@@ -40,6 +40,7 @@ from agently.utils import DataFormatter
 
 from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
 from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
+from ._defaults import WORKSPACE_GUIDE_FILENAME
 from ._utils import json_dumps, json_loads, slug, utc_now
 
 
@@ -100,9 +101,36 @@ class LocalWorkspaceBackend:
         )
         meta.setdefault("created_at", utc_now())
         meta_path.write_text(json_dumps(meta), encoding="utf-8")
+        self._ensure_root_guide()
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             self._create_schema(conn)
+
+    def _ensure_root_guide(self) -> None:
+        guide_path = self.root / WORKSPACE_GUIDE_FILENAME
+        if guide_path.exists():
+            return
+        guide_path.write_text(
+            "\n".join(
+                [
+                    "# Agently Workspace",
+                    "",
+                    "This directory is managed by Agently.",
+                    "",
+                    "Directory roles:",
+                    "",
+                    "- workspace.db: local metadata, search index, links, checkpoints, and runtime events.",
+                    "- workspace.meta.json: machine-readable Workspace metadata.",
+                    "- content/: managed record payloads owned by Workspace.",
+                    "- files/: editable file working trees scoped by lineage.",
+                    "",
+                    "Use files/lineage/.../files for task artifacts, downloads, and files shared with Actions or external coding agents.",
+                    "Do not edit workspace.db or content/ directly unless you are debugging Workspace internals.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
     def _default_workspace_id(self):
         digest = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()[:24]

@@ -214,18 +214,27 @@ class ActionExtension(BaseAgent):
         on_missing: Literal["skip", "error"] = "skip",
         timeout_seconds: float | None = 600,
         action_prefix: str = "",
-        session_scope: Literal["action_call", "execution"] = "execution",
     ):
         from agently.builtins.actions import ACP
 
+        resolved_root = root
+        if resolved_root is None:
+            workspace = getattr(self, "workspace", None)
+            files_root = getattr(workspace, "files_root", None)
+            if files_root is not None:
+                resolved_root = files_root
+                ensure_files_guide = getattr(workspace, "ensure_files_guide", None)
+                if callable(ensure_files_guide):
+                    ensure_files_guide()
+                else:
+                    Path(str(files_root)).mkdir(parents=True, exist_ok=True)
         acp = ACP(
-            root=root,
+            root=resolved_root,
             agent_ids=agent_ids,
             provider=provider,
             on_missing=on_missing,
             timeout_seconds=timeout_seconds,
             action_prefix=action_prefix,
-            session_scope=session_scope,
         )
         self._register_action_items(acp)
         diagnostics = acp.list_agents().get("diagnostics", [])

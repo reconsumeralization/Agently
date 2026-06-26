@@ -11,7 +11,7 @@ import pytest
 from agently import Agently
 from agently.core import LazyWorkspace, WorkspaceConfigurationError, WorkspaceManager, WorkspacePolicyError
 from agently.core.application import AgentTask
-from agently.core.workspace._defaults import script_scope
+from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME, script_scope
 from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
 from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPackage, WorkspaceContextPlan, WorkspaceRecordRef
 
@@ -44,6 +44,31 @@ async def test_agent_has_lazy_workspace_by_default(tmp_path, monkeypatch):
     assert workspace.root.exists()
     assert (workspace.root / "workspace.db").is_file()
     assert agent.settings.get("workspace.lazy") is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_writes_layout_guides(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "guided")
+
+    root_guide = workspace.root / WORKSPACE_GUIDE_FILENAME
+    files_guide = workspace.files_root / WORKSPACE_GUIDE_FILENAME
+
+    assert root_guide.is_file()
+    assert files_guide.is_file()
+    root_text = root_guide.read_text(encoding="utf-8")
+    files_text = files_guide.read_text(encoding="utf-8")
+    assert "workspace.db" in root_text
+    assert "content/" in root_text
+    assert "files/" in root_text
+    assert "editable file working tree" in files_text
+    assert str(workspace.files_root) in files_text
+
+    child = workspace.with_scope_node("tasks", "task-one")
+    child_guide = child.files_root / WORKSPACE_GUIDE_FILENAME
+    assert child_guide.is_file()
+    child_text = child_guide.read_text(encoding="utf-8")
+    assert "tasks/task-one" in child_text
+    assert "task_id" in child_text
 
 
 @pytest.mark.asyncio

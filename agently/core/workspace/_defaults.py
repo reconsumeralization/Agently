@@ -22,6 +22,7 @@ from typing import Any
 from ._utils import slug
 
 ScopeNode = dict[str, str]
+WORKSPACE_GUIDE_FILENAME = "AGENTLY_WORKSPACE.md"
 
 # Run-lineage scope kinds carry an indexable ancestor membership field so record
 # pruning by a broader scope (e.g. ``prune_scope({"task_id": T})``) can match

@@ -42,6 +42,7 @@ from agently.types.data.workspace import (
 from agently.types.plugins import WorkspaceBackend
 from ._defaults import (
     ScopeNode,
+    WORKSPACE_GUIDE_FILENAME,
     extend_lineage,
     extend_lineage_nodes,
     lineage_files_root,
@@ -106,6 +107,8 @@ class Workspace:
         self.scope_lineage: list[ScopeNode] = normalize_lineage(scope_lineage)
         self.default_scope = dict(default_scope or {})
         self.default_search_scope = dict(default_search_scope or self.default_scope)
+        if not getattr(self.backend, "read_only", False):
+            self.ensure_files_guide()
 
     def _bind_child(
         self,
@@ -185,6 +188,53 @@ class Workspace:
             default_search_scope=merge_scope(self.default_search_scope, default_search_scope),
             scope_lineage=self.scope_lineage,
         )
+
+    def ensure_files_guide(self) -> Path:
+        """Write a small human-readable guide into the scoped editable file root.
+
+        The guide is intentionally not named ``README.md`` so task deliverables
+        and cloned repositories can keep their own README semantics.
+        """
+
+        self.files_root.mkdir(parents=True, exist_ok=True)
+        guide_path = self.files_root / WORKSPACE_GUIDE_FILENAME
+        if guide_path.exists():
+            return guide_path
+        lineage = " -> ".join(
+            f"{ node.get('kind', '') }/{ node.get('id', '') }"
+            for node in self.scope_lineage
+            if node.get("kind")
+        ) or "workspace root"
+        scope_lines = [
+            f"- { key }: { value }"
+            for key, value in sorted(self.default_scope.items())
+            if value is not None and key != "scope_lineage"
+        ]
+        if not scope_lines:
+            scope_lines = ["- none"]
+        guide_path.write_text(
+            "\n".join(
+                [
+                    "# Agently Workspace Files",
+                    "",
+                    "This directory is the editable file working tree for the current Agently scope.",
+                    "",
+                    f"- Workspace root: { self.root }",
+                    f"- Files root: { self.files_root }",
+                    f"- Scope lineage: { lineage }",
+                    "",
+                    "Scope fields:",
+                    *scope_lines,
+                    "",
+                    "Use this directory for task deliverables, downloaded source files, and files shared with Actions or external coding agents.",
+                    "Common subdirectories may include downloads/, artifacts/, reports/, and temporary task-specific folders.",
+                    "Do not assume sibling lineage directories are in scope. Do not edit workspace.db or content/ directly.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return guide_path
 
     def _scoped_record_scope(self, scope: dict[str, Any] | None) -> dict[str, Any]:
         return merge_scope(self.default_scope, scope)
