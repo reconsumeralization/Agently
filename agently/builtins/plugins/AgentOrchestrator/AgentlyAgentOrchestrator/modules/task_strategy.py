@@ -115,7 +115,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         agent_task_options["capability_constraints"] = constraints
 
     # Planner capability visibility (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
-    # adapt the route planner's action / skill / skill-pack / dynamic-task
+    # adapt the route planner's action / skill / skill-pack
     # candidates into one sanitized, inert capability snapshot and pass it into
     # AgentTask options. AgentTask reads only this snapshot; it never imports
     # HybridRoutePlanner or holds the execution draft. Computed once here, at task
@@ -212,7 +212,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
 def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, Any]]:
     """Sanitized planner-facing capability snapshot (inert data only).
 
-    Adapts the route planner's action / skill / skill-pack / dynamic-task
+    Adapts the route planner's action / skill / skill-pack
     candidates into one list of `PlannerCapabilityCandidate` dicts. Each entry
     carries inert data only (id + kind + route + guidance_access + description),
     so AgentTask never reaches back into the route planner. Any per-source
