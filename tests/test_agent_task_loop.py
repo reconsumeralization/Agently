@@ -233,6 +233,32 @@ async def test_agent_task_workspace_artifact_delivery_does_not_write_plain_answe
 
 
 @pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_waits_for_remaining_work(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-remaining-work")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-remaining-work"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {"path": "reports/final.md"},
+            "remaining_work": ["Read README.md before writing the final report."],
+            "step_result": "Repository cloned; detailed source reading remains.",
+        },
+        plan={"deliverable_mode": "sectioned_workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact",
+    )
+
+    assert delivered["artifact_manifest"]["path"] == "reports/final.md"
+    assert delivered["remaining_work"] == ["Read README.md before writing the final report."]
+    assert delivered.get("file_refs") == []
+    assert "workspace_artifact_delivery" not in delivered
+    assert not (workspace.files_root / "reports/final.md").exists()
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_delivery_preserves_existing_full_body(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-preserve-body")
     task = AgentTask.__new__(AgentTask)
@@ -2548,6 +2574,58 @@ def test_cumulative_verifier_evidence_keeps_previous_iteration_action_previews(t
     browse_preview = actions[0]["result_preview"]
     assert browse_preview["selected_url"] == "https://example.test/specific"
     assert "Specific official syllabus" in browse_preview["content"]
+
+
+def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(tmp_path):
+    from agently.core.application import AgentTask
+
+    agent = _create_agent("agent-task-raw-action-data-evidence").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Create a source-grounded repository report.",
+        success_criteria=["The report grounds claims in files that were read."],
+        execution="flat",
+    )
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "execution_meta": {
+                "status": "completed",
+                "logs": {
+                    "action_logs": [
+                        {
+                            "action_id": "read_repo_file",
+                            "status": "success",
+                            "action_call_id": "call-config",
+                            "model_digest": {},
+                            "raw": {
+                                "kwargs": {"path": "configs/_base_/default.yaml", "max_chars": 8000},
+                                "data": {
+                                    "path": "configs/_base_/default.yaml",
+                                    "content": "model:\n  rewrite_max_completion_tokens: 64000\n",
+                                    "sha256": "abc123",
+                                    "truncated": False,
+                                },
+                            },
+                        }
+                    ],
+                    "route_logs": {},
+                },
+            },
+        }
+    )
+
+    cumulative = task._cumulative_execution_evidence_summary(
+        {"status": "completed", "logs": {"action_logs": [], "route_logs": {}}}
+    )
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(cumulative)
+
+    action = verifier_summary["actions"][0]
+    assert action["id"] == "read_repo_file"
+    assert action["input_preview"]["path"] == "configs/_base_/default.yaml"
+    assert action["result_preview"]["path"] == "configs/_base_/default.yaml"
+    assert "rewrite_max_completion_tokens" in action["result_preview"]["content"]
+    assert action["result_preview_meta"]["truncated"] is False
 
 
 @pytest.mark.asyncio

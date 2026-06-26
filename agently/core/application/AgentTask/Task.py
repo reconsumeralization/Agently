@@ -1579,6 +1579,7 @@ class AgentTask:
             not content
             and allow_stream_draft
             and deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}
+            and not self._has_remaining_work(result.get("remaining_work"))
         ):
             stream_delivery = await self._stream_workspace_artifact_draft(
                 path=path,
@@ -5025,6 +5026,7 @@ class AgentTask:
             "action_type",
             "kind",
             "action_call_id",
+            "input_preview",
             "result_preview_meta",
             "result_preview_sha256",
         )
@@ -6660,28 +6662,49 @@ class AgentTask:
         if action_call_id:
             compact["action_call_id"] = action_call_id
 
+        raw = record.get("raw")
+        if not isinstance(raw, Mapping):
+            raw = {}
         model_digest = record.get("model_digest")
-        if not isinstance(model_digest, Mapping):
-            raw = record.get("raw")
-            if isinstance(raw, Mapping) and isinstance(raw.get("model_digest"), Mapping):
-                model_digest = raw.get("model_digest")
-        digest = model_digest if isinstance(model_digest, Mapping) else record
+        if not isinstance(model_digest, Mapping) or not model_digest:
+            raw_model_digest = raw.get("model_digest")
+            if isinstance(raw_model_digest, Mapping) and raw_model_digest:
+                model_digest = raw_model_digest
+        digest = model_digest if isinstance(model_digest, Mapping) and model_digest else (raw or record)
 
         result_preview = digest.get("result_preview") if isinstance(digest, Mapping) else None
         if result_preview is None and isinstance(record.get("result_preview"), (Mapping, Sequence, str)):
             result_preview = record.get("result_preview")
+        if result_preview is None and isinstance(digest, Mapping):
+            for key in ("data", "result", "output"):
+                fallback_preview = digest.get(key)
+                if fallback_preview is not None:
+                    result_preview = fallback_preview
+                    break
         if result_preview is not None:
             compact["result_preview"] = cls._compact_action_preview_value(result_preview, max_chars=5200)
         result_preview_meta = digest.get("result_preview_meta") if isinstance(digest, Mapping) else None
         if result_preview_meta is None:
             result_preview_meta = record.get("result_preview_meta")
+        if result_preview_meta is None and isinstance(result_preview, Mapping):
+            result_preview_meta = {
+                key: result_preview.get(key)
+                for key in ("chars", "bytes", "sha256", "truncated", "read_bytes")
+                if key in result_preview
+            }
         if result_preview_meta is not None:
             compact["result_preview_meta"] = cls._compact_verifier_prompt_value(result_preview_meta, max_chars=500)
+
+        input_preview = record.get("input") or record.get("kwargs") or raw.get("input") or raw.get("kwargs")
+        if input_preview:
+            compact["input_preview"] = cls._compact_verifier_prompt_value(input_preview, max_chars=500)
 
         for key in ("artifact_refs", "file_refs"):
             value = digest.get(key) if isinstance(digest, Mapping) else None
             if value is None:
                 value = record.get(key)
+            if value is None and raw:
+                value = raw.get(key)
             if key == "artifact_refs" and isinstance(value, list):
                 compact[key] = [cls._compact_artifact_ref_for_verifier(ref) for ref in value[:8]]
                 if len(value) > 8:
