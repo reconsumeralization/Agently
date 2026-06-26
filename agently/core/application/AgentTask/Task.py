@@ -1702,7 +1702,7 @@ class AgentTask:
                 "scope": {"strategy_phase": "agent_task_workspace_artifact_draft"},
             },
             limits=self._child_execution_limits(),
-            options=self.options,
+            options=self._child_execution_options(),
         )
         draft_execution.route_policy(
             {
@@ -1900,7 +1900,7 @@ class AgentTask:
                     },
                 },
                 limits=self._child_execution_limits(),
-                options=self.options,
+                options=self._child_execution_options(),
             )
             self._bind_action_workspace(execution)
             if readback_records:
@@ -3835,7 +3835,7 @@ class AgentTask:
                 "scope": {"strategy_phase": "agent_task_execution_step"},
             },
             limits=self._child_execution_limits(),
-            options=self.options,
+            options=self._child_execution_options(),
         )
         self._bind_action_workspace(execution)
         step_execution = self._configure_step_execution(execution, plan)
@@ -3908,8 +3908,13 @@ class AgentTask:
         )
         stream_task = asyncio.create_task(self._bridge_step_execution_stream(iteration_index, execution))
         try:
-            result = await self._await_task_request(execution.async_get_data(), stage="execution")
-            meta = await self._await_task_request(execution.async_get_meta(), stage="execution_meta")
+            # The child AgentExecution owns its own model/action/resource idle
+            # limits. AgentTask must not reinterpret request_timeout_seconds as a
+            # hard cap for the whole nested execution stream, otherwise a
+            # still-progressing Search/Browse/Action step can be cancelled by
+            # the parent before the child runtime reports its own status.
+            result = await execution.async_get_data()
+            meta = await execution.async_get_meta()
             await stream_task
         except Exception as error:
             if not stream_task.done():
@@ -5180,12 +5185,17 @@ class AgentTask:
         return None
 
     def _child_execution_limits(self) -> dict[str, Any]:
-        limits: dict[str, Any] = dict(self.limits)
-        if limits.get("max_no_progress_seconds") is None:
-            request_timeout = self._task_request_timeout()
-            if request_timeout is not None:
-                limits["max_no_progress_seconds"] = request_timeout
-        return limits
+        return dict(self.limits)
+
+    def _child_execution_options(self) -> dict[str, Any]:
+        options = dict(self.options)
+        options.pop("request_timeout_seconds", None)
+        agent_task_options = options.get("agent_task")
+        if isinstance(agent_task_options, dict):
+            filtered_agent_task_options = dict(agent_task_options)
+            filtered_agent_task_options.pop("request_timeout_seconds", None)
+            options["agent_task"] = filtered_agent_task_options
+        return options
 
     def _task_max_seconds(self) -> float | None:
         return self._normalize_timeout(self.limits.get("max_seconds"))

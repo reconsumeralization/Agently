@@ -544,6 +544,52 @@ class MockFlatActionPlanningStallRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockFlatActionPlanningSlowRequester(MockAgentExecutionRequester):
+    name = "MockFlatActionPlanningSlowRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "actions",
+                "step_instruction": "Use the probe action.",
+                "expected_evidence": "probe action result",
+                "rationale": "The task needs action evidence.",
+            }
+        elif "next_action" in text and "execution_commands" in text:
+            await asyncio.sleep(0.35)
+            payload = {
+                "next_action": "execute",
+                "execution_commands": [
+                    {
+                        "purpose": "Collect probe action evidence.",
+                        "action_id": "probe_action",
+                        "action_input": {},
+                    }
+                ],
+            }
+        elif "[ACTION RESULTS]" in text:
+            payload = {
+                "step_result": "action evidence collected",
+                "evidence": ["probe_action executed"],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "action evidence is present",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "flat action accepted result",
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockWorkspaceArtifactDraftStallRequester(MockAgentExecutionRequester):
     name = "MockWorkspaceArtifactDraftStallRequester"
 
@@ -1158,6 +1204,13 @@ def _create_flat_action_planning_stall_agent(name: str = "agent-execution-flat-a
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def _create_flat_action_planning_slow_agent(name: str = "agent-execution-flat-action-planning-slow"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockFlatActionPlanningSlowRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
 def _create_workspace_artifact_draft_stall_agent(name: str = "agent-execution-artifact-draft-stall"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -1399,8 +1452,8 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
 
 
 @pytest.mark.asyncio
-async def test_flat_action_planning_timeout_returns_structured_failure(tmp_path):
-    agent = _create_flat_action_planning_stall_agent("execution-flat-action-planning-timeout").use_workspace(
+async def test_flat_request_timeout_does_not_cancel_progressing_child_execution(tmp_path):
+    agent = _create_flat_action_planning_slow_agent("execution-flat-action-planning-slow").use_workspace(
         tmp_path / "workspace"
     )
 
@@ -1422,6 +1475,37 @@ async def test_flat_action_planning_timeout_returns_structured_failure(tmp_path)
         .use_actions(["probe_action"])
     )
 
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert result["final_result"] == "flat action accepted result"
+    assert not task_meta["diagnostics"].get("execution_errors")
+
+
+@pytest.mark.asyncio
+async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_path):
+    agent = _create_flat_action_planning_stall_agent("execution-flat-action-planning-timeout").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    @agent.action_func
+    def probe_action() -> dict[str, str]:
+        return {"status": "ok"}
+
+    execution = (
+        agent.create_task(
+            goal="Collect action evidence.",
+            success_criteria=["The probe action executes."],
+            execution="flat",
+            max_iterations=1,
+            limits={"max_no_progress_seconds": 0.2},
+        )
+        .use_actions(["probe_action"])
+    )
+
     started_at = asyncio.get_running_loop().time()
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
@@ -1432,8 +1516,12 @@ async def test_flat_action_planning_timeout_returns_structured_failure(tmp_path)
     assert elapsed < 2
     assert result["status"] == "max_iterations"
     assert result["accepted"] is False
-    assert execution_error["type"] == "_AgentTaskDeadlineExceeded"
-    assert "AgentTask execution request timed out" in execution_error["message"]
+    assert execution_error["type"] != "_AgentTaskDeadlineExceeded"
+    assert (
+        "max_no_progress_seconds" in execution_error["message"]
+        or "no progress" in execution_error["message"]
+        or "stalled" in execution_error["message"]
+    )
     assert task_meta["iterations"][0]["execution_meta"]["status"] == "failed"
     assert task_meta["iterations"][0]["verification"]["is_complete"] is False
 
