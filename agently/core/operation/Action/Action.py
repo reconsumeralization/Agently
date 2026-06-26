@@ -133,6 +133,7 @@ class Action:
         self.action_settings.setdefault("loop.max_rounds", 5)
         self.action_settings.setdefault("loop.concurrency", None)
         self.action_settings.setdefault("loop.timeout", None)
+        self.action_settings.setdefault("loop.max_consecutive_failed_rounds_per_action", 2)
         self.action_settings.setdefault("protocol", "structured_plan")
         self.action_settings.setdefault("planning_model_key", None)
         self.action_settings.setdefault("policy.global", {})
@@ -142,6 +143,7 @@ class Action:
         self.tool_settings.setdefault("loop.max_rounds", 5)
         self.tool_settings.setdefault("loop.concurrency", None)
         self.tool_settings.setdefault("loop.timeout", None)
+        self.tool_settings.setdefault("loop.max_consecutive_failed_rounds_per_action", 2)
 
         self.action_registry = ActionRegistry(name="ActionRegistry")
         self.action_dispatcher = ActionDispatcher(self.action_registry, self.settings)

@@ -964,11 +964,16 @@ class BaseAgent:
         if workspace is not None:
             cast(Any, self).use_workspace(workspace)
         normalized_execution = AgentTask.normalize_execution_strategy(execution)
+        resolved_task_id = task_id or f"agent_task_{uuid.uuid4().hex}"
         resolved_options = dict(options or {})
+        agent_task_options = dict(resolved_options.get("agent_task") or {})
+        scoped_workspace_action_ids: list[str] = []
+        if bool(agent_task_options.get("enable_workspace_readback_actions")):
+            scoped_workspace_action_ids = self._enable_task_workspace_read_actions(resolved_task_id)
         language_policy = self.settings.get("agent.language_policy", None)
         if isinstance(language_policy, Mapping):
-            agent_task_options = dict(resolved_options.get("agent_task") or {})
             agent_task_options.setdefault("language_policy", dict(language_policy))
+        if agent_task_options:
             resolved_options["agent_task"] = agent_task_options
         task_options = {
             "goal": goal,
@@ -981,18 +986,58 @@ class BaseAgent:
             "context_budget": context_budget,
             "limits": limits,
             "options": resolved_options if resolved_options else options,
-            "task_id": task_id,
+            "task_id": resolved_task_id,
         }
         agent_execution = self.create_execution(
-            lineage={"task_id": task_id} if task_id is not None else None,
+            lineage={"task_id": resolved_task_id},
             options={
                 "strategy": "task",
                 "task": {key: value for key, value in task_options.items() if value is not None},
             },
         )
+        if scoped_workspace_action_ids:
+            agent_execution.use_actions(scoped_workspace_action_ids)
         agent_execution.goal(goal, success_criteria)
         agent_execution.workspace = getattr(self, "workspace", None)
         return agent_execution
+
+    def _enable_task_workspace_read_actions(self, task_id: str) -> list[str]:
+        workspace = getattr(self, "workspace", None)
+        with_scope_node = getattr(workspace, "with_scope_node", None)
+        enable = getattr(self, "enable_workspace_file_actions", None)
+        if not callable(with_scope_node) or not callable(enable):
+            return []
+        try:
+            task_workspace = with_scope_node(
+                "tasks",
+                task_id,
+                scope={"task_id": task_id},
+                search_scope={"task_id": task_id},
+            )
+            files_root = getattr(task_workspace, "files_root", None)
+            if files_root is None:
+                return []
+            enable(
+                root=files_root,
+                read=True,
+                write=False,
+                search=True,
+                list_files=True,
+                expose_to_model=True,
+                max_file_bytes=50000,
+                max_search_file_bytes=200000,
+                desc=(
+                    "Read files written by this AgentTask, including trusted "
+                    "Workspace deliverables and bounded evidence readbacks."
+                ),
+            )
+        except Exception:
+            return []
+        registry = getattr(getattr(self, "action", None), "action_registry", None)
+        has_action = getattr(registry, "has", None)
+        if not callable(has_action):
+            return []
+        return [action_id for action_id in ("list_files", "read_file", "search_files") if has_action(action_id)]
 
     async def async_resume(
         self,

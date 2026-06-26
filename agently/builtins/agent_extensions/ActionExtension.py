@@ -55,10 +55,12 @@ class ActionExtension(BaseAgent):
         self.settings.setdefault("action.loop.max_rounds", 5, inherit=True)
         self.settings.setdefault("action.loop.concurrency", None, inherit=True)
         self.settings.setdefault("action.loop.timeout", None, inherit=True)
+        self.settings.setdefault("action.loop.max_consecutive_failed_rounds_per_action", 2, inherit=True)
         self.settings.setdefault("action.loop.enabled", True, inherit=True)
         self.settings.setdefault("tool.loop.max_rounds", 5, inherit=True)
         self.settings.setdefault("tool.loop.concurrency", None, inherit=True)
         self.settings.setdefault("tool.loop.timeout", None, inherit=True)
+        self.settings.setdefault("tool.loop.max_consecutive_failed_rounds_per_action", 2, inherit=True)
         self.settings.setdefault("tool.loop.enabled", True, inherit=True)
         self.settings.setdefault("execution_resource.owner_id", self.name, inherit=False)
 

@@ -260,6 +260,12 @@ structured planning 和 native tool-call selection。如果 loop 不能在 deadl
 `action_runtime.native_tool_calls.empty`。host 应把它当作 planning evidence，
 而不是已执行工作。
 
+当连续 action rounds 反复选择同一批失败 action id，并且这些记录都没有产生进展时，
+默认的 `TriggerFlowActionFlow` 会关闭当前 bounded action step，返回已经获得的失败
+evidence。默认阈值是 `action.loop.max_consecutive_failed_rounds_per_action = 2`
+（`tool.loop...` 仍作为兼容别名）。这不是任务预算；上层 owner，例如
+AgentTask，可以基于这些结构化失败记录继续 verify、replan 或 block。
+
 ## handler 接口
 
 如果你写自定义 `ActionRuntime` 或 `ActionFlow` 插件，规划与执行 handler 用稳定的双参数契约：

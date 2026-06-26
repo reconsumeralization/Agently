@@ -280,6 +280,14 @@ calls, Agently emits a skipped diagnostic action record with code
 `action_runtime.native_tool_calls.empty`. Host code should treat that diagnostic
 as planning evidence, not as executed work.
 
+When consecutive rounds select the same failing action ids and none of those
+records shows progress, the default `TriggerFlowActionFlow` closes the current
+bounded action step and returns the failure evidence it already has. The default
+threshold is `action.loop.max_consecutive_failed_rounds_per_action = 2`
+(`tool.loop...` remains a compatibility alias). This is not a task budget; a
+higher-level owner such as AgentTask can then verify, replan, or block from the
+structured failure records.
+
 ## Handler interface
 
 If you're writing a custom `ActionRuntime` or `ActionFlow` plugin, the planning and execution handlers use one stable two-argument contract:

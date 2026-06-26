@@ -253,6 +253,22 @@ Return a short structured answer for the task step contract.
     )
 
 
+def _taskboard_verification_payload(final_result: str = "taskboard accepted result") -> dict[str, Any]:
+    return {
+        "is_complete": True,
+        "requires_block": False,
+        "reason": "TaskBoard final evidence satisfies the success criteria.",
+        "failure_analysis": "",
+        "acceptance_delta": [],
+        "missing_criteria": [],
+        "repair_constraints": [],
+        "next_step_requirements": [],
+        "replan_instruction": "",
+        "final_result_required": True,
+        "final_result": final_result,
+    }
+
+
 def _install_site_skill(tmp_path: Path) -> Path:
     skill_root = tmp_path / "skill-pack" / "skills" / "website-builder"
     skill_root.mkdir(parents=True, exist_ok=True)
@@ -765,6 +781,8 @@ class MockTaskBoardRequester(MockAgentExecutionRequester):
                 "final_result": "taskboard accepted result",
                 "missing_criteria": [],
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload("taskboard accepted result")
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -820,6 +838,8 @@ class MockTaskBoardControlRequester(MockAgentExecutionRequester):
                 "final_result": "# Control Result",
                 "missing_criteria": [],
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload("# Control Result")
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -888,6 +908,8 @@ class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
                 "final_result": "# Sectioned Report",
                 "missing_criteria": [],
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload("# Sectioned Report")
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -947,6 +969,8 @@ class MockTaskBoardFinalCandidateRequester(MockAgentExecutionRequester):
                 "final_result": self.full_report[:120],
                 "missing_criteria": [],
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload(self.full_report)
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -993,6 +1017,8 @@ class MockTaskBoardSlowCardRequester(MockAgentExecutionRequester):
                 "final_result": "unexpected final",
                 "missing_criteria": [],
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload("unexpected final")
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -1047,6 +1073,8 @@ class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
                 "final_result": "taskboard retry accepted result",
                 "missing_criteria": [],
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload("taskboard retry accepted result")
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -1164,6 +1192,8 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                 "final_result": "taskboard readback accepted result",
                 "missing_criteria": [],
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload("taskboard readback accepted result")
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)

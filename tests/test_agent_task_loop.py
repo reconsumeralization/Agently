@@ -143,6 +143,9 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
     assert delivered["file_refs"][0]["source"] == "test.workspace_artifact"
     assert delivered["artifact_manifest"]["sha256"] == delivered["file_refs"][0]["sha256"]
     assert delivered["diagnostics"][0]["code"] == "agent_task.workspace_artifact.untrusted_model_file_refs"
+    assert delivered["artifact_markdown"].startswith("Workspace artifact delivered at reports/final.md")
+    assert delivered["artifact_preview"].startswith("# Actual Report")
+    assert delivered["workspace_artifact_content_omitted"][0]["field"] == "artifact_markdown"
     assert execution_meta["logs"]["artifact_refs"][0]["path"] == "reports/final.md"
     assert execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"] == "reports/final.md"
 
@@ -171,6 +174,62 @@ async def test_agent_task_workspace_artifact_delivery_prefers_complete_body(tmp_
     assert written == full_body
     assert delivered["workspace_artifact_delivery"]["content_key"] == "answer"
     assert delivered["file_refs"][0]["bytes"] == len(full_body.encode("utf-8"))
+    assert delivered["answer"].startswith("Workspace artifact delivered at reports/final.md")
+    assert delivered["artifact_preview"].startswith("# Complete Report")
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_compacts_manifest_sections(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-compact-manifest")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-compact-manifest"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    long_section = "Section body.\n" * 500
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {
+                "path": "reports/final.md",
+                "sections": [
+                    {"id": "overview", "title": "Overview", "content": long_section},
+                    "raw section text\n" * 200,
+                ],
+            },
+        },
+        plan={"deliverable_mode": "sectioned_workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact",
+    )
+
+    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    assert "Section body." in written
+    first_section = delivered["artifact_manifest"]["sections"][0]
+    second_section = delivered["artifact_manifest"]["sections"][1]
+    assert "content" not in first_section
+    assert first_section["omitted_content"][0]["field"] == "content"
+    assert second_section["content_omitted"] is True
+    assert delivered["artifact_preview"].startswith("## Overview")
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_does_not_write_plain_answer_without_mode(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-no-implicit-answer")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-no-implicit-answer"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    delivered = await task._deliver_workspace_artifact(
+        {"answer": "This is a control-card summary, not a deliverable body."},
+        plan={},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact",
+    )
+
+    assert delivered["answer"] == "This is a control-card summary, not a deliverable body."
+    assert delivered.get("file_refs") == []
+    assert not (workspace.files_root / "final.md").exists()
 
 
 @pytest.mark.asyncio
@@ -449,6 +508,39 @@ def test_agent_language_policy_normalizes_and_reaches_execution_prompt():
     assert execution_policy["language"] == "zh-CN"
     assert execution_policy["accept_language"].startswith("zh-CN")
     assert "Language policy" in execution.request.prompt.to_text()
+
+
+@pytest.mark.asyncio
+async def test_agent_create_task_exposes_scoped_workspace_readback_actions(tmp_path):
+    task_id = "workspace-readback-task"
+    agent = _create_agent("agent-task-scoped-workspace-actions")
+
+    execution = agent.create_task(
+        task_id=task_id,
+        goal="Create and verify a workspace deliverable.",
+        success_criteria=["final.md can be read back."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={"agent_task": {"enable_workspace_readback_actions": True}},
+    )
+
+    assert {"list_files", "read_file", "search_files"}.issubset(set(execution.local_action_ids))
+
+    scoped_workspace = agent.workspace.with_scope_node(
+        "tasks",
+        task_id,
+        scope={"task_id": task_id},
+        search_scope={"task_id": task_id},
+    )
+    await scoped_workspace.write_file("final.md", "# Scoped Deliverable\n")
+
+    read_result = await agent.action.async_execute_action("read_file", {"path": "final.md"})
+
+    data = read_result.get("data")
+    assert read_result.get("status") == "success"
+    assert isinstance(data, dict)
+    assert data.get("path") == "final.md"
+    assert "Scoped Deliverable" in str(data.get("content") or "")
 
 
 @pytest.mark.asyncio

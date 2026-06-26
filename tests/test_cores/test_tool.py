@@ -728,6 +728,76 @@ async def test_tool_plan_execute_loop_with_trigger_flow():
 
 
 @pytest.mark.asyncio
+async def test_action_loop_stops_after_repeated_failed_action_rounds():
+    action = Agently.action
+    tag = f"failed-action-convergence-{ uuid.uuid4().hex }"
+    action_id = f"unstable_search_{ uuid.uuid4().hex[:8] }"
+    action.register_action(
+        action_id=action_id,
+        desc="Unstable search backend.",
+        kwargs={"query": (str, "Search query.")},
+        func=lambda query: query,
+        tags=[tag],
+    )
+    prompt = Agently.create_prompt()
+    prompt.set("input", "find official source")
+    plan_rounds: list[int] = []
+
+    async def plan_handler(context, request):
+        _ = request
+        round_index = int(context["round_index"])
+        plan_rounds.append(round_index)
+        return cast(ActionDecision, {
+            "next_action": "execute",
+            "use_action": True,
+            "action_calls": [
+                {
+                    "purpose": "try unstable search",
+                    "action_id": action_id,
+                    "action_input": {"query": f"query {round_index}"},
+                    "todo_suggestion": "continue",
+                }
+            ],
+        })
+
+    async def execution_handler(context, request):
+        _ = context
+        return [
+            {
+                "purpose": "try unstable search",
+                "action_id": command.get("action_id"),
+                "tool_name": command.get("action_id"),
+                "kwargs": command.get("action_input", {}),
+                "success": False,
+                "status": "error",
+                "result": None,
+                "data": None,
+                "error": "backend unavailable",
+            }
+            for command in request.get("action_calls", [])
+        ]
+
+    try:
+        records = await action.async_plan_and_execute(
+            prompt=prompt,
+            settings=Agently.settings,
+            action_list=action.get_action_list(tags=[tag]),
+            agent_name="failed-action-convergence-test",
+            planning_handler=plan_handler,  # type: ignore[arg-type]
+            action_execution_handler=execution_handler,  # type: ignore[arg-type]
+            max_rounds=5,
+            timeout=5,
+        )
+    finally:
+        action.unregister_action(action_id)
+
+    assert plan_rounds == [0, 1]
+    assert len(records) == 2
+    assert all(record.get("action_id") == action_id for record in records)
+    assert all(record.get("status") == "error" for record in records)
+
+
+@pytest.mark.asyncio
 async def test_action_generate_native_tool_calls_matches_structured(monkeypatch):
     action = Agently.action
     tag = f"native-tool-call-{ uuid.uuid4().hex }"

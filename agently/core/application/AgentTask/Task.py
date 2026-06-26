@@ -118,6 +118,14 @@ _TASKBOARD_READBACK_PREVIEW_CHARS = 4000
 _TASKBOARD_PROMPT_RESULT_CHARS = 1600
 _TASKBOARD_STREAM_SUMMARY_CHARS = 3000
 _WORKSPACE_ARTIFACT_PREVIEW_BYTES = 4000
+_WORKSPACE_ARTIFACT_CONTENT_KEYS = ("content", "markdown", "body", "text")
+_WORKSPACE_ARTIFACT_RESULT_BODY_KEYS = (
+    "artifact_markdown",
+    "artifact_html",
+    "candidate_final_result",
+    "final_result",
+    "answer",
+)
 
 # Upper bound on the in-memory stream replay buffer for late subscribers.
 _STREAM_REPLAY_LIMIT = 5000
@@ -1022,7 +1030,7 @@ class AgentTask:
                 return data.get_state("final_result", inherit=False)
             revision = _unpack_revision_state(data)
             try:
-                result = await self._finalize_taskboard(revision)
+                result = await self._finalize_taskboard(revision, context_pack=context_pack)
             except _AgentTaskDeadlineExceeded as error:
                 result = await self._terminate_timed_out(
                     self.max_iterations,
@@ -1051,7 +1059,7 @@ class AgentTask:
             revision = TaskBoardRevision.from_value(json.loads(raw_revision))
         else:
             revision = TaskBoardRevision.from_value(board.revision)
-        return await self._finalize_taskboard(revision)
+        return await self._finalize_taskboard(revision, context_pack=context_pack)
 
     async def _request_taskboard_plan(self, context_pack: "WorkspaceContextPackage"):
         policy = resolve_task_board_planning_policy(
@@ -1360,6 +1368,112 @@ class AgentTask:
         return refs
 
     @classmethod
+    def _compact_workspace_artifact_manifest_for_hot_path(
+        cls,
+        manifest: Mapping[str, Any] | None,
+        *,
+        trusted_refs: list[dict[str, Any]],
+        source: str,
+    ) -> dict[str, Any]:
+        compact = dict(manifest or {})
+        for key in _WORKSPACE_ARTIFACT_CONTENT_KEYS:
+            value = compact.pop(key, None)
+            if isinstance(value, str) and value:
+                compact.setdefault("omitted_content", []).append(
+                    {
+                        "field": key,
+                        "chars": len(value),
+                        "reason": "workspace_artifact_hot_path",
+                    }
+                )
+        sections = compact.get("sections")
+        if isinstance(sections, Sequence) and not isinstance(sections, str | bytes | bytearray):
+            compact_sections: list[Any] = []
+            for index, section in enumerate(sections):
+                if isinstance(section, str):
+                    compact_sections.append(
+                        {
+                            "index": index,
+                            "content_omitted": True,
+                            "chars": len(section),
+                            "reason": "workspace_artifact_hot_path",
+                        }
+                    )
+                    continue
+                if not isinstance(section, Mapping):
+                    compact_sections.append(DataFormatter.sanitize(section))
+                    continue
+                section_compact = dict(section)
+                for key in _WORKSPACE_ARTIFACT_CONTENT_KEYS:
+                    value = section_compact.pop(key, None)
+                    if isinstance(value, str) and value:
+                        section_compact.setdefault("omitted_content", []).append(
+                            {
+                                "field": key,
+                                "chars": len(value),
+                                "reason": "workspace_artifact_hot_path",
+                            }
+                        )
+                compact_sections.append(section_compact)
+            compact["sections"] = compact_sections
+        if trusted_refs:
+            ref = trusted_refs[0]
+            compact.update(
+                {
+                    "path": ref.get("path"),
+                    "bytes": ref.get("bytes"),
+                    "sha256": ref.get("sha256"),
+                    "file_refs": trusted_refs,
+                    "source": source,
+                }
+            )
+        return DataFormatter.sanitize(compact)
+
+    @classmethod
+    def _compact_workspace_artifact_result_for_hot_path(
+        cls,
+        result: dict[str, Any],
+        *,
+        content_key: str,
+        content: str,
+        trusted_refs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not trusted_refs:
+            return result
+        ref = trusted_refs[0]
+        path = str(ref.get("path") or "")
+        replacement = (
+            f"Workspace artifact delivered at {path}; full content is available through file_refs/readback."
+        )
+        omitted: list[dict[str, Any]] = []
+        for key in _WORKSPACE_ARTIFACT_RESULT_BODY_KEYS:
+            value = result.get(key)
+            if isinstance(value, str) and value:
+                result[key] = replacement
+                omitted.append(
+                    {
+                        "field": key,
+                        "chars": len(value),
+                        "reason": "workspace_artifact_hot_path",
+                    }
+                )
+        if content and content_key and content_key not in {item["field"] for item in omitted}:
+            omitted.append(
+                {
+                    "field": content_key,
+                    "chars": len(content),
+                    "reason": "workspace_artifact_hot_path",
+                }
+            )
+        if omitted:
+            result["workspace_artifact_content_omitted"] = omitted
+        preview = str(ref.get("preview") or "")
+        if preview:
+            result["artifact_preview"] = preview
+            result["artifact_preview_truncated"] = bool(ref.get("truncated"))
+        return result
+
+    @classmethod
     def _workspace_artifact_delivery_mode(cls, result: Any) -> str:
         if not isinstance(result, Mapping):
             return ""
@@ -1371,6 +1485,22 @@ class AgentTask:
             if isinstance(value, str) and value.strip():
                 return "workspace_artifact"
         return ""
+
+    @staticmethod
+    def _taskboard_context_card_is_leaf(context: Any) -> bool:
+        card = getattr(context, "card", None)
+        card_id = str(getattr(card, "id", "") or "").strip()
+        if not card_id:
+            return False
+        revision = getattr(context, "revision", None)
+        graph = getattr(revision, "graph", None)
+        cards = list(getattr(graph, "cards", []) or [])
+        if not cards:
+            return True
+        depended_on: set[str] = set()
+        for item in cards:
+            depended_on.update(str(dep_id) for dep_id in getattr(item, "depends_on", ()) or ())
+        return card_id not in depended_on
 
     @staticmethod
     def _append_workspace_artifact_meta(execution_meta: Mapping[str, Any] | None, refs: list[dict[str, Any]]) -> None:
@@ -1436,6 +1566,14 @@ class AgentTask:
             manifest_dict,
             deliverable_mode=deliverable_mode,
         )
+        prefer_stream_draft = bool((plan or {}).get("prefer_stream_draft"))
+        if prefer_stream_draft and content_key == "answer":
+            content = ""
+            content_key = ""
+        if not deliverable_mode and content_key == "answer":
+            if diagnostics:
+                result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            return DataFormatter.sanitize(result)
         path = self._workspace_artifact_manifest_path(manifest_dict)
         if (
             not content
@@ -1464,7 +1602,17 @@ class AgentTask:
                     }
                 )
                 result["file_refs"] = trusted_refs
-                result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
+                result = self._compact_workspace_artifact_result_for_hot_path(
+                    result,
+                    content_key="streamed_workspace_artifact",
+                    content="",
+                    trusted_refs=trusted_refs,
+                )
+                result["artifact_manifest"] = self._compact_workspace_artifact_manifest_for_hot_path(
+                    manifest_dict,
+                    trusted_refs=trusted_refs,
+                    source=source,
+                )
                 result["workspace_artifact_delivery"] = DataFormatter.sanitize(stream_delivery)
                 diagnostics.append(
                     {
@@ -1534,7 +1682,17 @@ class AgentTask:
                     "source": source,
                 }
             )
-            result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
+            result = self._compact_workspace_artifact_result_for_hot_path(
+                result,
+                content_key=content_key,
+                content=content,
+                trusted_refs=trusted_refs,
+            )
+            result["artifact_manifest"] = self._compact_workspace_artifact_manifest_for_hot_path(
+                manifest_dict,
+                trusted_refs=trusted_refs,
+                source=source,
+            )
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
             self._append_workspace_artifact_meta(execution_meta, trusted_refs)
@@ -1602,7 +1760,17 @@ class AgentTask:
                 "source": source,
             }
         )
-        result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
+        result = self._compact_workspace_artifact_result_for_hot_path(
+            result,
+            content_key=content_key,
+            content=content,
+            trusted_refs=trusted_refs,
+        )
+        result["artifact_manifest"] = self._compact_workspace_artifact_manifest_for_hot_path(
+            manifest_dict,
+            trusted_refs=trusted_refs,
+            source=source,
+        )
         result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
         if diagnostics:
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
@@ -1671,11 +1839,22 @@ class AgentTask:
         if not candidates:
             return "", ""
         if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
-            # The Workspace file is the trusted deliverable. If the model emits a
-            # short display placeholder in artifact_markdown and the full body in
-            # answer/candidate_final_result, write the complete body instead.
-            key, content = max(candidates, key=lambda item: len(item[1]))
-            return content, key
+            explicit_candidates = [
+                item
+                for item in candidates
+                if item[0] in {"artifact_manifest", "artifact_markdown", "artifact_html", "candidate_final_result", "final_result"}
+            ]
+            answer_candidates = [item for item in candidates if item[0] == "answer"]
+            if explicit_candidates:
+                key, content = max(explicit_candidates, key=lambda item: len(item[1]))
+                if answer_candidates:
+                    answer_key, answer_content = max(answer_candidates, key=lambda item: len(item[1]))
+                    if len(answer_content) >= max(len(content) * 2, len(content) + 64):
+                        return answer_content, answer_key
+                return content, key
+            if answer_candidates:
+                key, content = max(answer_candidates, key=lambda item: len(item[1]))
+                return content, key
         for preferred_key in ("artifact_manifest", "artifact_markdown", "artifact_html", "candidate_final_result", "final_result", "answer"):
             for key, content in candidates:
                 if key == preferred_key:
@@ -1945,10 +2124,10 @@ class AgentTask:
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
                 "evidence is truly critical. If this card produces the user-facing deliverable, use candidate_final_result, "
                 "final_result, or artifact_markdown only when the complete body is short enough for the bounded output. "
-                "For long reports, exam papers, or multi-section deliverables, prefer artifact_manifest with "
-                "sections/content so the JSON stays a control plane instead of a giant body field; each section "
-                "should carry title/content and the manifest should include path='final.md' unless a more specific "
-                "deliverable path is required. "
+                "For long reports, exam papers, or multi-section deliverables, return only an artifact_manifest "
+                "with path='final.md' and section ids/titles/brief intent; do not include full section content in "
+                "artifact_manifest, artifact_markdown, candidate_final_result, final_result, or answer. AgentTask "
+                "will stream the long body into Workspace and read it back. "
                 "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
                 "for deliverables. Review or "
                 "verification cards must not put review notes in those deliverable fields unless they include the "
@@ -1971,7 +2150,7 @@ class AgentTask:
                     ),
                     "artifact_markdown": (
                         str,
-                        "Bounded short markdown deliverable only; use artifact_manifest.sections for long reports or exams",
+                        "Bounded short markdown deliverable only; for long reports or exams return an artifact_manifest outline without full section content",
                         False,
                     ),
                     "artifact_manifest": (
@@ -2132,9 +2311,10 @@ class AgentTask:
             "'readback' or 'repair' and explain the exact missing refs or gaps instead of inventing facts. "
             "When the card can produce the user-facing deliverable, use artifact_markdown, candidate_final_result, "
             "or final_result only when the complete body is short enough for the bounded output. For sectioned or "
-            "long artifacts, prefer artifact_manifest with sections/content so JSON remains the control plane; each "
-            "section should carry title/content and the manifest should include path='final.md' unless a more "
-            "specific deliverable path is required. "
+            "long artifacts, return only an artifact_manifest with path='final.md' plus section ids/titles/brief "
+            "intent; do not include full section content in artifact_manifest, artifact_markdown, "
+            "candidate_final_result, final_result, or answer. AgentTask will stream the long body into Workspace "
+            "and read it back. "
             "AgentTask will write/read back Workspace files and produce "
             "trusted file_refs. Do not invent file_refs for deliverables. If the task is source-grounded, include "
             "the concrete source URLs, file paths, or evidence refs used by the deliverable in the deliverable body; "
@@ -2158,7 +2338,7 @@ class AgentTask:
                 ),
                 "artifact_markdown": (
                     str,
-                    "Bounded short markdown deliverable only; use artifact_manifest.sections for long reports or exams",
+                    "Bounded short markdown deliverable only; for long reports or exams return an artifact_manifest outline without full section content",
                     False,
                 ),
                 "artifact_manifest": (
@@ -2202,9 +2382,31 @@ class AgentTask:
                 error=error,
                 execution_id=None,
             )
+        required_deliverables = self._required_workspace_deliverables()
+        deliverable_mode = self._workspace_artifact_delivery_mode(card_output)
+        prefer_stream_draft = False
+        if (
+            not deliverable_mode
+            and required_deliverables
+            and self._taskboard_context_card_is_leaf(context)
+            and isinstance(card_output, Mapping)
+        ):
+            deliverable_mode = "sectioned_workspace_artifact"
+            prefer_stream_draft = True
+            card_output = dict(card_output)
+            if not isinstance(card_output.get("artifact_manifest"), Mapping):
+                card_output["artifact_manifest"] = {
+                    "path": required_deliverables[0],
+                    "sections": [
+                        {"id": "deliverable", "title": "Required deliverable", "intent": "Satisfy the task output contract"}
+                    ],
+                }
         card_output = await self._deliver_workspace_artifact(
             card_output,
-            plan={"deliverable_mode": self._workspace_artifact_delivery_mode(card_output)},
+            plan={
+                "deliverable_mode": deliverable_mode,
+                "prefer_stream_draft": prefer_stream_draft,
+            },
             source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
             context_pack=context_pack,
             card_context=context,
@@ -2545,11 +2747,33 @@ class AgentTask:
             },
         )
 
-    async def _finalize_taskboard(self, revision: Any) -> dict[str, Any]:
+    @classmethod
+    def _taskboard_final_refs_from_evidence_view(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+
+        def collect(value: Any) -> None:
+            if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+                return
+            for item in value:
+                if isinstance(item, Mapping):
+                    refs.append(dict(DataFormatter.sanitize(item)))
+
+        collect(evidence_view.get("artifact_refs"))
+        collect(evidence_view.get("file_refs"))
+        cards = evidence_view.get("cards")
+        if isinstance(cards, Sequence) and not isinstance(cards, str | bytes | bytearray):
+            for card in cards:
+                if not isinstance(card, Mapping):
+                    continue
+                collect(card.get("artifact_refs"))
+                collect(card.get("file_refs"))
+        return cls._dedupe_ref_records(refs)
+
+    async def _finalize_taskboard(self, revision: Any, *, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
         result_status = self._taskboard_terminal_status(revision, schedule)
         evidence_view = build_task_board_evidence_view(revision).to_dict()
-        candidate_final_result = self._taskboard_candidate_final_result(revision)
+        candidate_final_result = await self._taskboard_candidate_final_result_with_readback(revision, evidence_view)
         can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
         if result_status != "completed" and not can_attempt_degraded_final:
             self.status = "blocked" if result_status == "blocked" else "error"
@@ -2579,6 +2803,65 @@ class AgentTask:
         )
         final = self._normalize_taskboard_final_result(final, candidate_final_result)
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
+        final_verification: dict[str, Any] | None = None
+        final_refs = self._taskboard_final_refs_from_evidence_view(evidence_view)
+        if accepted:
+            final_execution_result = {
+                "status": "completed",
+                "accepted": accepted,
+                "final_result": final.get("final_result", ""),
+                "reason": final.get("reason", ""),
+                "missing_criteria": final.get("missing_criteria", []),
+                "file_refs": final_refs,
+                "artifact_refs": final_refs,
+                "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_stream(evidence_view),
+            }
+            final_execution_meta = {
+                "status": "completed",
+                "route": {"selected_route": "agent_task", "execution_strategy": self.execution_strategy},
+                "logs": {"artifact_refs": final_refs},
+                "workspace_refs": {"agent_task_artifacts": final_refs},
+                "diagnostics": {"taskboard_terminal_status": result_status},
+            }
+            try:
+                final_verification = await self._request_verification(
+                    self.max_iterations,
+                    plan={
+                        "execution_shape": "taskboard",
+                        "effective_execution_shape": "taskboard",
+                        "deliverable_mode": "workspace_artifact",
+                        "expected_evidence": "TaskBoard final deliverable and trusted Workspace refs",
+                    },
+                    execution_result=final_execution_result,
+                    execution_meta=final_execution_meta,
+                    context_pack=context_pack,
+                )
+            except Exception as error:
+                final_verification = {
+                    "is_complete": False,
+                    "requires_block": True,
+                    "reason": "TaskBoard final verification failed structurally.",
+                    "failure_analysis": str(error) or error.__class__.__name__,
+                    "acceptance_delta": ["TaskBoard final verification must return structured completion status."],
+                    "missing_criteria": ["TaskBoard final verification did not produce a valid structured result."],
+                    "replan_instruction": "Run a continuation step that produces verifier-readable final evidence.",
+                    "repair_constraints": ["Preserve trusted Workspace refs and final deliverable evidence."],
+                    "next_step_requirements": ["Return structured verification fields."],
+                    "final_result_required": True,
+                    "final_result": "",
+                    "guard_reasons": ["taskboard_final_verification_error"],
+                    "error": {"type": error.__class__.__name__, "message": str(error)},
+                }
+            missing_deliverables = await self._missing_required_workspace_deliverables()
+            if missing_deliverables:
+                self._guard_missing_required_deliverables(final_verification, missing_deliverables)
+            if not bool(final_verification.get("is_complete")):
+                accepted = False
+                final = dict(final)
+                final["accepted"] = False
+                final["reason"] = final_verification.get("reason") or "TaskBoard final verification failed."
+                final["missing_criteria"] = final_verification.get("missing_criteria", [])
+                final["final_result"] = final_verification.get("final_result") or final.get("final_result", "")
         self.status = "completed" if accepted else "blocked"
         self.result = {
             "status": self.status,
@@ -2595,6 +2878,7 @@ class AgentTask:
                 "evidence_view": evidence_view,
                 "terminal_status": result_status,
                 "degraded_finalization_attempted": result_status != "completed",
+                "final_verification": final_verification,
             },
         }
         await self._record_phase(
@@ -2700,6 +2984,93 @@ class AgentTask:
         if leaf_fallback_candidates:
             return max(leaf_fallback_candidates, key=len, default="")
         return max(fallback_candidates, key=len, default="")
+
+    async def _taskboard_candidate_final_result_with_readback(
+        self,
+        revision: Any,
+        evidence_view: Mapping[str, Any],
+    ) -> str:
+        hot_candidate = self._taskboard_candidate_final_result(revision)
+        readback_candidate = await self._taskboard_workspace_candidate_from_refs(evidence_view)
+        if not readback_candidate:
+            return hot_candidate
+        if (
+            not hot_candidate
+            or len(readback_candidate) > len(hot_candidate)
+            or self._looks_like_workspace_artifact_placeholder(hot_candidate)
+        ):
+            return readback_candidate
+        return hot_candidate
+
+    async def _taskboard_workspace_candidate_from_refs(self, evidence_view: Mapping[str, Any]) -> str:
+        candidates: list[str] = []
+        diagnostics: list[dict[str, Any]] = []
+        for ref in self._taskboard_final_refs_from_evidence_view(evidence_view):
+            if not self._is_trusted_workspace_artifact_ref(ref):
+                continue
+            path = str(ref.get("path") or "").strip()
+            if not path:
+                continue
+            declared_bytes = self._coerce_non_negative_int(ref.get("bytes"))
+            max_bytes = declared_bytes + 1 if declared_bytes > 0 else max(_WORKSPACE_ARTIFACT_PREVIEW_BYTES, 200000)
+            try:
+                read_result = await self.workspace.read_file(path, max_bytes=max_bytes)
+            except Exception as error:
+                diagnostics.append(
+                    {
+                        "status": "failed",
+                        "path": path,
+                        "error": {"type": error.__class__.__name__, "message": str(error)},
+                    }
+                )
+                continue
+            content = read_result.get("content")
+            truncated = bool(read_result.get("truncated"))
+            if isinstance(content, str) and content.strip() and not truncated:
+                candidates.append(content.strip())
+                diagnostics.append(
+                    {
+                        "status": "read",
+                        "path": str(read_result.get("path") or path),
+                        "bytes": int(read_result.get("bytes") or 0),
+                        "sha256": str(read_result.get("sha256") or ""),
+                        "read_bytes": int(read_result.get("read_bytes") or 0),
+                    }
+                )
+            else:
+                diagnostics.append(
+                    {
+                        "status": "skipped",
+                        "path": str(read_result.get("path") or path),
+                        "reason": "empty_or_truncated_workspace_artifact_readback",
+                        "bytes": int(read_result.get("bytes") or 0),
+                        "read_bytes": int(read_result.get("read_bytes") or 0),
+                        "truncated": truncated,
+                    }
+                )
+        if diagnostics:
+            self.diagnostics.setdefault("taskboard_final_candidate_readback", []).extend(
+                DataFormatter.sanitize(diagnostics)
+            )
+        return max(candidates, key=len, default="")
+
+    @staticmethod
+    def _is_trusted_workspace_artifact_ref(ref: Mapping[str, Any]) -> bool:
+        role = str(ref.get("role") or "").strip()
+        source = str(ref.get("source") or "").strip()
+        return role == "workspace_artifact" or source.startswith("agent_task.workspace_artifact")
+
+    @staticmethod
+    def _looks_like_workspace_artifact_placeholder(value: str) -> bool:
+        return value.strip().startswith("Workspace artifact delivered at ")
+
+    @staticmethod
+    def _coerce_non_negative_int(value: Any) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(number, 0)
 
     @classmethod
     def _normalize_taskboard_final_result(cls, final: dict[str, Any], candidate_final_result: str) -> dict[str, Any]:
@@ -3662,9 +4033,11 @@ class AgentTask:
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
             "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
             " For long deliverables, choose deliverable_mode='workspace_artifact' or "
-            "'sectioned_workspace_artifact' and instruct the execution step to return a sectioned artifact_manifest; "
-            "use artifact_markdown only for bounded short deliverables. AgentTask will write/read back Workspace "
-            "files; the model must not self-declare trusted file_refs for a deliverable."
+            "'sectioned_workspace_artifact' and instruct the execution step to return only a Workspace "
+            "artifact_manifest path plus a section outline. Do not ask the execution step to put full report or "
+            "exam bodies inside artifact_markdown, answer, final_result, candidate_final_result, or artifact_manifest "
+            "section content; AgentTask will stream the long body into Workspace and read it back. The model must not "
+            "self-declare trusted file_refs for a deliverable."
         )
         request.output(
             {
@@ -3864,9 +4237,11 @@ class AgentTask:
                 "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
                 "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
                 "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "
-                "is workspace_artifact or sectioned_workspace_artifact, prefer an artifact_manifest with sections/content "
-                "for long or multi-section deliverables; use artifact_markdown only for bounded short bodies. AgentTask "
-                "will write/read back Workspace files and produce trusted file_refs. "
+                "is workspace_artifact or sectioned_workspace_artifact, return only an artifact_manifest with path and "
+                "section outline for long or multi-section deliverables; use artifact_markdown only for bounded short "
+                "bodies. Do not put the full long body in artifact_manifest section content, answer, "
+                "candidate_final_result, or final_result. AgentTask will stream/write/read back Workspace files and "
+                "produce trusted file_refs. "
                 "Do not invent file_refs for deliverables. "
                 "For web-source steps, treat Search results as discovery hints only. Browse official pages and follow "
                 "same-site index/list/download/navigation links before relying on a broad announcement page as the "
