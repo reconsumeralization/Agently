@@ -317,6 +317,9 @@ class MockGoalPursuitRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
             }
         elif "Verify the task against every success criterion" in text:
+            final_result = MockGoalPursuitRequester.final_result
+            if "summary" in text:
+                final_result = json.dumps({"summary": MockGoalPursuitRequester.final_result}, ensure_ascii=False)
             payload = {
                 "is_complete": True,
                 "requires_block": False,
@@ -324,7 +327,7 @@ class MockGoalPursuitRequester(MockAgentExecutionRequester):
                 "missing_criteria": [],
                 "replan_instruction": "",
                 "final_result_required": True,
-                "final_result": MockGoalPursuitRequester.final_result,
+                "final_result": final_result,
             }
         else:
             payload = {"answer": "ok", "status": "ready"}

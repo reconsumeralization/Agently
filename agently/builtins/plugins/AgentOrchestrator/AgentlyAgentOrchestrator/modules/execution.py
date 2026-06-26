@@ -65,6 +65,7 @@ from .route_execution import async_execute_route, start_execution
 from .routing import HybridRoutePlanner
 from .state import (
     ExecutionOptionsState,
+    apply_strategy_selection,
     apply_effort_strategy_limits,
     build_effective_options,
     configure_effort,
@@ -139,6 +140,9 @@ class AgentExecution:
         self._agent_task_step_overrides: dict[str, Any] = {}
         self.task_options: dict[str, Any] = {}
         self.strategy_name: str | None = None
+        self.inherited_task_execution_strategy: str | None = None
+        self.inherited_effective_task_execution_strategy: str | None = None
+        self.inherited_strategy_context_source: str | None = None
         self.effective_options: dict[str, Any] = {}
         self.consumed_options: dict[str, Any] = {}
         self.workspace: Any = getattr(self.agent, "workspace", None)
@@ -159,12 +163,16 @@ class AgentExecution:
             lineage_nodes.append({"kind": "executions", "id": self.id})
             self.workspace = with_scope_lineage(lineage_nodes)
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
+        self._load_inherited_strategy_context()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
             lineage=self.lineage,
             limits=self.limits,
             nesting_depth=self._nesting_depth,
             nesting_budget=self._nesting_budget,
+            task_execution_strategy=self.inherited_task_execution_strategy,
+            effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
+            strategy_context_source=self.inherited_strategy_context_source,
         )
         self.parent_run_context = parent_run_context
         self.route_info: dict[str, Any] = {}
@@ -263,14 +271,31 @@ class AgentExecution:
         budget = min(budgets) if budgets else None
         return depth, budget
 
+    def _load_inherited_strategy_context(self):
+        from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
+
+        parent_context = get_current_agent_execution_context()
+        self.inherited_task_execution_strategy = getattr(parent_context, "task_execution_strategy", None)
+        self.inherited_effective_task_execution_strategy = getattr(
+            parent_context,
+            "effective_task_execution_strategy",
+            None,
+        )
+        self.inherited_strategy_context_source = getattr(parent_context, "strategy_context_source", None)
+        return self
+
     def _replace_runtime_context(self):
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
+        self._load_inherited_strategy_context()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
             lineage=self.lineage,
             limits=self.limits,
             nesting_depth=self._nesting_depth,
             nesting_budget=self._nesting_budget,
+            task_execution_strategy=self.inherited_task_execution_strategy,
+            effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
+            strategy_context_source=self.inherited_strategy_context_source,
         )
         self.stream = AgentExecutionStream(
             execution_id=self.id,
@@ -660,9 +685,14 @@ class AgentExecution:
 
     def strategy(self, value: str | None = None, **options: Any):
         if value is not None:
-            self.strategy_name = str(value)
-            self.options["strategy"] = self.strategy_name
+            apply_strategy_selection(self, value, source="explicit_strategy")
         if options:
+            if "execution" in options:
+                from agently.core.application import AgentTask
+
+                options = dict(options)
+                options["execution"] = AgentTask.normalize_execution_strategy(options.get("execution"))
+                options["_execution_strategy_source"] = "explicit_strategy_option"
             self.task_options.update(options)
         self.effective_options = self._build_effective_options()
         self._selected_route = None
@@ -751,7 +781,13 @@ class AgentExecution:
         return state_is_task_strategy(self)
 
     def task_strategy_options(self) -> dict[str, Any]:
-        return dict(self.task_options)
+        options = dict(self.task_options)
+        if "execution" not in options:
+            inherited = self.inherited_effective_task_execution_strategy or self.inherited_task_execution_strategy
+            if inherited in {"flat", "taskboard"}:
+                options["execution"] = inherited
+                options["_execution_strategy_source"] = "inherited_agent_execution_context"
+        return options
 
     async def emit_stream(
         self,

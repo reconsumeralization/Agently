@@ -152,6 +152,12 @@ ACP endpoint 和内置本地 coding-agent CLI adapter，并且只在存在已验
 选项。CLI adapter 会标记 `acp_session.persistence="stateless_cli"`，除非存在真实可恢复的
 ACP protocol session。
 
+AgentTaskLoop 也可以在 bounded step 或 TaskBoard card 执行失败、且配置的重试耗尽后，
+把 ACP 作为显式启用的 recovery fallback。这个路径仍然调用已注册的 `acp_run_task`
+Action，并使用 `ExecutionResource(kind="acp")`；ACP 不是绕过 AgentExecution 或 task
+strategy policy 的新 route。如果 host 从未调用 `agent.use_acp(...)`，fallback 只会记录
+skipped diagnostics，不会导入 ACP 依赖，也不会伪造可用 agent。
+
 `enable_*` helpers 的 `desc=` 是可选项。默认会作为补充说明追加，确保模型仍然看到基础用法和安全边界。
 如果你确实要替换默认描述，使用 `desc_mode="override"`；如果要忽略传入描述、只保留内置描述，使用
 `desc_mode="default"`。

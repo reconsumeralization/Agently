@@ -40,6 +40,7 @@ class MCPActionExecutor:
     async def execute(self, *, spec, action_call, policy, settings) -> Any:
         _ = (spec, policy, settings)
         LazyImport.import_package("fastmcp", version_constraint=">=3", auto_install=False)
+        LazyImport.import_package("mcp", auto_install=False)
         from fastmcp import Client
         from mcp.types import AudioContent, EmbeddedResource, ImageContent, ResourceLink, TextContent
 

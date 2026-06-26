@@ -160,6 +160,13 @@ task-start option. CLI adapters are marked
 `acp_session.persistence="stateless_cli"` unless a real protocol session is
 available.
 
+AgentTaskLoop can also use ACP as an opt-in recovery fallback after a bounded
+step or TaskBoard card fails and configured retries are exhausted. This still
+uses the registered `acp_run_task` Action plus `ExecutionResource(kind="acp")`;
+ACP is not a route that bypasses AgentExecution or task strategy policy. If the
+host never called `agent.use_acp(...)`, the fallback records skipped diagnostics
+instead of importing ACP dependencies or inventing an agent.
+
 The `desc=` argument on `enable_*` helpers is optional. By default it is appended
 as additional guidance so the model still sees the baseline usage and safety
 constraints. Use `desc_mode="override"` when you intentionally want to replace

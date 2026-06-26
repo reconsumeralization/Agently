@@ -93,7 +93,7 @@ async def main() -> None:
             format="json",
         )
         .strategy(
-            "task",
+            "flat",
             task_id="goal_effort_public_stream",
             workspace=workspace_dir,
             limits={"max_model_requests": 10, "max_seconds": 180, "max_no_progress_seconds": 80},
@@ -134,6 +134,7 @@ async def main() -> None:
     )
     host_checks = {
         "route_is_agent_task": meta.get("route", {}).get("selected_route") == "agent_task",
+        "effective_strategy_is_flat": meta.get("task_refs", {}).get("effective_execution_strategy") == "flat",
         "task_completed": result.get("status") == "completed" and bool(result.get("accepted")),
         "execution_input_reached_task_loop": (
             isinstance(execution_prompt, dict)
@@ -173,3 +174,30 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# Expected key output from a real DeepSeek run on 2026-06-26:
+# command:
+#   AGENT_TASK_PUBLIC_STREAM_WORKSPACE=.agently/tasks/goal-effort-public-stream-4138 \
+#   python examples/agent_task/goal_effort_public_stream.py
+# provider="deepseek"
+# task_status="completed"
+# accepted=true
+# artifact_status="accepted"
+# route.selected_route="agent_task"
+# task_refs.strategy="flat"
+# task_refs.execution_strategy="flat"
+# task_refs.effective_execution_strategy="flat"
+# task_refs.task_shape_analysis={}
+# stream_counts.progress_delta=122
+# stream_counts.progress=3
+# stream_counts.snapshot=4
+# host_checks.route_is_agent_task=true
+# host_checks.effective_strategy_is_flat=true
+# host_checks.task_completed=true
+# host_checks.execution_input_reached_task_loop=true
+# host_checks.execution_output_contract_reached_task_loop=true
+# host_checks.progress_delta_streamed=true
+# host_checks.progress_language_observed=true
+# host_checks.final_result_uses_incident_id=true
+# workspace_refs.reflections count=2
+# stream_trace_file points to outputs/goal_effort_public_stream.jsonl under the Workspace

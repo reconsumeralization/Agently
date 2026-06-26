@@ -23,6 +23,8 @@ from agently.utils import DataFormatter
 if TYPE_CHECKING:
     from .execution import AgentExecution
 
+_TASK_ROUTE_STRATEGIES = {"task", "task_loop", "long_task"}
+
 
 class ExecutionOptionsState(dict):
     """Callable dict preserving AgentExecution.options(...) compatibility."""
@@ -60,11 +62,14 @@ def load_strategy_state_from_options(owner: "AgentExecution"):
         if isinstance(execution_options, dict):
             strategy = execution_options.get("strategy")
     if strategy is not None:
-        owner.strategy_name = str(strategy)
+        apply_strategy_selection(owner, strategy, source="execution_options")
 
     task_options = owner.options.get("task")
     if isinstance(task_options, dict):
         owner.task_options.update(task_options)
+        if "execution" in task_options:
+            owner.task_options["execution"] = normalize_task_execution_strategy(task_options.get("execution"))
+            owner.task_options.setdefault("_execution_strategy_source", "task_options")
         goal = task_options.get("goal")
         if goal is not None:
             owner.goal(goal)
@@ -119,6 +124,38 @@ def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
     return effective
 
 
+def normalize_task_execution_strategy(value: Any) -> str:
+    from agently.core.application import AgentTask
+
+    return str(AgentTask.normalize_execution_strategy(value))
+
+
+def is_task_execution_strategy_value(value: Any) -> bool:
+    try:
+        normalize_task_execution_strategy(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def apply_strategy_selection(owner: "AgentExecution", value: Any, *, source: str) -> bool:
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return False
+    try:
+        execution_strategy = normalize_task_execution_strategy(text)
+    except (TypeError, ValueError):
+        owner.strategy_name = text
+        owner.options["strategy"] = text
+        return False
+
+    owner.strategy_name = execution_strategy
+    owner.options["strategy"] = execution_strategy
+    owner.task_options["execution"] = execution_strategy
+    owner.task_options["_execution_strategy_source"] = source
+    return True
+
+
 def configure_effort(
     owner: "AgentExecution",
     value: Any = "medium",
@@ -167,13 +204,48 @@ def normalize_effort_configuration(
 def resolve_effort_strategy(effort: Any, detail: Any = None) -> dict[str, Any]:
     name, detail_map = normalize_effort_configuration(effort, detail)
     presets: dict[str, dict[str, Any]] = {
-        "minimal": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
-        "low": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
-        "fast": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
-        "medium": {"planning_depth": "standard", "max_iterations": 3, "verifier_strength": "strong"},
-        "normal": {"planning_depth": "standard", "max_iterations": 3, "verifier_strength": "strong"},
-        "high": {"planning_depth": "deep", "max_iterations": 5, "verifier_strength": "strong"},
-        "max": {"planning_depth": "deep", "max_iterations": 5, "verifier_strength": "strong"},
+        "minimal": {
+            "planning_depth": "shallow",
+            "max_iterations": 1,
+            "verifier_strength": "standard",
+            "reflection_density": "final",
+        },
+        "low": {
+            "planning_depth": "shallow",
+            "max_iterations": 1,
+            "verifier_strength": "standard",
+            "reflection_density": "final",
+        },
+        "fast": {
+            "planning_depth": "shallow",
+            "max_iterations": 1,
+            "verifier_strength": "standard",
+            "reflection_density": "final",
+        },
+        "medium": {
+            "planning_depth": "standard",
+            "max_iterations": 3,
+            "verifier_strength": "strong",
+            "reflection_density": "major_node",
+        },
+        "normal": {
+            "planning_depth": "standard",
+            "max_iterations": 3,
+            "verifier_strength": "strong",
+            "reflection_density": "major_node",
+        },
+        "high": {
+            "planning_depth": "deep",
+            "max_iterations": 5,
+            "verifier_strength": "strong",
+            "reflection_density": "action",
+        },
+        "max": {
+            "planning_depth": "deep",
+            "max_iterations": 5,
+            "verifier_strength": "strong",
+            "reflection_density": "action",
+        },
     }
     resolved = dict(presets.get(name) or presets["medium"])
     resolved["name"] = name
@@ -371,7 +443,9 @@ def task_success_criteria(owner: "AgentExecution") -> list[str]:
 
 
 def is_task_strategy(owner: "AgentExecution") -> bool:
-    if owner.strategy_name in {"task", "task_loop", "long_task"}:
+    if owner.strategy_name in _TASK_ROUTE_STRATEGIES:
+        return True
+    if owner.strategy_name is not None and is_task_execution_strategy_value(owner.strategy_name):
         return True
     if owner.goal_items or owner.success_criteria_items:
         return True

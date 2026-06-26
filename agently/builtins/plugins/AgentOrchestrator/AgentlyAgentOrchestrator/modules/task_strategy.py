@@ -97,6 +97,9 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     agent_task_options.setdefault("agent_task", {})
     if isinstance(agent_task_options["agent_task"], dict):
         agent_task_options["agent_task"]["execution_strategy"] = execution_strategy
+        source = task_options.get("_execution_strategy_source")
+        if source is not None:
+            agent_task_options["agent_task"]["execution_strategy_source"] = str(source)
     required_actions = execution.required_action_ids()
     required_skills = execution.required_skill_ids()
     if required_actions or required_skills:
@@ -163,6 +166,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         "task_id": task.id,
         "strategy": route_meta.get("strategy") or execution.strategy_name or "task",
         "execution_strategy": task.execution_strategy,
+        "effective_execution_strategy": task.effective_execution_strategy,
         "resume": bool(resume_task_id is not None or task_options.get("resume")),
         "resumed_from_iteration": getattr(task, "_resumed_from_iteration", 0),
     }
@@ -173,6 +177,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             "goal": goal,
             "success_criteria": success_criteria,
             "execution_strategy": task.execution_strategy,
+            "effective_execution_strategy": task.effective_execution_strategy,
         },
         route="agent_task",
         source="agent_execution",
@@ -187,6 +192,8 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         {
             "status": task.status,
             "execution_strategy": task.execution_strategy,
+            "effective_execution_strategy": task_meta.get("effective_execution_strategy"),
+            "task_shape_analysis": task_meta.get("task_shape_analysis"),
             "workspace_refs": task_meta.get("workspace_refs", {}),
         }
     )

@@ -314,6 +314,27 @@ not json
     assert failure["payload"]["parse_error"]
 
 
+@pytest.mark.asyncio
+async def test_structured_text_parser_falls_back_to_json_dict():
+    text = '{"summary": "done", "items": ["a", "b"]}'
+    parser = create_parser(
+        [("delta", text), ("done", text)],
+        {"summary": (str,), "items": ([str],)},
+        "hybrid",
+    )
+
+    assert await parser.async_get_data() == {"summary": "done", "items": ["a", "b"]}
+    all_data = await parser.async_get_data(type="all")
+    assert all_data["extra"]["parse_success"] is True
+    assert all_data["extra"]["output_format"] == "hybrid"
+    assert all_data["extra"]["resolved_output_format"] == "json"
+    assert all_data["extra"]["format_fallback"]["from"] == "hybrid"
+    observations = parser.drain_runtime_observations()
+    completed = next(observation for observation in observations if observation["kind"] == "completed")
+    assert completed["payload"]["format"] == "hybrid"
+    assert completed["payload"]["resolved_format"] == "json"
+
+
 def test_prompt_config_aliases_accept_new_formats():
     agent = Agently.create_agent("structured-prompt-config-xml")
     yaml_prompt = """

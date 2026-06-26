@@ -274,6 +274,23 @@ class AgentlyResponseParser(ResponseParser):
             return None, "Parser returned no structured payload.", False
         return parsed, None, payload_extracted
 
+    def _parse_json_fallback_output(
+        self,
+        text: str,
+    ) -> tuple[dict[str, Any] | None, str | None, bool, BaseModel | None, bool, str | None]:
+        completed, parsed, result_object, repaired = self._parse_json_output(text)
+        payload_extracted = completed is not None
+        if parsed is None:
+            parse_error = (
+                "No JSON payload could be located."
+                if completed is None
+                else "Located JSON payload could not be parsed."
+            )
+            return None, parse_error, payload_extracted, None, repaired, completed
+        if not isinstance(parsed, Mapping):
+            return None, "JSON fallback parsed a non-dict payload.", payload_extracted, None, repaired, completed
+        return dict(parsed), None, payload_extracted, result_object, repaired, completed
+
     def _record_runtime_observation(
         self,
         kind: str,
@@ -390,7 +407,9 @@ class AgentlyResponseParser(ResponseParser):
             parsed, parse_error, payload_extracted = self._parse_structured_text_output(str(data))
             self.full_result_data["extra"]["parse_error"] = parse_error
             self.full_result_data["extra"]["output_format"] = self._prompt_object.output_format
+            self.full_result_data["extra"]["resolved_output_format"] = self._prompt_object.output_format
             self.full_result_data["extra"]["payload_extracted"] = payload_extracted
+            self.full_result_data["extra"]["format_fallback"] = None
             if parsed is not None:
                 result_object = self._build_result_object(parsed)
                 self.full_result_data["parsed_result"] = parsed
@@ -412,24 +431,82 @@ class AgentlyResponseParser(ResponseParser):
                     },
                 )
             else:
-                self.full_result_data["parsed_result"] = None
-                self.full_result_data["result_object"] = None
-                self.full_result_data["text_result"] = str(data)
-                self.full_result_data["extra"]["parse_success"] = False
-                self._record_runtime_observation(
-                    "parse_failed",
-                    level="WARNING",
-                    message=f"Can not parse {self._prompt_object.output_format} output from model response.",
-                    payload={
-                        "result": str(data),
-                        "streamed_text": buffer,
-                        "format": self._prompt_object.output_format,
-                        "resolved_format": self._prompt_object.output_format,
-                        "payload_extracted": payload_extracted,
-                        "parse_success": False,
-                        "parse_error": parse_error,
-                    },
-                )
+                (
+                    fallback_parsed,
+                    fallback_error,
+                    fallback_payload_extracted,
+                    fallback_result_object,
+                    fallback_repaired,
+                    fallback_cleaned,
+                ) = self._parse_json_fallback_output(str(data))
+                if fallback_parsed is not None:
+                    self.full_result_data["cleaned_result"] = fallback_cleaned
+                    self.full_result_data["parsed_result"] = fallback_parsed
+                    self.full_result_data["result_object"] = fallback_result_object
+                    self.full_result_data["text_result"] = str(data)
+                    self.full_result_data["extra"]["parse_error"] = None
+                    self.full_result_data["extra"]["parse_success"] = True
+                    self.full_result_data["extra"]["resolved_output_format"] = "json"
+                    self.full_result_data["extra"]["payload_extracted"] = fallback_payload_extracted
+                    self.full_result_data["extra"]["format_fallback"] = {
+                        "from": self._prompt_object.output_format,
+                        "to": "json",
+                        "reason": parse_error,
+                        "repaired": fallback_repaired,
+                    }
+                    self._record_runtime_observation(
+                        "completed",
+                        message=(
+                            f"Model response parsed as JSON fallback after "
+                            f"{self._prompt_object.output_format} output parsing failed."
+                        ),
+                        payload={
+                            "result": DataFormatter.sanitize(fallback_parsed),
+                            "raw_text": str(data),
+                            "cleaned_text": fallback_cleaned,
+                            "streamed_text": buffer,
+                            "format": self._prompt_object.output_format,
+                            "resolved_format": "json",
+                            "payload_extracted": fallback_payload_extracted,
+                            "parse_success": True,
+                            "parse_error": None,
+                            "format_fallback": {
+                                "from": self._prompt_object.output_format,
+                                "to": "json",
+                                "reason": parse_error,
+                                "repaired": fallback_repaired,
+                            },
+                        },
+                    )
+                else:
+                    combined_error = parse_error
+                    if fallback_error:
+                        combined_error = f"{parse_error}; JSON fallback: {fallback_error}"
+                    self.full_result_data["parsed_result"] = None
+                    self.full_result_data["result_object"] = None
+                    self.full_result_data["text_result"] = str(data)
+                    self.full_result_data["extra"]["parse_error"] = combined_error
+                    self.full_result_data["extra"]["parse_success"] = False
+                    self._record_runtime_observation(
+                        "parse_failed",
+                        level="WARNING",
+                        message=f"Can not parse {self._prompt_object.output_format} output from model response.",
+                        payload={
+                            "result": str(data),
+                            "streamed_text": buffer,
+                            "format": self._prompt_object.output_format,
+                            "resolved_format": self._prompt_object.output_format,
+                            "payload_extracted": payload_extracted or fallback_payload_extracted,
+                            "parse_success": False,
+                            "parse_error": combined_error,
+                            "format_fallback": {
+                                "from": self._prompt_object.output_format,
+                                "to": "json",
+                                "reason": parse_error,
+                                "error": fallback_error,
+                            },
+                        },
+                    )
             return
 
         if (

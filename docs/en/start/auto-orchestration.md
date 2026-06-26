@@ -115,6 +115,12 @@ whether an execution is a goal-pursuit task. `budget.iteration_limit` maps to
 the task-loop iteration budget, while `model_call_limit` and
 `wall_time_seconds` map to AgentExecution limits unless explicit limits were
 already set. Completion still requires both model verification and host guards.
+For task-strategy executions, effort also controls reflection density:
+`low` records the final reflection and only planner-marked important process
+points, `medium` reflects after each major task node or TaskBoard card/tick, and
+`high` reflects after every framework-observable bounded step, Action/ACP call,
+TaskBoard card, and final result. Reflection records are Workspace evidence and
+verifier/replan input, but they are not completion evidence by themselves.
 
 `execution.step_plan` defaults to `auto`. Users normally do not need to spell it
 out. It lets a Goal Pursuit iteration use DAG as an internal bounded-step shape
@@ -133,13 +139,23 @@ loop instead of one direct AgentExecution. It returns a task-strategy
 owned by one Agent: plan, execute one bounded step, write Workspace evidence,
 verify, replan when needed, then finish as complete or blocked.
 
-In 4.1.3.7 this is a hardened bounded public task-loop strategy, not the full
-future AgentTask system. `agent.create_task_loop(...)` is the explicit spelling
+In the current 4.1.3 line this is a hardened bounded public task-loop strategy,
+not the full future AgentTask system. `agent.create_task_loop(...)` is the explicit spelling
 for the same long-task strategy when code wants to make the strategy choice
 visible. Both APIs still return `AgentExecution`; new code should
 consume data, text, stream, metadata, status, and task refs through
 `execution.get_result()` or the execution stream/meta facade instead of treating
 `AgentTask` as a second public lifecycle.
+
+`execution="auto"` is the default task execution strategy. In `auto`, AgentTaskLoop
+asks the model for a natural-language task-shape analysis plus a thin structured
+`execution_hint`, then the strategy policy resolves the actual shape to `flat`
+or `taskboard`. The hint is only strategy evidence; TaskBoard does not classify
+the task, and the verifier cannot accept the hint as completion evidence. Use
+`execution="flat"` or `.strategy("flat")` to force the linear loop, and
+`execution="taskboard"` or `.strategy("taskboard")` only when the host
+explicitly wants TaskBoard. Nested AgentExecution instances inherit the parent
+strategy context unless the child explicitly calls `.strategy(...)`.
 
 ```python
 agent.language("en")
@@ -252,9 +268,18 @@ AgentTask host guards require those Workspace files to exist and read back befor
 accepting completion. A verifier response that says a file exists is not enough
 unless Workspace readback confirms it.
 
+Intermediate process steps with strong structured contracts use Agently
+`.output(..., format=...)` on the owning `ModelRequest` or `AgentExecution`.
+Compact control payloads use JSON; content-heavy payloads may use
+`hybrid`, `flat_markdown`, `xml_field`, or `yaml_literal` when that format fits
+the payload. If a declared non-JSON format cannot be parsed, Agently tries JSON
+as a recovery parser and accepts it only when the parsed value is a dict. The
+same guard applies to task `final_result` when an execution output contract is
+present.
+
 `examples/agent_task/goal_effort_public_stream.py` is the public-chain
 streaming proof for this contract. It runs
-`.goal(...).effort(...).input(...).output(...).strategy("task")`, consumes
+`.goal(...).effort(...).input(...).output(...).strategy("flat")`, consumes
 `get_async_generator()`, streams model-generated progress deltas, and checks
 that the execution prompt snapshot reaches AgentTaskLoop planning, execution,
 and verification. `examples/agent_task/goal_pursuit_acceptance_matrix.py`
@@ -274,9 +299,11 @@ point.
 
 `examples/agent_task/agently_architecture_diagram_task.py` is the longer
 design-document experiment for the same path. It uses
-`.goal(...).effort(...).strategy("task")`, a repository-source Action,
-Workspace file Actions, and an independent Agently model judge to produce and
-review a readable Agently architecture diagram.
+`.goal(...).effort(...).strategy("task")` as the compatibility spelling for an
+AgentTaskLoop draft, a repository-source Action, Workspace file Actions, and an
+independent Agently model judge to produce and review a readable Agently
+architecture diagram. The execution shape is still resolved by the task
+strategy layer unless the host explicitly selects `flat` or `taskboard`.
 
 The first public slice is intentionally narrow: single task, one Agent owner,
 roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps

@@ -60,6 +60,18 @@ class MockAgentTaskRequester:
             yield "message", payload_text[:midpoint]
             yield "message", payload_text[midpoint:]
             return
+        elif "Analyze this task's execution shape for AgentTaskLoop strategy resolution" in text:
+            payload = {
+                "analysis": "This mock task is linear and can stay in the flat loop.",
+                "execution_hint": {
+                    "recommended_shape": "flat",
+                    "confidence": "medium",
+                    "reasons": ["one bounded repair loop is enough"],
+                    "linear_evidence": ["single deliverable"],
+                    "branching_evidence": [],
+                    "uncertainty": "",
+                },
+            }
         elif "Verify the task against every success criterion" in text:
             MockAgentTaskRequester.verification_calls += 1
             if MockAgentTaskRequester.verification_calls == 1:
@@ -72,13 +84,19 @@ class MockAgentTaskRequester:
                     "final_result": "",
                 }
             else:
+                final_result = "legacy script upgraded and verified"
+                if "summary" in text:
+                    final_result = json.dumps(
+                        {"summary": "Operator summary for INC-4242."},
+                        ensure_ascii=False,
+                    )
                 payload = {
                     "is_complete": True,
                     "requires_block": False,
                     "reason": "all success criteria are now satisfied",
                     "missing_criteria": [],
                     "replan_instruction": "",
-                    "final_result": "legacy script upgraded and verified",
+                    "final_result": final_result,
                 }
         elif "Plan the next bounded AgentExecution step" in text:
             payload = {
@@ -679,6 +697,354 @@ async def test_public_task_strategy_spellings_share_agent_task_lifecycle(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_strategy_shape_analysis_is_hint_not_hard_route(tmp_path):
+    agent = _create_agent("agent-task-shape-analysis").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="shape-analysis-policy-gate",
+        goal="Plan a multi-angle launch review.",
+        success_criteria=["The review is planned."],
+        execution="auto",
+        options={"agent_task": {"execution_strategy_policy": {"allow_taskboard": False}}},
+    )
+
+    async def taskboard_hint():
+        return {
+            "analysis": "Several workstreams could benefit from a board.",
+            "execution_hint": {
+                "recommended_shape": "taskboard",
+                "confidence": "high",
+                "reasons": ["parallel evidence streams"],
+                "linear_evidence": [],
+                "branching_evidence": ["marketing, operations, and finance perspectives"],
+                "uncertainty": "",
+            },
+        }
+
+    cast(Any, task)._request_task_shape_analysis = taskboard_hint
+
+    effective = await task._resolve_effective_execution_strategy()
+
+    assert effective == "flat"
+    assert task.execution_strategy == "auto"
+    assert task.task_shape_analysis["execution_hint"]["recommended_shape"] == "taskboard"
+    assert task.diagnostics["execution_strategy"]["effective"] == "flat"
+    assert task.workspace_refs["strategy"]
+
+
+@pytest.mark.asyncio
+async def test_auto_strategy_can_select_taskboard_when_policy_allows(tmp_path):
+    agent = _create_agent("agent-task-shape-taskboard").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="shape-analysis-taskboard",
+        goal="Plan multiple parallel research tracks.",
+        success_criteria=["Each track has evidence."],
+        execution="auto",
+        options={"agent_task": {"execution_strategy_policy": {"allow_taskboard": True}}},
+    )
+
+    async def taskboard_hint():
+        return {
+            "analysis": "The task has multiple independent tracks.",
+            "execution_hint": {
+                "recommended_shape": "taskboard",
+                "confidence": "medium",
+                "reasons": ["independent evidence tracks"],
+                "linear_evidence": [],
+                "branching_evidence": ["track A", "track B"],
+                "uncertainty": "",
+            },
+        }
+
+    cast(Any, task)._request_task_shape_analysis = taskboard_hint
+
+    assert await task._resolve_effective_execution_strategy() == "taskboard"
+    assert task.diagnostics["execution_strategy"]["source"] == "task_shape_analysis"
+
+
+@pytest.mark.asyncio
+async def test_explicit_flat_strategy_skips_shape_analysis(tmp_path):
+    agent = _create_agent("agent-explicit-flat-strategy").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="explicit-flat-no-analysis",
+        goal="Run a linear task.",
+        success_criteria=["The task is done."],
+        execution="flat",
+    )
+
+    async def fail_if_called():
+        raise AssertionError("explicit flat must not request task-shape analysis")
+
+    cast(Any, task)._request_task_shape_analysis = fail_if_called
+
+    assert await task._resolve_effective_execution_strategy() == "flat"
+    assert task.task_shape_analysis == {}
+
+
+def test_strategy_method_maps_execution_shapes_and_nested_inheritance(tmp_path):
+    from agently.core.application.AgentExecution import AgentExecutionContext
+    from agently.core.runtime.RuntimeContext import bind_runtime_context
+
+    agent = _create_agent("agent-strategy-method").use_workspace(tmp_path / "workspace")
+
+    flat_execution = agent.goal("Do a flat task.", ["Done."]).strategy("flat", max_iterations=1)
+    assert flat_execution.strategy_name == "flat"
+    assert flat_execution.task_options["execution"] == "flat"
+    assert flat_execution.task_strategy_options()["execution"] == "flat"
+
+    parent_context = AgentExecutionContext(
+        execution_id="parent-exec",
+        lineage={},
+        limits={},
+        task_execution_strategy="auto",
+        effective_task_execution_strategy="taskboard",
+        strategy_context_source="task_shape_analysis",
+    )
+    with bind_runtime_context(agent_execution_context=parent_context):
+        inherited = agent.create_execution().goal("Nested task.", ["Done."])
+        overridden = agent.create_execution().goal("Nested override.", ["Done."]).strategy("flat")
+
+    assert inherited.task_strategy_options()["execution"] == "taskboard"
+    assert inherited.task_strategy_options()["_execution_strategy_source"] == "inherited_agent_execution_context"
+    assert overridden.task_strategy_options()["execution"] == "flat"
+
+    inherited_task = AgentTask(
+        agent,
+        task_id="nested-inherited-taskboard",
+        goal="Nested inherited task.",
+        success_criteria=["Done."],
+        execution=inherited.task_strategy_options()["execution"],
+    )
+
+    async def fail_if_called():
+        raise AssertionError("inherited effective strategy must not request task-shape analysis")
+
+    cast(Any, inherited_task)._request_task_shape_analysis = fail_if_called
+    assert inherited_task.execution_strategy == "taskboard"
+    assert inherited_task.effective_execution_strategy == "taskboard"
+    assert asyncio.run(inherited_task._resolve_effective_execution_strategy()) == "taskboard"
+
+
+@pytest.mark.asyncio
+async def test_effort_reflection_density_records_expected_points(tmp_path):
+    async def run_with_effort(label: str, effort: dict[str, Any]):
+        agent = _create_agent(f"agent-reflection-{label}").use_workspace(tmp_path / label)
+        task = AgentTask(
+            agent,
+            task_id=f"reflection-{label}",
+            goal="Complete one bounded step.",
+            success_criteria=["Verifier accepts the result."],
+            execution="flat",
+            max_iterations=1,
+            options={"agent_task": {"effort": effort}},
+        )
+
+        async def request_plan(_iteration_index, _context_pack):
+            return {
+                "execution_shape": "direct",
+                "step_instruction": "produce evidence",
+                "expected_evidence": "evidence",
+                "rationale": "one step",
+            }
+
+        async def execute_step(_iteration_index, _plan, _context_pack):
+            return (
+                {"step_result": "done", "evidence": ["ok"], "remaining_work": []},
+                {"execution_id": f"exec-{label}", "status": "success", "route": {"selected_route": "model_request"}},
+            )
+
+        async def request_verification(_iteration_index, **_kwargs):
+            return {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "accepted",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "done",
+            }
+
+        cast(Any, task)._request_plan = request_plan
+        cast(Any, task)._execute_step = execute_step
+        cast(Any, task)._request_verification = request_verification
+        await task.async_run()
+        return [item["phase"] for item in task.reflections]
+
+    low = await run_with_effort("low", {"name": "low", "reflection_density": "final"})
+    medium = await run_with_effort("medium", {"name": "medium", "reflection_density": "major_node"})
+    high = await run_with_effort("high", {"name": "high", "reflection_density": "action"})
+
+    assert low == ["final"]
+    assert "major_node" in medium and "bounded_step" not in medium and "final" in medium
+    assert {"bounded_step", "major_node", "final"}.issubset(set(high))
+
+
+@pytest.mark.asyncio
+async def test_acp_recovery_policy_uses_registered_action_after_exhaustion(tmp_path, monkeypatch):
+    agent = _create_agent("agent-acp-recovery").use_workspace(tmp_path / "workspace")
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_execute_action(action_id: str, payload: dict[str, Any]):
+        calls.append((action_id, payload))
+        return {
+            "ok": True,
+            "status": "success",
+            "agent_id": payload.get("agent_id"),
+            "result": {"final_result": "recovered by acp"},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(agent.action, "async_execute_action", fake_execute_action)
+
+    task = AgentTask(
+        agent,
+        task_id="acp-recovery-task",
+        goal="Recover a failed bounded step.",
+        success_criteria=["ACP recovery evidence is accepted."],
+        execution="flat",
+        max_iterations=1,
+        options={"agent_task": {"acp_recovery": {"enabled": True, "agent_id": "codex"}}},
+    )
+
+    async def request_plan(_iteration_index, _context_pack):
+        return {
+            "execution_shape": "direct",
+            "step_instruction": "fail first",
+            "expected_evidence": "failure",
+            "rationale": "exercise recovery",
+        }
+
+    async def execute_step(_iteration_index, _plan, _context_pack):
+        return (
+            {"step_result": "", "evidence": ["failed"], "remaining_work": ["recover"]},
+            {"execution_id": "failed-step", "status": "failed", "route": {"selected_route": "model_request"}},
+        )
+
+    async def request_verification(_iteration_index, *, execution_meta, **_kwargs):
+        assert execution_meta["route"]["selected_route"] == "acp_recovery"
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "ACP recovery accepted",
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "recovered by acp",
+        }
+
+    cast(Any, task)._request_plan = request_plan
+    cast(Any, task)._execute_step = execute_step
+    cast(Any, task)._request_verification = request_verification
+
+    result = await task.async_run()
+
+    assert result["status"] == "completed"
+    assert calls and calls[0][0] == "acp_run_task"
+    assert calls[0][1]["agent_id"] == "codex"
+    assert task.workspace_refs["acp_recovery"]
+
+
+def test_output_contract_guards_invalid_final_result_after_json_fallback(tmp_path):
+    agent = _create_agent("agent-output-final-guard").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="output-final-guard",
+        goal="Return structured output.",
+        success_criteria=["Final result must be valid JSON."],
+        options={
+            "execution_prompt_snapshot": {
+                "output": {"answer": (str, "Answer", True)},
+                "output_format": "hybrid",
+            }
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "looks complete",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": '{"answer": "bad quote”}',
+        },
+        execution_evidence_summary={"status": "success"},
+    )
+
+    assert verification["is_complete"] is False
+    assert "final_result_output_parse_failed" in verification["guard_reasons"]
+    assert "parse as a dict" in verification["missing_criteria"][0]
+    assert "hybrid -> json" in verification["missing_criteria"][0]
+
+
+def test_output_contract_accepts_declared_hybrid_final_result(tmp_path):
+    agent = _create_agent("agent-hybrid-final-guard").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="hybrid-final-guard",
+        goal="Return structured output.",
+        success_criteria=["Final result must match the declared hybrid output contract."],
+        options={
+            "execution_prompt_snapshot": {
+                "output": {"answer": (str, "Answer", True), "items": ([str], "Items", True)},
+                "output_format": "hybrid",
+            }
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "looks complete",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": '### answer\nDone.\n\n### items\n```json\n["a", "b"]\n```',
+        },
+        execution_evidence_summary={"status": "success"},
+    )
+
+    assert verification["is_complete"] is True
+    assert "guard_reasons" not in verification
+
+
+def test_output_contract_falls_back_to_json_when_declared_format_fails(tmp_path):
+    agent = _create_agent("agent-hybrid-json-final-fallback").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="hybrid-json-final-fallback",
+        goal="Return structured output.",
+        success_criteria=["Final result must match the declared output contract."],
+        options={
+            "execution_prompt_snapshot": {
+                "output": {"answer": (str, "Answer", True), "items": ([str], "Items", True)},
+                "output_format": "hybrid",
+            }
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "looks complete",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": '{"answer": "Done.", "items": ["a", "b"]}',
+        },
+        execution_evidence_summary={"status": "success"},
+    )
+
+    assert verification["is_complete"] is True
+    assert "guard_reasons" not in verification
+    diagnostics = task.diagnostics["final_result_output_contract"][0]
+    assert diagnostics["declared_format"] == "hybrid"
+    assert diagnostics["resolved_format"] == "json"
+
+
+@pytest.mark.asyncio
 async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     MockAgentTaskRequester.reset()
     agent = _create_agent()
@@ -767,16 +1133,19 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert len(meta["workspace_refs"]["decisions"]) == 2
     assert len(meta["workspace_refs"]["verification"]) == 2
     assert len(meta["workspace_refs"]["checkpoints"]) == 2
-    assert len(meta["workspace_refs"]["evidence_links"]) == 6
+    assert len(meta["workspace_refs"]["evidence_links"]) >= 6
+    assert meta["workspace_refs"]["reflections"]
     workspace = agent.workspace
     assert workspace is not None
     assert len(await workspace.checkpoint_history("legacy-script-upgrade")) == 2
     verifies_links = await workspace.links(relation="verifies_observation")
     decision_links = await workspace.links(relation="implements_decision")
     checkpoint_links = await workspace.links(relation="checkpointed_by")
+    reflection_links = await workspace.links(relation="reflects_on")
     assert len(verifies_links) == 2
     assert len(decision_links) == 2
     assert len(checkpoint_links) == 2
+    assert reflection_links
     assert all(link["meta"]["evidence"] for link in [*verifies_links, *decision_links, *checkpoint_links])
 
 

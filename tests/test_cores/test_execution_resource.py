@@ -397,7 +397,9 @@ async def test_mcp_executor_transport_routing():
             "With managed resource injected, executor must prefer managed transport"
         assert lazy_import.call_args_list == [
             mock.call("fastmcp", version_constraint=">=3", auto_install=False),
+            mock.call("mcp", auto_install=False),
             mock.call("fastmcp", version_constraint=">=3", auto_install=False),
+            mock.call("mcp", auto_install=False),
         ]
 
 

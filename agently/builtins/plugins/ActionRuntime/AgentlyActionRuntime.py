@@ -293,7 +293,8 @@ class AgentlyActionRuntime:
                         "todo_suggestion": (str, "Suggestion for next round's next_action decision."),
                     }
                 ],
-            }
+            },
+            format="json",
         )
         action_plan_result = _get_model_request_result(
             action_plan_request,

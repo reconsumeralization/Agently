@@ -154,6 +154,9 @@ class AgentExecutionContext:
         limits: AgentExecutionLimits | dict[str, Any],
         nesting_depth: int = 0,
         nesting_budget: int | None = None,
+        task_execution_strategy: str | None = None,
+        effective_task_execution_strategy: str | None = None,
+        strategy_context_source: str | None = None,
     ):
         self.execution_id = execution_id
         self.lineage = cast(AgentExecutionLineage, dict(lineage))
@@ -172,6 +175,9 @@ class AgentExecutionContext:
         # Effective max nesting depth inherited from the constraining ancestor
         # (or this execution's own limit). None means unbounded.
         self.nesting_budget = nesting_budget
+        self.task_execution_strategy = _optional_str(task_execution_strategy)
+        self.effective_task_execution_strategy = _optional_str(effective_task_execution_strategy)
+        self.strategy_context_source = _optional_str(strategy_context_source)
 
     def raise_if_nesting_exceeded(self):
         if self.nesting_budget is None:
@@ -239,8 +245,24 @@ class AgentExecutionContext:
             "stages": {
                 "events": [dict(item) for item in self.stage_events[-50:]],
             },
+            "task_execution_strategy": {
+                "requested": self.task_execution_strategy,
+                "effective": self.effective_task_execution_strategy,
+                "source": self.strategy_context_source,
+            },
             "last_progress": last_progress,
         }
+
+    def set_task_execution_strategy(
+        self,
+        *,
+        requested: str | None,
+        effective: str | None = None,
+        source: str,
+    ) -> None:
+        self.task_execution_strategy = _optional_str(requested)
+        self.effective_task_execution_strategy = _optional_str(effective)
+        self.strategy_context_source = _optional_str(source)
 
     def set_action_scope(
         self,

@@ -7,7 +7,7 @@ Environment:
     DEEPSEEK_API_KEY in the shell or .env file.
     Set AGENT_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
 
-This example exercises the 4.1.3.7 AgentExecution-backed task strategy on a
+This example exercises the 4.1.3.8 AgentExecution-backed task strategy on a
 longer architecture-document task:
 
     goal + effort + task strategy
@@ -272,7 +272,7 @@ async def main() -> None:
             "architecture_diagram_skill_guidance": ARCHITECTURE_DIAGRAM_SKILL_GUIDANCE,
             "source_paths": SOURCE_PATHS,
             "expected_output_file": OUTPUT_FILE,
-            "current_release_slice": "4.1.3.7 AgentExecution-backed AgentTaskLoop hardening",
+            "current_release_slice": "4.1.3.8 AgentExecution-backed AgentTaskLoop hardening",
         },
         rules=JUDGE_RULES,
     )

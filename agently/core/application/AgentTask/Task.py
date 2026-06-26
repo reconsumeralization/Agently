@@ -34,6 +34,7 @@ from agently.core.orchestration import (
     task_board_planning_output_schema,
 )
 from agently.core.orchestration.TaskBoard.TaskBoardValidation import task_board_card_required
+from agently.core.model.StructuredOutputParser import parse_output_contract_dict
 from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult, TaskBoardRevision
 from agently.types.trigger_flow import TriggerFlowRuntimeData
 from agently.utils import DataFormatter, FunctionShifter
@@ -59,6 +60,7 @@ AgentTaskStatus = Literal[
     "error",
 ]
 AgentTaskExecutionStrategy = Literal["auto", "flat", "taskboard"]
+AgentTaskEffectiveExecutionStrategy = Literal["flat", "taskboard"]
 
 _AGENT_TASK_EXECUTION_STRATEGY_ALIASES = {
     "": "auto",
@@ -188,6 +190,12 @@ class AgentTask:
         self.goal = str(goal)
         self.success_criteria = [str(item) for item in success_criteria if str(item).strip()]
         self.execution_strategy = self.normalize_execution_strategy(execution)
+        self.effective_execution_strategy: AgentTaskEffectiveExecutionStrategy | None = (
+            cast(AgentTaskEffectiveExecutionStrategy, self.execution_strategy)
+            if self.execution_strategy in {"flat", "taskboard"}
+            else None
+        )
+        self.task_shape_analysis: dict[str, Any] = {}
         self.max_iterations = max(1, int(max_iterations))
         self.verify = verify
         self.context_profile = context_profile
@@ -227,7 +235,11 @@ class AgentTask:
             "verification": [],
             "checkpoints": [],
             "evidence_links": [],
+            "strategy": [],
+            "reflections": [],
+            "acp_recovery": [],
         }
+        self.reflections: list[dict[str, Any]] = []
         self.created_at = time.time()
         self.started_at: float | None = None
         self.completed_at: float | None = None
@@ -271,6 +283,9 @@ class AgentTask:
 
         async def loop(data):
             await data.async_set_state("task_id", self.id, emit=False)
+            effective_strategy = await self._resolve_effective_execution_strategy()
+            await data.async_set_state("agent_task.execution_strategy", self.execution_strategy, emit=False)
+            await data.async_set_state("agent_task.effective_execution_strategy", effective_strategy, emit=False)
             await self._emit("agent_task.started", self._task_summary())
             start_iteration = self._resumed_from_iteration + 1
             if start_iteration > 1:
@@ -278,7 +293,7 @@ class AgentTask:
                     "agent_task.resumed",
                     {"task_id": self.id, "resumed_from_iteration": self._resumed_from_iteration},
                 )
-            if self.execution_strategy == "taskboard":
+            if effective_strategy == "taskboard":
                 result = await self._run_taskboard()
                 await data.async_set_state("agent_task.latest_iteration", result, emit=False)
                 await data.async_set_state("agent_task.result", self.result, emit=False)
@@ -295,6 +310,216 @@ class AgentTask:
         flow.to(loop, name="agent_task_loop")
         return flow
 
+    async def _resolve_effective_execution_strategy(self) -> AgentTaskEffectiveExecutionStrategy:
+        if self.effective_execution_strategy in {"flat", "taskboard"}:
+            self._sync_execution_strategy_context(source="explicit_execution_strategy")
+            return self.effective_execution_strategy
+        if self.execution_strategy in {"flat", "taskboard"}:
+            return self._set_effective_execution_strategy(
+                cast(AgentTaskEffectiveExecutionStrategy, self.execution_strategy),
+                source="explicit_execution_strategy",
+            )
+
+        try:
+            analysis = await self._await_task_deadline(
+                self._request_task_shape_analysis(),
+                stage="task_shape_analysis",
+            )
+        except _AgentTaskDeadlineExceeded:
+            raise
+        except Exception as error:
+            analysis = {
+                "analysis": "",
+                "execution_hint": {
+                    "recommended_shape": "flat",
+                    "confidence": "low",
+                    "reasons": [],
+                    "linear_evidence": [],
+                    "branching_evidence": [],
+                    "uncertainty": "task_shape_analysis failed; flat fallback selected",
+                },
+                "diagnostics": [
+                    {
+                        "code": "agent_task.task_shape_analysis.failed",
+                        "type": error.__class__.__name__,
+                        "message": str(error),
+                    }
+                ],
+            }
+        self.task_shape_analysis = self._normalize_task_shape_analysis(analysis)
+        await self._record_task_shape_analysis()
+        hint = self.task_shape_analysis.get("execution_hint")
+        effective = "taskboard" if self._taskboard_hint_is_selectable(hint) else "flat"
+        source = "task_shape_analysis" if effective == "taskboard" else "flat_fallback"
+        return self._set_effective_execution_strategy(
+            cast(AgentTaskEffectiveExecutionStrategy, effective),
+            source=source,
+        )
+
+    def _set_effective_execution_strategy(
+        self,
+        value: AgentTaskEffectiveExecutionStrategy,
+        *,
+        source: str,
+    ) -> AgentTaskEffectiveExecutionStrategy:
+        self.effective_execution_strategy = value
+        self.diagnostics["execution_strategy"] = {
+            "requested": self.execution_strategy,
+            "effective": value,
+            "source": source,
+            "task_shape_analysis_ref": self.workspace_refs.get("strategy", [])[-1:]
+            if self.workspace_refs.get("strategy")
+            else [],
+        }
+        self._sync_execution_strategy_context(source=source)
+        return value
+
+    def _sync_execution_strategy_context(self, *, source: str) -> None:
+        try:
+            from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
+
+            context = get_current_agent_execution_context()
+            setter = getattr(context, "set_task_execution_strategy", None)
+            if callable(setter):
+                setter(
+                    requested=self.execution_strategy,
+                    effective=self.effective_execution_strategy,
+                    source=source,
+                )
+        except Exception:
+            return
+
+    async def _request_task_shape_analysis(self) -> dict[str, Any]:
+        request = self.agent.create_temp_request()
+        language_policy = self._language_policy()
+        self._apply_language_policy_to_request(request, language_policy)
+        request.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "execution_strategy": self.execution_strategy,
+                "execution_prompt": self._execution_prompt_context(),
+                "planner_capabilities": self._planner_capabilities(),
+                "language_policy": language_policy,
+            }
+        )
+        request.instruct(
+            "Analyze this task's execution shape for AgentTaskLoop strategy resolution. "
+            "First write flexible natural-language analysis. Then provide execution_hint as a thin, non-binding "
+            "structured hint. Do not decide final execution by keywords. Do not treat the hint as completion evidence. "
+            "recommended_shape must be flat or taskboard. Prefer flat when confidence is low or uncertainty is material."
+        )
+        request.output(
+            {
+                "analysis": (str, "Free-form task-shape analysis.", True),
+                "execution_hint": (
+                    dict,
+                    "Structured hint: recommended_shape, confidence, reasons, linear_evidence, branching_evidence, uncertainty.",
+                    True,
+                ),
+            },
+            format="json",
+        )
+        raw = await self._await_task_request(request.async_get_data(), stage="task_shape_analysis")
+        if not isinstance(raw, Mapping):
+            return {
+                "analysis": str(raw or ""),
+                "execution_hint": {"recommended_shape": "flat", "confidence": "low"},
+                "diagnostics": [{"code": "agent_task.task_shape_analysis.invalid_type"}],
+            }
+        return dict(raw)
+
+    def _normalize_task_shape_analysis(self, analysis: Any) -> dict[str, Any]:
+        source = dict(analysis) if isinstance(analysis, Mapping) else {}
+        raw_hint = source.get("execution_hint")
+        hint = dict(raw_hint) if isinstance(raw_hint, Mapping) else {}
+        diagnostics = list(source.get("diagnostics") or []) if isinstance(source.get("diagnostics"), list) else []
+        try:
+            recommended_shape = self.normalize_execution_strategy(hint.get("recommended_shape", "flat"))
+            if recommended_shape == "auto":
+                raise ValueError("execution_hint.recommended_shape must not be auto")
+        except (TypeError, ValueError):
+            recommended_shape = "flat"
+            diagnostics.append({"code": "agent_task.task_shape_analysis.invalid_recommended_shape"})
+        confidence = str(hint.get("confidence") or "low").strip().lower()
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "low"
+            diagnostics.append({"code": "agent_task.task_shape_analysis.invalid_confidence"})
+        normalized_hint = {
+            "recommended_shape": recommended_shape,
+            "confidence": confidence,
+            "reasons": self._normalize_string_list(hint.get("reasons")),
+            "linear_evidence": self._normalize_string_list(hint.get("linear_evidence")),
+            "branching_evidence": self._normalize_string_list(hint.get("branching_evidence")),
+            "uncertainty": str(hint.get("uncertainty") or "").strip(),
+        }
+        normalized = {
+            "analysis": str(source.get("analysis") or "").strip(),
+            "execution_hint": normalized_hint,
+        }
+        if diagnostics:
+            normalized["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        return DataFormatter.sanitize(normalized)
+
+    def _taskboard_hint_is_selectable(self, hint: Any) -> bool:
+        if not isinstance(hint, Mapping):
+            return False
+        if hint.get("recommended_shape") != "taskboard":
+            return False
+        policy = self._execution_strategy_policy()
+        if self._normalize_bool(policy.get("allow_taskboard", True), default=True) is False:
+            self.diagnostics.setdefault("execution_strategy_gates", []).append(
+                {"gate": "allow_taskboard", "accepted": False}
+            )
+            return False
+        threshold = str(policy.get("taskboard_confidence_threshold") or "medium").strip().lower()
+        confidence = str(hint.get("confidence") or "low").strip().lower()
+        order = {"low": 0, "medium": 1, "high": 2}
+        if threshold not in order:
+            threshold = "medium"
+        if order.get(confidence, 0) < order[threshold]:
+            self.diagnostics.setdefault("execution_strategy_gates", []).append(
+                {
+                    "gate": "taskboard_confidence_threshold",
+                    "accepted": False,
+                    "confidence": confidence,
+                    "threshold": threshold,
+                }
+            )
+            return False
+        return True
+
+    def _execution_strategy_policy(self) -> dict[str, Any]:
+        raw = self._agent_task_option("execution_strategy_policy", None)
+        if raw is None:
+            raw = self._agent_task_option("strategy_policy", None)
+        return dict(raw) if isinstance(raw, Mapping) else {}
+
+    async def _record_task_shape_analysis(self) -> None:
+        if not self.task_shape_analysis:
+            return
+        try:
+            record_ref = await self.workspace.ingest(
+                content={
+                    "task_id": self.id,
+                    "execution_strategy": self.execution_strategy,
+                    "task_shape_analysis": DataFormatter.sanitize(self.task_shape_analysis),
+                    "completion_evidence": False,
+                },
+                collection="strategy",
+                kind="agent_task_shape_analysis",
+                summary=f"{self.id} task shape analysis",
+                scope={"task_id": self.id},
+                source={"type": "agent_task", "phase": "strategy"},
+                meta={"task_id": self.id, "completion_evidence": False},
+            )
+            self._append_workspace_ref("strategy", record_ref)
+        except Exception as error:
+            self.diagnostics.setdefault("strategy_record_errors", []).append(
+                {"type": error.__class__.__name__, "message": str(error)}
+            )
+
     async def async_run(self) -> Any:
         async with self._start_lock:
             if self._completed:
@@ -310,6 +535,7 @@ class AgentTask:
                 self._completed = True
                 self.completed_at = time.time()
                 await self._emit("agent_task.resumed", {"task_id": self.id, "terminal": True})
+                await self._ensure_final_reflection()
                 await self._emit("result", self.result)
                 await self._close_streams()
                 return self.result
@@ -322,6 +548,7 @@ class AgentTask:
                         "goals": [self.goal],
                         "success_criteria": self.success_criteria,
                         "execution_strategy": self.execution_strategy,
+                        "effective_execution_strategy": self.effective_execution_strategy,
                         "max_iterations": self.max_iterations,
                         "required_capabilities": self.options.get("capability_constraints", {}),
                     },
@@ -338,6 +565,7 @@ class AgentTask:
                         "iterations": len(self.iterations),
                     }
                     await self._emit("agent_task.blocked", self.result)
+                await self._ensure_final_reflection()
                 await self._emit("result", self.result)
                 return self.result
             except BaseException as error:
@@ -569,6 +797,18 @@ class AgentTask:
         }
         if execution_failed:
             self._record_failed_execution_shape(plan, execution_meta)
+            execution_result, execution_meta = await self._maybe_run_acp_recovery(
+                iteration_index,
+                plan=plan,
+                execution_result=execution_result,
+                execution_meta=execution_meta,
+            )
+            execution_failed = str(execution_meta.get("status") or "").strip().lower() in {
+                "failed",
+                "error",
+                "timed_out",
+                "blocked",
+            }
         execution_result = await self._deliver_workspace_artifact(
             execution_result,
             plan=plan,
@@ -600,6 +840,18 @@ class AgentTask:
             execution_result=execution_result,
             execution_meta=execution_meta,
         )
+        step_reflection_ref = None
+        if self._should_record_process_reflection("bounded_step", plan=plan):
+            step_reflection_ref = await self._record_reflection(
+                iteration_index,
+                phase="bounded_step",
+                subject_ref=observation_ref,
+                summary=self._bounded_step_reflection_summary(
+                    plan=plan,
+                    execution_meta=execution_meta,
+                    execution_failed=execution_failed,
+                ),
+            )
         await self._emit(
             f"agent_task.iteration.{iteration_index}.observation",
             {"record": observation_ref, "checkpoint": checkpoint_ref},
@@ -663,6 +915,14 @@ class AgentTask:
             },
         )
         verification_ref = await self._record_verification(iteration_index, verification, observation_ref)
+        verification_reflection_ref = None
+        if self._should_record_process_reflection("major_node", plan=plan):
+            verification_reflection_ref = await self._record_reflection(
+                iteration_index,
+                phase="major_node",
+                subject_ref=verification_ref,
+                summary=self._major_node_reflection_summary(verification=verification),
+            )
         await self._emit_snapshot(
             iteration_index,
             "verification",
@@ -695,6 +955,11 @@ class AgentTask:
             "observation_ref": observation_ref,
             "verification": verification,
             "verification_ref": verification_ref,
+            "reflection_refs": [
+                ref
+                for ref in (step_reflection_ref, verification_reflection_ref)
+                if ref is not None
+            ],
             "context_item_count": len(context_pack.get("items", [])),
         }
         self.iterations.append(DataFormatter.sanitize(iteration_record))
@@ -1119,10 +1384,24 @@ class AgentTask:
 
     async def _run_taskboard_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
         if self._taskboard_card_uses_readback(context.card):
-            return await self._run_taskboard_readback_card(context, context_pack)
-        if self._taskboard_card_uses_control_request(context.card):
-            return await self._run_taskboard_control_card(context, context_pack)
-        return await self._run_taskboard_agent_card(context, context_pack)
+            result = await self._run_taskboard_readback_card(context, context_pack)
+        elif self._taskboard_card_uses_control_request(context.card):
+            result = await self._run_taskboard_control_card(context, context_pack)
+        else:
+            result = await self._run_taskboard_agent_card(context, context_pack)
+        if self._should_record_process_reflection("taskboard_card", plan={}):
+            await self._record_reflection(
+                max(0, len(self.iterations)),
+                phase="taskboard_card",
+                subject_ref=None,
+                summary={
+                    "assessment": f"TaskBoard card {getattr(context.card, 'card_id', '')} returned {result.status}.",
+                    "status": result.status,
+                    "card_id": getattr(context.card, "card_id", ""),
+                    "completion_evidence": False,
+                },
+            )
+        return result
 
     def _bind_action_workspace(self, execution: Any) -> None:
         request = getattr(execution, "request", None)
@@ -2971,6 +3250,7 @@ class AgentTask:
                 "artifact_status": "partial",
                 "task_id": self.id,
                 "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "reason": "TaskBoard did not reach a completed board state.",
                 "taskboard": {
                     "revision": revision.to_dict(),
@@ -3006,7 +3286,11 @@ class AgentTask:
             }
             final_execution_meta = {
                 "status": "completed",
-                "route": {"selected_route": "agent_task", "execution_strategy": self.execution_strategy},
+                "route": {
+                    "selected_route": "agent_task",
+                    "execution_strategy": self.execution_strategy,
+                    "effective_execution_strategy": self.effective_execution_strategy,
+                },
                 "logs": {"artifact_refs": final_refs},
                 "workspace_refs": {"agent_task_artifacts": final_refs},
                 "diagnostics": {"taskboard_terminal_status": result_status},
@@ -3057,6 +3341,7 @@ class AgentTask:
             "artifact_status": "accepted" if accepted else "partial",
             "task_id": self.id,
             "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
             "final_result": final.get("final_result", ""),
             "reason": final.get("reason", ""),
             "missing_criteria": final.get("missing_criteria", []),
@@ -3075,6 +3360,7 @@ class AgentTask:
                 "status": self.status,
                 "accepted": accepted,
                 "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "taskboard_revision_id": revision.revision_id,
             },
         )
@@ -3872,14 +4158,19 @@ class AgentTask:
             raw_step_plan = "dag"
         if raw_step_plan not in {"direct", "auto", "dag"}:
             raw_step_plan = "direct"
-        if self.execution_strategy == "flat":
+        effective_execution_strategy = self.effective_execution_strategy or (
+            "flat" if self.execution_strategy == "flat" else self.execution_strategy
+        )
+        explicit_flat_strategy = self.execution_strategy == "flat"
+        if explicit_flat_strategy:
             raw_step_plan = "direct"
         policy["step_plan"] = raw_step_plan
         policy["execution_strategy"] = self.execution_strategy
+        policy["effective_execution_strategy"] = effective_execution_strategy
         if "max_tasks" not in policy and "max_plan_items" in policy:
             policy["max_tasks"] = policy.get("max_plan_items")
         policy.setdefault("allow_dag_steps", raw_step_plan in {"auto", "dag"})
-        if self.execution_strategy == "flat":
+        if explicit_flat_strategy:
             policy["allow_dag_steps"] = False
         failed_dag_shapes = sorted(self._failed_execution_shapes.intersection(_DAG_STEP_EXECUTION_SHAPES))
         if raw_step_plan == "auto" and failed_dag_shapes:
@@ -4396,6 +4687,8 @@ class AgentTask:
                 "execution_prompt": execution_prompt,
                 "execution_policy": self._step_execution_policy(),
                 "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
+                "task_shape_analysis": DataFormatter.sanitize(self.task_shape_analysis),
                 "planner_capabilities": planner_capabilities,
                 "language_policy": language_policy,
             }
@@ -4633,6 +4926,7 @@ class AgentTask:
                 "plan": DataFormatter.sanitize(plan),
                 "step_execution": step_execution,
                 "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "language_policy": language_policy,
@@ -4643,7 +4937,8 @@ class AgentTask:
             (
                 "Execute exactly one bounded step for the AgentTask. "
                 f"Use the selected execution shape: {step_execution.get('effective_shape', 'direct')}. "
-                f"The AgentTask execution_strategy is {self.execution_strategy}. "
+                f"The AgentTask requested execution_strategy is {self.execution_strategy}; "
+                f"the effective execution_strategy is {self.effective_execution_strategy or self.execution_strategy}. "
                 "Respect the caller-provided execution_prompt context and output contract when present. "
                 "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
                 "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
@@ -4933,6 +5228,224 @@ class AgentTask:
         if shape:
             self._failed_execution_shapes.add(shape)
 
+    async def _maybe_run_acp_recovery(
+        self,
+        iteration_index: int,
+        *,
+        plan: dict[str, Any],
+        execution_result: Any,
+        execution_meta: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        policy = self._acp_recovery_policy()
+        if not policy:
+            return execution_result, execution_meta
+        if iteration_index < self.max_iterations and self._normalize_bool(
+            policy.get("after_retry_exhausted", True),
+            default=True,
+        ):
+            return execution_result, execution_meta
+
+        action = getattr(self.agent, "action", None)
+        execute_action = getattr(action, "async_execute_action", None)
+        if not callable(execute_action):
+            self.diagnostics.setdefault("acp_recovery", []).append(
+                {"status": "skipped", "reason": "agent_action_runtime_unavailable"}
+            )
+            return execution_result, execution_meta
+
+        action_id = str(policy.get("action_id") or "acp_run_task").strip()
+        agent_id = str(policy.get("agent_id") or "").strip()
+        if not agent_id:
+            agent_id = await self._select_acp_recovery_agent_id(policy, execute_action)
+        if not agent_id:
+            self.diagnostics.setdefault("acp_recovery", []).append(
+                {"status": "skipped", "reason": "no_acp_agent_id"}
+            )
+            return execution_result, execution_meta
+
+        recovery_task = str(policy.get("task") or "").strip()
+        if not recovery_task:
+            recovery_task = (
+                "Recover this failed AgentTask bounded step. Preserve the original goal, success criteria, "
+                "failed plan, and failure diagnostics. Return concrete evidence and any repaired result."
+            )
+        payload = {
+            "agent_id": agent_id,
+            "task": recovery_task,
+            "working_subdir": str(policy.get("working_subdir") or ""),
+            "context": {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "iteration": iteration_index,
+                "plan": DataFormatter.sanitize(plan),
+                "failed_execution_result": DataFormatter.sanitize(execution_result),
+                "failed_execution_meta": DataFormatter.sanitize(execution_meta),
+            },
+        }
+        try:
+            raw_acp_result = execute_action(action_id, payload)
+            if asyncio.iscoroutine(raw_acp_result) or isinstance(raw_acp_result, Awaitable):
+                acp_result = await raw_acp_result
+            else:
+                acp_result = raw_acp_result
+        except Exception as error:
+            diagnostic = {
+                "status": "failed",
+                "reason": "acp_action_failed",
+                "type": error.__class__.__name__,
+                "message": str(error),
+                "action_id": action_id,
+                "agent_id": agent_id,
+            }
+            self.diagnostics.setdefault("acp_recovery", []).append(diagnostic)
+            return execution_result, execution_meta
+
+        recovery_ref = await self._record_acp_recovery(
+            iteration_index,
+            plan=plan,
+            failed_execution_meta=execution_meta,
+            acp_result=acp_result,
+        )
+        acp_result_map = acp_result if isinstance(acp_result, Mapping) else {}
+        if self._should_record_process_reflection("acp_call", plan=plan):
+            await self._record_reflection(
+                iteration_index,
+                phase="acp_call",
+                subject_ref=recovery_ref,
+                summary={
+                    "assessment": "ACP fallback returned recovery evidence.",
+                    "status": str(acp_result_map.get("status") or ""),
+                    "agent_id": agent_id,
+                    "action_id": action_id,
+                    "completion_evidence": False,
+                },
+            )
+        recovered_ok = bool(acp_result_map.get("ok")) or str(acp_result_map.get("status") or "") in {
+            "success",
+            "completed",
+        }
+        recovered_result = {
+            "step_result": "ACP fallback completed." if recovered_ok else "ACP fallback returned diagnostics.",
+            "evidence": ["ACP fallback evidence was recorded."],
+            "remaining_work": [] if recovered_ok else ["Review ACP fallback diagnostics and replan."],
+            "acp_recovery": DataFormatter.sanitize(acp_result),
+        }
+        recovered_meta = {
+            "execution_id": f"{self.id}:iter-{iteration_index}:acp-recovery",
+            "status": "success" if recovered_ok else "failed",
+            "route": {
+                "selected_route": "acp_recovery",
+                "status": "success" if recovered_ok else "failed",
+                "action_id": action_id,
+                "agent_id": agent_id,
+            },
+            "logs": {
+                "action_logs": {
+                    action_id: {
+                        "status": "success" if recovered_ok else "failed",
+                        "result": DataFormatter.sanitize(acp_result),
+                    }
+                },
+                "route_logs": {},
+                "errors": [],
+                "workspace_refs": {"acp_recovery": [recovery_ref] if recovery_ref else []},
+            },
+            "workspace_refs": {"acp_recovery": [recovery_ref] if recovery_ref else []},
+            "diagnostics": {
+                "acp_recovery": {
+                    "action_id": action_id,
+                    "agent_id": agent_id,
+                    "recovered": recovered_ok,
+                }
+            },
+        }
+        return recovered_result, recovered_meta
+
+    def _acp_recovery_policy(self) -> dict[str, Any]:
+        raw = self._agent_task_option("acp_recovery", None)
+        if raw is None:
+            raw = self._agent_task_option("recovery_policy", None)
+        if not isinstance(raw, Mapping):
+            return {}
+        policy = dict(raw)
+        nested_acp = policy.get("acp")
+        if isinstance(nested_acp, Mapping):
+            policy = dict(nested_acp)
+        mode = str(policy.get("mode") or policy.get("type") or "acp").strip().lower()
+        if mode not in {"acp", "agent_client_protocol"}:
+            return {}
+        if self._normalize_bool(policy.get("enabled", True), default=True) is False:
+            return {}
+        return policy
+
+    async def _select_acp_recovery_agent_id(self, policy: dict[str, Any], execute_action: Any) -> str:
+        list_action_id = str(policy.get("list_action_id") or "acp_list_agents").strip()
+        try:
+            raw_listed = execute_action(list_action_id, {})
+            if asyncio.iscoroutine(raw_listed) or isinstance(raw_listed, Awaitable):
+                listed = await raw_listed
+            else:
+                listed = raw_listed
+        except Exception as error:
+            self.diagnostics.setdefault("acp_recovery", []).append(
+                {
+                    "status": "skipped",
+                    "reason": "acp_list_agents_failed",
+                    "type": error.__class__.__name__,
+                    "message": str(error),
+                }
+            )
+            return ""
+        candidates: Any = listed
+        if isinstance(listed, Mapping):
+            data = listed.get("data")
+            if isinstance(data, Mapping):
+                candidates = data.get("agents")
+            else:
+                candidates = listed.get("agents")
+        if not isinstance(candidates, Sequence) or isinstance(candidates, str | bytes | bytearray):
+            return ""
+        for item in candidates:
+            if not isinstance(item, Mapping):
+                continue
+            agent_id = str(item.get("agent_id") or item.get("id") or item.get("name") or "").strip()
+            if agent_id:
+                return agent_id
+        return ""
+
+    async def _record_acp_recovery(
+        self,
+        iteration_index: int,
+        *,
+        plan: dict[str, Any],
+        failed_execution_meta: dict[str, Any],
+        acp_result: Any,
+    ) -> "WorkspaceRecordRef | None":
+        try:
+            record_ref = await self.workspace.ingest(
+                content={
+                    "task_id": self.id,
+                    "iteration": iteration_index,
+                    "plan": DataFormatter.sanitize(plan),
+                    "failed_execution_meta": DataFormatter.sanitize(failed_execution_meta),
+                    "acp_result": DataFormatter.sanitize(acp_result),
+                },
+                collection="acp_recovery",
+                kind="agent_task_acp_recovery",
+                summary=f"{self.id} iteration {iteration_index} ACP recovery",
+                scope={"task_id": self.id, "iteration": iteration_index},
+                source={"type": "agent_task", "phase": "acp_recovery"},
+                meta={"task_id": self.id, "iteration": iteration_index},
+            )
+            self._append_workspace_ref("acp_recovery", record_ref)
+            return record_ref
+        except Exception as error:
+            self.diagnostics.setdefault("acp_recovery_record_errors", []).append(
+                {"type": error.__class__.__name__, "message": str(error)}
+            )
+            return None
+
     def _iteration_prompt_summaries(self) -> list[dict[str, Any]]:
         """Bounded, low-noise iteration history for plan/verify prompts.
 
@@ -4970,6 +5483,7 @@ class AgentTask:
                     },
                     "observation_ref": record.get("observation_ref"),
                     "verification_ref": record.get("verification_ref"),
+                    "reflection_refs": DataFormatter.sanitize(record.get("reflection_refs", [])),
                 }
             )
         # Prior-run summaries (from a resumed snapshot) come first so the model
@@ -4979,6 +5493,24 @@ class AgentTask:
         if isinstance(limit, int) and limit > 0 and len(combined) > limit:
             combined = combined[-limit:]
         return combined
+
+    def _reflection_prompt_summaries(self) -> list[dict[str, Any]]:
+        limit = self._iterations_prompt_limit()
+        records = self.reflections[-limit:] if isinstance(limit, int) and limit > 0 else self.reflections
+        summaries: list[dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            summaries.append(
+                {
+                    "iteration": record.get("iteration"),
+                    "phase": record.get("phase"),
+                    "record_ref": record.get("record_ref"),
+                    "summary": DataFormatter.sanitize(record.get("summary", {})),
+                    "completion_evidence": False,
+                }
+            )
+        return summaries
 
     @staticmethod
     def _planner_repair_context(previous_iterations: list[dict[str, Any]]) -> dict[str, Any]:
@@ -5108,6 +5640,7 @@ class AgentTask:
                 "context_pack": self._compact_context_pack_for_verifier(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "previous_iterations": self._iteration_prompt_summaries(),
+                "reflection_summaries": self._reflection_prompt_summaries(),
                 "language_policy": language_policy,
             }
         )
@@ -5119,6 +5652,8 @@ class AgentTask:
             "Require source/evidence references when the criteria ask for evidence. "
             "Use both execution_evidence_summary and cumulative_execution_evidence_summary; the final verification "
             "must account for evidence gathered in earlier iterations, not only the current write/finalize step. "
+            "Use reflection_summaries as evaluator notes linked to evidence and verification; reflection records are not "
+            "completion evidence by themselves. "
             "For source-grounded tasks, compare the candidate's factual claims, named sections, coverage mappings, "
             "quoted source titles, URLs, and artifact statements against verifier-visible evidence and bounded Action "
             "result previews. A citation, source URL, or file ref alone does not ground a mismatched claim; the claim "
@@ -5744,6 +6279,52 @@ class AgentTask:
                     normalized.get("acceptance_delta"),
                     ["Final result is missing."],
                 )
+        if normalized["is_complete"]:
+            final_result_text = normalized["final_result"].strip()
+            if final_result_text:
+                output_contract = self._parse_final_result_output_contract(final_result_text)
+                if output_contract is not None and output_contract["parse_success"] is not True:
+                    normalized["is_complete"] = False
+                    guard_reasons.append("final_result_output_parse_failed")
+                    attempts = output_contract.get("attempts", [])
+                    attempted_formats = [
+                        str(item.get("format"))
+                        for item in attempts
+                        if isinstance(item, Mapping) and str(item.get("format") or "").strip()
+                    ]
+                    format_note = " -> ".join(attempted_formats) if attempted_formats else output_contract["declared_format"]
+                    message = (
+                        "Final result must parse as a dict for the declared execution output contract "
+                        f"(tried {format_note})."
+                    )
+                    last_error = str(output_contract.get("last_error") or "").strip()
+                    if last_error:
+                        message = f"{message} Last parser error: {last_error}."
+                    normalized["missing_criteria"] = self._merge_string_lists(
+                        normalized.get("missing_criteria"),
+                        [message],
+                    )
+                    normalized["acceptance_delta"] = self._merge_string_lists(
+                        normalized.get("acceptance_delta"),
+                        [message],
+                    )
+                    if not normalized["replan_instruction"]:
+                        normalized["replan_instruction"] = (
+                            "Run another bounded step and produce a final_result that can be parsed as a dict "
+                            "for the declared execution output contract; use JSON if the requested format fails."
+                        )
+                elif (
+                    output_contract is not None
+                    and output_contract.get("resolved_format") != output_contract.get("declared_format")
+                ):
+                    self.diagnostics.setdefault("final_result_output_contract", []).append(
+                        {
+                            "task_id": self.id,
+                            "declared_format": output_contract.get("declared_format"),
+                            "resolved_format": output_contract.get("resolved_format"),
+                            "fallback": output_contract.get("fallback"),
+                        }
+                    )
         continuation = self._untried_read_action_continuation(execution_evidence_summary)
         if normalized["requires_block"] and continuation:
             normalized["requires_block"] = False
@@ -5799,6 +6380,73 @@ class AgentTask:
         for key, value in verification.items():
             normalized.setdefault(key, DataFormatter.sanitize(value))
         return normalized
+
+    def _parse_final_result_output_contract(self, final_result_text: str) -> dict[str, Any] | None:
+        execution_prompt = self._execution_prompt_context()
+        output_schema = execution_prompt.get("output")
+        if not isinstance(output_schema, Mapping) or not output_schema:
+            return None
+        output_format = str(execution_prompt.get("output_format") or "").strip().lower()
+        if output_format in {"", "json_object", "application/json"}:
+            output_format = "json"
+        if output_format == "auto":
+            output_format = "json"
+        if output_format not in {"json", "flat_markdown", "hybrid", "xml_field", "yaml_literal"}:
+            return None
+
+        attempts: list[dict[str, Any]] = []
+        for format_name in [output_format, *([] if output_format == "json" else ["json"])]:
+            parsed, error = self._parse_final_result_by_format(
+                final_result_text,
+                output_schema=dict(output_schema),
+                output_format=format_name,
+            )
+            attempt = {"format": format_name, "success": parsed is not None}
+            if error:
+                attempt["error"] = error
+            attempts.append(attempt)
+            if parsed is not None:
+                return {
+                    "parse_success": True,
+                    "declared_format": output_format,
+                    "resolved_format": format_name,
+                    "attempts": attempts,
+                    "fallback": (
+                        {
+                            "from": output_format,
+                            "to": format_name,
+                            "reason": attempts[0].get("error"),
+                        }
+                        if format_name != output_format
+                        else None
+                    ),
+                }
+
+        last_error = ""
+        for attempt in reversed(attempts):
+            if attempt.get("error"):
+                last_error = str(attempt["error"])
+                break
+        return {
+            "parse_success": False,
+            "declared_format": output_format,
+            "resolved_format": output_format,
+            "attempts": attempts,
+            "last_error": last_error,
+        }
+
+    @staticmethod
+    def _parse_final_result_by_format(
+        final_result_text: str,
+        *,
+        output_schema: dict[str, Any],
+        output_format: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        return parse_output_contract_dict(
+            final_result_text,
+            output_schema=output_schema,
+            output_format=output_format,
+        )
 
     @staticmethod
     def _normalize_string_list(value: Any) -> list[str]:
@@ -6065,6 +6713,8 @@ class AgentTask:
             "goal": self.goal,
             "success_criteria": list(self.success_criteria),
             "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
+            "task_shape_analysis": DataFormatter.sanitize(self.task_shape_analysis),
             "max_iterations": self.max_iterations,
             "verify": self.verify,
             "context_profile": self.context_profile,
@@ -6091,6 +6741,7 @@ class AgentTask:
                         "iteration": iteration_index,
                         "manifest": self._resume_manifest(),
                         "iterations_summary": self._iteration_prompt_summaries(),
+                        "reflection_summaries": self._reflection_prompt_summaries(),
                         "satisfied_required_actions": sorted(self._satisfied_required_actions),
                         "satisfied_required_skills": sorted(self._satisfied_required_skills),
                         "satisfied_capabilities": sorted(self._satisfied_capabilities),
@@ -6158,8 +6809,21 @@ class AgentTask:
             task_id=str(task_id),
         )
         task._resumed_from_iteration = int(state.get("iteration") or 0)
+        effective_execution_strategy = manifest.get("effective_execution_strategy")
+        if effective_execution_strategy in {"flat", "taskboard"}:
+            task.effective_execution_strategy = cast(AgentTaskEffectiveExecutionStrategy, effective_execution_strategy)
+        task_shape_analysis = manifest.get("task_shape_analysis")
+        if isinstance(task_shape_analysis, dict):
+            task.task_shape_analysis = DataFormatter.sanitize(task_shape_analysis)
         summaries = state.get("iterations_summary")
         task._resumed_iteration_summaries = list(summaries) if isinstance(summaries, list) else []
+        reflection_summaries = state.get("reflection_summaries")
+        if isinstance(reflection_summaries, list):
+            task.reflections = [
+                DataFormatter.sanitize(item)
+                for item in reflection_summaries
+                if isinstance(item, dict)
+            ]
         task._satisfied_required_actions = set(
             cls._normalize_string_list(state.get("satisfied_required_actions"))
         )
@@ -6329,6 +6993,133 @@ class AgentTask:
         self._append_workspace_ref("evidence_links", evidence_link)
         return record_ref
 
+    def _reflection_density(self) -> str:
+        agent_task_options = self.options.get("agent_task")
+        effort = agent_task_options.get("effort") if isinstance(agent_task_options, Mapping) else None
+        effort = effort if isinstance(effort, Mapping) else {}
+        density = str(effort.get("reflection_density") or "").strip().lower()
+        if density in {"final", "major_node", "action"}:
+            return density
+        name = str(effort.get("name") or self._taskboard_effort() or "medium").strip().lower()
+        if name in {"minimal", "low", "fast"}:
+            return "final"
+        if name in {"high", "max"}:
+            return "action"
+        return "major_node"
+
+    def _should_record_process_reflection(self, phase: str, *, plan: dict[str, Any]) -> bool:
+        density = self._reflection_density()
+        if density == "action":
+            return phase in {"bounded_step", "major_node", "taskboard_card", "acp_call"}
+        if density == "major_node":
+            return phase in {"major_node", "taskboard_card"}
+        if phase != "major_node":
+            return False
+        marker = plan.get("important") or plan.get("importance") or plan.get("reflection_required")
+        return bool(marker is True or str(marker).strip().lower() in {"important", "high", "required"})
+
+    def _bounded_step_reflection_summary(
+        self,
+        *,
+        plan: dict[str, Any],
+        execution_meta: dict[str, Any],
+        execution_failed: bool,
+    ) -> dict[str, Any]:
+        return {
+            "assessment": "bounded step failed and requires repair" if execution_failed else "bounded step produced evidence",
+            "status": "failed" if execution_failed else "observed",
+            "execution_shape": plan.get("effective_execution_shape", plan.get("execution_shape", "")),
+            "execution_id": execution_meta.get("execution_id"),
+            "route": execution_meta.get("route", {}),
+            "completion_evidence": False,
+        }
+
+    @staticmethod
+    def _major_node_reflection_summary(*, verification: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "assessment": str(verification.get("reason") or ""),
+            "status": "accepted" if verification.get("is_complete") else "needs_replan",
+            "missing_criteria": DataFormatter.sanitize(verification.get("missing_criteria", [])),
+            "acceptance_delta": DataFormatter.sanitize(verification.get("acceptance_delta", [])),
+            "completion_evidence": False,
+        }
+
+    async def _record_reflection(
+        self,
+        iteration_index: int,
+        *,
+        phase: str,
+        subject_ref: "WorkspaceRecordRef | None",
+        summary: dict[str, Any],
+    ) -> "WorkspaceRecordRef | None":
+        content = {
+            "task_id": self.id,
+            "iteration": iteration_index,
+            "phase": phase,
+            "reflection_density": self._reflection_density(),
+            "summary": DataFormatter.sanitize(summary),
+            "subject_ref": DataFormatter.sanitize(subject_ref),
+            "completion_evidence": False,
+        }
+        try:
+            record_ref = await self.workspace.ingest(
+                content=content,
+                collection="reflections",
+                kind="agent_task_reflection",
+                summary=f"{self.id} iteration {iteration_index} {phase} reflection",
+                scope={"task_id": self.id, "iteration": iteration_index},
+                source={"type": "agent_task", "phase": "reflect", "reflection_phase": phase},
+                meta={"task_id": self.id, "iteration": iteration_index, "completion_evidence": False},
+            )
+            if subject_ref:
+                evidence_link = await self.workspace.link_evidence(
+                    record_ref,
+                    subject_ref,
+                    relation="reflects_on",
+                    meta={
+                        "owner": "AgentTask",
+                        "task_id": self.id,
+                        "iteration": iteration_index,
+                        "completion_evidence": False,
+                    },
+                )
+                self._append_workspace_ref("evidence_links", evidence_link)
+            self._append_workspace_ref("reflections", record_ref)
+            reflection_summary = {
+                "iteration": iteration_index,
+                "phase": phase,
+                "record_ref": record_ref,
+                "summary": DataFormatter.sanitize(summary),
+                "completion_evidence": False,
+            }
+            self.reflections.append(reflection_summary)
+            await self._emit(
+                f"agent_task.iteration.{iteration_index}.reflection.{phase}",
+                {"record": record_ref, "summary": reflection_summary["summary"]},
+            )
+            return record_ref
+        except Exception as error:
+            self.diagnostics.setdefault("reflection_record_errors", []).append(
+                {"type": error.__class__.__name__, "message": str(error), "phase": phase}
+            )
+            return None
+
+    async def _ensure_final_reflection(self) -> None:
+        if any(item.get("phase") == "final" for item in self.reflections if isinstance(item, dict)):
+            return
+        await self._record_reflection(
+            max(0, len(self.iterations)),
+            phase="final",
+            subject_ref=None,
+            summary={
+                "assessment": str((self.result or {}).get("reason") or self.status),
+                "status": self.status,
+                "accepted": bool((self.result or {}).get("accepted")),
+                "artifact_status": (self.result or {}).get("artifact_status"),
+                "completion_evidence": False,
+            },
+        )
+
     def _append_workspace_ref(self, collection: str, ref: dict[str, Any] | None):
         if not ref:
             return
@@ -6346,8 +7137,11 @@ class AgentTask:
             "goal": self.goal,
             "success_criteria": DataFormatter.sanitize(self.success_criteria),
             "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
+            "task_shape_analysis": DataFormatter.sanitize(self.task_shape_analysis),
             "max_iterations": self.max_iterations,
             "iterations": DataFormatter.sanitize(self.iterations),
+            "reflections": DataFormatter.sanitize(self.reflections),
             "resumed_from_iteration": self._resumed_from_iteration,
             "resumed_iteration_summaries": DataFormatter.sanitize(self._resumed_iteration_summaries),
             "result": DataFormatter.sanitize(self.result),
@@ -7216,6 +8010,7 @@ class AgentTask:
             "goal": self.goal,
             "success_criteria": self.success_criteria,
             "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
             "max_iterations": self.max_iterations,
             "verify": self.verify,
         }

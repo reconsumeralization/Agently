@@ -22,66 +22,8 @@ from __future__ import annotations
 import re
 from typing import Any, AsyncGenerator, Mapping
 
-from agently.types.data.prompt import _classify_field_spec
 from agently.types.data.response import StreamingData
-
-from .section_value import (
-    normalize_complex_section_value,
-    normalize_scalar_section_value,
-)
-
-
-def parse_flat_markdown_output(text: str, output_schema: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Parse a flat_markdown model response into a dict keyed by output schema fields.
-
-    Splits the response text by ``### field_name`` section headers. Content
-    between each header and the next header (or end of text) is assigned to
-    the corresponding field.
-
-    Args:
-        text: The raw model response text.
-        output_schema: The output dict schema (field_name -> field_spec tuple).
-
-    Returns:
-        Parsed dict, or ``None`` if no sections are found.
-    """
-    if not isinstance(output_schema, Mapping) or not output_schema:
-        return None
-
-    result: dict[str, Any] = {}
-    # Split on "### field_name" at start of line
-    # Pattern: ^###  (optional spaces) field_name $ (end of line)
-    field_names = list(output_schema.keys())
-    # Build a pattern that only matches known field names
-    if not field_names:
-        return None
-    escaped_names = "|".join(re.escape(name) for name in field_names)
-    pattern = rf"^###\s+({escaped_names})\s*(?:\[(?:text|JSON)\])?\s*$"
-
-    sections = re.split(pattern, text, flags=re.MULTILINE)
-    # sections[0] = preamble (before first header)
-    # sections[1] = first field_name, sections[2] = first content
-    # sections[3] = second field_name, sections[4] = second content, etc.
-
-    for i in range(1, len(sections), 2):
-        field_name = sections[i].strip()
-        content = sections[i + 1].strip() if i + 1 < len(sections) else ""
-        field_spec = output_schema.get(field_name)
-        if _classify_field_spec(field_spec) == "complex":
-            ok, value = normalize_complex_section_value(
-                content,
-                field_name=field_name,
-            )
-        else:
-            ok, value = normalize_scalar_section_value(
-                content,
-                field_name=field_name,
-            )
-        if not ok:
-            return None
-        result[field_name] = value
-
-    return result if result else None
+from agently.core.model.StructuredOutputParser import parse_flat_markdown_output
 
 
 class FlatMarkdownStreamingParser:
