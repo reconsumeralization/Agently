@@ -144,12 +144,20 @@ browser/page/session, register it with a Browser ExecutionResource provider enab
 
 Agent Client Protocol (ACP) coding agents are exposed as Action capability, not
 as an AgentExecution route. Use `agent.use_acp(root=".", on_missing="skip")` to
-scan local ACP endpoints, handshake with available coding agents, and register
-`acp_list_agents` plus `acp_run_task` only when a runnable agent is verified.
+scan local ACP endpoints and built-in local coding-agent CLI adapters, then
+register `acp_list_agents` plus `acp_run_task` only when a runnable agent is
+verified. Built-in adapters cover common Codex and Claude Code command
+locations in addition to the current process `PATH`; they use fixed
+framework-owned argv templates and do not expose model-visible shell execution.
 The default `on_missing="skip"` records diagnostics and avoids fake runnable
 agents; `on_missing="error"` fails closed. ACP run actions declare
 `ExecutionResource(kind="acp")` so root scope and lifecycle facts stay in the
-resource layer.
+resource layer. By default `agent.use_acp(session_scope="execution")` reuses one
+framework session descriptor for the same AgentExecution context, ACP agent id,
+and root. If no AgentExecution context is active, the call falls back to an
+action-call session with diagnostics instead of sharing state across unrelated
+host calls. CLI adapters are marked `acp_session.persistence="stateless_cli"`
+unless a real protocol session is available.
 
 The `desc=` argument on `enable_*` helpers is optional. By default it is appended
 as additional guidance so the model still sees the baseline usage and safety

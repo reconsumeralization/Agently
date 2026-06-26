@@ -14,12 +14,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import shutil
+import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 
+from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
 from agently.types.data import ExecutionResourceRequirement
 from agently.utils import FunctionShifter, LazyImport
 
@@ -58,6 +61,194 @@ class ACPProvider(Protocol):
 
 class LocalACPProvider:
     COMMON_AGENT_COMMANDS = ("codex", "claude", "gemini")
+    DEFAULT_COMMAND_PATHS: dict[str, tuple[str, ...]] = {
+        "codex": (
+            "codex",
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+        ),
+        "claude": (
+            "claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+        ),
+        "gemini": (
+            "gemini",
+            "/opt/homebrew/bin/gemini",
+            "/usr/local/bin/gemini",
+        ),
+    }
+
+    def __init__(self, command_paths: Mapping[str, Iterable[str]] | None = None):
+        self.command_paths = {
+            agent_id: tuple(str(item) for item in paths)
+            for agent_id, paths in (command_paths or self.DEFAULT_COMMAND_PATHS).items()
+        }
+        self._agents_by_id: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _command_exists(command: str) -> str | None:
+        if not command:
+            return None
+        resolved = shutil.which(command)
+        if resolved:
+            return resolved
+        path = Path(command).expanduser()
+        if path.exists() and path.is_file():
+            return str(path)
+        return None
+
+    @staticmethod
+    def _health_args(agent_id: str) -> tuple[str, ...]:
+        return ("--version",)
+
+    @staticmethod
+    def _run_args(agent_id: str, *, task: str, root: str, working_dir: str) -> tuple[str, ...]:
+        if agent_id == "codex":
+            return (
+                "exec",
+                "-C",
+                working_dir,
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "never",
+                "--skip-git-repo-check",
+                task,
+            )
+        if agent_id == "claude":
+            return (
+                "-p",
+                "--permission-mode",
+                "dontAsk",
+                "--add-dir",
+                root,
+                task,
+            )
+        return (task,)
+
+    async def _async_command_health(
+        self,
+        *,
+        agent_id: str,
+        command: str,
+        cwd: str,
+        timeout_seconds: float | None,
+    ) -> dict[str, Any]:
+        args = self._health_args(agent_id)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                command,
+                *args,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=min(float(timeout_seconds or 10), 10.0),
+                )
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "error": "ACP command health check timed out.",
+                }
+            output = stdout.decode("utf-8", "replace").strip()
+            error = stderr.decode("utf-8", "replace").strip()
+            return {
+                "ok": process.returncode == 0,
+                "status": "ready" if process.returncode == 0 else "failed",
+                "exit_code": process.returncode,
+                "output": output[:1200],
+                "stderr": error[:1200],
+            }
+        except Exception as error:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": str(error) or error.__class__.__name__,
+                "exception_type": error.__class__.__name__,
+            }
+
+    def _command_health(
+        self,
+        *,
+        agent_id: str,
+        command: str,
+        cwd: str,
+        timeout_seconds: float | None,
+    ) -> dict[str, Any]:
+        return FunctionShifter.syncify(self._async_command_health)(
+            agent_id=agent_id,
+            command=command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _discover_cli_agents(
+        self,
+        *,
+        root: str,
+        requested: list[str],
+        timeout_seconds: float | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        agents: list[dict[str, Any]] = []
+        diagnostics: list[dict[str, Any]] = []
+        for agent_id in requested:
+            paths = list(self.command_paths.get(agent_id, (agent_id,)))
+            path_candidates = [
+                {"command": path, "resolved": self._command_exists(path)}
+                for path in paths
+            ]
+            selected_command = ""
+            selected_health: dict[str, Any] | None = None
+            failures: list[dict[str, Any]] = []
+            for item in path_candidates:
+                resolved = item.get("resolved")
+                if not resolved:
+                    continue
+                health = self._command_health(
+                    agent_id=agent_id,
+                    command=str(resolved),
+                    cwd=root,
+                    timeout_seconds=timeout_seconds,
+                )
+                if health.get("ok"):
+                    selected_command = str(resolved)
+                    selected_health = health
+                    break
+                failures.append({"command": resolved, "health": health})
+            if selected_command:
+                agent = {
+                    "agent_id": agent_id,
+                    "name": {"codex": "Codex", "claude": "Claude Code", "gemini": "Gemini"}.get(agent_id, agent_id),
+                    "status": "ready",
+                    "endpoint": selected_command,
+                    "command": selected_command,
+                    "transport": "cli_adapter",
+                    "handshake_kind": "command_health",
+                    "meta": {
+                        "health": selected_health or {},
+                        "path_candidates": path_candidates,
+                    },
+                }
+                agents.append(agent)
+                continue
+            diagnostics.append(
+                {
+                    "code": "acp.command_unavailable",
+                    "agent_id": agent_id,
+                    "message": "No runnable local coding-agent command passed ACP CLI adapter health checks.",
+                    "path_candidates": path_candidates,
+                    "health_failures": failures,
+                }
+            )
+        return agents, diagnostics
 
     def discover_agents(
         self,
@@ -68,14 +259,26 @@ class LocalACPProvider:
     ) -> Mapping[str, Any]:
         requested = [str(item).strip() for item in (agent_ids or self.COMMON_AGENT_COMMANDS) if str(item).strip()]
         command_candidates = [
-            {"agent_id": item, "command": item, "available": shutil.which(item) is not None}
+            {
+                "agent_id": item,
+                "paths": [
+                    {"command": path, "available": self._command_exists(path) is not None}
+                    for path in self.command_paths.get(item, (item,))
+                ],
+            }
             for item in requested
         ]
+        cli_agents, cli_diagnostics = self._discover_cli_agents(
+            root=root,
+            requested=requested,
+            timeout_seconds=timeout_seconds,
+        )
         try:
             acp_module = LazyImport.import_package("acp", auto_install=False)
         except ImportError as error:
+            self._agents_by_id = {agent["agent_id"]: agent for agent in cli_agents}
             return {
-                "agents": [],
+                "agents": cli_agents,
                 "diagnostics": [
                     {
                         "code": "acp.dependency_missing",
@@ -83,13 +286,14 @@ class LocalACPProvider:
                         "requested_agent_ids": requested,
                         "command_candidates": command_candidates,
                     }
-                ],
+                ] + cli_diagnostics,
             }
 
         discover = getattr(acp_module, "discover_agents", None)
         if not callable(discover):
+            self._agents_by_id = {agent["agent_id"]: agent for agent in cli_agents}
             return {
-                "agents": [],
+                "agents": cli_agents,
                 "diagnostics": [
                     {
                         "code": "acp.discovery_api_missing",
@@ -97,14 +301,36 @@ class LocalACPProvider:
                         "requested_agent_ids": requested,
                         "command_candidates": command_candidates,
                     }
-                ],
+                ] + cli_diagnostics,
             }
         result = _resolve_sync(discover(root=root, agent_ids=requested or None, timeout_seconds=timeout_seconds))
         if isinstance(result, Mapping):
-            return result
+            agents = list(result.get("agents", []) or [])
+            diagnostics = list(result.get("diagnostics", []) or [])
+            combined_agents = [
+                *(agent for agent in agents if isinstance(agent, Mapping)),
+                *cli_agents,
+            ]
+            self._agents_by_id = {
+                str(agent.get("agent_id")): dict(agent)
+                for agent in combined_agents
+                if isinstance(agent, Mapping) and agent.get("agent_id")
+            }
+            return {
+                **dict(result),
+                "agents": combined_agents,
+                "diagnostics": diagnostics + cli_diagnostics,
+            }
         if isinstance(result, Iterable) and not isinstance(result, (str, bytes)):
-            return {"agents": list(result), "diagnostics": []}
-        return {"agents": [], "diagnostics": [{"code": "acp.discovery_invalid_result"}]}
+            agents = [*(item for item in list(result) if isinstance(item, Mapping)), *cli_agents]
+            self._agents_by_id = {
+                str(agent.get("agent_id")): dict(agent)
+                for agent in agents
+                if isinstance(agent, Mapping) and agent.get("agent_id")
+            }
+            return {"agents": agents, "diagnostics": cli_diagnostics}
+        self._agents_by_id = {agent["agent_id"]: agent for agent in cli_agents}
+        return {"agents": cli_agents, "diagnostics": [{"code": "acp.discovery_invalid_result"}, *cli_diagnostics]}
 
     async def async_run_task(
         self,
@@ -116,6 +342,64 @@ class LocalACPProvider:
         timeout_seconds: float | None = None,
         context: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
+        agent = self._agents_by_id.get(agent_id)
+        if isinstance(agent, Mapping) and agent.get("transport") == "cli_adapter":
+            command = str(agent.get("command") or "")
+            if not command:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "error": "ACP CLI adapter has no command.",
+                    "diagnostics": [{"code": "acp.cli_command_missing"}],
+                }
+            args = self._run_args(agent_id, task=task, root=root, working_dir=working_dir)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    command,
+                    *args,
+                    cwd=working_dir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    return {
+                        "ok": False,
+                        "status": "timed_out",
+                        "error": "ACP CLI task timed out.",
+                        "agent_id": agent_id,
+                        "diagnostics": [{"code": "acp.cli_timeout"}],
+                    }
+                output = stdout.decode("utf-8", "replace")
+                error = stderr.decode("utf-8", "replace")
+                return {
+                    "ok": process.returncode == 0,
+                    "status": "success" if process.returncode == 0 else "error",
+                    "agent_id": agent_id,
+                    "output": output,
+                    "stderr": error,
+                    "exit_code": process.returncode,
+                    "command": command,
+                    "transport": "cli_adapter",
+                    "acp_session": (
+                        dict(context.get("_agently_acp_session", {}))
+                        if isinstance(context, Mapping)
+                        and isinstance(context.get("_agently_acp_session", {}), Mapping)
+                        else {}
+                    ),
+                    "diagnostics": [] if process.returncode == 0 else [{"code": "acp.cli_failed"}],
+                }
+            except Exception as error:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "error": str(error) or error.__class__.__name__,
+                    "agent_id": agent_id,
+                    "diagnostics": [{"code": "acp.cli_exception", "type": error.__class__.__name__}],
+                }
         acp_module = LazyImport.import_package("acp", auto_install=False)
         run_task = getattr(acp_module, "run_task", None)
         if not callable(run_task):
@@ -148,6 +432,7 @@ class ACP:
         on_missing: Literal["skip", "error"] = "skip",
         timeout_seconds: float | None = 600,
         action_prefix: str = "",
+        session_scope: Literal["action_call", "execution"] = "execution",
     ):
         self.root = Path(root or Path.cwd()).resolve()
         self.agent_ids = self._normalize_agent_ids(agent_ids)
@@ -155,6 +440,7 @@ class ACP:
         self.on_missing = on_missing
         self.timeout_seconds = timeout_seconds
         self.action_prefix = action_prefix.strip()
+        self.session_scope = session_scope if session_scope in {"action_call", "execution"} else "execution"
         self._agents: list[dict[str, Any]] | None = None
         self._diagnostics: list[dict[str, Any]] = []
 
@@ -178,6 +464,8 @@ class ACP:
             "status": str(agent.get("status") or "ready"),
             "endpoint": str(agent.get("endpoint") or ""),
             "command": str(agent.get("command") or ""),
+            "transport": str(agent.get("transport") or ""),
+            "handshake_kind": str(agent.get("handshake_kind") or ""),
             "meta": dict(agent.get("meta", {})) if isinstance(agent.get("meta"), Mapping) else {},
         }
 
@@ -265,7 +553,7 @@ class ACP:
                 "workspace_roots": [str(self.root)],
                 "timeout_seconds": float(self.timeout_seconds or 0),
             },
-            "meta": {"component": "builtins.actions.ACP"},
+            "meta": {"component": "builtins.actions.ACP", "session_scope": self.session_scope},
         }
 
     def register_actions(
@@ -295,6 +583,7 @@ class ACP:
                 "component": "builtins.actions.ACP",
                 "kind": "acp",
                 "root": str(self.root),
+                "session_scope": self.session_scope,
                 "diagnostics": list(self._diagnostics),
             },
         )
@@ -324,6 +613,7 @@ class ACP:
                     "component": "builtins.actions.ACP",
                     "kind": "acp",
                     "root": str(self.root),
+                    "session_scope": self.session_scope,
                     "agent_ids": [agent["agent_id"] for agent in self._agents],
                 },
             )
@@ -352,6 +642,79 @@ class ACP:
         if candidate != self.root and self.root not in candidate.parents:
             raise ValueError("ACP working_subdir must stay inside the configured root.")
         return candidate
+
+    @staticmethod
+    def _selected_session_persistence(agent: Mapping[str, Any]) -> str:
+        if str(agent.get("transport") or "") == "cli_adapter":
+            return "stateless_cli"
+        return "protocol_session"
+
+    def _resolve_session_descriptor(
+        self,
+        *,
+        selected: Mapping[str, Any],
+        working_dir: Path,
+    ) -> dict[str, Any]:
+        agent_id = str(selected.get("agent_id") or "")
+        persistence = self._selected_session_persistence(selected)
+        if self.session_scope == "action_call":
+            session_id = f"acp:{ uuid.uuid4().hex }"
+            return {
+                "scope": "action_call",
+                "session_id": session_id,
+                "agent_id": agent_id,
+                "root": str(self.root),
+                "working_dir": str(working_dir),
+                "persistence": persistence,
+            }
+
+        execution_context = get_current_agent_execution_context()
+        execution_id = str(getattr(execution_context, "execution_id", "") or "")
+        if execution_context is None or not execution_id:
+            session_id = f"acp:{ uuid.uuid4().hex }"
+            return {
+                "scope": "action_call",
+                "requested_scope": "execution",
+                "session_id": session_id,
+                "agent_id": agent_id,
+                "root": str(self.root),
+                "working_dir": str(working_dir),
+                "persistence": persistence,
+                "diagnostics": [{"code": "acp.session.execution_context_missing"}],
+            }
+
+        action_scope = getattr(execution_context, "action_scope", None)
+        if not isinstance(action_scope, dict):
+            action_scope = {}
+            try:
+                setattr(execution_context, "action_scope", action_scope)
+            except Exception:
+                pass
+        sessions = action_scope.setdefault("acp_sessions", {})
+        if not isinstance(sessions, dict):
+            sessions = {}
+            action_scope["acp_sessions"] = sessions
+        session_key = f"{ agent_id }|{ self.root }|{ execution_id }"
+        session = sessions.get(session_key)
+        if not isinstance(session, dict):
+            session = {
+                "scope": "execution",
+                "session_id": f"acp:{ execution_id }:{ agent_id }:{ uuid.uuid4().hex[:8] }",
+                "agent_id": agent_id,
+                "root": str(self.root),
+                "working_dir": str(working_dir),
+                "execution_id": execution_id,
+                "persistence": persistence,
+            }
+            sessions[session_key] = session
+        else:
+            session.setdefault("scope", "execution")
+            session.setdefault("agent_id", agent_id)
+            session.setdefault("root", str(self.root))
+            session.setdefault("execution_id", execution_id)
+            session["working_dir"] = str(working_dir)
+            session["persistence"] = persistence
+        return dict(session)
 
     async def async_run_task(
         self,
@@ -402,13 +765,16 @@ class ACP:
             Callable[..., Awaitable[Mapping[str, Any] | str] | Mapping[str, Any] | str],
             run_task,
         )
+        acp_session = self._resolve_session_descriptor(selected=selected, working_dir=working_dir)
+        provider_context = dict(context or {})
+        provider_context["_agently_acp_session"] = dict(acp_session)
         result = run_task_func(
             agent_id=selected["agent_id"],
             task=task,
             root=str(self.root),
             working_dir=str(working_dir),
             timeout_seconds=self.timeout_seconds,
-            context=dict(context or {}),
+            context=provider_context,
         )
         if inspect.isawaitable(result):
             result = await cast(Awaitable[Mapping[str, Any] | str], result)
@@ -419,12 +785,14 @@ class ACP:
         payload.setdefault("root", str(self.root))
         payload.setdefault("working_dir", str(working_dir))
         payload.setdefault("diagnostics", [])
+        payload.setdefault("acp_session", acp_session)
         payload_data = {
             "agent_id": payload.get("agent_id", selected["agent_id"]),
             "output": payload.get("output", payload.get("result", payload.get("data"))),
             "root": payload.get("root", str(self.root)),
             "working_dir": payload.get("working_dir", str(working_dir)),
             "diagnostics": payload.get("diagnostics", []),
+            "acp_session": payload.get("acp_session", acp_session),
         }
         payload.setdefault("data", payload_data)
         payload.setdefault("result", payload.get("data"))

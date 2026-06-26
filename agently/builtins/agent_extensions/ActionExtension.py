@@ -214,6 +214,7 @@ class ActionExtension(BaseAgent):
         on_missing: Literal["skip", "error"] = "skip",
         timeout_seconds: float | None = 600,
         action_prefix: str = "",
+        session_scope: Literal["action_call", "execution"] = "execution",
     ):
         from agently.builtins.actions import ACP
 
@@ -224,6 +225,7 @@ class ActionExtension(BaseAgent):
             on_missing=on_missing,
             timeout_seconds=timeout_seconds,
             action_prefix=action_prefix,
+            session_scope=session_scope,
         )
         self._register_action_items(acp)
         diagnostics = acp.list_agents().get("diagnostics", [])
