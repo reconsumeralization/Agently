@@ -2,8 +2,8 @@
 
 Agently 4.1.3 makes `agent.start()` the default user-layer entrypoint for an
 Agent turn. It keeps returning the business result, while the Agent can route
-through ordinary model response, Actions, Skills Executor, or a DAG-shaped
-execution route when those candidates were explicitly injected.
+through ordinary model response, Actions, or Skills Executor when those
+capabilities were explicitly injected.
 
 ```python
 result = (
@@ -16,16 +16,14 @@ result = (
 )
 ```
 
-Candidate injection is the boundary. If no Actions, Skills, Skills Packs, or
-DAG candidates are registered, `agent.start()` remains an ordinary model
-request.
+Candidate injection is the boundary. If no Actions, Skills, or Skills Packs are
+registered, `agent.start()` remains an ordinary model request.
 
 `TaskDAG` is the foundation DAG capability. `DynamicTask` remains a
 compatibility and convenience facade over DAG planning/execution, not a second
-recommended task lifecycle. `agent.use_dynamic_task(...)` registers an
-Agent-level DAG candidate for later executions. `execution.use_dynamic_task(...)`
-registers a candidate only on the captured `AgentExecution` draft, so one DAG
-route does not leak into unrelated Agent runs.
+recommended task lifecycle and not an AgentTaskLoop auto-strategy route. Use
+TaskDAG / DynamicTask when the application or a visual automation surface owns
+the graph shape and wants to run that graph explicitly.
 
 Quick prompt chains create execution-scoped drafts. The Agent can be kept as a
 service singleton for shared settings, model activation, Actions, Skills,
@@ -58,11 +56,10 @@ for execution prompt accumulation. Use `always=True`,
 the lower-level request-builder surface.
 
 Accepted development-line routing is candidate-driven and deterministic-first.
-Submitted DAG candidates through the DynamicTask facade take precedence and
-required Skills candidates run through the Skills route. When several optional
-candidates are present, such as DAG-shaped execution, model-decision Skills,
-and ordinary Actions, the model chooses the route by default. If there is only
-one optional candidate, that route is selected directly.
+Required Skills candidates run through the Skills route. When several optional
+candidates are present, such as model-decision Skills and ordinary Actions, the
+model chooses the route by default. If there is only one optional candidate,
+that route is selected directly.
 
 The public Agent API stays in core, but route planning and execution are owned
 by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
@@ -122,14 +119,12 @@ points, `medium` reflects after each major task node or TaskBoard card/tick, and
 TaskBoard card, and final result. Reflection records are Workspace evidence and
 verifier/replan input, but they are not completion evidence by themselves.
 
-`execution.step_plan` defaults to `auto`. Users normally do not need to spell it
-out. It lets a Goal Pursuit iteration use DAG as an internal bounded-step shape
-when the next unit of work naturally has serial or parallel substeps. Use
-`execution={"step_plan": "direct"}` only to force one bounded AgentExecution
-step, or `execution={"step_plan": "dag", "max_tasks": 6}` when the caller wants
-to prefer a DAG-shaped step and bound its size. The DAG result is folded back
-into AgentTaskLoop evidence; it is not accepted task completion until the model
-verifier and host guards both pass.
+`execution.step_plan` is retained only as compatibility guidance. Users
+normally do not need to spell it out. AgentTaskLoop no longer uses TaskDAG /
+DynamicTask as an internal bounded step strategy; legacy `dynamic_task` /
+`execution_dag` step proposals and `execution={"step_plan": "dag"}` are
+degraded to direct bounded execution with diagnostics. Use TaskDAG / DynamicTask
+separately when the host owns a submitted or visual automation graph.
 
 ## AgentTask Loop
 
@@ -330,8 +325,8 @@ strategy layer unless the host explicitly selects `flat` or `taskboard`.
 
 The first public slice is intentionally narrow: single task, one Agent owner,
 roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps
-may use Actions, Skills, or DAG candidates that the host already enabled on the
-Agent or attached to the current execution. AgentTask does not provide
+may use Actions or Skills that the host already enabled on the Agent or attached
+to the current execution. AgentTask does not provide
 multi-task coordination, background autonomy, distributed leases, mid-step
 pause/resume, or long-term memory management. Crash recovery for this slice is
 exposed through `agent.resume(...)` / `agent.async_resume(...)`, which rebuild a

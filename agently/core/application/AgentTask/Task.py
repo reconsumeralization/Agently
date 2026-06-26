@@ -4416,9 +4416,12 @@ class AgentTask:
             or policy.get("execution_shape")
             or "direct"
         ).strip().lower()
-        if raw_step_plan in {"dynamic_task", "task_dag", "execution_dag"}:
-            raw_step_plan = "dag"
-        if raw_step_plan not in {"direct", "auto", "dag"}:
+        requested_step_plan = raw_step_plan
+        if raw_step_plan in {"dynamic_task", "task_dag", "execution_dag", "dag"}:
+            raw_step_plan = "direct"
+            policy["step_plan_degraded_from"] = requested_step_plan
+            policy["step_plan_degradation_reason"] = "task_dag_not_agent_execution_strategy"
+        if raw_step_plan not in {"direct", "auto"}:
             raw_step_plan = "direct"
         effective_execution_strategy = self.effective_execution_strategy or (
             "flat" if self.execution_strategy == "flat" else self.execution_strategy
@@ -4431,12 +4434,9 @@ class AgentTask:
         policy["effective_execution_strategy"] = effective_execution_strategy
         if "max_tasks" not in policy and "max_plan_items" in policy:
             policy["max_tasks"] = policy.get("max_plan_items")
-        policy.setdefault("allow_dag_steps", raw_step_plan in {"auto", "dag"})
-        if explicit_flat_strategy:
-            policy["allow_dag_steps"] = False
+        policy["allow_dag_steps"] = False
         failed_dag_shapes = sorted(self._failed_execution_shapes.intersection(_DAG_STEP_EXECUTION_SHAPES))
-        if raw_step_plan == "auto" and failed_dag_shapes:
-            policy["allow_dag_steps"] = False
+        if failed_dag_shapes:
             policy["suppressed_execution_shapes"] = failed_dag_shapes
         return policy
 
@@ -4607,22 +4607,6 @@ class AgentTask:
         normalized = aliases.get(text, text)
         return normalized if normalized in _STEP_EXECUTION_SHAPES else "direct"
 
-    def _step_dynamic_task_candidate(self, plan: dict[str, Any]) -> dict[str, Any] | None:
-        raw_candidate: Any = None
-        for key in ("dynamic_task", "task_dag", "execution_dag"):
-            item = plan.get(key)
-            if isinstance(item, Mapping):
-                raw_candidate = item
-                break
-        if raw_candidate is None and isinstance(plan.get("dynamic_task_plan"), Mapping):
-            raw_candidate = {"plan": plan["dynamic_task_plan"]}
-        if raw_candidate is None:
-            return None
-        candidate = dict(raw_candidate)
-        if not candidate.get("mode"):
-            candidate["mode"] = "submitted" if candidate.get("plan") is not None else "auto"
-        return candidate
-
     def _configure_step_execution(self, execution: Any, plan: dict[str, Any]) -> dict[str, Any]:
         policy = self._step_execution_policy()
         requested_shape = str(plan.get("execution_shape") or "direct")
@@ -4632,49 +4616,8 @@ class AgentTask:
         warning: str | None = None
 
         if requested_shape in _DAG_STEP_EXECUTION_SHAPES:
-            dag_suppressed = (
-                policy.get("step_plan") == "auto"
-                and bool(self._failed_execution_shapes.intersection(_DAG_STEP_EXECUTION_SHAPES))
-            )
-            dag_policy_allows = (
-                policy.get("step_plan") != "direct"
-                and bool(policy.get("allow_dag_steps") or policy.get("step_plan") in {"auto", "dag"})
-            )
-            candidate = self._step_dynamic_task_candidate(plan)
-            has_dynamic_candidates = bool(
-                getattr(self.agent, "_dynamic_task_candidates", []) or getattr(execution, "local_dynamic_task_candidates", [])
-            )
-            dag_allowed = bool(
-                not dag_suppressed
-                and dag_policy_allows
-                and (
-                    candidate
-                    or has_dynamic_candidates
-                )
-            )
-            if dag_suppressed:
-                effective_shape = "direct"
-                warning = "dag_shape_failed_previously"
-            elif not dag_policy_allows:
-                effective_shape = "direct"
-                warning = "dag_shape_not_enabled"
-            elif candidate is not None:
-                add_candidate = getattr(execution, "_add_dynamic_task_candidate", None)
-                if callable(add_candidate):
-                    add_candidate(candidate)
-                    candidate_added = True
-            elif not has_dynamic_candidates and dag_allowed:
-                auto_candidate: dict[str, Any] = {"mode": "auto"}
-                for key in ("max_tasks", "timeout", "max_retries", "output_schema", "ensure_keys", "output_format"):
-                    if policy.get(key) is not None:
-                        auto_candidate[key] = policy.get(key)
-                add_candidate = getattr(execution, "_add_dynamic_task_candidate", None)
-                if callable(add_candidate):
-                    add_candidate(auto_candidate)
-                    candidate_added = True
-            else:
-                effective_shape = "direct"
-                warning = "dag_shape_not_enabled"
+            effective_shape = "direct"
+            warning = "dag_shape_not_agent_execution_strategy"
 
         plan["effective_execution_shape"] = effective_shape
         # Structured step scope (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
@@ -4752,8 +4695,6 @@ class AgentTask:
             "direct": "model_request",
             "actions": "model_request",
             "skills": "skills",
-            "dynamic_task": "dynamic_task",
-            "execution_dag": "dynamic_task",
         }
         route = route_by_shape.get(str(effective_shape or "").strip())
         if route is None:
@@ -4772,7 +4713,7 @@ class AgentTask:
 
         Read from the typed snapshot the orchestrator route injected into options
         at task construction (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC).
-        Covers actions, skills, skill packs, and dynamic-task candidates as one
+        Covers AgentTaskLoop executable actions, skills, and skill packs as one
         capability list. AgentTask consumes only this snapshot; it does not reach
         back into the routing plugin.
         """
@@ -4786,9 +4727,12 @@ class AgentTask:
             capability_id = str(item.get("id") or item.get("capability_id") or "").strip()
             if not capability_id:
                 continue
+            kind = str(item.get("kind") or "action")
+            if kind == "dynamic_task":
+                continue
             entry: dict[str, Any] = {
                 "id": capability_id,
-                "kind": str(item.get("kind") or "action"),
+                "kind": kind,
                 "route": str(item.get("route") or "model_request"),
                 "guidance_access": str(item.get("guidance_access") or "none"),
                 "description": str(item.get("description") or ""),
@@ -4961,7 +4905,7 @@ class AgentTask:
         # only on their own route.
         capability_note = (
             " Available capabilities are listed in planner_capabilities, each with a kind "
-            "(action/skill/skill_pack/dynamic_task), the execution_shape route that exposes it, and "
+            "(action/skill/skill_pack), the execution_shape route that exposes it, and "
             "guidance_access. A capability whose guidance_access is route_context (such as a Skill's "
             "guidance) only reaches the model on its own route, so choose that execution_shape when such "
             "a capability is the intended way to satisfy a criterion."
@@ -4971,7 +4915,7 @@ class AgentTask:
         allowed_shapes = (
             "direct or actions"
             if self.execution_strategy == "flat"
-            else "direct, actions, skills, dynamic_task, or execution_dag"
+            else "direct, actions, or skills"
         )
         strategy_note = (
             " The selected execution_strategy is flat: keep the task in a linear AgentTask loop and do not plan DAG or TaskBoard steps."
@@ -4993,7 +4937,8 @@ class AgentTask:
             "announcement page as the source boundary, plan Browse/readback for the candidate page and relevant same-site "
             "index/list/download/navigation pages so a more specific official source can be discovered. "
             f"Set execution_shape to {allowed_shapes}. "
-            "Use a DAG-shaped execution only when execution_policy allows it or a concrete DynamicTask candidate is available."
+            "Do not plan TaskDAG, DynamicTask, or DAG-shaped execution here; TaskDAG is an independent "
+            "manual/configured or visual-automation orchestration surface, not an AgentTaskLoop strategy."
             + strategy_note
             + capability_note
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
@@ -5009,7 +4954,7 @@ class AgentTask:
             {
                 "execution_shape": (
                     str,
-                    "Execution shape for this bounded step: direct, actions, skills, dynamic_task, or execution_dag",
+                    "Execution shape for this bounded step: direct, actions, or skills",
                     False,
                 ),
                 "step_instruction": (str, "Instruction for one bounded AgentExecution step", True),
@@ -5023,11 +4968,6 @@ class AgentTask:
                 "step_scope": (
                     dict,
                     "Optional structured scope: {allowed_capability_ids: [...]}; empty means no restriction",
-                    False,
-                ),
-                "dynamic_task": (
-                    dict,
-                    "Optional bounded DynamicTask candidate when execution_shape is dynamic_task or execution_dag",
                     False,
                 ),
             },
@@ -5356,7 +5296,7 @@ class AgentTask:
 
         effective_shape = str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "direct")
         execution_policy = self._step_execution_policy()
-        plan_block_kind = "flow_segment" if effective_shape in _DAG_STEP_EXECUTION_SHAPES else "agent_step"
+        plan_block_kind = "agent_step"
         plan_block_id = plan_block_kind
         plan_block_label = "dag-segment" if plan_block_kind == "flow_segment" else "agent-step"
         step_scope = plan.get("step_scope")

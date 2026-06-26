@@ -404,7 +404,12 @@ async def test_agent_task_flat_workspace_artifact_delivery_before_verification(t
                     "remaining_work": [],
                 }
             else:
-                payload = {"answer": "ok"}
+                payload = {
+                    "step_result": "Direct bounded step returned value ok.",
+                    "candidate_final_result": "Bounded step completed with value ok.",
+                    "evidence": ["value ok was produced by the direct bounded step."],
+                    "remaining_work": [],
+                }
             yield "message", json.dumps(payload, ensure_ascii=False)
 
     settings = Settings(name="agent-task-workspace-artifact-settings", parent=Agently.settings)
@@ -1606,7 +1611,7 @@ async def test_agent_execution_dynamic_task_candidate_is_execution_local():
 
 
 @pytest.mark.asyncio
-async def test_agent_task_loop_executes_dag_shaped_step_without_global_candidate_leak(tmp_path):
+async def test_agent_task_loop_rejects_dag_shaped_step_without_global_candidate_leak(tmp_path):
     class DagStepVerificationRequester(MockAgentTaskRequester):
         name = "DagStepVerificationRequester"
 
@@ -1616,13 +1621,18 @@ async def test_agent_task_loop_executes_dag_shaped_step_without_global_candidate
                 payload = {
                     "is_complete": True,
                     "requires_block": False,
-                    "reason": "the DAG step returned the required evidence",
+                    "reason": "the bounded step returned the required evidence",
                     "missing_criteria": [],
                     "replan_instruction": "",
-                    "final_result": "DAG step completed with value ok.",
+                    "final_result": "Bounded step completed with value ok.",
                 }
             else:
-                payload = {"answer": "ok"}
+                payload = {
+                    "step_result": "Direct bounded step returned value ok.",
+                    "candidate_final_result": "Bounded step completed with value ok.",
+                    "evidence": ["value ok was produced by the direct bounded step."],
+                    "remaining_work": [],
+                }
             yield "message", json.dumps(payload, ensure_ascii=False)
 
     async def run_task(context):
@@ -1669,16 +1679,17 @@ async def test_agent_task_loop_executes_dag_shaped_step_without_global_candidate
 
     assert result["status"] == "completed"
     assert first_iteration["plan"]["execution_shape"] == "dynamic_task"
-    assert first_iteration["plan"]["effective_execution_shape"] == "dynamic_task"
-    assert first_iteration["plan"]["step_execution"]["dynamic_task_candidate_added"] is True
-    assert first_iteration["execution_meta"]["route_plan"]["selected_route"] == "dynamic_task"
+    assert first_iteration["plan"]["effective_execution_shape"] == "direct"
+    assert first_iteration["plan"]["step_execution"]["dynamic_task_candidate_added"] is False
+    assert first_iteration["plan"]["step_execution"]["warning"] == "dag_shape_not_agent_execution_strategy"
+    assert first_iteration["plan"]["step_execution"]["policy"]["step_plan"] == "direct"
+    assert first_iteration["plan"]["step_execution"]["policy"]["step_plan_degraded_from"] == "dag"
+    assert first_iteration["plan"]["step_execution"]["policy"]["allow_dag_steps"] is False
+    assert first_iteration["execution_meta"]["route_plan"]["selected_route"] == "model_request"
     blocks = first_iteration["execution_meta"]["blocks"]
-    assert blocks["execution_plan"]["plan_blocks"][0]["kind"] == "flow_segment"
-    assert blocks["execution_plan"]["plan_blocks"][0]["bound_inputs"]["step_plan"] == "dag"
-    assert blocks["execution_block_graph"]["execution_blocks"][0]["kind"] == "flow_segment"
-    assert first_iteration["execution_meta"]["logs"]["route_logs"]["task_dag"]["semantic_outputs"]["final"]["result"][
-        "value"
-    ] == "ok"
+    assert blocks["execution_plan"]["plan_blocks"][0]["kind"] == "agent_step"
+    assert blocks["execution_plan"]["plan_blocks"][0]["bound_inputs"]["step_plan"] == "direct"
+    assert blocks["execution_block_graph"]["execution_blocks"][0]["kind"] == "agent_step"
     assert getattr(agent, "_dynamic_task_candidates", []) == []
 
 
@@ -2886,7 +2897,7 @@ def test_auto_step_plan_suppresses_dag_after_prior_dag_failure(tmp_path):
     step_execution = cast(Any, task)._configure_step_execution(execution, plan)
 
     assert step_execution["effective_shape"] == "direct"
-    assert step_execution["warning"] == "dag_shape_failed_previously"
+    assert step_execution["warning"] == "dag_shape_not_agent_execution_strategy"
     assert step_execution["policy"]["allow_dag_steps"] is False
     assert step_execution["policy"]["suppressed_execution_shapes"] == ["dynamic_task"]
     assert execution.added_candidates == []
@@ -2928,11 +2939,11 @@ def test_direct_step_plan_rejects_model_generated_dynamic_task_candidate(tmp_pat
     step_execution = cast(Any, task)._configure_step_execution(execution, plan)
 
     assert step_execution["effective_shape"] == "direct"
-    assert step_execution["warning"] == "dag_shape_not_enabled"
+    assert step_execution["warning"] == "dag_shape_not_agent_execution_strategy"
     assert execution.added_candidates == []
 
 
-def test_explicit_dag_step_plan_keeps_dag_after_prior_dag_failure(tmp_path):
+def test_explicit_dag_step_plan_is_not_agent_task_strategy(tmp_path):
     from agently.core.application import AgentTask
 
     agent = _capability_gate_agent("agent-task-explicit-dag-kept")
@@ -2968,9 +2979,13 @@ def test_explicit_dag_step_plan_keeps_dag_after_prior_dag_failure(tmp_path):
 
     step_execution = cast(Any, task)._configure_step_execution(execution, plan)
 
-    assert step_execution["effective_shape"] == "dynamic_task"
-    assert step_execution["dynamic_task_candidate_added"] is True
-    assert execution.added_candidates == [{"plan": {"tasks": []}, "mode": "submitted"}]
+    assert step_execution["effective_shape"] == "direct"
+    assert step_execution["dynamic_task_candidate_added"] is False
+    assert step_execution["warning"] == "dag_shape_not_agent_execution_strategy"
+    assert step_execution["policy"]["step_plan"] == "direct"
+    assert step_execution["policy"]["step_plan_degraded_from"] == "dag"
+    assert step_execution["policy"]["allow_dag_steps"] is False
+    assert execution.added_candidates == []
 
 
 def test_execution_log_summary_infers_action_success_from_route_history():
