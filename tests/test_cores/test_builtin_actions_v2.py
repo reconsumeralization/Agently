@@ -27,6 +27,24 @@ def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():
     assert hasattr(LegacyCmd(), "tool_info_list")
 
 
+def test_mcp_and_acp_optional_dependencies_wait_for_explicit_use(monkeypatch):
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def record_lazy_import(*args: Any, **kwargs: Any):
+        calls.append((args, kwargs))
+        raise AssertionError("optional dependency should not be loaded without explicit use")
+
+    registrar_module = importlib.import_module("agently.core.operation.Action.ActionResourceRegistrar")
+    acp_module = importlib.import_module("agently.builtins.actions.ACP")
+    monkeypatch.setattr(registrar_module.LazyImport, "import_package", record_lazy_import)
+    monkeypatch.setattr(acp_module.LazyImport, "import_package", record_lazy_import)
+
+    agent = Agently.create_agent()
+    agent.use_actions(Cmd(allowed_cmd_prefixes=["echo"]))
+
+    assert calls == []
+
+
 @pytest.mark.asyncio
 async def test_cmd_without_workspace_boundary_fails_closed_no_cwd_fallback(tmp_path):
     # Without a Workspace-issued working directory, Cmd must refuse instead of

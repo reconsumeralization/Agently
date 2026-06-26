@@ -355,11 +355,13 @@ class AgentExecution:
         return self.async_get_meta(*args, **kwargs)
 
     async def async_meta(self):
-        if self.task_record is not None:
-            return await self.task_record.async_meta()
+        task_record = self.task_record
+        if task_record is not None:
+            return await task_record.async_meta()
         await self.async_start()
-        if self.task_record is not None:
-            return await self.task_record.async_meta()
+        task_record = self.task_record
+        if task_record is not None:
+            return await task_record.async_meta()
         return await self.async_get_meta()
 
     def set_execution_prompt(self, key: Any, value: Any, *, mappings: dict[str, Any] | None = None):

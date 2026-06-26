@@ -32,7 +32,13 @@ def test_current_release_manifest_matches_registry_release_file():
     release_devtools = dict(release_manifest["companions"]["devtools"])
     current_devtools.pop("recommended_version_specifier", None)
     release_devtools.pop("recommended_version_specifier", None)
+    current_runtime_control = dict(current_devtools.pop("runtime_control"))
+    release_runtime_control = dict(release_devtools.pop("runtime_control"))
     assert current_devtools == release_devtools
+    assert release_runtime_control.items() <= current_runtime_control.items()
+    assert current_runtime_control["model_request_telemetry_contract"].startswith(
+        "Existing model RuntimeEvents may carry payload.model_request_telemetry"
+    )
 
 
 def test_devtools_and_skills_companion_views_derive_from_current_release_manifest():
@@ -72,7 +78,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
         "event_center_dispatch": "RuntimeEvent",
         "compatibility_input_type": "ObservationEvent",
     }
-    assert in_development["companions"]["devtools"]["runtime_control"] == {
+    expected_runtime_control = {
         "runtime_event_ownership": {
             "official_event_producer": "core",
             "plugin_contract": "plugins return observations/errors/decisions; core maps them to official RuntimeEvent records",
@@ -116,6 +122,14 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
             "summary_marker": "meta.coalesced",
         },
     }
+    in_development_runtime_control = in_development["companions"]["devtools"]["runtime_control"]
+    assert expected_runtime_control.items() <= in_development_runtime_control.items()
+    assert in_development_runtime_control["model_request_telemetry_contract"].startswith(
+        "Existing model RuntimeEvents may carry payload.model_request_telemetry"
+    )
+    assert in_development_runtime_control["model_request_result_stream_status_contract"].startswith(
+        "ModelRequestResult reserves $status"
+    )
     assert in_development["companions"]["skills"]["authoring_protocol"] == "agently-skills.authoring.v2"
     assert in_development["companions"]["skills"]["authoring_format"] == "standard SKILL.md only"
     runtime_capability_contract = in_development["companions"]["skills"]["runtime_capability_contract"]

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator
 from httpx import HTTPStatusError, RequestError
 from httpx_sse import SSEError
 
+from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.model.AttemptRunner import AttemptRunner, core_attempt_runner_entrypoint
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState
 
@@ -59,6 +60,17 @@ class OpenAICompatibleHandlersMixin:
             return not str(error).lstrip().startswith("Status Code:")
         return False
 
+    def _can_retry_error(self, error: BaseException, state: AttemptState, *, retry_after_output: bool) -> bool:
+        if not self._is_retryable_provider_error(error):
+            return False
+        if (
+            isinstance(error, RuntimeStageStallError)
+            and getattr(error, "stage", None) == "response_stream"
+            and state.output_started
+        ):
+            return False
+        return not state.output_started or retry_after_output
+
     def build_request_handlers(self, request_data: "AgentlyRequestData") -> AttemptHandlers:
         max_attempts = self._get_request_retry_max_attempts()
         retry_after_output = self._get_request_retry_after_output()
@@ -69,18 +81,16 @@ class OpenAICompatibleHandlersMixin:
                 if (
                     event == "error"
                     and isinstance(payload, BaseException)
-                    and self._is_retryable_provider_error(payload)
                     and state.attempt_index < max_attempts
-                    and (not state.output_started or retry_after_output)
+                    and self._can_retry_error(payload, state, retry_after_output=retry_after_output)
                 ):
                     raise payload
                 yield item
 
         async def handle_error(error: BaseException, state: AttemptState) -> AttemptDecision:
             if (
-                self._is_retryable_provider_error(error)
-                and state.attempt_index < max_attempts
-                and (not state.output_started or retry_after_output)
+                state.attempt_index < max_attempts
+                and self._can_retry_error(error, state, retry_after_output=retry_after_output)
             ):
                 return AttemptDecision.retry(
                     reason="provider_transient_error",

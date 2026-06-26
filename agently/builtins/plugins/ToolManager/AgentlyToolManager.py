@@ -398,7 +398,7 @@ class AgentlyToolManager(ToolManager):
         replay_safe: bool = True,
         expose_to_model: bool = True,
     ):
-        LazyImport.import_package("fastmcp", version_constraint=">=3")
+        LazyImport.import_package("fastmcp", version_constraint=">=3", auto_install=False)
         from fastmcp import Client
 
         transport = normalize_mcp_transport(transport, headers=headers)

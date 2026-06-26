@@ -1,5 +1,6 @@
 import pytest
 from typing import Any, cast
+import importlib
 
 from agently import Agently
 from agently.core import (
@@ -363,8 +364,14 @@ async def test_mcp_executor_transport_routing():
     spec = {"action_id": "my_tool"}
     policy: dict[str, Any] = {}
     settings = mock.MagicMock()
+    mcp_executor_module = importlib.import_module(
+        "agently.builtins.plugins.ActionExecutor.MCPActionExecutor"
+    )
 
-    with mock.patch("fastmcp.Client", fake_client):
+    with (
+        mock.patch.object(mcp_executor_module.LazyImport, "import_package") as lazy_import,
+        mock.patch("fastmcp.Client", fake_client),
+    ):
         action_call_no_env: dict[str, Any] = {
             "action_input": {},
             "execution_resource_resources": {},
@@ -388,6 +395,10 @@ async def test_mcp_executor_transport_routing():
             pass
         assert captured and captured[-1] is managed_transport, \
             "With managed resource injected, executor must prefer managed transport"
+        assert lazy_import.call_args_list == [
+            mock.call("fastmcp", version_constraint=">=3", auto_install=False),
+            mock.call("fastmcp", version_constraint=">=3", auto_install=False),
+        ]
 
 
 def test_mcp_transport_normalization_supports_url_headers_and_configs():
@@ -437,11 +448,19 @@ async def test_action_use_mcp_url_headers_passes_normalized_transport_to_fastmcp
         async def list_tools(self):
             return []
 
-    with mock.patch("fastmcp.Client", FakeClient):
+    registrar_module = importlib.import_module(
+        "agently.core.operation.Action.ActionResourceRegistrar"
+    )
+
+    with (
+        mock.patch.object(registrar_module.LazyImport, "import_package") as lazy_import,
+        mock.patch("fastmcp.Client", FakeClient),
+    ):
         await Agently.action.async_use_mcp(
             "https://example.com/mcp",
             headers={"Authorization": "Bearer token"},
         )
 
+    lazy_import.assert_called_once_with("fastmcp", version_constraint=">=3", auto_install=False)
     assert captured[-1]["mcpServers"]["default"]["url"] == "https://example.com/mcp"
     assert captured[-1]["mcpServers"]["default"]["headers"] == {"Authorization": "Bearer token"}

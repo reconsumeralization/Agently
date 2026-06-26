@@ -458,7 +458,7 @@ class Browse:
 
     @classmethod
     def _sanitize_raw_body_fallback(cls, root) -> str:
-        for node in root.find_all(("img", "picture", "source", "svg", "canvas", "video", "audio", "iframe")):
+        for node in root.find_all(("svg", "canvas", "video", "audio", "iframe")):
             node.decompose()
         for node in root.find_all(True):
             node_attrs = getattr(node, "attrs", None) or {}

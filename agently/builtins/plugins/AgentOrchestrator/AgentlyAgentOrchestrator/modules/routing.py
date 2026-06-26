@@ -59,7 +59,8 @@ class HybridRoutePlanner:
                 for candidate in candidates
                 if str(candidate.get("action_id") or candidate.get("name") or "") in local_ids
             ]
-        recall_records = getattr(self.execution.execution_context, "scoped_action_artifact_recall_records", None)
+        execution_context = getattr(self.execution, "execution_context", None)
+        recall_records = getattr(execution_context, "scoped_action_artifact_recall_records", None)
         if callable(recall_records):
             candidates = action._with_action_artifact_recall_action(candidates, recall_records())
         return candidates

@@ -605,10 +605,14 @@ def _validate_execution_block_contract(block: ExecutionBlock) -> None:
         )
     emits = block.signal_contract.get("emits", ())
     if isinstance(emits, str):
-        emits = (emits,)
-    if emits is not None and not isinstance(emits, (list, tuple, set)):
+        normalized_emits = (emits,)
+    elif emits is None:
+        normalized_emits = ()
+    elif isinstance(emits, (list, tuple, set)):
+        normalized_emits = emits
+    else:
         raise TypeError(f"ExecutionBlock '{ block.id }' signal_contract.emits must be a sequence.")
-    unknown_signals = sorted(str(signal) for signal in emits if str(signal) not in STANDARD_BLOCK_SIGNALS)
+    unknown_signals = sorted(str(signal) for signal in normalized_emits if str(signal) not in STANDARD_BLOCK_SIGNALS)
     if unknown_signals:
         raise ValueError(
             f"ExecutionBlock '{ block.id }' emits unknown block signal(s): { ', '.join(unknown_signals) }."
