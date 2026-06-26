@@ -1509,7 +1509,7 @@ class AgentTask:
                 "step_id": "workspace_artifact_draft",
                 "scope": {"strategy_phase": "agent_task_workspace_artifact_draft"},
             },
-            limits=self.limits,
+            limits=self._child_execution_limits(),
             options=self.options,
         )
         draft_execution.route_policy(
@@ -1687,7 +1687,7 @@ class AgentTask:
                         "attempt_index": attempt_index,
                     },
                 },
-                limits=self.limits,
+                limits=self._child_execution_limits(),
                 options=self.options,
             )
             self._bind_action_workspace(execution)
@@ -2310,7 +2310,7 @@ class AgentTask:
             return await awaitable
         try:
             return await asyncio.wait_for(awaitable, timeout=timeout)
-        except TimeoutError as error:
+        except (asyncio.TimeoutError, TimeoutError) as error:
             raise TimeoutError(
                 f"TaskBoard card '{card_id}' {stage} request timed out after {timeout} seconds."
             ) from error
@@ -3556,7 +3556,7 @@ class AgentTask:
                 "step_id": "execute",
                 "scope": {"strategy_phase": "agent_task_execution_step"},
             },
-            limits=self.limits,
+            limits=self._child_execution_limits(),
             options=self.options,
         )
         self._bind_action_workspace(execution)
@@ -3630,8 +3630,8 @@ class AgentTask:
         )
         stream_task = asyncio.create_task(self._bridge_step_execution_stream(iteration_index, execution))
         try:
-            result = await execution.async_get_data()
-            meta = await execution.async_get_meta()
+            result = await self._await_task_request(execution.async_get_data(), stage="execution")
+            meta = await self._await_task_request(execution.async_get_meta(), stage="execution_meta")
             await stream_task
         except Exception as error:
             if not stream_task.done():
@@ -4748,7 +4748,7 @@ class AgentTask:
             return await awaitable
         try:
             return await asyncio.wait_for(awaitable, timeout=timeout)
-        except TimeoutError as error:
+        except (asyncio.TimeoutError, TimeoutError) as error:
             reason = f"AgentTask {stage} request timed out after {timeout} seconds."
             raise _AgentTaskDeadlineExceeded(
                 stage,
@@ -4773,6 +4773,14 @@ class AgentTask:
         if configured is not None:
             return self._normalize_timeout(configured)
         return None
+
+    def _child_execution_limits(self) -> dict[str, Any]:
+        limits = dict(self.limits)
+        if limits.get("max_no_progress_seconds") is None:
+            request_timeout = self._task_request_timeout()
+            if request_timeout is not None:
+                limits["max_no_progress_seconds"] = request_timeout
+        return limits
 
     def _task_max_seconds(self) -> float | None:
         return self._normalize_timeout(self.limits.get("max_seconds"))
