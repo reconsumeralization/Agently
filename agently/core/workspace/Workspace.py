@@ -42,12 +42,14 @@ from agently.types.data.workspace import (
 from agently.types.plugins import WorkspaceBackend
 from ._defaults import (
     ScopeNode,
+    WORKSPACE_FILE_AREAS,
     WORKSPACE_GUIDE_FILENAME,
     extend_lineage,
     extend_lineage_nodes,
     lineage_files_root,
     lineage_scratch_root,
     merge_scope,
+    normalize_file_area,
     normalize_lineage,
     scope_from_lineage,
 )
@@ -212,6 +214,10 @@ class Workspace:
         ]
         if not scope_lines:
             scope_lines = ["- none"]
+        area_lines = [
+            f"- { name }/: { description }"
+            for name, description in sorted(WORKSPACE_FILE_AREAS.items())
+        ]
         guide_path.write_text(
             "\n".join(
                 [
@@ -226,8 +232,11 @@ class Workspace:
                     "Scope fields:",
                     *scope_lines,
                     "",
+                    "Standard file areas:",
+                    *area_lines,
+                    "",
                     "Use this directory for task deliverables, downloaded source files, and files shared with Actions or external coding agents.",
-                    "Common subdirectories may include downloads/, artifacts/, reports/, and temporary task-specific folders.",
+                    "Use Workspace.open_scratch(...) or Workspace.scratch_root() for temporary scratch work; do not invent a scratch/ folder under this files root.",
                     "Do not assume sibling lineage directories are in scope. Do not edit workspace.db or content/ directly.",
                     "",
                 ]
@@ -235,6 +244,42 @@ class Workspace:
             encoding="utf-8",
         )
         return guide_path
+
+    @staticmethod
+    def standard_file_areas() -> dict[str, str]:
+        """Return the standard editable file-area names for scoped files roots."""
+
+        return dict(WORKSPACE_FILE_AREAS)
+
+    def file_area_path(
+        self,
+        area: str,
+        *parts: str | Path,
+        create: bool = False,
+    ) -> Path:
+        """Resolve a standard file-area path within this scoped ``files_root``.
+
+        The returned path is always contained by ``files_root``. When ``create``
+        is true, the area directory or the returned path's parent directory is
+        created unless the Workspace is read-only.
+        """
+
+        normalized_area = normalize_file_area(area)
+        relative = Path(normalized_area)
+        for part in parts:
+            candidate = Path(part)
+            if candidate.is_absolute():
+                raise ValueError(f"Workspace file area path parts must be relative: { part }")
+            if any(segment == ".." for segment in candidate.parts):
+                raise ValueError(f"Workspace file area path parts must not contain '..': { part }")
+            relative = relative / candidate
+        target = self.resolve_file_path(relative)
+        if create:
+            if self.capabilities().get("read_only"):
+                raise PermissionError("Workspace is read-only; file_area_path(..., create=True) is blocked.")
+            directory = target if not parts else target.parent
+            directory.mkdir(parents=True, exist_ok=True)
+        return target
 
     def _scoped_record_scope(self, scope: dict[str, Any] | None) -> dict[str, Any]:
         return merge_scope(self.default_scope, scope)

@@ -28,6 +28,24 @@ local Workspace materialize 时，Agently 会在物理 root 和每个 scoped edi
 说明会解释当前 lineage，以及哪些目录可由外部 agent 或 Action 编辑。文件名刻意不叫
 `README.md`，避免和 clone 仓库、任务交付物自己的 README 语义冲突。
 
+scoped `files_root` 的说明文件还会写清标准可编辑文件区：
+
+- `downloads/`：Browse、Action 或外部 provider 物化的远程文件，后续再交给
+  `read_file(...)` / `export_file(...)` 处理；
+- `artifacts/`：生成的支撑制品、结构化输出、证据包和非主交付物；
+- `reports/`：面向用户阅读的交付物，例如 Markdown、HTML、PDF 报告、试卷或简报。
+
+框架或应用代码需要这些目录下的受控路径时，使用
+`workspace.file_area_path(...)`：
+
+```python
+download_path = agent.workspace.file_area_path("downloads", "syllabus.pdf")
+report_path = agent.workspace.file_area_path("reports", "weekly.md", create=True)
+```
+
+需要恢复或清理的临时工作应使用 `workspace.open_scratch(...)` 或
+`workspace.scratch_root()`，不要在 `files_root` 里另造 `scratch/` 文件夹。
+
 ```python
 agent = Agently.create_agent("repo-worker")
 

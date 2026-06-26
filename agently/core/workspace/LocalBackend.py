@@ -40,7 +40,7 @@ from agently.utils import DataFormatter
 
 from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
 from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
-from ._defaults import WORKSPACE_GUIDE_FILENAME
+from ._defaults import WORKSPACE_FILE_AREAS, WORKSPACE_GUIDE_FILENAME
 from ._utils import json_dumps, json_loads, slug, utc_now
 
 
@@ -110,6 +110,10 @@ class LocalWorkspaceBackend:
         guide_path = self.root / WORKSPACE_GUIDE_FILENAME
         if guide_path.exists():
             return
+        area_lines = [
+            f"- { name }/: { description }"
+            for name, description in sorted(WORKSPACE_FILE_AREAS.items())
+        ]
         guide_path.write_text(
             "\n".join(
                 [
@@ -124,7 +128,11 @@ class LocalWorkspaceBackend:
                     "- content/: managed record payloads owned by Workspace.",
                     "- files/: editable file working trees scoped by lineage.",
                     "",
+                    "Standard file areas inside each scoped files root:",
+                    *area_lines,
+                    "",
                     "Use files/lineage/.../files for task artifacts, downloads, and files shared with Actions or external coding agents.",
+                    "Use scratch/lineage/.../scratch only through Workspace scratch APIs; do not mix scratch files into files/.",
                     "Do not edit workspace.db or content/ directly unless you are debugging Workspace internals.",
                     "",
                 ]

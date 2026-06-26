@@ -23,6 +23,22 @@ from ._utils import slug
 
 ScopeNode = dict[str, str]
 WORKSPACE_GUIDE_FILENAME = "AGENTLY_WORKSPACE.md"
+WORKSPACE_FILE_AREAS: dict[str, str] = {
+    "downloads": "Remote files materialized by Browse, Actions, or external providers before read_file/export_file handling.",
+    "artifacts": "Generated supporting artifacts, structured outputs, evidence bundles, and non-primary deliverables.",
+    "reports": "User-facing readable deliverables such as Markdown, HTML, PDF reports, exams, or briefs.",
+}
+WORKSPACE_FILE_AREA_ALIASES: dict[str, str] = {
+    "download": "downloads",
+    "remote": "downloads",
+    "artifact": "artifacts",
+    "evidence": "artifacts",
+    "output": "reports",
+    "outputs": "reports",
+    "report": "reports",
+    "deliverable": "reports",
+    "deliverables": "reports",
+}
 
 # Run-lineage scope kinds carry an indexable ancestor membership field so record
 # pruning by a broader scope (e.g. ``prune_scope({"task_id": T})``) can match
@@ -87,6 +103,15 @@ def scope_node(kind: str, node_id: str | None) -> ScopeNode:
     """
 
     return {"kind": str(kind), "id": str(node_id) if node_id not in (None, "") else "default"}
+
+
+def normalize_file_area(area: str) -> str:
+    normalized = slug(str(area or "").strip().lower(), "")
+    normalized = WORKSPACE_FILE_AREA_ALIASES.get(normalized, normalized)
+    if normalized not in WORKSPACE_FILE_AREAS:
+        allowed = ", ".join(sorted(WORKSPACE_FILE_AREAS))
+        raise ValueError(f"Unknown Workspace file area: { area }. Allowed areas: { allowed }.")
+    return normalized
 
 
 def normalize_lineage(scope_lineage: Sequence[Mapping[str, Any]] | None) -> list[ScopeNode]:

@@ -60,7 +60,16 @@ async def test_workspace_writes_layout_guides(tmp_path):
     assert "workspace.db" in root_text
     assert "content/" in root_text
     assert "files/" in root_text
+    assert "Standard file areas" in root_text
+    assert "downloads/" in root_text
+    assert "artifacts/" in root_text
+    assert "reports/" in root_text
     assert "editable file working tree" in files_text
+    assert "Standard file areas" in files_text
+    assert "downloads/" in files_text
+    assert "artifacts/" in files_text
+    assert "reports/" in files_text
+    assert "Workspace.open_scratch" in files_text
     assert str(workspace.files_root) in files_text
 
     child = workspace.with_scope_node("tasks", "task-one")
@@ -69,6 +78,27 @@ async def test_workspace_writes_layout_guides(tmp_path):
     child_text = child_guide.read_text(encoding="utf-8")
     assert "tasks/task-one" in child_text
     assert "task_id" in child_text
+
+
+def test_workspace_standard_file_area_paths_are_scoped(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "areas")
+
+    assert set(workspace.standard_file_areas()) == {"downloads", "artifacts", "reports"}
+    assert workspace.file_area_path("download", "remote.pdf") == workspace.files_root / "downloads" / "remote.pdf"
+    reports_path = workspace.file_area_path("output", "daily", "brief.md", create=True)
+    assert reports_path == workspace.files_root / "reports" / "daily" / "brief.md"
+    assert reports_path.parent.is_dir()
+
+    with pytest.raises(ValueError):
+        workspace.file_area_path("unknown", "x.txt")
+    with pytest.raises(ValueError):
+        workspace.file_area_path("downloads", "../escape.txt")
+    with pytest.raises(ValueError):
+        workspace.file_area_path("downloads", tmp_path / "outside.txt")
+
+    read_only = Agently.create_workspace(tmp_path / "areas", mode="read")
+    with pytest.raises(PermissionError):
+        read_only.file_area_path("reports", create=True)
 
 
 @pytest.mark.asyncio

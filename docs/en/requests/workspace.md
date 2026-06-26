@@ -33,6 +33,27 @@ which directory external agents or Actions may edit. The filename intentionally
 is not `README.md` so cloned repositories and task deliverables can keep their
 own README semantics.
 
+Scoped `files_root` guides also name the standard editable file areas:
+
+- `downloads/`: remote files materialized by Browse, Actions, or external
+  providers before `read_file(...)` / `export_file(...)` handling;
+- `artifacts/`: generated supporting artifacts, structured outputs, evidence
+  bundles, and non-primary deliverables;
+- `reports/`: user-facing readable deliverables such as Markdown, HTML, PDF
+  reports, exams, or briefs.
+
+Use `workspace.file_area_path(...)` when framework or application code needs a
+contained path inside one of those areas:
+
+```python
+download_path = agent.workspace.file_area_path("downloads", "syllabus.pdf")
+report_path = agent.workspace.file_area_path("reports", "weekly.md", create=True)
+```
+
+Temporary work that should be recovered or cleaned as scratch belongs to
+`workspace.open_scratch(...)` or `workspace.scratch_root()`, not a `scratch/`
+folder inside `files_root`.
+
 ```python
 agent = Agently.create_agent("repo-worker")
 
