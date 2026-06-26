@@ -39,11 +39,6 @@ class HybridRoutePlanner:
             return json.dumps(DataFormatter.sanitize(value), ensure_ascii=False)
         return "Agent task"
 
-    def dynamic_task_candidates(self) -> list[dict[str, Any]]:
-        agent_candidates = list(getattr(self.agent, "_dynamic_task_candidates", []) or [])
-        local_candidates = list(getattr(self.execution, "local_dynamic_task_candidates", []) or [])
-        return [*agent_candidates, *local_candidates]
-
     def action_candidates(self) -> list[dict[str, Any]]:
         action = getattr(self.agent, "action", None)
         if action is None:
@@ -130,13 +125,6 @@ class HybridRoutePlanner:
         return mode if mode in {"fallback", "block"} else "fallback"
 
     async def select_route(self) -> tuple[str, dict[str, Any]]:
-        dynamic_candidates = self.dynamic_task_candidates()
-        submitted_dynamic_candidates = [
-            candidate for candidate in dynamic_candidates if str(candidate.get("mode") or "auto") == "submitted"
-        ]
-        if submitted_dynamic_candidates and self.route_allowed("dynamic_task"):
-            return "dynamic_task", {"candidate": submitted_dynamic_candidates[-1], "selected_by": "deterministic"}
-
         skills = self.skill_candidate_summary()
         if skills["required"] and self.route_allowed("skills"):
             return "skills", {
@@ -147,8 +135,6 @@ class HybridRoutePlanner:
             }
 
         optional_candidates = []
-        if dynamic_candidates and self.route_allowed("dynamic_task"):
-            optional_candidates.append({"route": "dynamic_task", "candidate": dynamic_candidates[-1]})
         if skills["model_decision"] and self.route_allowed("skills"):
             optional_candidates.append({
                 "route": "skills",
@@ -196,15 +182,14 @@ class HybridRoutePlanner:
                             "task": self.task_target(),
                             "route_candidates": DataFormatter.sanitize(candidates),
                             "route_policy": (
-                                "Choose exactly one route. Prefer dynamic_task for multi-step explicit DAG work, "
-                                "skills for installed domain Skill behavior, and model_request when direct model "
-                                "reasoning with available actions is sufficient."
+                                "Choose exactly one route. Prefer skills for installed domain Skill behavior, "
+                                "and model_request when direct model reasoning with available actions is sufficient."
                             ),
                         }
                     )
                     .output(
                         {
-                            "selected_route": (str, "one of: dynamic_task, skills, model_request", True),
+                            "selected_route": (str, "one of: skills, model_request", True),
                             "reason": (str, "concise business reason for the route choice"),
                         },
                         format="json",
@@ -221,9 +206,8 @@ class HybridRoutePlanner:
             except Exception:
                 pass
         # Deterministic fallback when the model route choice fails: prefer the
-        # lowest-cost route rather than candidate construction order (which always
-        # put dynamic_task, the most expensive route, first).
-        fallback_priority = {"model_request": 0, "skills": 1, "dynamic_task": 2}
+        # lowest-cost route rather than candidate construction order.
+        fallback_priority = {"model_request": 0, "skills": 1}
         candidate = min(
             candidates,
             key=lambda item: fallback_priority.get(str(item.get("route")), 99),
@@ -242,7 +226,6 @@ class HybridRoutePlanner:
             "candidates": {
                 "actions": self.action_candidates(),
                 "skills": self.skill_candidate_summary(),
-                "dynamic_task": self.dynamic_task_candidates(),
             },
         }
 

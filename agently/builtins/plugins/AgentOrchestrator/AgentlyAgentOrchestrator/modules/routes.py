@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Literal, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -263,101 +262,3 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     execution.logs["route_logs"] = dict(skills_execution.to_dict())
     execution.status = skills_execution.status
     return skills_execution.output
-
-
-async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[str, Any]) -> Any:
-    candidate = dict(route_meta.get("candidate") or {})
-    mode = str(candidate.get("mode") or "auto")
-    target = execution.task_target()
-    action_candidates = execution.action_candidates()
-    actions = candidate.get("actions")
-    if actions is None and action_candidates:
-        actions = getattr(execution.agent, "action", None)
-    task = execution.agent.create_dynamic_task(
-        target,
-        plan=candidate.get("plan"),
-        planner=candidate.get("planner"),
-        model=candidate.get("model"),
-        actions=actions,
-        skills=candidate.get("skills"),
-        handlers=candidate.get("handlers"),
-        name=candidate.get("name"),
-        max_tasks=candidate.get("max_tasks"),
-        output_schema=candidate.get("output_schema"),
-        ensure_keys=candidate.get("ensure_keys"),
-        output_format=candidate.get("output_format"),
-        _prompt_snapshot=execution.prompt_snapshot,
-    )
-    graph = candidate.get("plan")
-    if graph is None or mode == "auto":
-        graph = await task.async_plan(max_retries=int(candidate.get("max_retries", 3) or 3))
-    task.validate(graph, strict_schema_version=True)
-    graph_dict = graph.to_dict() if hasattr(graph, "to_dict") else dict(graph)
-    await execution.emit_stream("route.dynamic_task.graph", graph_dict, route="dynamic_task", source="dynamic_task")
-
-    compiled = task.compile(graph)
-    dag_execution = compiled.create_execution(auto_close=False)
-    graph_input, graph_input_source = _resolve_dynamic_task_graph_input(execution, candidate, target)
-
-    async def runner():
-        try:
-            await dag_execution.async_start(graph_input)
-            return await dag_execution.async_close(timeout=candidate.get("timeout", 30))
-        except BaseException as error:
-            await dag_execution.async_stop_stream()
-            if _is_init_placeholder_error(error):
-                raise ValueError(
-                    f"{ error } Agent Dynamic Task route resolved graph_input from "
-                    f"{ graph_input_source }."
-                ) from error
-            raise
-
-    def _dag_started() -> bool:
-        started = getattr(dag_execution, "started", None)
-        if isinstance(started, bool):
-            return started
-        return bool(getattr(dag_execution, "_started", False))
-
-    run_task = asyncio.create_task(runner())
-    while not _dag_started() and not run_task.done():
-        await asyncio.sleep(0)
-    if not _dag_started():
-        close_snapshot = await run_task
-        task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
-        execution.close_snapshot = close_snapshot
-        execution.logs["route_logs"] = {"task_dag": close_snapshot}
-        return task_result
-    stream = dag_execution.get_async_runtime_stream(timeout=None)
-    try:
-        async for item in stream:
-            await execution.bridge_task_dag_stream_item(item, route="dynamic_task")
-        close_snapshot = await run_task
-    except BaseException:
-        if not run_task.done():
-            run_task.cancel()
-        await asyncio.gather(run_task, return_exceptions=True)
-        raise
-    task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
-    execution.close_snapshot = close_snapshot
-    execution.logs["route_logs"] = {"task_dag": close_snapshot}
-    return task_result
-
-
-def _resolve_dynamic_task_graph_input(
-    execution: "AgentExecution",
-    candidate: dict[str, Any],
-    target: str,
-) -> tuple[Any, str]:
-    if candidate.get("graph_input_provided", False):
-        return candidate.get("graph_input"), "use_dynamic_task(graph_input=...)"
-
-    prompt_snapshot = getattr(execution, "prompt_snapshot", {})
-    if isinstance(prompt_snapshot, dict) and "input" in prompt_snapshot and prompt_snapshot.get("input") is not None:
-        return prompt_snapshot.get("input"), "execution prompt snapshot input slot"
-
-    return {"target": target}, "fallback target"
-
-
-def _is_init_placeholder_error(error: BaseException) -> bool:
-    message = str(error)
-    return "runtime placeholder" in message and "${INIT" in message

@@ -375,8 +375,8 @@ result views, or process streaming:
 
 ```python
 execution = agent.create_execution()
-execution.input("Run the reviewed graph.")
-execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+execution.input("Summarize the reviewed DAG snapshot for the operator.")
+execution.info({"dag_snapshot": snapshot})
 
 async for item in execution.get_async_generator(type="instant"):
     if item.is_complete:
@@ -395,9 +395,11 @@ replayed. Use `type="instant"` for structured execution events:
 `is_complete` fields and adds route metadata for process-level events.
 
 `create_execution()` creates an AgentExecution draft. Ordinary prompt-only
-drafts run as direct model requests. When a developer-owned loop or task
-strategy needs a bounded step, express the boundary with `lineage` and
-`limits`:
+drafts run as direct model requests. DynamicTask/TaskDAG workflows run through
+`Agently.create_dynamic_task(...)` or `TaskDAGExecutor(...)` first and can pass
+their snapshots into a later AgentExecution as evidence. When a developer-owned
+loop or task strategy needs a bounded AgentExecution step, express the boundary
+with `lineage` and `limits`:
 
 ```python
 execution = agent.input("Try one bounded fix step.").create_execution(
@@ -417,7 +419,7 @@ execution = agent.input("Try one bounded fix step.").create_execution(
 
 This is still one AgentExecution, not a multi-turn loop. `lineage` provides
 stable correlation, while `limits` provides shared model-request budget counting
-across direct model routes, TaskDAG model tasks, and Skills model stages.
+across direct model routes and Skills model stages.
 Use `None` for an unlimited budget.
 
 If a bounded execution exceeds its model-request budget, Agently raises
@@ -432,7 +434,7 @@ wall-clock budget and returns a task `timed_out` result with task metadata; othe
 routes surface the hard deadline as `RuntimeStageStallError`, available from the
 root `agently.core` export or from `agently.core.application.AgentExecution`.
 `limits.max_no_progress_seconds` is an idle stall boundary: any accepted runtime
-progress from route selection, model streaming, TaskDAG, Skills, or ActionRuntime
+progress from route selection, model streaming, Skills, or ActionRuntime
 refreshes the timer. `async_get_meta()` remains inspectable and records
 `status="timed_out"` or `status="stalled"` with `diagnostics["timeouts"]` /
 `diagnostics["stalls"]` and the last progress event.
@@ -536,30 +538,29 @@ snippets once the problem is understood.
 
 ## Submitted DAG Input
 
-Submitted DAGs routed through the DynamicTask facade keep using DAG runtime
-placeholders such as `${INIT.ticket}` and `${DEPS.lookup}` inside task
-`inputs`. Under an Agent route, the graph input source is resolved in this
-order:
+Submitted DAGs routed through the independent DynamicTask facade keep using DAG
+runtime placeholders such as `${INIT.ticket}` and `${DEPS.lookup}` inside task
+`inputs`. The graph input source is resolved in this order:
 
 ```text
-use_dynamic_task(graph_input=...)
-> the execution prompt snapshot input slot
+async_run(graph_input=...)
 > {"target": task_target}
 ```
 
-This lets ordinary Agent prompt code feed a submitted DAG without inventing a
-second mapping surface:
+This keeps DAG input explicit and separate from AgentExecution prompt routing:
 
 ```python
-execution = agent.create_execution()
-execution.input({"ticket": "TICKET-OK"})
-execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+task = Agently.create_dynamic_task(
+    target="review ticket",
+    plan=graph,
+    handlers=handlers,
+)
+snapshot = await task.async_run(graph_input={"ticket": "TICKET-OK"})
 ```
 
-The prompt snapshot is captured by `create_execution()`. Later changes to
-`agent.input(...)` do not alter an already-created execution. Use
-`graph_input=...` when the DAG input must be different from the Agent prompt
-input, or when you want that precedence to be explicit.
+If an AgentExecution needs the result, pass the snapshot as ordinary evidence in
+`input(...)`, `info(...)`, or a Workspace record. The DAG snapshot does not by
+itself mean the broader business goal is complete.
 
 ## Skills Semantics
 
@@ -588,20 +589,23 @@ item.action_id
 item.graph_id
 ```
 
-Executor routes bridge TriggerFlow runtime stream and ModelRequest instant
-checkpoints so services can stream route decisions, plan/graph readiness,
-task/action progress, selected model field deltas, and final semantic outputs.
+Executor routes bridge route and ModelRequest instant checkpoints so services
+can stream route decisions, task/action progress, selected model field deltas,
+and final semantic outputs.
 If a TriggerFlow-backed route fails, the Agent execution stream is closed and
 the original error is raised to the consumer instead of leaving
 `get_async_generator(...)` waiting for more items.
 
-For TaskDAG model nodes, structured output fields stream under stable paths:
+For independent TaskDAG model nodes, consume the TriggerFlow runtime stream and
+normalize `task_dag.model_field` items if the host wants field-level display:
 
 ```python
-async for item in execution.get_async_generator(type="instant"):
-    if item.path == "task_dag.tasks.reply.fields.reply" and item.delta:
-        print(item.delta, end="", flush=True)
+task = Agently.create_dynamic_task(target="reply", plan=graph, handlers=handlers)
+execution = task.compile(graph).create_execution(auto_close=False)
+async for item in execution.get_async_runtime_stream({"ticket": ticket}, timeout=None):
+    if item.get("type") == "task_dag.model_field" and item.get("field_path") == "reply":
+        print(item.get("delta") or "", end="", flush=True)
 ```
 
-This preserves model-response `instant` semantics while keeping process-stream
-paths owned by the Agent execution route.
+This keeps AgentExecution stream semantics separate from independent DAG
+runtime stream semantics.

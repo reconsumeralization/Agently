@@ -67,14 +67,14 @@ class MockAccountSystems:
 # The app exposes EnterpriseRenewalService.prepare_recovery_package(brief).
 # Unlike 02, the app does not submit a DAG. The model planner must produce a
 # richer DAG with independent branches and at least one join before execution.
-# Expected key output from one DeepSeek run:
+# Expected key output from one real DeepSeek run on 2026-06-27:
 # provider=deepseek
-# planned_task_count=6
+# planned_task_count=5
 # root_task_count=3
 # join_task_count=1
-# task_ids=commercial_risk_analysis,product_adoption_risk_analysis,support_legal_risk_analysis,risk_synthesis,recovery_strategy_development,recovery_package_generation
+# task_ids=commercial_risk,product_risk,support_legal_risk,risk_synthesis,recovery_package
 # semantic_role=recovery_package
-# semantic_final_task=recovery_package_generation
+# semantic_final_task=recovery_package
 # next_actions_count=7
 #
 # How it works:
@@ -106,8 +106,7 @@ class EnterpriseRenewalService:
 
     async def prepare_recovery_package(self, escalation_brief: str) -> dict[str, Any]:
         system_snapshot = self.account_systems.current_snapshot()
-        agent = Agently.create_agent("renewal-recovery-planner")
-        task = agent.create_dynamic_task(
+        task = Agently.create_dynamic_task(
             target=(
                 "Create an enterprise renewal recovery package. Generate a complex TaskDAG "
                 "with five to seven model tasks. Use at least three independent root analysis "

@@ -657,7 +657,6 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'Agent.create_task_loop',
                                                              'AgentExecution.strategy("task")',
                                                              'AgentExecution.strategy("task_loop")',
-                                                             'AgentExecution.use_dynamic_task',
                                                              'Agent.resume',
                                                              'Agent.async_resume',
                                                              'Agent.resume_task',
@@ -728,13 +727,13 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'hermes/hermes agent, and gemini; these hints are not '
                                                              'runnable-agent evidence. DynamicTask is the current '
                                                              'compatibility/convenience facade over DAG planning and '
-                                                             'execution for direct TaskDAG/DynamicTask use, not the '
-                                                             'strategic task lifecycle or task-loop router. Explicit '
-                                                             'AgentExecution.use_dynamic_task(...) remains a '
-                                                             'compatibility route for caller-submitted DAGs and is not '
-                                                             'selected by AgentTaskLoop auto strategy. '
-                                                             'agent.use_dynamic_task(...) remains the Agent-level DAG '
-                                                             'candidate pool for explicit DynamicTask routing only. '
+                                                             'execution for direct independent TaskDAG/DynamicTask '
+                                                             'use, not the strategic task lifecycle, task-loop router, '
+                                                             'or AgentExecution route. Agent.use_dynamic_task(...) and '
+                                                             'AgentExecution.use_dynamic_task(...) fail fast with '
+                                                             'migration diagnostics; use '
+                                                             'Agently.create_dynamic_task(...) or direct '
+                                                             'TaskDAGExecutor(...) for independent DAG workflows. '
                                                              'Consumers read final data, text, streams, metadata, '
                                                              'execution_strategy, effective_execution_strategy, '
                                                              'task_shape_analysis, reflection refs, Workspace refs, '

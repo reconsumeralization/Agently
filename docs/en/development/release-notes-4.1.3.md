@@ -44,8 +44,9 @@ agents on the same recommended path.
 
 `agent.start()` is now the default user-layer entrypoint for a candidate-aware
 Agent turn. The caller still receives the business result, while the Agent can
-route through ordinary model response, Actions, Skills Executor, or Dynamic
-Task when those candidates were explicitly declared.
+route through ordinary model response, Actions, or Skills Executor when those
+candidates were explicitly declared. DynamicTask/TaskDAG remains available as an
+independent DAG workflow surface rather than an AgentExecution route.
 
 ```python
 result = (
@@ -55,7 +56,6 @@ result = (
         [{"source": "anthropics/skills", "subpath": "skills/docx"}],
         mode="model_decision",
     )
-    .use_dynamic_task(mode="auto", max_tasks=8)
     .input({"customer_id": "C-1024", "ticket": "payment failure"})
     .output({
         "summary": (str, "business summary", True),
@@ -80,8 +80,7 @@ caller, UI, or downstream service while the work is still running.
 ```python
 execution = (
     agent
-    .use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
-    .input({"ticket": "T-42"})
+    .input({"ticket": "T-42", "dag_snapshot": snapshot})
     .create_execution()
 )
 
@@ -234,25 +233,20 @@ decisions, or through a custom organization-specific strategy.
 ## Dynamic Task And TriggerFlow As The Execution Backbone
 
 Dynamic Task remains the right surface for complex model-generated or
-application-submitted DAGs. In 4.1.3, Agent execution can route into Dynamic
-Task and preserve streamed field deltas under stable paths.
+application-submitted DAGs. In 4.1.3.8 development, AgentExecution no longer
+routes into DynamicTask; run the DAG independently and pass its snapshot to a
+later AgentExecution when the agent needs to consume the evidence.
 
 ```python
-execution = (
-    agent
-    .use_dynamic_task(mode="auto", max_tasks=8)
-    .input("Research this company and produce an investment memo.")
-    .output({
+task = Agently.create_dynamic_task(
+    target="Research this company and produce an investment memo.",
+    output_schema={
         "thesis": (str, "investment thesis", True),
         "risks": ([str], "major risks", True),
         "evidence": ([str], "supporting evidence", True),
-    })
-    .create_execution()
+    },
 )
-
-async for item in execution.get_async_generator(type="instant"):
-    if item.delta:
-        print(item.path, item.delta)
+snapshot = await task.async_start(timeout=180)
 ```
 
 Business value: complex work can be decomposed, streamed, inspected, and

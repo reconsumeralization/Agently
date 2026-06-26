@@ -1578,35 +1578,22 @@ async def test_agent_task_loop_progress_model_does_not_delay_stream_close(tmp_pa
     assert not any((item.meta or {}).get("progress_source") == "model" for item in stream_items)
 
 
-@pytest.mark.asyncio
-async def test_agent_execution_dynamic_task_candidate_is_execution_local():
-    async def run_task(context):
-        return {"task_id": context.task.id, "value": context.graph_input["value"]}
-
+def test_agent_execution_dynamic_task_candidate_route_is_removed():
     agent = Agently.create_agent("execution-local-dynamic-task")
-    execution = (
-        agent
-        .create_execution()
-        .input("run a local dynamic task graph")
-        .use_dynamic_task(
+    execution = agent.create_execution().input("run a local dynamic task graph")
+
+    with pytest.raises(ValueError, match=r"AgentExecution\.use_dynamic_task.*independent DAG workflows"):
+        execution.use_dynamic_task(
             mode="submitted",
             plan={
                 "graph_id": "execution-local-dynamic-task",
                 "task_schema_version": "task_dag/v1",
                 "tasks": [{"id": "extract", "kind": "local", "binding": "local_handler"}],
-                "semantic_outputs": {"final": "extract"},
             },
-            handlers={"local_handler": run_task},
-            graph_input={"value": "ok"},
+            handlers={"local_handler": lambda context: context.task.id},
         )
-    )
 
-    data = await execution.async_get_data()
-    meta = await execution.async_get_meta()
-
-    assert data["semantic_outputs"]["final"]["result"]["value"] == "ok"
-    assert meta["route_plan"]["selected_route"] == "dynamic_task"
-    assert execution.local_dynamic_task_candidates
+    assert execution.dynamic_task_candidates() == []
     assert getattr(agent, "_dynamic_task_candidates", []) == []
 
 

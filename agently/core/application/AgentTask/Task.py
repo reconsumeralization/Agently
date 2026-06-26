@@ -19,7 +19,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Generator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast, Literal, TYPE_CHECKING
@@ -2637,7 +2637,7 @@ class AgentTask:
         previous_errors: list[dict[str, Any]] = []
         language_policy = self._language_policy()
         for attempt_index in range(1, max_attempts + 1):
-            execution = self.agent.create_execution(
+            execution = self._create_bounded_child_execution(
                 lineage={
                     "task_id": self.id,
                     "iteration_id": f"taskboard:{context.card.id}:attempt:{attempt_index}",
@@ -2648,138 +2648,127 @@ class AgentTask:
                         "attempt_index": attempt_index,
                     },
                 },
-                limits=self._child_execution_limits(),
-                options=self._child_execution_options(),
+                route_policy={
+                    "allowed_routes": ["model_request"],
+                    "on_violation": "block",
+                    "owner": "AgentTaskTaskBoard",
+                    "step_execution_shape": "taskboard_card",
+                },
+                recall_records=cast(Sequence[Mapping[str, Any]], readback_records),
+                recall_source="AgentTaskTaskBoard.evidence_view",
             )
-            self._bind_action_workspace(execution)
-            if readback_records:
-                set_recall_records = getattr(execution.execution_context, "set_action_artifact_recall_records", None)
-                if callable(set_recall_records):
-                    set_recall_records(readback_records, source="AgentTaskTaskBoard.evidence_view")
-            execution.route_policy({
-                "allowed_routes": ["model_request"],
-                "on_violation": "block",
-                "owner": "AgentTaskTaskBoard",
-                "step_execution_shape": "taskboard_card",
-            })
             source_refs = self._collect_taskboard_source_refs(
                 evidence_view,
                 dependency_readbacks,
                 context.dependency_results,
                 max_refs=_TASKBOARD_SOURCE_REFS_MAX,
             )
-            execution.input(
-                {
-                    "task_id": self.id,
-                    "goal": self.goal,
-                    "success_criteria": self.success_criteria,
-                    "card": context.card.to_dict(),
-                    "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
-                    "taskboard_evidence_view": evidence_view,
-                    "dependency_readbacks": dependency_readbacks,
-                    "available_readback": self._taskboard_available_readback(evidence_view),
-                    "source_refs": source_refs,
-                    "previous_attempt_errors": previous_errors,
-                    "attempt": {
+            try:
+                card_output, execution_meta = await self._run_bounded_child_execution(
+                    execution=execution,
+                    language_policy=language_policy,
+                    input_payload={
+                        "task_id": self.id,
+                        "goal": self.goal,
+                        "success_criteria": self.success_criteria,
+                        "card": context.card.to_dict(),
+                        "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
+                        "taskboard_evidence_view": evidence_view,
+                        "dependency_readbacks": dependency_readbacks,
+                        "available_readback": self._taskboard_available_readback(evidence_view),
+                        "source_refs": source_refs,
+                        "previous_attempt_errors": previous_errors,
+                        "attempt": {
+                            "attempt_index": attempt_index,
+                            "max_attempts": max_attempts,
+                        },
+                        "context_pack": DataFormatter.sanitize(context_pack),
+                        "execution_prompt": self._execution_prompt_context(),
+                        "language_policy": language_policy,
+                    },
+                    instruction=(
+                        "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
+                        "Use TaskBoard evidence view as the hot summary; request full content only through available "
+                        "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
+                        "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
+                        "contains framework-prefetched bounded readback previews for dependency Action artifacts that were "
+                        "structurally truncated or marked full_value_available; inspect those before declaring dependency "
+                        "evidence missing. If available_readback lists Action artifact refs and the prefetched previews are "
+                        "still insufficient, call read_action_artifact with the artifact_id and action_call_id before blocking "
+                        "on missing evidence. Return card-local evidence "
+                        "and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
+                        "is available, return status completed with diagnostics that explain the degraded source boundary. "
+                        "Only return failed or blocked when the card cannot produce the required outcome or the missing "
+                        "evidence is truly critical. If this card produces the user-facing deliverable, use candidate_final_result, "
+                        "final_result, or artifact_markdown only when the complete body is short enough for the bounded output. "
+                        "For long reports, exam papers, or multi-section deliverables, return only an artifact_manifest "
+                        "with path='final.md' and section ids/titles/brief intent; do not include full section content in "
+                        "artifact_manifest, artifact_markdown, candidate_final_result, final_result, or answer. AgentTask "
+                        "will stream the long body into Workspace and read it back. "
+                        "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
+                        "for deliverables. If the task is source-grounded, include concrete source URLs, file paths, or "
+                        "evidence refs from source_refs/dependency_readbacks in the deliverable body; do not mention a "
+                        "source title or local downloaded filename without its verifier-visible URL/path when such a ref "
+                        "exists. Review or "
+                        "verification cards must not put review notes in those deliverable fields unless they include the "
+                        "full corrected deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask "
+                        "own lifecycle completion."
+                    ),
+                    output_schema={
+                        "status": (str, "completed, blocked, or failed for this card", False),
+                        "answer": (str, "Card-local result or artifact summary", True),
+                        "candidate_final_result": (
+                            str,
+                            "Complete user-facing deliverable body when this card directly produces one",
+                            False,
+                        ),
+                        "final_result": (
+                            str,
+                            "Complete final deliverable body when this card directly produces the final answer",
+                            False,
+                        ),
+                        "artifact_markdown": (
+                            str,
+                            "Bounded short markdown deliverable only; for long reports or exams return an artifact_manifest outline without full section content",
+                            False,
+                        ),
+                        "artifact_manifest": (
+                            dict,
+                            "Preferred Workspace artifact manifest for sectioned or file-backed deliverables",
+                            False,
+                        ),
+                        "file_refs": (
+                            [dict],
+                            "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
+                            False,
+                        ),
+                        "evidence": ([str], "Evidence produced or used by this card", False),
+                        "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
+                        "diagnostics": ([dict], "Optional card diagnostics", False),
+                    },
+                    output_format="json",
+                    started_event=f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.execution.started",
+                    started_payload={
+                        "card_id": context.card.id,
                         "attempt_index": attempt_index,
                         "max_attempts": max_attempts,
                     },
-                    "context_pack": DataFormatter.sanitize(context_pack),
-                    "execution_prompt": self._execution_prompt_context(),
-                    "language_policy": language_policy,
-                }
-            )
-            execution.language(language_policy.get("language", "auto"))
-            execution.instruct(
-                "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
-                "Use TaskBoard evidence view as the hot summary; request full content only through available "
-                "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
-                "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
-                "contains framework-prefetched bounded readback previews for dependency Action artifacts that were "
-                "structurally truncated or marked full_value_available; inspect those before declaring dependency "
-                "evidence missing. If available_readback lists Action artifact refs and the prefetched previews are "
-                "still insufficient, call read_action_artifact with the artifact_id and action_call_id before blocking "
-                "on missing evidence. Return card-local evidence "
-                "and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
-                "is available, return status completed with diagnostics that explain the degraded source boundary. "
-                "Only return failed or blocked when the card cannot produce the required outcome or the missing "
-                "evidence is truly critical. If this card produces the user-facing deliverable, use candidate_final_result, "
-                "final_result, or artifact_markdown only when the complete body is short enough for the bounded output. "
-                "For long reports, exam papers, or multi-section deliverables, return only an artifact_manifest "
-                "with path='final.md' and section ids/titles/brief intent; do not include full section content in "
-                "artifact_manifest, artifact_markdown, candidate_final_result, final_result, or answer. AgentTask "
-                "will stream the long body into Workspace and read it back. "
-                "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
-                "for deliverables. If the task is source-grounded, include concrete source URLs, file paths, or "
-                "evidence refs from source_refs/dependency_readbacks in the deliverable body; do not mention a "
-                "source title or local downloaded filename without its verifier-visible URL/path when such a ref "
-                "exists. Review or "
-                "verification cards must not put review notes in those deliverable fields unless they include the "
-                "full corrected deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask "
-                "own lifecycle completion."
-            )
-            execution.output(
-                {
-                    "status": (str, "completed, blocked, or failed for this card", False),
-                    "answer": (str, "Card-local result or artifact summary", True),
-                    "candidate_final_result": (
-                        str,
-                        "Complete user-facing deliverable body when this card directly produces one",
-                        False,
+                    stream_bridge=lambda child_execution: self._bridge_taskboard_card_execution_stream(
+                        context.card.id,
+                        child_execution,
                     ),
-                    "final_result": (
-                        str,
-                        "Complete final deliverable body when this card directly produces the final answer",
-                        False,
+                    data_waiter=lambda awaitable: self._await_taskboard_card_execution(
+                        awaitable,
+                        card_id=context.card.id,
+                        stage="data",
                     ),
-                    "artifact_markdown": (
-                        str,
-                        "Bounded short markdown deliverable only; for long reports or exams return an artifact_manifest outline without full section content",
-                        False,
+                    meta_waiter=lambda awaitable: self._await_taskboard_card_execution(
+                        awaitable,
+                        card_id=context.card.id,
+                        stage="meta",
                     ),
-                    "artifact_manifest": (
-                        dict,
-                        "Preferred Workspace artifact manifest for sectioned or file-backed deliverables",
-                        False,
-                    ),
-                    "file_refs": (
-                        [dict],
-                        "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
-                        False,
-                    ),
-                    "evidence": ([str], "Evidence produced or used by this card", False),
-                    "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
-                    "diagnostics": ([dict], "Optional card diagnostics", False),
-                },
-                format="json",
-            )
-            await self._emit(
-                f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.execution.started",
-                {
-                    "execution_id": execution.id,
-                    "card_id": context.card.id,
-                    "attempt_index": attempt_index,
-                    "max_attempts": max_attempts,
-                },
-            )
-            stream_task = asyncio.create_task(self._bridge_taskboard_card_execution_stream(context.card.id, execution))
-            try:
-                card_output = await self._await_taskboard_card_execution(
-                    execution.async_get_data(),
-                    card_id=context.card.id,
-                    stage="data",
                 )
-                execution_meta = await self._await_taskboard_card_execution(
-                    execution.async_get_meta(),
-                    card_id=context.card.id,
-                    stage="meta",
-                )
-                await stream_task
             except Exception as error:
-                if not stream_task.done():
-                    stream_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await stream_task
                 execution_id = str(getattr(execution, "id", "") or "") or None
                 retry_diagnostic = self._taskboard_card_retry_diagnostic(
                     card_id=context.card.id,
@@ -5106,104 +5095,84 @@ class AgentTask:
         context_pack: "WorkspaceContextPackage",
     ) -> tuple[Any, dict[str, Any]]:
         plan = self._normalize_step_plan(plan)
-        execution = self.agent.create_execution(
+        execution = self._create_bounded_child_execution(
             lineage={
                 "task_id": self.id,
                 "iteration_id": f"iter-{iteration_index}",
                 "step_id": "execute",
                 "scope": {"strategy_phase": "agent_task_execution_step"},
             },
-            limits=self._child_execution_limits(),
-            options=self._child_execution_options(),
         )
-        self._bind_action_workspace(execution)
         step_execution = self._configure_step_execution(execution, plan)
         language_policy = self._language_policy()
-        execution.input(
-            {
-                "task_id": self.id,
-                "goal": self.goal,
-                "success_criteria": self.success_criteria,
-                "iteration": iteration_index,
-                "plan": DataFormatter.sanitize(plan),
-                "step_execution": step_execution,
-                "execution_strategy": self.execution_strategy,
-                "effective_execution_strategy": self.effective_execution_strategy,
-                "context_pack": DataFormatter.sanitize(context_pack),
-                "execution_prompt": self._execution_prompt_context(),
-                "language_policy": language_policy,
-            }
-        )
-        execution.language(language_policy.get("language", "auto"))
-        execution.instruct(
-            (
-                "Execute exactly one bounded step for the AgentTask. "
-                f"Use the selected execution shape: {step_execution.get('effective_shape', 'direct')}. "
-                f"The AgentTask requested execution_strategy is {self.execution_strategy}; "
-                f"the effective execution_strategy is {self.effective_execution_strategy or self.execution_strategy}. "
-                "Respect the caller-provided execution_prompt context and output contract when present. "
-                "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
-                "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
-                "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "
-                "is workspace_artifact or sectioned_workspace_artifact, return only an artifact_manifest with path and "
-                "section outline for long or multi-section deliverables; use artifact_markdown only for bounded short "
-                "bodies. Do not put the full long body in artifact_manifest section content, answer, "
-                "candidate_final_result, or final_result. AgentTask will stream/write/read back Workspace files and "
-                "produce trusted file_refs. "
-                "Do not invent file_refs for deliverables. "
-                "For web-source steps, treat Search results as discovery hints only. Browse official pages and follow "
-                "same-site index/list/download/navigation links before relying on a broad announcement page as the "
-                "source boundary. "
-                "Do not claim final completion unless evidence supports it."
-            )
-        )
-        execution.output(
-            {
-                "step_result": (str, "Concrete result of this bounded step", True),
-                "candidate_final_result": (
-                    str,
-                    "Complete answer/report/artifact body produced by this step when it may satisfy the final task",
-                    False,
-                ),
-                "artifact_markdown": (
-                    str,
-                    "Short markdown deliverable body when this step creates one and it fits bounded output",
-                    False,
-                ),
-                "artifact_manifest": (
-                    dict,
-                    "Workspace artifact manifest for file-backed or sectioned deliverables",
-                    False,
-                ),
-                "file_refs": (
-                    [dict],
-                    "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
-                    False,
-                ),
-                "evidence": ([str], "Evidence produced by the step", True),
-                "remaining_work": ([str], "Known remaining work, empty when none"),
-            },
-            format="json",
-        )
-        await self._emit(
-            f"agent_task.iteration.{iteration_index}.execution.started",
-            {"execution_id": execution.id, "step_execution": step_execution},
-        )
-        stream_task = asyncio.create_task(self._bridge_step_execution_stream(iteration_index, execution))
         try:
-            # The child AgentExecution owns its own model/action/resource idle
-            # limits. AgentTask must not reinterpret request_timeout_seconds as a
-            # hard cap for the whole nested execution stream, otherwise a
-            # still-progressing Search/Browse/Action step can be cancelled by
-            # the parent before the child runtime reports its own status.
-            result = await execution.async_get_data()
-            meta = await execution.async_get_meta()
-            await stream_task
+            result, meta = await self._run_bounded_child_execution(
+                execution=execution,
+                language_policy=language_policy,
+                input_payload={
+                    "task_id": self.id,
+                    "goal": self.goal,
+                    "success_criteria": self.success_criteria,
+                    "iteration": iteration_index,
+                    "plan": DataFormatter.sanitize(plan),
+                    "step_execution": step_execution,
+                    "execution_strategy": self.execution_strategy,
+                    "effective_execution_strategy": self.effective_execution_strategy,
+                    "context_pack": DataFormatter.sanitize(context_pack),
+                    "execution_prompt": self._execution_prompt_context(),
+                    "language_policy": language_policy,
+                },
+                instruction=(
+                    "Execute exactly one bounded step for the AgentTask. "
+                    f"Use the selected execution shape: {step_execution.get('effective_shape', 'direct')}. "
+                    f"The AgentTask requested execution_strategy is {self.execution_strategy}; "
+                    f"the effective execution_strategy is {self.effective_execution_strategy or self.execution_strategy}. "
+                    "Respect the caller-provided execution_prompt context and output contract when present. "
+                    "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
+                    "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
+                    "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "
+                    "is workspace_artifact or sectioned_workspace_artifact, return only an artifact_manifest with path and "
+                    "section outline for long or multi-section deliverables; use artifact_markdown only for bounded short "
+                    "bodies. Do not put the full long body in artifact_manifest section content, answer, "
+                    "candidate_final_result, or final_result. AgentTask will stream/write/read back Workspace files and "
+                    "produce trusted file_refs. "
+                    "Do not invent file_refs for deliverables. "
+                    "For web-source steps, treat Search results as discovery hints only. Browse official pages and follow "
+                    "same-site index/list/download/navigation links before relying on a broad announcement page as the "
+                    "source boundary. "
+                    "Do not claim final completion unless evidence supports it."
+                ),
+                output_schema={
+                    "step_result": (str, "Concrete result of this bounded step", True),
+                    "candidate_final_result": (
+                        str,
+                        "Complete answer/report/artifact body produced by this step when it may satisfy the final task",
+                        False,
+                    ),
+                    "artifact_markdown": (
+                        str,
+                        "Short markdown deliverable body when this step creates one and it fits bounded output",
+                        False,
+                    ),
+                    "artifact_manifest": (
+                        dict,
+                        "Workspace artifact manifest for file-backed or sectioned deliverables",
+                        False,
+                    ),
+                    "file_refs": (
+                        [dict],
+                        "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
+                        False,
+                    ),
+                    "evidence": ([str], "Evidence produced by the step", True),
+                    "remaining_work": ([str], "Known remaining work, empty when none"),
+                },
+                output_format="json",
+                started_event=f"agent_task.iteration.{iteration_index}.execution.started",
+                started_payload={"step_execution": step_execution},
+                stream_bridge=lambda child_execution: self._bridge_step_execution_stream(iteration_index, child_execution),
+            )
         except Exception as error:
-            if not stream_task.done():
-                stream_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await stream_task
             result, failed_meta = self._failed_execution_result(
                 iteration_index,
                 plan=plan,
@@ -5224,6 +5193,79 @@ class AgentTask:
                 },
             )
             return result, failed_meta
+        return result, cast(dict[str, Any], meta)
+
+    def _create_bounded_child_execution(
+        self,
+        *,
+        lineage: Mapping[str, Any],
+        route_policy: Mapping[str, Any] | None = None,
+        recall_records: Sequence[Mapping[str, Any]] | None = None,
+        recall_source: str | None = None,
+    ) -> Any:
+        execution = self.agent.create_execution(
+            lineage=dict(lineage),
+            limits=self._child_execution_limits(),
+            options=self._child_execution_options(),
+        )
+        self._bind_action_workspace(execution)
+        if recall_records:
+            set_recall_records = getattr(execution.execution_context, "set_action_artifact_recall_records", None)
+            if callable(set_recall_records):
+                set_recall_records(list(recall_records), source=recall_source or "AgentTask")
+        if route_policy:
+            apply_route_policy = getattr(execution, "route_policy", None)
+            if callable(apply_route_policy):
+                apply_route_policy(dict(route_policy))
+        return execution
+
+    async def _run_bounded_child_execution(
+        self,
+        *,
+        execution: Any,
+        language_policy: Mapping[str, Any],
+        input_payload: Mapping[str, Any],
+        instruction: str,
+        output_schema: Mapping[str, Any],
+        output_format: str,
+        started_event: str,
+        started_payload: Mapping[str, Any],
+        stream_bridge: Callable[[Any], Awaitable[None]],
+        data_waiter: Callable[[Awaitable[Any]], Awaitable[Any]] | None = None,
+        meta_waiter: Callable[[Awaitable[Any]], Awaitable[Any]] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        execution.input(dict(input_payload))
+        execution.language(language_policy.get("language", "auto"))
+        execution.instruct(instruction)
+        execution.output(dict(output_schema), format=output_format)
+        await self._emit(
+            started_event,
+            {
+                "execution_id": execution.id,
+                **dict(started_payload),
+            },
+        )
+        async def run_stream_bridge() -> None:
+            await stream_bridge(execution)
+
+        stream_task = asyncio.create_task(run_stream_bridge())
+        try:
+            # The child AgentExecution owns its own model/action/resource idle
+            # limits. AgentTask must not reinterpret request_timeout_seconds as a
+            # hard cap for the whole nested execution stream, otherwise a
+            # still-progressing Search/Browse/Action step can be cancelled by
+            # the parent before the child runtime reports its own status.
+            data_awaitable = execution.async_get_data()
+            result = await (data_waiter(data_awaitable) if data_waiter is not None else data_awaitable)
+            meta_awaitable = execution.async_get_meta()
+            meta = await (meta_waiter(meta_awaitable) if meta_waiter is not None else meta_awaitable)
+            await stream_task
+        except Exception:
+            if not stream_task.done():
+                stream_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await stream_task
+            raise
         return result, cast(dict[str, Any], meta)
 
     async def _bridge_step_execution_stream(self, iteration_index: int, execution: Any) -> None:

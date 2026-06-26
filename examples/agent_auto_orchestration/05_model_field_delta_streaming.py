@@ -7,9 +7,9 @@ Environment:
     DEEPSEEK_API_KEY in the shell or .env file.
     Set DYNAMIC_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
 
-This example focuses on the AgentExecution stream contract. It uses a submitted
-Dynamic Task DAG with multiple model nodes and prints selected structured fields
-as they stream:
+This example focuses on the independent Dynamic Task runtime stream. It uses a
+submitted Dynamic Task DAG with multiple model nodes and prints selected
+structured fields as they stream:
 
     task_dag.tasks.prethink.fields.prethinking
     task_dag.tasks.reply.fields.tool_call_note
@@ -20,14 +20,14 @@ The CLI consumes `item.delta` with `print(delta, end="", flush=True)` so the
 operator sees process notes and final reply text while each field is still being
 generated, before the task-level `.complete` event fires.
 
-Expected key output from one local Ollama run with qwen2.5:7b on 2026-05-22:
-    selected_route=dynamic_task
+Expected key output from one real DeepSeek run on 2026-06-27:
+    execution_entry=dynamic_task
     stream_prethinking_delta=True
     stream_tool_call_note_delta=True
     stream_reply_delta=True
     stream_reflection_delta=True
     reply_task_completed=True
-    Final reply excerpt starts with: Dear valued customer,
+    Final reply excerpt starts with: We understand the urgency
 """
 
 from __future__ import annotations
@@ -73,6 +73,19 @@ FIELD_LABELS = {
     "task_dag.tasks.reply.fields.reply": "\n\n[reply]\n",
     "task_dag.tasks.review.fields.reflection": "\n\n[reflection]\n",
 }
+
+
+def _runtime_stream_path(item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    item_type = str(item.get("type") or "")
+    if item_type == "task_dag.model_field":
+        return f"task_dag.tasks.{ item.get('task_id') }.fields.{ item.get('field_path') }"
+    if item_type == "task_dag.task":
+        return f"task_dag.tasks.{ item.get('task_id') }.{ item.get('action') }"
+    if item_type == "task_dag.graph":
+        return f"task_dag.graph.{ item.get('action') }"
+    return item_type
 
 
 async def provide_context(_context):
@@ -169,17 +182,12 @@ async def main():
     print(f"Provider: {provider}")
     print("Streaming selected DAG model fields as deltas...")
 
-    agent = Agently.create_agent("field-delta-stream-agent")
-    execution = (
-        agent
-        .use_dynamic_task(
-            mode="submitted",
-            plan=build_graph(),
-            handlers={"context_handler": provide_context},
-        )
-        .input("Handle the enterprise billing export incident transparently.")
-        .create_execution()
+    task = Agently.create_dynamic_task(
+        target="Handle the enterprise billing export incident transparently.",
+        plan=build_graph(),
+        handlers={"context_handler": provide_context},
     )
+    execution = task.compile(build_graph()).create_execution(auto_close=False)
 
     seen_labels: set[str] = set()
     flags = {
@@ -190,39 +198,41 @@ async def main():
         "reply_task_completed": False,
     }
 
-    async for item in execution.get_async_generator(type="instant"):
-        if item.path == "route.selected" and item.is_complete:
-            print(f"\n[route] selected: {(item.value or {}).get('selected_route')}")
-            continue
+    async for item in execution.get_async_runtime_stream({"ticket": SUPPORT_CONTEXT}, timeout=None):
+        path = _runtime_stream_path(item)
+        if path == "task_dag.graph.complete":
+            break
 
-        if item.path == "task_dag.tasks.reply.complete" and item.is_complete:
+        if path == "task_dag.tasks.reply.complete":
             flags["reply_task_completed"] = True
             continue
 
-        if item.event_type != "delta" or not item.delta:
+        if not isinstance(item, dict) or item.get("event_type") != "delta" or not item.get("delta"):
             continue
-        if item.path not in FIELD_LABELS:
+        if path not in FIELD_LABELS:
             continue
 
-        if item.path not in seen_labels:
-            print(FIELD_LABELS[item.path], end="", flush=True)
-            seen_labels.add(item.path)
-        print(item.delta, end="", flush=True)
+        if path not in seen_labels:
+            print(FIELD_LABELS[path], end="", flush=True)
+            seen_labels.add(path)
+        delta = str(item.get("delta") or "")
+        print(delta, end="", flush=True)
 
-        if item.path.endswith(".prethinking"):
+        if path.endswith(".prethinking"):
             flags["stream_prethinking_delta"] = True
-        elif item.path.endswith(".tool_call_note"):
+        elif path.endswith(".tool_call_note"):
             flags["stream_tool_call_note_delta"] = True
-        elif item.path.endswith(".reply"):
+        elif path.endswith(".reply"):
             flags["stream_reply_delta"] = True
-        elif item.path.endswith(".reflection"):
+        elif path.endswith(".reflection"):
             flags["stream_reflection_delta"] = True
 
-    data = await execution.async_get_data()
-    meta = await execution.async_get_meta()
+    data = await execution.async_close(timeout=180)
+    if isinstance(data, dict) and "reply" in dict(data.get("task_results") or {}):
+        flags["reply_task_completed"] = True
 
     print("\n\n---")
-    print("selected_route=", meta["route_plan"]["selected_route"], sep="")
+    print("execution_entry=dynamic_task")
     for key, value in flags.items():
         print(f"{key}={value}")
 

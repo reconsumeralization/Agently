@@ -4,7 +4,6 @@ Dynamic Task examples use the application-level facade:
 
 ```python
 Agently.create_dynamic_task(...)
-agent.create_dynamic_task(...)
 ```
 
 TriggerFlow remains the execution substrate, but these examples are not

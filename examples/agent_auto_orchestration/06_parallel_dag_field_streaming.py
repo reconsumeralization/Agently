@@ -37,8 +37,8 @@ Stream paths consumed:
     task_dag.tasks.executive_brief.fields.verdict
     task_dag.tasks.executive_brief.fields.risk_summary
 
-Expected key output from one local Ollama run with qwen2.5:7b on 2026-05-22:
-    route: dynamic_task
+Expected key output from one real DeepSeek run on 2026-06-27:
+    execution_entry: dynamic_task
     Parallel branch field deltas streamed: True
     All 4 tracked signoff/executive tasks completed: True
 """
@@ -162,6 +162,19 @@ _FIELD_TO_PANEL: dict[str, str] = {}
 for _pk, _pd in _PANEL_DEFS.items():
     for _fp in _pd["fields"]:
         _FIELD_TO_PANEL[_fp] = _pk
+
+
+def _runtime_stream_path(item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    item_type = str(item.get("type") or "")
+    if item_type == "task_dag.model_field":
+        return f"task_dag.tasks.{ item.get('task_id') }.fields.{ item.get('field_path') }"
+    if item_type == "task_dag.task":
+        return f"task_dag.tasks.{ item.get('task_id') }.{ item.get('action') }"
+    if item_type == "task_dag.graph":
+        return f"task_dag.graph.{ item.get('action') }"
+    return item_type
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -358,52 +371,53 @@ def build_graph() -> dict[str, Any]:
 
 async def main() -> None:
     provider = configure_model(temperature=0.2)
-    agent = Agently.create_agent("launch-readiness-parallel-demo")
-    execution = (
-        agent
-        .use_dynamic_task(
-            mode="submitted",
-            plan=build_graph(),
-            handlers={"context_handler": load_context},
-        )
-        .input("Assess launch readiness for Real-time Collaborative Editing v3.0.")
-        .create_execution()
+    task = Agently.create_dynamic_task(
+        target="Assess launch readiness for Real-time Collaborative Editing v3.0.",
+        plan=build_graph(),
+        handlers={"context_handler": load_context},
     )
+    execution = task.compile(build_graph()).create_execution(auto_close=False)
 
     # Per-field text buffers: field_path -> list of delta strings
     buffers: dict[str, list[str]] = {fp: [] for fp in _FIELD_TO_PANEL}
     completed_tasks: set[str] = set()
     streamed_fields: set[str] = set()
-    route: str = ""
 
     layout = _build_layout(buffers, completed_tasks)
 
     with Live(layout, refresh_per_second=15, screen=True, transient=False) as live:
-        async for item in execution.get_async_generator(type="instant"):
-            if item.path == "route.selected" and item.is_complete:
-                route = (item.value or {}).get("selected_route", "")
+        async for item in execution.get_async_runtime_stream({"launch_context": LAUNCH_CONTEXT}, timeout=None):
+            path = _runtime_stream_path(item)
+            if not path:
                 continue
+            if path == "task_dag.graph.complete":
+                break
 
             # Track task completion
             for pd in _PANEL_DEFS.values():
-                if item.path in pd["complete_tasks"] and item.is_complete:
-                    completed_tasks.add(item.path)
+                if path in pd["complete_tasks"]:
+                    completed_tasks.add(path)
                     break
 
             # Only field deltas
-            if item.event_type != "delta" or not item.delta:
+            if not isinstance(item, dict) or item.get("event_type") != "delta" or not item.get("delta"):
                 continue
-            if item.path not in _FIELD_TO_PANEL:
+            if path not in _FIELD_TO_PANEL:
                 continue
 
-            streamed_fields.add(item.path)
-            buffers[item.path].append(item.delta)
+            streamed_fields.add(path)
+            buffers[path].append(str(item.get("delta") or ""))
 
             # Refresh the layout
             live.update(_build_layout(buffers, completed_tasks))
 
     # ── Final summary (below the live display) ────────────────────────────
-    data = await execution.async_get_data()
+    data = await execution.async_close(timeout=240)
+    if isinstance(data, dict):
+        completed_tasks.update(
+            f"task_dag.tasks.{ task_id }.complete"
+            for task_id in dict(data.get("task_results") or {})
+        )
 
     expected = set(_FIELD_TO_PANEL.keys())
     field_groups = {
@@ -425,12 +439,13 @@ async def main() -> None:
         },
     }
     parallel_delta_coverage = all(bool(paths & streamed_fields) for paths in field_groups.values())
-    print(f"\nroute: {route}")
+    semantic = (data or {}).get("semantic_outputs", {})
+    tracked_outputs_completed = all(key in semantic for key in ("security", "performance", "ux", "executive"))
+    print("\nexecution_entry: dynamic_task")
     print(f"Parallel branch field deltas streamed: {parallel_delta_coverage}")
     print(f"Observed {len(streamed_fields)} of {len(expected)} configured field streams: {sorted(streamed_fields)}")
-    print(f"All 4 tracked signoff/executive tasks completed: {len(completed_tasks) == 4}")
+    print(f"All 4 tracked signoff/executive tasks completed: {tracked_outputs_completed}")
 
-    semantic = (data or {}).get("semantic_outputs", {})
     for key in ("security", "performance", "ux"):
         result = semantic.get(key, {}).get("result", {})
         rec = str(result.get("recommendation", "—"))[:200]

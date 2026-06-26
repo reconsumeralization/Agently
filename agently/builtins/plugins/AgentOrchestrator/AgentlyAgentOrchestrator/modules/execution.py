@@ -103,9 +103,6 @@ if TYPE_CHECKING:
     from agently.core.application import DynamicTask
 
 
-_DYNAMIC_TASK_GRAPH_INPUT_UNSET = object()
-
-
 class AgentExecution:
     """Unified execution draft, run owner, and result source for one Agent run."""
 
@@ -504,48 +501,11 @@ class AgentExecution:
         return self._refresh_prompt_snapshot()
 
     def use_dynamic_task(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        if args:
-            raise TypeError("AgentExecution.use_dynamic_task(...) accepts keyword arguments only.")
-        self._add_dynamic_task_candidate(kwargs)
-        self._selected_route = None
-        self.effective_options = self._build_effective_options()
-        return self
-
-    def _add_dynamic_task_candidate(self, candidate: dict[str, Any]):
-        self.local_dynamic_task_candidates.append(self._normalize_dynamic_task_candidate(candidate))
-        self._selected_route = None
-        self.effective_options = self._build_effective_options()
-        return self
-
-    @staticmethod
-    def _normalize_dynamic_task_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-        mode = str(candidate.get("mode") or "auto")
-        if mode not in {"auto", "submitted"}:
-            raise ValueError("Dynamic Task mode must be one of: 'auto', 'submitted'.")
-        plan = candidate.get("plan")
-        if mode == "submitted" and plan is None:
-            raise ValueError("use_dynamic_task(mode='submitted') requires plan=.")
-        graph_input_provided = candidate.get("graph_input_provided", _DYNAMIC_TASK_GRAPH_INPUT_UNSET)
-        if graph_input_provided is _DYNAMIC_TASK_GRAPH_INPUT_UNSET:
-            graph_input_provided = "graph_input" in candidate
-        return {
-            "mode": mode,
-            "plan": plan,
-            "planner": candidate.get("planner"),
-            "model": candidate.get("model"),
-            "actions": candidate.get("actions"),
-            "skills": candidate.get("skills"),
-            "handlers": candidate.get("handlers"),
-            "name": candidate.get("name"),
-            "max_tasks": candidate.get("max_tasks"),
-            "output_schema": candidate.get("output_schema"),
-            "ensure_keys": candidate.get("ensure_keys"),
-            "output_format": candidate.get("output_format"),
-            "graph_input": candidate.get("graph_input"),
-            "graph_input_provided": bool(graph_input_provided),
-            "timeout": candidate.get("timeout"),
-            "max_retries": candidate.get("max_retries", 3),
-        }
+        raise ValueError(
+            "AgentExecution.use_dynamic_task(...) is no longer an AgentExecution route. "
+            "Use Agently.create_dynamic_task(...) or direct TaskDAGExecutor(...) for "
+            "independent DAG workflows."
+        )
 
     def resolve_skills_plan(self, *args: Any, **kwargs: Any) -> "SkillExecutionPlan":
         kwargs = self._with_local_skill_kwargs(kwargs)
@@ -889,7 +849,7 @@ class AgentExecution:
         await self.stream.close()
 
     def dynamic_task_candidates(self) -> list[dict[str, Any]]:
-        return self.route_planner.dynamic_task_candidates()
+        return []
 
     def action_candidates(self) -> list[dict[str, Any]]:
         return self.route_planner.action_candidates()

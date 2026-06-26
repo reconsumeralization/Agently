@@ -39,7 +39,8 @@ Agently 现在可以作为生产级 AI 服务后端的执行基座：
 
 `agent.start()` 现在是一次候选能力感知 Agent turn 的默认用户层入口。调用方仍然
 拿到业务结果；当显式声明了候选能力时，Agent 可以路由到普通模型响应、Actions、
-Skills Executor 或 Dynamic Task。
+或 Skills Executor。DynamicTask/TaskDAG 仍然作为独立 DAG workflow surface
+可用，不再作为 AgentExecution route。
 
 ```python
 result = (
@@ -49,7 +50,6 @@ result = (
         [{"source": "anthropics/skills", "subpath": "skills/docx"}],
         mode="model_decision",
     )
-    .use_dynamic_task(mode="auto", max_tasks=8)
     .input({"customer_id": "C-1024", "ticket": "payment failure"})
     .output({
         "summary": (str, "business summary", True),
@@ -72,8 +72,7 @@ result = (
 ```python
 execution = (
     agent
-    .use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
-    .input({"ticket": "T-42"})
+    .input({"ticket": "T-42", "dag_snapshot": snapshot})
     .create_execution()
 )
 
@@ -214,25 +213,20 @@ execution = await agent.async_run_skills_task(
 
 ## Dynamic Task 和 TriggerFlow 成为执行骨架
 
-复杂的模型生成 DAG 或应用提交 DAG 仍然由 Dynamic Task 承载。4.1.3 让 Agent
-execution 可以路由到 Dynamic Task，并把结构化字段增量保留在稳定路径下。
+复杂的模型生成 DAG 或应用提交 DAG 仍然由 Dynamic Task 承载。在 4.1.3.8
+开发线中，AgentExecution 不再路由到 DynamicTask；先独立运行 DAG，再把 snapshot
+作为 evidence 传给后续 AgentExecution。
 
 ```python
-execution = (
-    agent
-    .use_dynamic_task(mode="auto", max_tasks=8)
-    .input("Research this company and produce an investment memo.")
-    .output({
+task = Agently.create_dynamic_task(
+    target="Research this company and produce an investment memo.",
+    output_schema={
         "thesis": (str, "investment thesis", True),
         "risks": ([str], "major risks", True),
         "evidence": ([str], "supporting evidence", True),
-    })
-    .create_execution()
+    },
 )
-
-async for item in execution.get_async_generator(type="instant"):
-    if item.delta:
-        print(item.path, item.delta)
+snapshot = await task.async_start(timeout=180)
 ```
 
 业务价值：复杂任务可以在同一运行时中分解、流式展示、检查和恢复，而不是塞进一次

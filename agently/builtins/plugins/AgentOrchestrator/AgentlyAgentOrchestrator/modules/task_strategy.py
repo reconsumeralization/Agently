@@ -283,22 +283,6 @@ def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, 
                 pack_id = _capability_id_from_selector(selector)
                 add(pack_id, "skill_pack", "skills", "route_context", mode=mode, description=descriptions.get(pack_id, ""))
 
-    # DynamicTask / DAG candidates -> dynamic_task route.
-    try:
-        for candidate in execution.dynamic_task_candidates() or []:
-            if not isinstance(candidate, dict):
-                continue
-            add(
-                candidate.get("name") or candidate.get("id") or "",
-                "dynamic_task",
-                "dynamic_task",
-                "none",
-                mode=str(candidate.get("mode") or ""),
-                description=str(candidate.get("description") or ""),
-            )
-    except Exception:
-        pass
-
     return capabilities
 
 

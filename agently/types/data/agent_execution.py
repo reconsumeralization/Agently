@@ -99,8 +99,8 @@ class AgentExecutionMeta(TypedDict):
     workspace_refs: AgentExecutionWorkspaceRefs
 
 
-CapabilityKind: TypeAlias = Literal["action", "skill", "skill_pack", "dynamic_task"]
-CapabilityRoute: TypeAlias = Literal["model_request", "skills", "dynamic_task"]
+CapabilityKind: TypeAlias = Literal["action", "skill", "skill_pack"]
+CapabilityRoute: TypeAlias = Literal["model_request", "skills"]
 GuidanceAccess: TypeAlias = Literal["route_context", "context_pack", "summary_only", "none"]
 
 
@@ -108,7 +108,7 @@ class PlannerCapabilityCandidate(TypedDict, total=False):
     """One planner-facing capability candidate, sanitized to inert data.
 
     A capability is any route candidate the planner may choose: an Action, a
-    Skill, a Skill pack, or a DynamicTask/DAG candidate. Carries no plugin
+    Skill, or a Skill pack. Carries no plugin
     objects. Produced by the orchestrator route from its route-planner output and
     passed into AgentTask options; AgentTask reads it but never reaches back into
     the plugin (see AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC).
@@ -117,8 +117,8 @@ class PlannerCapabilityCandidate(TypedDict, total=False):
     records how the capability's instructions reach the model: `route_context`
     (only when that route runs, e.g. a Skill's SKILL.md), `context_pack`,
     `summary_only`, or `none` (e.g. a plain Action). `mode` is kind-specific and
-    optional (e.g. `model_decision`/`required` for skills, `auto`/`submitted` for
-    dynamic tasks) and is not normalized across kinds.
+    optional (e.g. `model_decision`/`required` for skills) and is not normalized
+    across kinds.
     """
 
     id: str

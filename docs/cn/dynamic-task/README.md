@@ -42,12 +42,12 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=10)
 ```
 
-高级调用方可以把同一条 DAG 路径拆成独立模块，按需定制，再回写到
-`AgentExecution`：
+高级调用方可以把同一条 DAG 路径拆成独立模块，按需定制，再把 DAG snapshot 作为
+evidence 传给后续 `AgentExecution` 做总结、校验或下一步处理：
 
 ```python
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
-from agently.core import TaskDAGResolver, TaskDAGValidator
+from agently.core import TaskDAGExecutor, TaskDAGResolver, TaskDAGValidator
 
 handlers = {
     "fetch_handler": fetch_handler,
@@ -61,9 +61,13 @@ planner = AgentlyTaskDAGPlanner(validator=validator)
 graph = await planner.async_plan(planner_agent, {"target": goal})
 validator.validate(graph, strict_schema_version=True)
 
+snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
+    graph,
+    graph_input={"goal": goal},
+)
+
 execution = agent.create_execution()
-execution.input({"goal": goal})
-execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+execution.input({"goal": goal, "dag_snapshot": snapshot})
 result = await execution.async_start()
 ```
 
@@ -95,15 +99,11 @@ plan = {
 `${STATE.task_results.lookup}`。`${TRIGGER...}` 指向原始 TriggerFlow trigger
 payload（`data.value`），主要用于高级调试或 executor 层集成。运行时路径缺失会在任务执行时 fail closed，而不是把未解析字符串继续传给 handler。
 
-当提交式 DAG 通过 `agent.use_dynamic_task(...).create_execution()` 运行时，
-`${INIT...}` 会优先读取显式传入的 `use_dynamic_task(graph_input=...)`。如果没有
-传这个参数，则读取 `create_execution()` 时冻结的 execution prompt snapshot 的
-`input` slot。只有两者都不存在时，Agent route 才回退到
-`{"target": task_target}`。
-
-如果 DAG 候选只应属于当前 execution，在 `agent.create_execution()` 之后调用
-`execution.use_dynamic_task(...)`。它使用同一套 graph input 规则，但不会修改
-Agent 级 DAG 候选池。
+当提交式 DAG 通过 `Agently.create_dynamic_task(...).async_run(...)` 运行时，
+`${INIT...}` 读取传给 `async_run` 的 `graph_input`。如果没有提供
+`graph_input`，DynamicTask 回退到目标 payload `{"target": task_target}`。
+AgentExecution 不再拥有 DynamicTask route，因此 `Agent.use_dynamic_task(...)`
+和 `AgentExecution.use_dynamic_task(...)` 会 fail fast 并给出迁移诊断。
 
 如果 `create_dynamic_task(..., output_schema=..., ensure_keys=...)` 为 semantic
 output 的 model 节点提供了前台结构契约，这个宿主契约优先于 planner 在节点上选择的
@@ -129,37 +129,12 @@ snapshot = await task.async_run(graph_input={"doc": "policy"}, timeout=10)
 `from_json(...)` 都支持 `task_dag_key_path="plans.review"`，用于从较大的配置文件里选择
 某一个 DAG。使用 `graph.get_yaml(path)` 或 `graph.get_json(path)` 可以导出归一化后的图。
 
-Agent 实例也提供同名兼容 facade：
-
-```python
-task = agent.create_dynamic_task(target="review policy")
-```
-
-Agent prompt 方法是配置阶段。`agent.create_dynamic_task()` 会像
-`agent.start()` / `agent.create_execution()` 一样消费当前 prompt snapshot：
-
-```python
-task = (
-    agent
-    .info({"customer": "Acme"})
-    .instruct("Focus on renewal risk and account-team actions.")
-    .input({"account": "Acme", "ticket": "T-42"})
-    .output({
-        "summary": (str, "risk summary", True),
-        "risks": ([str], "risk bullets", True),
-    }, format="json")
-    .create_dynamic_task()
-)
-```
-
-这份 prompt snapshot 会通过现有 Prompt generator 渲染成 DAG
-target。`output` slot 会成为 facade 级 `output_schema`，`output_format` 会成为
-默认 model-task format。`set_agent_prompt(...)` / `always=True` 写入的长期 prompt
-会被继承。quick prompt 链里的本轮 execution prompt 保存在 AgentExecution draft 上，
-并被冻结到新 task；只有明确使用低层 request-builder 时才直接使用
-`agent.create_request(...)` / `agent.request`。显式传入的
-`create_dynamic_task(target=..., output_schema=..., output_format=...)` 参数优先于
-prompt 推导值。
+当前 DAG workflow 代码优先使用 `Agently.create_dynamic_task(...)`。旧的
+`agent.create_dynamic_task(...)` 兼容 facade 仍保留给 prompt snapshot 调用方，但
+新示例应让 DynamicTask 与 `agent.start()`、`agent.async_start()`、
+`AgentExecution.async_start()` 保持分离。显式传入的
+`create_dynamic_task(target=..., output_schema=..., output_format=...)` 参数定义
+facade 层 model-task 默认值。
 
 模型任务应复用 Agently request 的输出流水线，不要在 handler 或 example 里自行解析
 模型文本。`output_schema` 会作用到 semantic output 模型节点；如果某个模型节点

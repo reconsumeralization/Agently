@@ -77,8 +77,8 @@ owner 是 `TaskDAG`。
 
 ## 定制 DAG 再回写 AgentExecution
 
-当团队需要高自由度时，可以把 DAG 路径拆成独立模块，逐层定制，再通过
-`AgentExecution` 回到统一消费面。
+当团队需要高自由度时，可以把 DAG 路径拆成独立模块，逐层定制，独立运行后再把
+snapshot 作为 evidence 传给后续 `AgentExecution`。
 
 ```python
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
@@ -97,14 +97,17 @@ planner = AgentlyTaskDAGPlanner(validator=validator)
 graph = await planner.async_plan(planner_agent, {"target": goal})
 validator.validate(graph, strict_schema_version=True)
 
+snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
+    graph,
+    graph_input={"goal": goal},
+)
+
 execution = agent.create_execution()
-execution.input({"goal": goal})
-execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+execution.input({"goal": goal, "dag_snapshot": snapshot})
 result = await execution.async_start()
 ```
 
-如果应用直接用 `TaskDAGExecutor` 运行 DAG，就把 snapshot 当作下一次 Agent step
-的 evidence：
+应用已经直接持有 executor 时，同样把 snapshot 当作下一次 Agent step 的 evidence：
 
 ```python
 snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(

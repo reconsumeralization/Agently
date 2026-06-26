@@ -13,15 +13,15 @@ would attach to a ticket. The model classifies urgency, analyzes root cause,
 drafts a reply, and reviews quality — all as a DAG with dependencies.
 
 Data flow between nodes uses the current Dynamic Task scheme: each node is a
-``kind="local"`` callable handler (keys end in ``_handler``) wired through
-``use_dynamic_task(..., handlers=...)``. Direct runtime wiring uses submitted
-DAG placeholders such as ``${INIT.ticket}`` and ``${DEPS.task_id.path}``;
-advanced executor integrations can inspect the raw TriggerFlow payload through
-``${TRIGGER.result}``;
-richer joins read upstream values from ``context.dependency_results``.
+``kind="local"`` callable handler (keys end in ``_handler``) wired into an
+independent ``Agently.create_dynamic_task(...)`` facade. Direct runtime wiring
+uses submitted DAG placeholders such as ``${INIT.ticket}`` and
+``${DEPS.task_id.path}``; advanced executor integrations can inspect the raw
+TriggerFlow payload through ``${TRIGGER.result}``; richer joins read upstream
+values from ``context.dependency_results``.
 
-Expected key output from one real DeepSeek run:
-    selected_route=dynamic_task
+Expected key output from one real DeepSeek run on 2026-06-27:
+    execution_entry=dynamic_task
     stream_classify=True
     stream_analyze=True
     stream_draft=True
@@ -258,11 +258,20 @@ _STAGE_NARRATIVE = {
 }
 
 
+def _runtime_stream_path(item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    item_type = str(item.get("type") or "")
+    if item_type == "task_dag.task":
+        return f"task_dag.tasks.{ item.get('task_id') }.{ item.get('action') }"
+    if item_type == "task_dag.graph":
+        return f"task_dag.graph.{ item.get('action') }"
+    return item_type
+
+
 async def main() -> None:
     provider = configure_model(temperature=0.3)
     print(f"Model provider: {provider}\n")
-
-    agent = Agently.create_agent("support-triage-demo")
 
     import json
     ticket_str = json.dumps(MOCK_TICKET, ensure_ascii=False, indent=2)
@@ -314,39 +323,37 @@ async def main() -> None:
 
     await asyncio.sleep(0.3)  # simulated: agent startup, loading actions
 
-    execution = (
-        agent
-        # In the Agent route, submitted-DAG ${INIT.x} placeholders read the
-        # execution prompt snapshot input slot unless graph_input= is explicit.
-        .use_dynamic_task(mode="submitted", plan=graph, handlers=DAG_HANDLERS)
-        .input({"ticket": ticket_str})
-        .create_execution()
+    task = Agently.create_dynamic_task(
+        target="Handle the enterprise support ticket through the submitted DAG.",
+        plan=graph,
+        handlers=DAG_HANDLERS,
     )
+    execution = task.compile(graph).create_execution(auto_close=False)
 
     stream_events: list[str] = []
     stage_step = 0
 
-    async for item in execution.get_async_generator(type="instant"):
-        if not item.is_complete:
+    async for item in execution.get_async_runtime_stream({"ticket": ticket_str}, timeout=None):
+        path = _runtime_stream_path(item)
+        if not path:
             continue
-        path = item.path
         stream_events.append(path)
 
-        if path == "route.selected":
-            route = (item.value or {}).get("selected_route", "dynamic_task")
-            print(f"  [route] selected: {route}")
+        if path == "task_dag.graph.complete":
+            break
 
-        elif path.startswith("task_dag.tasks.") and path.endswith(".complete"):
+        if path.startswith("task_dag.tasks.") and path.endswith(".complete"):
             # Path format: task_dag.tasks.{task_id}.{action}
             task_id = path.split(".")[2]
             narrative = _STAGE_NARRATIVE.get(task_id, task_id)
             stage_step += 1
             print(f"  [{stage_step}] {narrative}")
 
-    data = await execution.async_get_data()
-    meta = await execution.async_get_meta()
+    data = await execution.async_close(timeout=120)
 
     task_results = data.get("task_results") if isinstance(data, dict) else {}
+    for task_id in dict(task_results or {}):
+        stream_events.append(f"task_dag.tasks.{ task_id }.complete")
     classify_result = (task_results or {}).get("classify") or {}
     analyze_result = (task_results or {}).get("analyze") or {}
     draft_result = (task_results or {}).get("draft") or {}
@@ -383,8 +390,7 @@ async def main() -> None:
     if suggestions:
         print(f"  改进建议:   {suggestions[:200]}")
 
-    selected_route = meta.get("route_plan", {}).get("selected_route", "")
-    print(f"\nselected_route={selected_route}")
+    print("\nexecution_entry=dynamic_task")
     print(f"stream_classify={any(e.startswith('task_dag.tasks.classify') for e in stream_events)}")
     print(f"stream_analyze={any(e.startswith('task_dag.tasks.analyze') for e in stream_events)}")
     print(f"stream_draft={any(e.startswith('task_dag.tasks.draft') for e in stream_events)}")

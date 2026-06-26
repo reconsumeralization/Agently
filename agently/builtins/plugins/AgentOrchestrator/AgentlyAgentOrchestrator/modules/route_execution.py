@@ -22,7 +22,7 @@ from agently.core.application.AgentExecution import AgentExecutionLimitExceeded,
 from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import DataFormatter
 
-from .routes import run_dynamic_task_route, run_model_request_route, run_skills_route
+from .routes import run_model_request_route, run_skills_route
 from .task_strategy import run_agent_task_route
 
 if TYPE_CHECKING:
@@ -76,8 +76,6 @@ async def async_execute_route(
             }
         if route == "skills":
             result = await run_skills_route(owner, route_meta)
-        elif route == "dynamic_task":
-            result = await run_dynamic_task_route(owner, route_meta)
         elif route == "agent_task":
             result = await run_agent_task_route(owner, route_meta)
         else:

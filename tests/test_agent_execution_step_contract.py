@@ -3054,12 +3054,11 @@ async def test_agent_execution_bounded_step_blocks_when_direct_model_budget_exce
     assert meta["diagnostics"]["limit_events"][0]["limit_name"] == "max_model_requests"
 
 
-@pytest.mark.asyncio
-async def test_agent_execution_bounded_step_budget_covers_dynamic_task_model_tasks():
+def test_agent_execution_bounded_step_rejects_dynamic_task_route():
     agent = _create_agent("task-step-dynamic-budget")
-    execution = (
-        agent
-        .use_dynamic_task(
+
+    with pytest.raises(ValueError, match=r"Agent\.use_dynamic_task.*independent DAG workflows"):
+        agent.use_dynamic_task(
             mode="submitted",
             plan={
                 "graph_id": "task-step-budget-dag",
@@ -3081,20 +3080,8 @@ async def test_agent_execution_bounded_step_budget_covers_dynamic_task_model_tas
             },
             timeout=3,
         )
-        .input("run two model tasks")
-        .create_execution(
-            lineage={"task_id": "budget-task", "iteration_id": "iter-1", "step_id": "dag"},
-            limits={"max_model_requests": 1},
-        )
-    )
 
-    with pytest.raises(AgentExecutionLimitExceeded):
-        await execution.async_get_data()
-
-    meta = await execution.async_get_meta()
-    assert meta["status"] == "blocked"
-    assert meta["route_plan"]["selected_route"] == "dynamic_task"
-    assert meta["diagnostics"]["budget"]["model_requests_used"] == 1
+    assert getattr(agent, "_dynamic_task_candidates", []) == []
 
 
 @pytest.mark.asyncio

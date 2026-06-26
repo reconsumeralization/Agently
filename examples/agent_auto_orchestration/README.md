@@ -30,7 +30,7 @@ python examples/agent_auto_orchestration/20_agent_execution_lineage_workspace_lo
 python examples/agent_auto_orchestration/21_agent_execution_github_issue_intake.py
 python examples/agent_auto_orchestration/22_unified_agent_execution_result.py
 python examples/agent_auto_orchestration/23_agent_execution_auto_dispatch.py
-python examples/agent_auto_orchestration/24_execution_local_dynamic_task_candidate.py
+python examples/agent_auto_orchestration/24_independent_dynamic_task_dag.py
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` remains as the compact reference for
@@ -41,12 +41,12 @@ candidate registration.
 
 ## Current Examples
 
-- **02 - Customer Support Triage.** Dynamic Task DAG with local handlers,
-  dependency edges, and real model calls over mocked CRM data.
-- **05 - Operator-visible Field Delta Streaming.** Dynamic Task DAG with
-  `kind="model"` nodes and field-level streaming.
-- **06 - Parallel DAG Field Delta Streaming.** Multi-branch Dynamic Task DAG
-  with concurrent workstreams and a fan-in executive brief.
+- **02 - Customer Support Triage.** Independent Dynamic Task DAG with local
+  handlers, dependency edges, and real model calls over mocked CRM data.
+- **05 - Operator-visible Field Delta Streaming.** Independent Dynamic Task DAG
+  with `kind="model"` nodes and field-level runtime streaming.
+- **06 - Parallel DAG Field Delta Streaming.** Independent multi-branch Dynamic
+  Task DAG with concurrent workstreams and a fan-in executive brief.
 - **19 - Remote Skills Weather Event Ops.** Current Blocks-backed remote Skills
   acceptance example. Weather facts come from a real MCP server through
   ActionRuntime; selected Skills execute through `effort="normal"` and expose
@@ -59,9 +59,8 @@ candidate registration.
   strategy consumed through the same result/stream/meta facade.
 - **23 - AgentExecution Auto Dispatch.** Route-selection example proving
   default `model_request` and task-strategy `agent_task` dispatch.
-- **24 - Execution-Local Dynamic Task Candidate.** Infrastructure smoke for
-  `execution.use_dynamic_task(...)`, verifying the candidate stays
-  execution-local.
+- **24 - Independent Dynamic Task DAG.** Infrastructure smoke for direct
+  `Agently.create_dynamic_task(...)` submitted-DAG execution.
 
 Model calls are real. Business data is mocked unless the example explicitly
 states that it uses a real external system such as MCP or GitHub CLI.

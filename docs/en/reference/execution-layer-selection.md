@@ -77,10 +77,11 @@ substrate. It can still be used, but the architectural owner is `TaskDAG`.
 | `TriggerFlow` | Runtime state, signals, joins, concurrency, pause/resume, save/load | Model prompt/output behavior or DAG task semantics |
 | `Workspace` | Evidence records, checkpoints, context packs, recall into later steps | Planning, verification, or automatic memory decisions |
 
-## Custom DAG Back Into AgentExecution
+## Custom DAG Then AgentExecution Evidence
 
 When a team wants high freedom, it can decompose the DAG path, customize each
-module, and still write the result back through `AgentExecution`.
+module, run it independently, and pass the snapshot into `AgentExecution` as
+evidence for a later agent step.
 
 ```python
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
@@ -99,14 +100,17 @@ planner = AgentlyTaskDAGPlanner(validator=validator)
 graph = await planner.async_plan(planner_agent, {"target": goal})
 validator.validate(graph, strict_schema_version=True)
 
+snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
+    graph,
+    graph_input={"goal": goal},
+)
+
 execution = agent.create_execution()
-execution.input({"goal": goal})
-execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+execution.input({"goal": goal, "dag_snapshot": snapshot})
 result = await execution.async_start()
 ```
 
-If the application runs the DAG directly through `TaskDAGExecutor`, treat the
-snapshot as evidence for the next Agent step:
+The same separation works when the application already owns the executor:
 
 ```python
 snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(

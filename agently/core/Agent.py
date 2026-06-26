@@ -476,32 +476,12 @@ class BaseAgent:
         timeout: float | None = None,
         max_retries: int = 3,
     ) -> Self:
-        if mode not in {"auto", "submitted"}:
-            raise ValueError("Dynamic Task mode must be one of: 'auto', 'submitted'.")
-        if mode == "submitted" and plan is None:
-            raise ValueError("use_dynamic_task(mode='submitted') requires plan=.")
-        graph_input_provided = graph_input is not _UNSET
-        self._dynamic_task_candidates.append(
-            {
-                "mode": mode,
-                "plan": plan,
-                "planner": planner,
-                "model": model,
-                "actions": actions,
-                "skills": skills,
-                "handlers": handlers,
-                "name": name,
-                "max_tasks": max_tasks,
-                "output_schema": output_schema,
-                "ensure_keys": ensure_keys,
-                "output_format": output_format,
-                "graph_input": graph_input if graph_input_provided else None,
-                "graph_input_provided": graph_input_provided,
-                "timeout": timeout,
-                "max_retries": max_retries,
-            }
+        raise ValueError(
+            "Agent.use_dynamic_task(...) no longer registers a DynamicTask route for "
+            "agent.start(), agent.async_start(), or AgentExecution.async_start(). "
+            "Use Agently.create_dynamic_task(...) or direct TaskDAGExecutor(...) for "
+            "independent DAG workflows."
         )
-        return self
 
     def _create_agent_execution_run_context(
         self,
