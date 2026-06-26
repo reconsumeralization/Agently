@@ -2545,8 +2545,9 @@ async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task_loop(tmp_pa
     agent = _create_goal_pursuit_agent("execution-task-route-deadline-owner").use_workspace(tmp_path / "workspace")
     execution = (
         agent
-        .goal("Build the site.", success_criteria=["The runnable page exists."])
         .create_execution(limits={"max_seconds": 0.2, "max_no_progress_seconds": 5})
+        .goal("Build the site.", success_criteria=["The runnable page exists."])
+        .strategy("flat")
     )
 
     async def slow_request_plan(_iteration_index, _context_pack):

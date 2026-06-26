@@ -33,9 +33,7 @@ async def run_model_request_route(
     max_retries: int,
     raise_ensure_failure: bool,
 ) -> Any:
-    agent = execution.agent
-    agent_execution_run_context = agent._create_agent_execution_run_context(parent_run_context=execution.parent_run_context)
-    await agent._async_emit_agent_execution_started(agent_execution_run_context)
+    agent_execution_run_context = await execution._async_emit_agent_execution_started_once()
     if ensure_all_keys is not None:
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
     result = execution.request.get_result(parent_run_context=agent_execution_run_context)

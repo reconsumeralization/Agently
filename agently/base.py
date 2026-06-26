@@ -53,50 +53,50 @@ if TYPE_CHECKING:
 
 _SETTINGS_VALUE_UNSET = object()
 
-settings = Settings(
+settings: Settings = Settings(
     name="global_settings",
 )
 _load_default_settings(settings)
-plugin_manager = PluginManager(
+plugin_manager: PluginManager = PluginManager(
     settings,
     name="global_plugin_manager",
 )
 _load_default_plugins(plugin_manager)
-event_center = EventCenter()
+event_center: EventCenter = EventCenter()
 _hook_default_event_handlers(event_center)
-async_emit_observation = event_center.async_emit
-emit_observation = event_center.emit
-async_emit_runtime = event_center.async_emit
-emit_runtime = event_center.emit
-logger = create_logger()
+async_emit_observation: Any = event_center.async_emit
+emit_observation: Any = event_center.emit
+async_emit_runtime: Any = event_center.async_emit
+emit_runtime: Any = event_center.emit
+logger: Any = create_logger()
 httpx_level_name = settings.get("runtime.httpx_log_level", "WARNING")
 httpx_level = getattr(logging, str(httpx_level_name).upper(), logging.WARNING)
 logging.getLogger("httpx").setLevel(httpx_level)
 logging.getLogger("httpcore").setLevel(httpx_level)
-action = Action(plugin_manager, settings)
-tool = action
-execution_resource = ExecutionResourceManager(
+action: Action = Action(plugin_manager, settings)
+tool: Action = action
+execution_resource: ExecutionResourceManager = ExecutionResourceManager(
     plugin_manager=plugin_manager,
     settings=settings,
     event_center=event_center,
 )
-policy_approval = PolicyApprovalManager(
+policy_approval: PolicyApprovalManager = PolicyApprovalManager(
     settings=settings,
     event_center=event_center,
 )
-request_scheduler = RequestScheduler()
-action_registry = action.action_registry
+request_scheduler: RequestScheduler = RequestScheduler()
+action_registry: Any = action.action_registry
 _load_default_actions(action_registry)
-action_dispatcher = action.action_dispatcher
-action_runtime = action.action_runtime
-action_flow = action.action_flow
-skills_executor = SkillsExecutor(plugin_manager, settings)
-blocks = Blocks(plugin_manager, settings)
-workspace = WorkspaceManager()
-_agently_emitter = event_center.create_emitter("Agently")
+action_dispatcher: Any = action.action_dispatcher
+action_runtime: Any = action.action_runtime
+action_flow: Any = action.action_flow
+skills_executor: SkillsExecutor = SkillsExecutor(plugin_manager, settings)
+blocks: Blocks = Blocks(plugin_manager, settings)
+workspace: WorkspaceManager = WorkspaceManager()
+_agently_emitter: Any = event_center.create_emitter("Agently")
 
 
-def print_(content: Any, *args):
+def print_(content: Any, *args: Any) -> None:
     contents = [str(content)]
     if args:
         for arg in args:
@@ -105,7 +105,7 @@ def print_(content: Any, *args):
     _agently_emitter.info(content_text, event_type="runtime.print")
 
 
-async def async_print(content: Any, *args):
+async def async_print(content: Any, *args: Any) -> None:
     contents = [str(content)]
     if args:
         for arg in args:
@@ -265,7 +265,7 @@ class AgentlyMain(Generic[A]):
         self.workspace = workspace
         self.AgentType = AgentType
 
-        def refresh_httpx_log_level():
+        def refresh_httpx_log_level() -> None:
             level_name = self.settings.get("runtime.httpx_log_level", "WARNING")
             level = getattr(logging, str(level_name).upper(), logging.WARNING)
             logging.getLogger("httpx").setLevel(level)
@@ -277,7 +277,7 @@ class AgentlyMain(Generic[A]):
             *,
             auto_load_env: bool = False,
             raise_empty: bool = False,
-        ):
+        ) -> "AgentlyMain[A]":
             if isinstance(key, str) and key == "debug" and value is not _SETTINGS_VALUE_UNSET:
                 _apply_debug_profile(
                     self.settings,
@@ -300,7 +300,7 @@ class AgentlyMain(Generic[A]):
             *,
             auto_load_env: bool = False,
             raise_empty: bool = False,
-        ):
+        ) -> "AgentlyMain[A]":
             self.settings.load(data_type, value, auto_load_env=auto_load_env, raise_empty=raise_empty)
             if self.settings.get("debug", None) is not None:
                 _apply_debug_profile(self.settings, self.settings.get("debug"))
@@ -310,11 +310,11 @@ class AgentlyMain(Generic[A]):
         self.set_settings = set_settings
         self.load_settings = load_settings
 
-    def set_api_key(self, api_key: str):
+    def set_api_key(self, api_key: str) -> "AgentlyMain[A]":
         self.set_settings("agently.api_key", api_key)
         return self
 
-    def set_debug_console(self, debug_console_status: Literal["ON", "OFF"]):
+    def set_debug_console(self, debug_console_status: Literal["ON", "OFF"]) -> "AgentlyMain[A]":
         # Deprecated: debug console mode is retired and no longer participates in runtime.
         if debug_console_status == "ON":
             DeprecationWarnings.log_deprecated_once(
@@ -324,11 +324,11 @@ class AgentlyMain(Generic[A]):
             )
         return self
 
-    def set_log_level(self, log_level: "RuntimeEventLevel"):
+    def set_log_level(self, log_level: "RuntimeEventLevel") -> "AgentlyMain[A]":
         self.logger.setLevel(log_level)
         return self
 
-    def configure_policy_approval(self, *, handler: str | None = None):
+    def configure_policy_approval(self, *, handler: str | None = None) -> "AgentlyMain[A]":
         if handler is not None:
             self.policy_approval.set_default_handler(handler)
         return self
@@ -418,7 +418,7 @@ class AgentlyMain(Generic[A]):
             default_search_scope=default_search_scope,
         )
 
-    def create_observation_bridge(self, *watch_targets: Any, **bridge_options: Any):
+    def create_observation_bridge(self, *watch_targets: Any, **bridge_options: Any) -> Any:
         devtools = LazyImport.import_package(
             "agently_devtools",
             auto_install=False,
@@ -430,5 +430,5 @@ class AgentlyMain(Generic[A]):
             bridge.watch(*watch_targets)
         return bridge
 
-    def observe(self, *watch_targets: Any, **bridge_options: Any):
+    def observe(self, *watch_targets: Any, **bridge_options: Any) -> Any:
         return self.create_observation_bridge(*watch_targets, **bridge_options)

@@ -73,7 +73,15 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(result.get_async_generator(type="specific"), AsyncGenerator[AgentlySpecificResultMessage, None])
 
         compat_result: ModelRequestResult = agent.create_request().input("hello").get_response()
+        assert_type(compat_result.get_data(ensure_keys=["reply"]), dict[str, Any])
+        assert_type(compat_result.get_text(), str)
         assert_type(compat_result.result.get_text(), str)
+
+        execution_result = execution.get_result()
+        assert_type(execution_result.get_data(ensure_keys=["reply"]), dict[str, Any])
+        assert_type(execution_result.get_text(), str)
+        assert_type(execution_result.get_generator(type="instant"), Generator[AgentExecutionStreamData, None, None])
+        assert_type(execution_result.get_async_generator(type="instant"), AsyncGenerator[AgentExecutionStreamData, None])
 
 
 def test_public_handler_type_aliases():

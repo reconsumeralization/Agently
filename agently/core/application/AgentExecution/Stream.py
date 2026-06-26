@@ -15,8 +15,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from typing import Any, Literal
+from contextlib import suppress
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, Literal, cast
 
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter
@@ -97,6 +98,14 @@ class AgentExecutionStream:
         self.items.append(item)
         for queue in list(self.queues):
             await queue.put(item)
+        if self._execution is not None:
+            emit_runtime_projection = getattr(self._execution, "_async_emit_stream_runtime_event", None)
+            if callable(emit_runtime_projection):
+                with suppress(Exception):
+                    await cast(
+                        Callable[[AgentExecutionStreamData], Awaitable[None]],
+                        emit_runtime_projection,
+                    )(item)
         return item
 
     def _is_compatible_delta(self, left: AgentExecutionStreamData, right: AgentExecutionStreamData) -> bool:

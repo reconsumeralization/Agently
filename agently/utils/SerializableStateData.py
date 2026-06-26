@@ -27,7 +27,7 @@ class SerializableStateData(StateData):
         *,
         name: str | None = None,
         parent: "SerializableStateData | None" = None,
-    ):
+    ) -> None:
         super().__init__(dict(data) if data is not None else None, name=name, parent=parent)
 
     @property
@@ -53,16 +53,16 @@ class SerializableStateData(StateData):
     def __contains__(self, key: str) -> bool:
         return super().__contains__(key)
 
-    def __setitem__(self, key: str, value: SerializableValue):
+    def __setitem__(self, key: str, value: SerializableValue) -> None:
         super().__setitem__(key, value)
 
-    def set(self, key: str, value: SerializableValue):
+    def set(self, key: str, value: SerializableValue) -> None:
         super().set(key, value)
 
-    def update(self, new: SerializableMapping):
+    def update(self, new: SerializableMapping) -> None:
         super().update(dict(new))
 
-    def __delitem__(self, key: str):
+    def __delitem__(self, key: str) -> None:
         super().__delitem__(key)
 
 
@@ -73,7 +73,7 @@ class SerializableStateDataNamespace(StateDataNamespace):
         namespace: str = "",
         *,
         root_runtime_data: SerializableStateData | None = None,
-    ):
+    ) -> None:
         super().__init__(
             root_state_data=root_state_data,
             namespace=namespace,
@@ -101,14 +101,14 @@ class SerializableStateDataNamespace(StateDataNamespace):
     def __contains__(self, key: str) -> bool:
         return super().__contains__(key)
 
-    def __setitem__(self, key: str, value: SerializableValue):
+    def __setitem__(self, key: str, value: SerializableValue) -> None:
         return super().__setitem__(key, value)
 
-    def set(self, key: str, value: SerializableValue):
+    def set(self, key: str, value: SerializableValue) -> None:
         return super().set(key, value)
 
-    def update(self, new: SerializableMapping):
+    def update(self, new: SerializableMapping) -> None:
         return super().update(dict(new))
 
-    def __delitem__(self, key: str):
+    def __delitem__(self, key: str) -> None:
         return super().__delitem__(key)

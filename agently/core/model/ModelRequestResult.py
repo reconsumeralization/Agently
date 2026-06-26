@@ -111,10 +111,10 @@ class ModelRequestResult:
         self._validate_handler_signature: tuple[int, ...] | None = None
         self._data_flow = ModelRequestResultDataFlow(self)
         self.full_result_data = self._response_parser.full_result_data
-        self.get_meta = cast(Callable[[], dict[str, Any]], FunctionShifter.syncify(self.async_get_meta))
-        self.get_text = cast(Callable[[], str], FunctionShifter.syncify(self.async_get_text))
-        self.get_data = FunctionShifter.syncify(self.async_get_data)
-        self.get_data_object = FunctionShifter.syncify(self.async_get_data_object)
+        self._get_meta_sync = cast(Callable[[], dict[str, Any]], FunctionShifter.syncify(self.async_get_meta))
+        self._get_text_sync = cast(Callable[[], str], FunctionShifter.syncify(self.async_get_text))
+        self._get_data_sync = FunctionShifter.syncify(self.async_get_data)
+        self._get_data_object_sync = FunctionShifter.syncify(self.async_get_data_object)
 
     async def _drain_response_parser_observations(self):
         drain = getattr(self._response_parser, "drain_runtime_observations", None)
@@ -185,7 +185,7 @@ class ModelRequestResult:
     async def async_get_data(
         self,
         *,
-        type: Literal['parsed'],
+        type: Literal['parsed'] = "parsed",
         ensure_keys: list[str],
         validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
@@ -229,6 +229,53 @@ class ModelRequestResult:
         )
 
     @overload
+    def get_data(
+        self,
+        *,
+        type: Literal['parsed'] = "parsed",
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    def get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any: ...
+
+    def get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any:
+        return self._get_data_sync(
+            type=type,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            _retry_count=_retry_count,
+        )
+
+    @overload
     async def async_get_data_object(
         self,
     ) -> "BaseModel | None": ...
@@ -263,8 +310,50 @@ class ModelRequestResult:
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
-    ):
+    ) -> "BaseModel | None":
         return await self._data_flow.async_get_data_object(
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
+
+    @overload
+    def get_data_object(self) -> "BaseModel | None": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel | None": ...
+
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel | None":
+        return self._get_data_object_sync(
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
             key_style=key_style,
@@ -282,6 +371,9 @@ class ModelRequestResult:
             await self._drain_response_parser_observations()
             await self._run_finally_handlers_once()
 
+    def get_meta(self) -> dict[str, Any]:
+        return self._get_meta_sync()
+
     async def async_get_text(self) -> str:
         try:
             return await self._await_materialization(
@@ -291,6 +383,9 @@ class ModelRequestResult:
         finally:
             await self._drain_response_parser_observations()
             await self._run_finally_handlers_once()
+
+    def get_text(self) -> str:
+        return self._get_text_sync()
 
     @overload
     def get_generator(

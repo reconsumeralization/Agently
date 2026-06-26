@@ -283,7 +283,26 @@ class AgentTask:
 
         async def loop(data):
             await data.async_set_state("task_id", self.id, emit=False)
-            effective_strategy = await self._resolve_effective_execution_strategy()
+            try:
+                effective_strategy = await self._resolve_effective_execution_strategy()
+            except _AgentTaskDeadlineExceeded as error:
+                await self._emit("agent_task.started", self._task_summary())
+                await self._terminate_timed_out(
+                    0,
+                    stage=error.stage,
+                    reason=error.reason,
+                    limit_name=error.limit_name,
+                    timeout_seconds=error.timeout_seconds,
+                )
+                await data.async_set_state("agent_task.execution_strategy", self.execution_strategy, emit=False)
+                await data.async_set_state(
+                    "agent_task.effective_execution_strategy",
+                    self.effective_execution_strategy,
+                    emit=False,
+                )
+                await data.async_set_state("agent_task.result", self.result, emit=False)
+                await data.async_set_state("agent_task.status", self.status, emit=False)
+                return
             await data.async_set_state("agent_task.execution_strategy", self.execution_strategy, emit=False)
             await data.async_set_state("agent_task.effective_execution_strategy", effective_strategy, emit=False)
             await self._emit("agent_task.started", self._task_summary())

@@ -18,6 +18,7 @@ import json5
 from pathlib import Path
 
 from typing import Any
+from typing_extensions import Self
 from json import JSONDecodeError
 
 from agently.core import BaseAgent
@@ -40,7 +41,7 @@ class ConfigurePromptExtension(BaseAgent):
         save_to: str | Path | None = None,
         *,
         encoding: str | None = "utf-8",
-    ):
+    ) -> str:
         prompt_data = {
             ".agent": self.agent_prompt.to_serializable_prompt_data(),
             ".execution": self.request_prompt.to_serializable_prompt_data(),
@@ -61,7 +62,7 @@ class ConfigurePromptExtension(BaseAgent):
         save_to: str | Path | None = None,
         *,
         encoding: str | None = "utf-8",
-    ):
+    ) -> str:
         prompt_data = {
             ".agent": self.agent_prompt.to_serializable_prompt_data(),
             ".execution": self.request_prompt.to_serializable_prompt_data(),
@@ -154,7 +155,7 @@ class ConfigurePromptExtension(BaseAgent):
         value: Any,
         *,
         mappings: dict[str, Any] | None = None,
-    ):
+    ) -> Self:
         self.request_prompt.set(key, value, mappings=mappings)
         return self
 
@@ -164,7 +165,7 @@ class ConfigurePromptExtension(BaseAgent):
         value: Any,
         *,
         mappings: dict[str, Any] | None = None,
-    ):
+    ) -> Self:
         return self._set_pending_execution_prompt(key, value, mappings=mappings)
 
     def _apply_execution_prompt_config(self, prompt_value: Any, variable_mappings: dict[str, Any] | None):
@@ -275,7 +276,7 @@ class ConfigurePromptExtension(BaseAgent):
         mappings: dict[str, Any] | None = None,
         prompt_key_path: str | None = None,
         encoding: str | None = "utf-8",
-    ):
+    ) -> Self:
         path = Path(path_or_content)
         if self._is_existing_file_path(path_or_content):
             try:
@@ -311,7 +312,7 @@ class ConfigurePromptExtension(BaseAgent):
         mappings: dict[str, Any] | None = None,
         prompt_key_path: str | None = None,
         encoding: str | None = "utf-8",
-    ):
+    ) -> Self:
         path = Path(path_or_content)
         if self._is_existing_file_path(path_or_content):
             try:

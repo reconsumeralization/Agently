@@ -335,6 +335,24 @@ async def test_structured_text_parser_falls_back_to_json_dict():
     assert completed["payload"]["resolved_format"] == "json"
 
 
+@pytest.mark.asyncio
+async def test_explicit_structured_format_error_falls_back_to_json_dict():
+    text = '{"summary": "done", "ready": true}'
+    parser = create_parser(
+        [("delta", text), ("done", text)],
+        {"summary": (str,), "ready": (bool,)},
+        "xml_field",
+    )
+
+    assert await parser.async_get_data() == {"summary": "done", "ready": True}
+    all_data = await parser.async_get_data(type="all")
+    assert all_data["extra"]["parse_success"] is True
+    assert all_data["extra"]["output_format"] == "xml_field"
+    assert all_data["extra"]["resolved_output_format"] == "json"
+    assert all_data["extra"]["format_fallback"]["from"] == "xml_field"
+    assert all_data["extra"]["format_fallback"]["to"] == "json"
+
+
 def test_prompt_config_aliases_accept_new_formats():
     agent = Agently.create_agent("structured-prompt-config-xml")
     yaml_prompt = """

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from typing_extensions import Self
 
 from agently.core import BaseAgent, LazyWorkspace, Workspace
 from agently.core.workspace._defaults import (
@@ -29,7 +30,7 @@ from agently.core.workspace._defaults import (
 
 
 class WorkspaceExtension(BaseAgent):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._workspace_explicit = False
         self.workspace: Workspace | LazyWorkspace = self._create_lazy_workspace()
@@ -121,7 +122,7 @@ class WorkspaceExtension(BaseAgent):
         mode: str = "read_write",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
-    ):
+    ) -> Self:
         from agently.base import workspace as global_workspace
 
         self._workspace_explicit = True

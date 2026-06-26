@@ -54,25 +54,25 @@ if TYPE_CHECKING:
 
 
 class _AgentDefinitionBuilder:
-    def __init__(self, agent: "BaseAgent"):
+    def __init__(self, agent: "BaseAgent") -> None:
         self._agent = agent
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._agent, name)
 
-    def activate_model(self, model_key: str | None = None):
+    def activate_model(self, model_key: str | None = None) -> Self:
         self._agent.activate_model(model_key)
         return self
 
-    def set_settings(self, *args: Any, **kwargs: Any):
+    def set_settings(self, *args: Any, **kwargs: Any) -> Self:
         self._agent.set_settings(*args, **kwargs)
         return self
 
-    def use_workspace(self, *args: Any, **kwargs: Any):
+    def use_workspace(self, *args: Any, **kwargs: Any) -> Self:
         cast(Any, self._agent).use_workspace(*args, **kwargs)
         return self
 
-    def configure_policy_approval(self, *args: Any, **kwargs: Any):
+    def configure_policy_approval(self, *args: Any, **kwargs: Any) -> Self:
         self._agent.configure_policy_approval(*args, **kwargs)
         return self
 
@@ -82,68 +82,68 @@ class _AgentDefinitionBuilder:
         value: Any,
         *,
         mappings: dict[str, Any] | None = None,
-    ):
+    ) -> Self:
         self._agent.set_agent_prompt(key, value, mappings=mappings)
         return self
 
-    def system(self, prompt: Any, *, mappings: dict[str, Any] | None = None):
+    def system(self, prompt: Any, *, mappings: dict[str, Any] | None = None) -> Self:
         self._agent.system(prompt, mappings=mappings, always=True)
         return self
 
-    def rule(self, prompt: Any, *, mappings: dict[str, Any] | None = None):
+    def rule(self, prompt: Any, *, mappings: dict[str, Any] | None = None) -> Self:
         self._agent.rule(prompt, mappings=mappings, always=True)
         return self
 
-    def role(self, *args: Any, **kwargs: Any):
+    def role(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.role(*args, **kwargs)
         return self
 
-    def user_info(self, *args: Any, **kwargs: Any):
+    def user_info(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.user_info(*args, **kwargs)
         return self
 
-    def input(self, *args: Any, **kwargs: Any):
+    def input(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.input(*args, **kwargs)
         return self
 
-    def info(self, *args: Any, **kwargs: Any):
+    def info(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.info(*args, **kwargs)
         return self
 
-    def instruct(self, *args: Any, **kwargs: Any):
+    def instruct(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.instruct(*args, **kwargs)
         return self
 
-    def examples(self, *args: Any, **kwargs: Any):
+    def examples(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.examples(*args, **kwargs)
         return self
 
-    def output(self, *args: Any, **kwargs: Any):
+    def output(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.output(*args, **kwargs)
         return self
 
-    def attachment(self, *args: Any, **kwargs: Any):
+    def attachment(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.attachment(*args, **kwargs)
         return self
 
-    def image(self, *args: Any, **kwargs: Any):
+    def image(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.image(*args, **kwargs)
         return self
 
-    def options(self, options: dict[str, Any]):
+    def options(self, options: dict[str, Any]) -> Self:
         self._agent.options(options, always=True)
         return self
 
-    def language(self, *args: Any, **kwargs: Any):
+    def language(self, *args: Any, **kwargs: Any) -> Self:
         self._agent.language(*args, **kwargs)
         return self
 
@@ -155,7 +155,7 @@ class BaseAgent:
         *,
         parent_settings: "Settings | None" = None,
         name: str | None = None,
-    ):
+    ) -> None:
         self.id = uuid.uuid4().hex
         self.name = name if name is not None else self.id[:7]
 
@@ -195,7 +195,7 @@ class BaseAgent:
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
 
-    def configure_policy_approval(self, *, handler: str | None = None):
+    def configure_policy_approval(self, *, handler: str | None = None) -> Self:
         if handler is not None:
             self.settings.set("policy_approval.handler", str(handler))
         return self
@@ -223,7 +223,7 @@ class BaseAgent:
         apply_language_policy_to_prompt(self.agent_prompt, policy)
         return self
 
-    def activate_model(self, model_key: str | None = None):
+    def activate_model(self, model_key: str | None = None) -> Self:
         """Set the default model key for subsequent Agent-owned requests.
 
         The model key is resolved through the existing model_pool /
@@ -252,7 +252,7 @@ class BaseAgent:
         policy: Mapping[str, Any] | None = None,
         settings: Mapping[str, Any] | None = None,
         **kwargs: Any,
-    ):
+    ) -> _AgentDefinitionBuilder:
         builder = _AgentDefinitionBuilder(self)
         if model is not None:
             self.activate_model(model)
@@ -318,7 +318,7 @@ class BaseAgent:
             model_key=model_key if model_key is not None else self._active_model_key,
         )
 
-    def create_temp_request(self, model_key: str | None = None):
+    def create_temp_request(self, model_key: str | None = None) -> ModelRequest:
         return self.create_request(
             name=f"{ self.name }-Temp-{ uuid.uuid4().hex }",
             inherit_agent_prompt=False,
@@ -475,7 +475,7 @@ class BaseAgent:
         graph_input: Any = _UNSET,
         timeout: float | None = None,
         max_retries: int = 3,
-    ):
+    ) -> Self:
         if mode not in {"auto", "submitted"}:
             raise ValueError("Dynamic Task mode must be one of: 'auto', 'submitted'.")
         if mode == "submitted" and plan is None:
@@ -507,20 +507,26 @@ class BaseAgent:
         self,
         *,
         parent_run_context: "RunContext | None" = None,
-    ):
+        execution_id: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> "RunContext":
         from agently.types.data import RunContext
 
         parent_run_context = resolve_parent_run_context(parent_run_context)
         session_id = self.settings.get("runtime.session_id", None)
         if session_id is not None:
             session_id = str(session_id)
+        run_meta = {"entrypoint": "agent"}
+        if meta is not None:
+            run_meta.update(meta)
         return RunContext.create(
             run_kind="agent_execution",
             parent=parent_run_context,
             agent_id=self.id,
             agent_name=self.name,
             session_id=session_id,
-            meta={"entrypoint": "agent"},
+            execution_id=execution_id,
+            meta=run_meta,
         )
 
     def _emit_agent_execution_started(self, agent_execution_run_context: "RunContext"):
@@ -552,6 +558,97 @@ class BaseAgent:
                     "agent_name": self.name,
                 },
                 "run": agent_execution_run_context,
+            }
+        )
+
+    async def _async_emit_agent_execution_terminal_event(
+        self,
+        agent_execution_run_context: "RunContext",
+        *,
+        execution_id: str,
+        status: str,
+        route: str | None,
+        strategy: str | None,
+        task_refs: dict[str, Any],
+        close_snapshot: dict[str, Any],
+        failed: bool = False,
+    ) -> None:
+        from agently.base import async_emit_runtime
+
+        event_type = "agent_execution.failed" if failed else "agent_execution.completed"
+        await async_emit_runtime(
+            {
+                "event_type": event_type,
+                "source": "BaseAgent",
+                "message": f"AgentExecution { 'failed' if failed else 'completed' } for '{ self.name }'.",
+                "payload": {
+                    "execution_id": execution_id,
+                    "status": status,
+                    "route": route,
+                    "strategy": strategy,
+                    "task_refs": DataFormatter.sanitize(task_refs),
+                    "close_snapshot": DataFormatter.sanitize(close_snapshot),
+                },
+                "run": agent_execution_run_context,
+                "meta": {
+                    "execution_id": execution_id,
+                    "route": route,
+                    "strategy": strategy,
+                },
+            }
+        )
+
+    async def _async_emit_agent_execution_stream_event(
+        self,
+        agent_execution_run_context: "RunContext",
+        *,
+        execution_id: str,
+        item: Any,
+        execution_strategy: str | None,
+        effective_execution_strategy: str | None,
+    ) -> None:
+        from agently.base import async_emit_runtime
+
+        item_meta = dict(getattr(item, "meta", None) or {})
+        stream_event_type = "delta" if getattr(item, "event_type", None) == "delta" else "done"
+        stream_kind = item_meta.get("stream_kind")
+        payload = {
+            "execution_id": execution_id,
+            "path": getattr(item, "path", None),
+            "value": DataFormatter.sanitize(getattr(item, "value", None)),
+            "delta": getattr(item, "delta", None),
+            "is_complete": getattr(item, "is_complete", None),
+            "stream_event_type": stream_event_type,
+            "source": getattr(item, "source", None),
+            "route": getattr(item, "route", None),
+            "stage_id": getattr(item, "stage_id", None),
+            "task_id": getattr(item, "task_id", None),
+            "action_id": getattr(item, "action_id", None),
+            "graph_id": getattr(item, "graph_id", None),
+            "stream_kind": stream_kind,
+            "execution_strategy": execution_strategy,
+            "effective_execution_strategy": effective_execution_strategy,
+            "item": item.model_dump(mode="json") if hasattr(item, "model_dump") else DataFormatter.sanitize(item),
+            "meta": DataFormatter.sanitize(item_meta),
+        }
+        await async_emit_runtime(
+            {
+                "event_type": "agent_execution.stream.delta" if stream_event_type == "delta" else "agent_execution.stream",
+                "source": "BaseAgent",
+                "message": str(getattr(item, "path", None) or ""),
+                "payload": payload,
+                "run": agent_execution_run_context,
+                "meta": {
+                    "execution_id": execution_id,
+                    "path": getattr(item, "path", None),
+                    "route": getattr(item, "route", None),
+                    "source": getattr(item, "source", None),
+                    "task_id": getattr(item, "task_id", None),
+                    "action_id": getattr(item, "action_id", None),
+                    "graph_id": getattr(item, "graph_id", None),
+                    "stream_kind": stream_kind,
+                    "high_frequency": stream_event_type == "delta",
+                },
             }
         )
 
@@ -613,22 +710,22 @@ class BaseAgent:
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_result(parent_run_context=agent_execution_run_context)
 
-    def get_meta(self, *, parent_run_context: "RunContext | None" = None):
+    def get_meta(self, *, parent_run_context: "RunContext | None" = None) -> dict[str, Any]:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_meta(parent_run_context=agent_execution_run_context)
 
-    async def async_get_meta(self, *, parent_run_context: "RunContext | None" = None):
+    async def async_get_meta(self, *, parent_run_context: "RunContext | None" = None) -> dict[str, Any]:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_meta(parent_run_context=agent_execution_run_context)
 
-    def get_text(self, *, parent_run_context: "RunContext | None" = None):
+    def get_text(self, *, parent_run_context: "RunContext | None" = None) -> str:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_text(parent_run_context=agent_execution_run_context)
 
-    async def async_get_text(self, *, parent_run_context: "RunContext | None" = None):
+    async def async_get_text(self, *, parent_run_context: "RunContext | None" = None) -> str:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_text(parent_run_context=agent_execution_run_context)
@@ -644,7 +741,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_data(
@@ -669,7 +766,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_data(
@@ -693,7 +790,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_data_object(
@@ -716,7 +813,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_data_object(
@@ -894,7 +991,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         return self.create_execution(parent_run_context=parent_run_context).get_data(
             type=type,
             ensure_keys=ensure_keys,
@@ -916,7 +1013,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         return await self.create_execution(parent_run_context=parent_run_context).async_get_data(
             type=type,
             ensure_keys=ensure_keys,
@@ -1135,7 +1232,7 @@ class BaseAgent:
         agent_execution.strategy("task_loop")
         return agent_execution
 
-    def validate(self, handler: "OutputValidateHandler"):
+    def validate(self, handler: "OutputValidateHandler") -> Self:
         self.extension_handlers.append("validate_handlers", handler)
         return self
 
@@ -1146,15 +1243,15 @@ class BaseAgent:
         value: Any,
         *,
         mappings: dict[str, Any] | None = None,
-    ):
+    ) -> Self:
         self.agent_prompt.set(key, value, mappings=mappings)
         return self
 
-    def remove_agent_prompt(self, key: "PromptStandardSlot | str"):
+    def remove_agent_prompt(self, key: "PromptStandardSlot | str") -> Self:
         self.agent_prompt.set(key, None)
         return self
 
-    def remove_execution_prompt(self, key: "PromptStandardSlot | str"):
+    def remove_execution_prompt(self, key: "PromptStandardSlot | str") -> Self:
         self.request.prompt.set(key, None)
         return self
 
@@ -1163,32 +1260,32 @@ class BaseAgent:
             del self.agent_prompt[key]
         self.agent_prompt.set(key, value)
 
-    def reset_chat_history(self):
+    def reset_chat_history(self) -> Self:
         self._replace_agent_prompt_value("chat_history", [])
         return self
 
-    def set_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict]"):
+    def set_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict]") -> Self:
         if not isinstance(chat_history, Sequence):
             chat_history = [chat_history]
         self._replace_agent_prompt_value("chat_history", chat_history)
         return self
 
-    def add_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict] | ChatMessageDict | ChatMessage"):
+    def add_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict] | ChatMessageDict | ChatMessage") -> Self:
         if not isinstance(chat_history, Sequence):
             chat_history = [chat_history]
         self.agent_prompt.extend("chat_history", chat_history)
         return self
 
-    def reset_action_results(self):
+    def reset_action_results(self) -> Self:
         if "action_results" in self.agent_prompt:
             del self.agent_prompt["action_results"]
         return self
 
-    def set_action_results(self, action_results: list[dict[str, Any]]):
+    def set_action_results(self, action_results: list[dict[str, Any]]) -> Self:
         self._replace_agent_prompt_value("action_results", action_results)
         return self
 
-    def add_action_results(self, action: str, result: Any):
+    def add_action_results(self, action: str, result: Any) -> Self:
         self.agent_prompt.append("action_results", {action: result})
         return self
 
@@ -1217,7 +1314,7 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("system", prompt, mappings=mappings)
             return self
@@ -1247,7 +1344,7 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
             self.agent_prompt.set("system.rule", prompt, mappings=mappings)
@@ -1284,7 +1381,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
@@ -1322,7 +1419,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
@@ -1360,7 +1457,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("input", prompt, mappings=mappings)
@@ -1397,7 +1494,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("info", prompt, mappings=mappings)
@@ -1434,7 +1531,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", prompt, mappings=mappings)
@@ -1471,7 +1568,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("examples", prompt, mappings=mappings)
@@ -1520,7 +1617,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("output", prompt, mappings=mappings)
             if format is not None:
@@ -1552,7 +1649,7 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("attachment", prompt, mappings=mappings)
             return self
@@ -1597,7 +1694,7 @@ class BaseAgent:
         detail: ImageDetail | None = None,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         attachment = build_image_attachment(
             question=question,
             file=file,
@@ -1632,7 +1729,7 @@ class BaseAgent:
         options: dict[str, Any],
         *,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("options", options)
             return self
@@ -1653,5 +1750,5 @@ class BaseAgent:
         return self.create_execution().strategy(value, **options)
 
     # Prompt
-    def get_prompt_text(self):
+    def get_prompt_text(self) -> str:
         return self.request_prompt.to_text()[6:][:-11]

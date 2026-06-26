@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, RuntimeStageStallError
@@ -118,6 +119,7 @@ async def start_execution(
         owner._started = True
         owner.status = "running"
         try:
+            await owner._async_emit_agent_execution_started_once()
             owner.execution_context.raise_if_nesting_exceeded()
             owner.execution_context.record_progress(
                 stage="agent_execution",
@@ -138,6 +140,9 @@ async def start_execution(
             if owner.status == "running":
                 owner.status = "success"
             await owner.emit_stream("result", owner.result, route=route, source="agent_execution")
+            if route != "model_request":
+                with suppress(Exception):
+                    await owner._async_emit_agent_execution_terminal_event(failed=False)
             return owner.result
         except RuntimeStageStallError as error:
             owner.status = "timed_out" if error.status == "timed_out" else "stalled"
@@ -148,6 +153,8 @@ async def start_execution(
                 error.to_diagnostic(),
                 source="agent_execution",
             )
+            with suppress(Exception):
+                await owner._async_emit_agent_execution_terminal_event(failed=True)
             raise
         except asyncio.TimeoutError as error:
             owner.status = "timed_out"
@@ -169,6 +176,8 @@ async def start_execution(
                 timeout_error.to_diagnostic(),
                 source="agent_execution",
             )
+            with suppress(Exception):
+                await owner._async_emit_agent_execution_terminal_event(failed=True)
             raise timeout_error from error
         except AgentExecutionLimitExceeded as error:
             owner.status = "blocked"
@@ -179,6 +188,8 @@ async def start_execution(
                 {"type": error.__class__.__name__, "message": str(error), "limit_name": error.limit_name},
                 source="agent_execution",
             )
+            with suppress(Exception):
+                await owner._async_emit_agent_execution_terminal_event(failed=True)
             raise
         except BaseException as error:
             owner.status = "error"
@@ -189,6 +200,8 @@ async def start_execution(
                 {"type": error.__class__.__name__, "message": str(error)},
                 source="agent_execution",
             )
+            with suppress(Exception):
+                await owner._async_emit_agent_execution_terminal_event(failed=True)
             raise
         finally:
             owner._refresh_diagnostics()

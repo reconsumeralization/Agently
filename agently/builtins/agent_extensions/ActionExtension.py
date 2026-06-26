@@ -16,6 +16,7 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar, cast
+from typing_extensions import Self
 
 from agently.core import BaseAgent
 from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from agently.core import Prompt
     from agently.core.operation.Action import ToolCommand, ToolExecutionRecord
     from agently.types.data import ActionCall, ActionResult, AgentlyModelResult, KwargsType, MCPConfigs, ReturnType
+    from agently.types.plugins import AgentExecution
 
 from agently.base import action as global_action
 
@@ -35,7 +37,7 @@ _WORKSPACE_ROOT_UNSET = object()
 
 
 class ActionExtension(BaseAgent):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
         self.action = type(global_action)(self.plugin_manager, self.settings)
@@ -123,7 +125,7 @@ class ActionExtension(BaseAgent):
         kwargs: "KwargsType",
         func: Callable,
         returns: "ReturnType | None" = None,
-    ):
+    ) -> Self:
         self.action.register_action(
             action_id=name,
             desc=desc,
@@ -142,7 +144,7 @@ class ActionExtension(BaseAgent):
         kwargs: "KwargsType",
         func: Callable,
         returns: "ReturnType | None" = None,
-    ):
+    ) -> Self:
         return self.register_action(name=name, desc=desc, kwargs=kwargs, func=func, returns=returns)
 
     def action_func(self, func: Callable[P, R]) -> Callable[P, R]:
@@ -199,7 +201,12 @@ class ActionExtension(BaseAgent):
             self.action.tag(names, agent_tag)
         return names
 
-    def use_actions(self, actions: Callable | str | list[str | Callable] | Any, *, always: bool = False):
+    def use_actions(
+        self,
+        actions: Callable | str | list[str | Callable] | Any,
+        *,
+        always: bool = False,
+    ) -> "Self | AgentExecution":
         if not always:
             return self.create_execution().use_actions(actions)
         self._register_action_items(actions)
@@ -214,7 +221,7 @@ class ActionExtension(BaseAgent):
         on_missing: Literal["skip", "error"] = "skip",
         timeout_seconds: float | None = 600,
         action_prefix: str = "",
-    ):
+    ) -> Self:
         from agently.builtins.actions import ACP
 
         resolved_root = root
@@ -242,7 +249,12 @@ class ActionExtension(BaseAgent):
             self.settings.set("agent.acp.diagnostics", cast(Any, diagnostics))
         return self
 
-    def require_actions(self, actions: Callable | str | list[str | Callable] | Any, *, always: bool = False):
+    def require_actions(
+        self,
+        actions: Callable | str | list[str | Callable] | Any,
+        *,
+        always: bool = False,
+    ) -> "Self | AgentExecution":
         if not always:
             return self.create_execution().require_actions(actions)
         for name in self._register_action_items(actions):
@@ -283,7 +295,7 @@ class ActionExtension(BaseAgent):
             )
         return scoped_list
 
-    def use_tools(self, tools: Callable | str | list[str | Callable] | Any):
+    def use_tools(self, tools: Callable | str | list[str | Callable] | Any) -> "Self | AgentExecution":
         return self.use_actions(tools)
 
     @staticmethod
@@ -307,7 +319,7 @@ class ActionExtension(BaseAgent):
         transport: "MCPConfigs | str | Any",
         *,
         headers: dict[str, str] | None = None,
-    ):
+    ) -> Self:
         await self.action.async_use_mcp(transport, headers=headers, tags=[f"agent-{ self.name }"])
         return self
 
@@ -317,8 +329,8 @@ class ActionExtension(BaseAgent):
         *,
         action_id: str | None = None,
         expose_to_model: bool = True,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> Self:
         sandbox_name = sandbox.strip().lower() if isinstance(sandbox, str) else ""
         if sandbox_name in {"python", "python_sandbox"}:
             resolved_action_id = action_id or "python_sandbox"
@@ -350,7 +362,7 @@ class ActionExtension(BaseAgent):
         preset_objects: dict[str, object] | None = None,
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
-    ):
+    ) -> Self:
         default_desc = (
             "Run Python code in a managed safe sandbox for deterministic calculation "
             "or small data shaping. Assign the final value to `result`."
@@ -376,7 +388,7 @@ class ActionExtension(BaseAgent):
         expose_to_model: bool = True,
         timeout: int = 20,
         env: dict[str, str] | None = None,
-    ):
+    ) -> Self:
         workspace = getattr(self, "workspace", None)
         if root is None and workspace is not None:
             root = getattr(workspace, "files_root", getattr(workspace, "content_root", None))
@@ -404,7 +416,7 @@ class ActionExtension(BaseAgent):
         cwd: str | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
-    ):
+    ) -> Self:
         workspace = getattr(self, "workspace", None)
         if cwd is None and workspace is not None:
             cwd = str(getattr(workspace, "files_root", getattr(workspace, "content_root")))
@@ -431,7 +443,7 @@ class ActionExtension(BaseAgent):
         desc_mode: CapabilityDescMode = "append",
         expose_to_model: bool = True,
         uri: bool = False,
-    ):
+    ) -> Self:
         default_desc = "Query a SQLite database through a managed execution resource."
         self.action.register_sqlite_action(
             action_id=action_id,
@@ -455,7 +467,7 @@ class ActionExtension(BaseAgent):
         timeout: int = 60,
         docker_binary: str = "docker",
         default_args: list[str] | None = None,
-    ):
+    ) -> Self:
         default_desc = "Run a command in a Docker container through a managed execution resource."
         self.action.register_docker_action(
             action_id=action_id,
@@ -485,7 +497,7 @@ class ActionExtension(BaseAgent):
         max_search_file_bytes: int = 200000,
         desc: str | None = None,
         desc_mode: CapabilityDescMode = "append",
-    ):
+    ) -> Self:
         workspace = getattr(self, "workspace", None)
         if isolated and root is _WORKSPACE_ROOT_UNSET:
             root = tempfile.mkdtemp(prefix="agently-workspace-action-")
@@ -816,7 +828,7 @@ class ActionExtension(BaseAgent):
         max_search_file_bytes: int = 200000,
         desc: str | None = None,
         desc_mode: CapabilityDescMode = "append",
-    ):
+    ) -> Self:
         DeprecationWarnings.warn_deprecated_once(
             "ActionExtension.enable_workspace.renamed_to_enable_workspace_file_actions",
             "`agent.enable_workspace(...)` is kept as a compatibility alias for "
@@ -849,7 +861,7 @@ class ActionExtension(BaseAgent):
         max_rounds: int | None = None,
         concurrency: int | None = None,
         timeout: float | None = None,
-    ):
+    ) -> Self:
         if enabled is not None:
             self.settings.set("action.loop.enabled", bool(enabled))
             self.settings.set("tool.loop.enabled", bool(enabled))
@@ -877,7 +889,7 @@ class ActionExtension(BaseAgent):
         max_rounds: int | None = None,
         concurrency: int | None = None,
         timeout: float | None = None,
-    ):
+    ) -> Self:
         return self.set_action_loop(
             enabled=enabled,
             max_rounds=max_rounds,
@@ -885,18 +897,18 @@ class ActionExtension(BaseAgent):
             timeout=timeout,
         )
 
-    def register_action_planning_handler(self, handler):
+    def register_action_planning_handler(self, handler: Any) -> Self:
         self.__action_planning_handler = handler
         return self
 
-    def register_tool_plan_analysis_handler(self, handler):
+    def register_tool_plan_analysis_handler(self, handler: Any) -> Self:
         return self.register_action_planning_handler(handler)
 
-    def register_action_execution_handler(self, handler):
+    def register_action_execution_handler(self, handler: Any) -> Self:
         self.__action_execution_handler = handler
         return self
 
-    def register_tool_execution_handler(self, handler):
+    def register_tool_execution_handler(self, handler: Any) -> Self:
         return self.register_action_execution_handler(handler)
 
     async def async_generate_action_call(

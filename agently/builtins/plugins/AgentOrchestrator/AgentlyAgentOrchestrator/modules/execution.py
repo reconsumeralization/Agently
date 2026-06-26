@@ -98,7 +98,9 @@ if TYPE_CHECKING:
         AgentExecutionLimits,
         OutputValidateHandler,
         RunContext,
+        SkillExecutionPlan,
     )
+    from agently.core.application import DynamicTask
 
 
 _DYNAMIC_TASK_GRAPH_INPUT_UNSET = object()
@@ -175,6 +177,8 @@ class AgentExecution:
             strategy_context_source=self.inherited_strategy_context_source,
         )
         self.parent_run_context = parent_run_context
+        self.agent_execution_run_context: "RunContext | None" = None
+        self._agent_execution_started_emitted = False
         self.route_info: dict[str, Any] = {}
         self.route_plan: dict[str, Any] = {}
         self.close_snapshot: dict[str, Any] = {}
@@ -328,7 +332,53 @@ class AgentExecution:
             },
         )
 
-    def configure_options(self, options: Any):
+    def _ensure_agent_execution_run_context(self) -> "RunContext":
+        if self.agent_execution_run_context is None:
+            self.agent_execution_run_context = self.agent._create_agent_execution_run_context(
+                parent_run_context=self.parent_run_context,
+                execution_id=self.id,
+                meta={
+                    "execution_id": self.id,
+                    "strategy": self.strategy_name,
+                    "lineage": DataFormatter.sanitize(self.lineage),
+                },
+            )
+        assert self.agent_execution_run_context is not None
+        return self.agent_execution_run_context
+
+    async def _async_emit_agent_execution_started_once(self) -> "RunContext":
+        run_context = self._ensure_agent_execution_run_context()
+        if not self._agent_execution_started_emitted:
+            await self.agent._async_emit_agent_execution_started(run_context)
+            self._agent_execution_started_emitted = True
+        return run_context
+
+    async def _async_emit_agent_execution_terminal_event(self, *, failed: bool = False) -> None:
+        if self.agent_execution_run_context is None:
+            return
+        await self.agent._async_emit_agent_execution_terminal_event(
+            self.agent_execution_run_context,
+            execution_id=self.id,
+            status=self.status,
+            route=cast(str | None, self.route_info.get("selected_route")),
+            strategy=self.strategy_name,
+            task_refs=self.task_refs,
+            close_snapshot=self.close_snapshot,
+            failed=failed,
+        )
+
+    async def _async_emit_stream_runtime_event(self, item: AgentExecutionStreamData) -> None:
+        if self.agent_execution_run_context is None:
+            return
+        await self.agent._async_emit_agent_execution_stream_event(
+            self.agent_execution_run_context,
+            execution_id=self.id,
+            item=item,
+            execution_strategy=cast(str | None, self.task_refs.get("execution_strategy") or self.task_options.get("execution")),
+            effective_execution_strategy=cast(str | None, self.task_refs.get("effective_execution_strategy")),
+        )
+
+    def configure_options(self, options: Any) -> "AgentExecution":
         return configure_execution_options(self, options)
 
     def create_execution(
@@ -338,7 +388,7 @@ class AgentExecution:
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
         options: Any = None,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> "AgentExecution":
         if self._started:
             if any(value is not None for value in (lineage, limits, options, parent_run_context)):
                 raise RuntimeError("Cannot reconfigure an AgentExecution after it has started.")
@@ -359,14 +409,14 @@ class AgentExecution:
     def get_response(self) -> AgentExecutionResult:
         return self.get_result()
 
-    def _compat_run(self, *args: Any, **kwargs: Any):
+    def _compat_run(self, *args: Any, **kwargs: Any) -> Any:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             return self.start(*args, **kwargs)
         return self.async_start(*args, **kwargs)
 
-    def _compat_meta(self, *args: Any, **kwargs: Any):
+    def _compat_meta(self, *args: Any, **kwargs: Any) -> Any:
         if self.task_record is not None:
             try:
                 asyncio.get_running_loop()
@@ -379,7 +429,7 @@ class AgentExecution:
             return self.get_meta(*args, **kwargs)
         return self.async_get_meta(*args, **kwargs)
 
-    async def async_meta(self):
+    async def async_meta(self) -> dict[str, Any]:
         task_record = self.task_record
         if task_record is not None:
             return await task_record.async_meta()
@@ -389,71 +439,71 @@ class AgentExecution:
             return await task_record.async_meta()
         return await self.async_get_meta()
 
-    def set_execution_prompt(self, key: Any, value: Any, *, mappings: dict[str, Any] | None = None):
+    def set_execution_prompt(self, key: Any, value: Any, *, mappings: dict[str, Any] | None = None) -> "AgentExecution":
         self._draft.set_execution_prompt(key, value, mappings=mappings)
         return self._refresh_prompt_snapshot()
 
-    def remove_execution_prompt(self, key: Any):
+    def remove_execution_prompt(self, key: Any) -> "AgentExecution":
         self._draft.remove_execution_prompt(key)
         return self._refresh_prompt_snapshot()
 
-    def validate(self, handler: "OutputValidateHandler"):
+    def validate(self, handler: "OutputValidateHandler") -> "AgentExecution":
         self._draft.validate(handler)
         return self
 
-    def system(self, prompt: Any, *, mappings: dict[str, Any] | None = None, always: bool = False):
+    def system(self, prompt: Any, *, mappings: dict[str, Any] | None = None, always: bool = False) -> "AgentExecution":
         self._draft.system(prompt, mappings=mappings, always=always)
         return self._refresh_prompt_snapshot()
 
-    def rule(self, prompt: Any, *, mappings: dict[str, Any] | None = None, always: bool = False):
+    def rule(self, prompt: Any, *, mappings: dict[str, Any] | None = None, always: bool = False) -> "AgentExecution":
         self._draft.rule(prompt, mappings=mappings, always=always)
         return self._refresh_prompt_snapshot()
 
-    def role(self, *args: Any, **kwargs: Any):
+    def role(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.role(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def user_info(self, *args: Any, **kwargs: Any):
+    def user_info(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.user_info(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def input(self, *args: Any, **kwargs: Any):
+    def input(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.input(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def info(self, *args: Any, **kwargs: Any):
+    def info(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.info(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def instruct(self, *args: Any, **kwargs: Any):
+    def instruct(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.instruct(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def examples(self, *args: Any, **kwargs: Any):
+    def examples(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.examples(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def output(self, *args: Any, **kwargs: Any):
+    def output(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.output(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def attachment(self, *args: Any, **kwargs: Any):
+    def attachment(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.attachment(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def image(self, *args: Any, **kwargs: Any):
+    def image(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.image(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def set_prompt_options(self, options: dict[str, Any], *, always: bool = False):
+    def set_prompt_options(self, options: dict[str, Any], *, always: bool = False) -> "AgentExecution":
         self._draft.set_prompt_options(options, always=always)
         return self._refresh_prompt_snapshot()
 
-    def language(self, *args: Any, **kwargs: Any):
+    def language(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         self._draft.language(*args, **kwargs)
         return self._refresh_prompt_snapshot()
 
-    def use_dynamic_task(self, *args: Any, **kwargs: Any):
+    def use_dynamic_task(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         if args:
             raise TypeError("AgentExecution.use_dynamic_task(...) accepts keyword arguments only.")
         self._add_dynamic_task_candidate(kwargs)
@@ -497,19 +547,19 @@ class AgentExecution:
             "max_retries": candidate.get("max_retries", 3),
         }
 
-    def resolve_skills_plan(self, *args: Any, **kwargs: Any):
+    def resolve_skills_plan(self, *args: Any, **kwargs: Any) -> "SkillExecutionPlan":
         kwargs = self._with_local_skill_kwargs(kwargs)
         return self._draft.resolve_skills_plan(*args, **kwargs)
 
-    async def async_resolve_skills_plan(self, *args: Any, **kwargs: Any):
+    async def async_resolve_skills_plan(self, *args: Any, **kwargs: Any) -> "SkillExecutionPlan":
         kwargs = self._with_local_skill_kwargs(kwargs)
         return await self._draft.async_resolve_skills_plan(*args, **kwargs)
 
-    def run_skills_task(self, *args: Any, **kwargs: Any):
+    def run_skills_task(self, *args: Any, **kwargs: Any) -> Any:
         kwargs = self._with_local_skill_kwargs(kwargs)
         return self._draft.run_skills_task(*args, **kwargs)
 
-    async def async_run_skills_task(self, *args: Any, **kwargs: Any):
+    async def async_run_skills_task(self, *args: Any, **kwargs: Any) -> Any:
         kwargs = self._with_local_skill_kwargs(kwargs)
         return await self._draft.async_run_skills_task(*args, **kwargs)
 
@@ -534,10 +584,10 @@ class AgentExecution:
                 updated["skills_packs"] = pack_selectors
         return updated
 
-    def create_dynamic_task(self, *args: Any, **kwargs: Any):
+    def create_dynamic_task(self, *args: Any, **kwargs: Any) -> "DynamicTask":
         return self._draft.create_dynamic_task(*args, **kwargs)
 
-    def get_prompt_text(self):
+    def get_prompt_text(self) -> str:
         return self._draft.get_prompt_text()
 
     def get_json_prompt(
@@ -545,7 +595,7 @@ class AgentExecution:
         save_to: str | Path | None = None,
         *,
         encoding: str | None = "utf-8",
-    ):
+    ) -> str:
         prompt_data = {
             ".agent": self.agent.agent_prompt.to_serializable_prompt_data(),
             ".execution": self.request_prompt.to_serializable_prompt_data(),
@@ -566,7 +616,7 @@ class AgentExecution:
         save_to: str | Path | None = None,
         *,
         encoding: str | None = "utf-8",
-    ):
+    ) -> str:
         prompt_data = {
             ".agent": self.agent.agent_prompt.to_serializable_prompt_data(),
             ".execution": self.request_prompt.to_serializable_prompt_data(),
@@ -583,7 +633,7 @@ class AgentExecution:
             target.write_text(content, encoding=encoding)
         return content
 
-    def goal(self, goal: Any, success_criteria: Any = None):
+    def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution":
         if isinstance(goal, (list, tuple, set)):
             set_execution_goals(self, tuple(goal))
         else:
@@ -596,10 +646,10 @@ class AgentExecution:
 
     goals = goal
 
-    def effort(self, value: Any = "medium", **strategy: Any):
+    def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
         return configure_effort(self, value, **strategy)
 
-    def use_actions(self, *args: Any, **kwargs: Any):
+    def use_actions(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         register = getattr(self.agent, "_register_action_items", None)
         if callable(register):
             raw_names = register(args[0] if args else None)
@@ -617,7 +667,7 @@ class AgentExecution:
         self.effective_options = self._build_effective_options()
         return self
 
-    def require_actions(self, *args: Any, **kwargs: Any):
+    def require_actions(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         register = getattr(self.agent, "_register_action_items", None)
         if callable(register):
             raw_names = register(args[0] if args else None)
@@ -644,7 +694,7 @@ class AgentExecution:
         )
         return self
 
-    def use_skills(self, skills: Any, **kwargs: Any):
+    def use_skills(self, skills: Any, **kwargs: Any) -> "AgentExecution":
         normalize = getattr(self.agent, "_normalize_skill_selector_entries", None)
         if callable(normalize):
             raw_entries = normalize(skills, **kwargs)
@@ -656,11 +706,11 @@ class AgentExecution:
         self.effective_options = self._build_effective_options()
         return self
 
-    def require_skills(self, skills: Any, **kwargs: Any):
+    def require_skills(self, skills: Any, **kwargs: Any) -> "AgentExecution":
         kwargs["mode"] = "required"
         return self.use_skills(skills, **kwargs)
 
-    def use_skills_packs(self, skills_packs: Any, *, mode: Any = "model_decision"):
+    def use_skills_packs(self, skills_packs: Any, *, mode: Any = "model_decision") -> "AgentExecution":
         if mode not in {"model_decision", "required"}:
             raise ValueError("Skill pack mode must be one of: 'model_decision', 'required'.")
         items = skills_packs if isinstance(skills_packs, (list, tuple, set)) else [skills_packs]
@@ -672,18 +722,18 @@ class AgentExecution:
         self.effective_options = self._build_effective_options()
         return self
 
-    def route_policy(self, value: Any):
+    def route_policy(self, value: Any) -> "AgentExecution":
         self.options["route_policy"] = DataFormatter.sanitize(value)
         self.effective_options = self._build_effective_options()
         self._selected_route = None
         return self
 
-    def access_control_policy(self, value: Any):
+    def access_control_policy(self, value: Any) -> "AgentExecution":
         self.options["access_control_policy"] = DataFormatter.sanitize(value)
         self.effective_options = self._build_effective_options()
         return self
 
-    def strategy(self, value: str | None = None, **options: Any):
+    def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution":
         if value is not None:
             apply_strategy_selection(self, value, source="explicit_strategy")
         if options:
@@ -701,7 +751,7 @@ class AgentExecution:
     def route_options(self, route_name: str) -> dict[str, Any]:
         return state_route_options(self, route_name)
 
-    def record_consumed_option(self, path: str, value: Any, *, owner: str):
+    def record_consumed_option(self, path: str, value: Any, *, owner: str) -> None:
         state_record_consumed_option(self, path, value, owner_name=owner)
 
     def task_target(self) -> str:
@@ -835,7 +885,7 @@ class AgentExecution:
             meta=stream_meta,
         )
 
-    async def close_streams(self):
+    async def close_streams(self) -> None:
         await self.stream.close()
 
     def dynamic_task_candidates(self) -> list[dict[str, Any]]:
@@ -899,7 +949,7 @@ class AgentExecution:
             raise_ensure_failure=raise_ensure_failure,
         )
 
-    def record_model_response_id(self, response_id: str | None):
+    def record_model_response_id(self, response_id: str | None) -> None:
         record_model_response_id_entry(self, response_id)
 
     async def record_action_log(
@@ -912,7 +962,7 @@ class AgentExecution:
     ) -> dict[str, Any] | None:
         return await record_action_log_entry(self, log, route=route, source=source, emit=emit)
 
-    async def bridge_task_dag_stream_item(self, item: Any, *, route: str):
+    async def bridge_task_dag_stream_item(self, item: Any, *, route: str) -> None:
         await bridge_task_dag_stream_item_entry(self, item, route=route)
 
     async def bridge_model_stream_item(
@@ -927,7 +977,7 @@ class AgentExecution:
         action_id: str | None = None,
         graph_id: str | None = None,
         meta: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         await bridge_model_stream_item_entry(
             self,
             item,
@@ -1066,13 +1116,13 @@ class AgentExecution:
     def _get_generator(self, *args: Any, **kwargs: Any) -> Generator[Any, None, None]:
         return sync_generator_entry(self, *args, **kwargs)
 
-    def _refresh_diagnostics(self):
+    def _refresh_diagnostics(self) -> None:
         refresh_diagnostics(self)
 
-    def _record_error_diagnostic(self, error: BaseException):
+    def _record_error_diagnostic(self, error: BaseException) -> None:
         record_error_diagnostic(self, error)
 
-    def raise_if_limit_exceeded(self):
+    def raise_if_limit_exceeded(self) -> None:
         self.execution_context.raise_if_limit_exceeded()
 
     def _workspace_scope(self, scope: dict[str, Any] | None = None) -> dict[str, Any]:

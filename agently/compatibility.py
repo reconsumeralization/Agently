@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.3.7"
-CURRENT_RELEASE_TRAIN = "2026-06-4.1.3.7"
+CURRENT_FRAMEWORK_VERSION = "4.1.3.8"
+CURRENT_RELEASE_TRAIN = "2026-06-4.1.3.8"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -15,13 +15,18 @@ DOCS_PUBLIC_SURFACE_PROTOCOL = "agently-docs.public-surface.v1"
 
 _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'framework': 'agently',
- 'framework_version': '4.1.3.7',
- 'release_train': '2026-06-4.1.3.7',
- 'released_at': '2026-06-12',
- 'notes': 'Version-scoped companion compatibility manifest for the Agently 4.1.3.7 release-line AgentExecution-backed '
-          'AgentTaskLoop hardening slice, including goal/effort configuration, bounded DAG-shaped step guidance, '
-          'Skills context-pack support, ActionRuntime release blockers, TriggerFlow/Workspace foundation protocol '
-          'updates, and explicit deferred scope for future AgentTask work.',
+ 'framework_version': '4.1.3.8',
+ 'release_train': '2026-06-4.1.3.8',
+ 'released_at': '2026-06-26',
+ 'notes': 'Version-scoped companion compatibility manifest for the Agently 4.1.3.8 release line. This release '
+          'finalizes task-execution strategy optimization: AgentExecution/AgentTaskLoop own auto/flat/taskboard '
+          'strategy selection, task-shape analysis remains non-binding evidence, TaskBoard stays an execution '
+          'substrate, ACP is a first-class Action plus ExecutionResource with lazy optional loading, effort presets '
+          'map to reflection density, strong-format intermediate requests use Agently output control with JSON dict '
+          'fallback diagnostics, AgentExecution projects flat and TaskBoard process stream items to RuntimeEvent for '
+          'DevTools observation, ModelRequest stream status and telemetry remain observation-only, '
+          'Workspace/TaskBoard/ActionRuntime contracts are hardened, and the package now ships PEP 561 typing metadata '
+          'for public IDE/static-analysis consumers.',
  'companions': {'devtools': {'companion_package': 'agently-devtools',
                              'runtime_protocol': 'agently-devtools.observation-runtime.v1',
                              'event_naming': {'preferred_event_type': 'RuntimeEvent',
@@ -55,6 +60,40 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                                      'verification, quality judgment, '
                                                                                      'planner input, or prompt '
                                                                                      'content.',
+                                                 'model_request_result_stream_status_contract': 'ModelRequestResult '
+                                                                                                'reserves $status for '
+                                                                                                'completed, failed, '
+                                                                                                'and cancelled '
+                                                                                                'ModelRequest attempt '
+                                                                                                'outcomes. '
+                                                                                                'failed/retry=true '
+                                                                                                'invalidates '
+                                                                                                'provisional stream '
+                                                                                                'output before a '
+                                                                                                'replacement attempt; '
+                                                                                                'plain delta streams '
+                                                                                                'emit the standalone '
+                                                                                                '<$retry>{reason}</$retry> '
+                                                                                                'marker at that replay '
+                                                                                                'boundary, while '
+                                                                                                '$status remains the '
+                                                                                                'structured fact '
+                                                                                                'source. '
+                                                                                                'AgentExecution '
+                                                                                                'projects $status and '
+                                                                                                'response/run lineage '
+                                                                                                'in its structured '
+                                                                                                'process stream. '
+                                                                                                'model.status '
+                                                                                                'RuntimeEvents are '
+                                                                                                'observation-only. '
+                                                                                                'OpenAICompatible '
+                                                                                                'after-output '
+                                                                                                'transport replay is '
+                                                                                                'explicit through '
+                                                                                                'request_retry.after_output '
+                                                                                                'and remains disabled '
+                                                                                                'by default.',
                                                  'agent_execution_limits': ['max_seconds', 'max_no_progress_seconds'],
                                                  'provider_stream_idle_timeout': ['OpenAICompatible.stream_idle_timeout',
                                                                                   'OpenAIResponsesCompatible.stream_idle_timeout'],
@@ -77,7 +116,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                                   'background_reclaim': 'idle_flush_and_explicit_flush',
                                                                                   'default_delivery': 'raw',
                                                                                   'summary_marker': 'meta.coalesced'}},
-                             'recommended_version_specifier': '>=0.1.9,<0.2.0'},
+                             'recommended_version_specifier': '>=0.1.10,<0.2.0'},
                 'skills': {'repository': 'Agently-Skills',
                            'authoring_protocol': 'agently-skills.authoring.v2',
                            'authoring_format': 'standard SKILL.md only',
@@ -160,6 +199,55 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'branch': 'update/archive-legacy-v1-catalog',
                                                              'last_supported_framework_version': '4.1.1',
                                                              'status': 'frozen'}]},
+                'blocks': {'lifecycle_contract': 'Blocks is the internal lowering bridge from AgentTaskLoop '
+                                                 'ExecutionPlan / PlanBlock instances and validated TaskDAG nodes to '
+                                                 'TriggerFlow-backed ExecutionBlockGraph. It is not a second task '
+                                                 'lifecycle, does not grant capabilities, does not accept terminal '
+                                                 'task completion, and does not replace TaskDAG validation or '
+                                                 'TriggerFlow dispatch.',
+                           'planner_contract': 'PlanBlock is a planner-visible specification over existing capability '
+                                               'sources with explicit input, output, capability, evidence, and runtime '
+                                               'binding contracts. PlanBlock selection is evidence of need, not '
+                                               'permission.',
+                           'runtime_contract': 'ExecutionBlock is trusted runtime code lowered to one TriggerFlow '
+                                               'chunk or a fixed chunk/signal group. PlanBlock and ExecutionBlock '
+                                               'registries validate known kinds, trusted runtime bindings, signal '
+                                               'contracts, and resource/capability requirements; compile fails closed '
+                                               'for missing plan edges, denied capabilities, or pending capabilities '
+                                               'without a matching approval_wait. Handler-backed blocks require '
+                                               'runtime handlers; workspace_operation requires a Workspace resource; '
+                                               'approval_wait records waiting evidence while using PolicyApproval and '
+                                               'TriggerFlow pause/resume; external_wait records waiting evidence while '
+                                               'using TriggerFlow pause/resume.',
+                           'skills_contract': 'Skills are progressive context/capability packages. SkillsExecutor '
+                                              'exposes capability_adapter(), discover_skill_capabilities(...), and '
+                                              'activate_skill(...) so Skill activation can feed PlanBlock selection '
+                                              'and EvidenceEnvelope skill_context records without executing Skill '
+                                              'resources or proving side effects. agent.run_skills_task(...) remains a '
+                                              'compatibility facade that builds skill_activation plus concrete '
+                                              'strategy PlanBlocks, lowers single_shot to a model_request '
+                                              'ExecutionBlock, lowers runtime_chain/staged/react/custom labels to '
+                                              'flow_segment ExecutionBlocks, and records Blocks plan/evidence metadata '
+                                              "in SkillExecution.close_snapshot['blocks'].",
+                           'task_dag_contract': 'TaskDAGExecutor.compile_blocks(...) and async_run_blocks(...) '
+                                                'validate TaskDAG data under TaskDAG ownership, lower validated DAG '
+                                                'nodes through Blocks, run on TriggerFlow, and map TaskDAG semantic '
+                                                'outputs through ResultAdapter and EvidenceEnvelope.',
+                           'agent_task_loop_contract': 'AgentTaskLoop bounded execution steps run through '
+                                                       'ExecutionPlan -> Blocks compile -> TriggerFlow execution -> '
+                                                       'EvidenceEnvelope/ResultAdapter metadata. Direct bounded steps '
+                                                       'lower as agent_step blocks; DAG-shaped bounded steps lower as '
+                                                       'trusted flow_segment blocks that preserve AgentTaskLoop '
+                                                       'ownership and treat DAG output as verifier evidence. '
+                                                       'Structured ReplanSignal evidence cancels only affected '
+                                                       'downstream ExecutionBlocks, blocks premature acceptance, and '
+                                                       'feeds the next AgentTaskLoop replan decision. Natural-language '
+                                                       'progress is an opt-in side channel: template progress emits '
+                                                       'complete progress items without model usage, while '
+                                                       'progress_model_key emits progress_delta events as streamed '
+                                                       'language output before the final progress item; '
+                                                       'progress_language can be set per execution or through '
+                                                       'agent_task.progress.language.'},
                 'docs': {'repository': 'docs', 'public_surface_protocol': 'agently-docs.public-surface.v1'},
                 'action_runtime': {'action_statuses': ['success',
                                                        'partial_success',
@@ -181,12 +269,15 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                      'action is registered or enabled through '
                                                                      'agent.enable_shell(...).',
                                    'execution_resource_metadata_redaction': 'Action metadata returned by '
-                                                                               'get_action_info()/get_action_list() '
-                                                                               'redacts execution environment env '
-                                                                               'values while preserving env key names; '
-                                                                               'raw env values remain available only '
-                                                                               'to the execution environment provider '
-                                                                               'path.',
+                                                                            'get_action_info()/get_action_list() '
+                                                                            'redacts execution resource env values '
+                                                                            'while preserving env key names; raw env '
+                                                                            'values remain available only to the '
+                                                                            'execution resource provider path. Renamed '
+                                                                            'from ExecutionEnvironment to '
+                                                                            'ExecutionResource in the 4.1.3.8 '
+                                                                            'Workspace/ActionRuntime boundary '
+                                                                            'refactor.',
                                    'action_loop_timeout_contract': 'The timeout argument passed to '
                                                                    'get_action_result(...)/async_get_action_result(...) '
                                                                    'bounds the full ActionFlow lifecycle, including '
@@ -209,16 +300,17 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                     'truncation flags, and availability fields. '
                                                                     'Workspace file_refs returned by Action data are '
                                                                     'surfaced on ActionResult/model_digest. '
-                                                                    'max_output_bytes records diagnostics and preserves '
-                                                                    'full output for artifact finalization instead of '
-                                                                    'destructively replacing the only data/result value.',
+                                                                    'max_output_bytes records diagnostics and '
+                                                                    'preserves full output for artifact finalization '
+                                                                    'instead of destructively replacing the only '
+                                                                    'data/result value.',
                                    'model_input_safety_contract': 'Model-planned Action commands from structured_plan '
                                                                   'and native_tool_calls are filtered at the '
                                                                   'ActionDispatcher boundary to registered '
                                                                   'ActionSpec.kwargs before executor invocation. '
                                                                   'Stripped input keys, timeouts, TypeError '
-                                                                  'call-boundary failures, and executor exceptions '
-                                                                  'are reported through structured ActionResult '
+                                                                  'call-boundary failures, and executor exceptions are '
+                                                                  'reported through structured ActionResult '
                                                                   'diagnostics. Direct and dry_run host calls keep '
                                                                   'existing unfiltered behavior.',
                                    'native_tool_call_empty_diagnostic': 'When native_tool_calls planning produces no '
@@ -302,29 +394,31 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                               'mirrors TriggerFlow(...) for factory-style flow '
                                                               'definition creation; '
                                                               'flow.create_execution(workspace=None) binds the current '
-                                                              'session/script default Workspace through runtime resource '
-                                                              'key workspace and assigns an execution-scoped file root '
-                                                              'under files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files, workspace=False '
-                                                              'opts out, and workspace=shared_workspace/path/backend '
-                                                              'binds an explicitly selected Workspace through the '
+                                                              'session/script default Workspace through runtime '
+                                                              'resource key workspace and assigns an execution-scoped '
+                                                              'file root under '
+                                                              'files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files, '
+                                                              'workspace=False opts out, and '
+                                                              'workspace=shared_workspace/path/backend binds an '
+                                                              'explicitly selected Workspace through the '
                                                               'execution-local runtime resource key workspace; '
-                                                              'flow/execution '
-                                                              'declare_resource_requirement(..., resolver=..., '
-                                                              'provider_kind=..., config_ref=..., secret_ref=..., '
-                                                              'fail_policy=...) persists importable resource resolver '
-                                                              'descriptors; execution.set_compaction_policy(...) forms '
-                                                              'the snapshot compaction surface; '
-                                                              'execution.inspect_load(...) reports missing resolver, '
-                                                              'unhealthy, policy-forbidden, pending resolver, '
-                                                              'unresolved resource, expired lease warnings, active '
-                                                              'lease owner conflicts, DAG join state mismatches, '
-                                                              'lineage-anchor mismatch, missing artifact, and invalid '
-                                                              'load-read-limit diagnostics; fail-closed pending '
-                                                              'resolvers or pending managed execution resources '
-                                                              'report status pending_resources and ready=false until '
-                                                              'async_load(...) resolves and validates live resources; '
-                                                              'execution.async_load(...) can rebuild live resources '
-                                                              'through importable resolvers before graph continuation; '
+                                                              'flow/execution declare_resource_requirement(..., '
+                                                              'resolver=..., provider_kind=..., config_ref=..., '
+                                                              'secret_ref=..., fail_policy=...) persists importable '
+                                                              'resource resolver descriptors; '
+                                                              'execution.set_compaction_policy(...) forms the snapshot '
+                                                              'compaction surface; execution.inspect_load(...) reports '
+                                                              'missing resolver, unhealthy, policy-forbidden, pending '
+                                                              'resolver, unresolved resource, expired lease warnings, '
+                                                              'active lease owner conflicts, DAG join state '
+                                                              'mismatches, lineage-anchor mismatch, missing artifact, '
+                                                              'and invalid load-read-limit diagnostics; fail-closed '
+                                                              'pending resolvers or pending managed execution '
+                                                              'resources report status pending_resources and '
+                                                              'ready=false until async_load(...) resolves and '
+                                                              'validates live resources; execution.async_load(...) can '
+                                                              'rebuild live resources through importable resolvers '
+                                                              'before graph continuation; '
                                                               'execution.inspect_runtime_event_records(...), '
                                                               'execution.project_runtime_event_record(...), '
                                                               'execution.async_save(..., expected_state_version=...), '
@@ -368,32 +462,31 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                            'put_checkpoint(..., expected_state_version=...), lease '
                                                            'claim/heartbeat/release, artifact refs, backend-provider '
                                                            'registration, optional scoped prune, and backend '
-                                                           'capability reporting. '
-                                                           'RuntimeEvent storage supports idempotency keys, '
-                                                           'expected_sequence fail-closed append checks, '
-                                                           'state_version, parent event and causation ids, parent '
-                                                           'signal id, aggregation scope, operator id, interrupt id, '
-                                                           'resume request id, actor id, lease owner id, snapshot '
-                                                           'refs, artifact refs, created_at, and persisted_at. Default '
-                                                           'Agents expose agent.workspace as a lazy Workspace '
-                                                           'foundation capability, and default TriggerFlow executions '
-                                                           'bind the current session/script default Workspace through '
-                                                           'runtime resource key workspace; the local filesystem plus SQLite '
-                                                           'backend materializes only when Workspace storage, '
-                                                           'checkpoint, evidence, read, or file-area behavior is '
-                                                           'actually used. Agent, execution, and task records carry '
-                                                           'logical scope partitions while file actions use lineage-scoped '
+                                                           'capability reporting. RuntimeEvent storage supports '
+                                                           'idempotency keys, expected_sequence fail-closed append '
+                                                           'checks, state_version, parent event and causation ids, '
+                                                           'parent signal id, aggregation scope, operator id, '
+                                                           'interrupt id, resume request id, actor id, lease owner id, '
+                                                           'snapshot refs, artifact refs, created_at, and '
+                                                           'persisted_at. Default Agents expose agent.workspace as a '
+                                                           'lazy Workspace foundation capability, and default '
+                                                           'TriggerFlow executions bind the current session/script '
+                                                           'default Workspace through runtime resource key workspace; '
+                                                           'the local filesystem plus SQLite backend materializes only '
+                                                           'when Workspace storage, checkpoint, evidence, read, or '
+                                                           'file-area behavior is actually used. Agent, execution, and '
+                                                           'task records carry logical scope partitions while file '
+                                                           'actions use lineage-scoped '
                                                            'files/lineage/<root-kind>/<root-id>/.../<leaf-kind>/<leaf-id>/files '
                                                            'roots. The local backend uses WAL, busy timeout, scope '
                                                            'indexes, and scoped prune support for local SQLite '
-                                                           'stability. Application-owned shared Workspaces are '
-                                                           'created through Workspace(...) or '
-                                                           'Agently.create_workspace(...) and explicitly bound to '
-                                                           'Agents, TriggerFlow executions, or service workers when '
-                                                           'they must share task information; separate Workspaces '
-                                                           'exchange information only through application-level '
-                                                           'search/read/write/link logic. Third-party Workspace '
-                                                           'backends can be passed directly to '
+                                                           'stability. Application-owned shared Workspaces are created '
+                                                           'through Workspace(...) or Agently.create_workspace(...) '
+                                                           'and explicitly bound to Agents, TriggerFlow executions, or '
+                                                           'service workers when they must share task information; '
+                                                           'separate Workspaces exchange information only through '
+                                                           'application-level search/read/write/link logic. '
+                                                           'Third-party Workspace backends can be passed directly to '
                                                            'agent.use_workspace(backend), '
                                                            'flow.create_execution(workspace=backend), or registered '
                                                            'through Agently.workspace.register_backend_provider(name, '
@@ -423,19 +516,18 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                            'projection truth, live resource serialization, or '
                                                            'cross-space messaging/replication.',
                               'file_io_handler_contract': 'Workspace exposes WorkspaceFileIOHandler as the public '
-                                                          'plugin seam for file read/write/export behavior. '
-                                                          'Workspace owns path containment, deterministic file info, '
-                                                          'handler dispatch, sha256/file refs, and structured '
-                                                          'diagnostics; handlers own format-specific parsing, '
-                                                          'rendering, optional dependencies, MCP-backed adapters, '
-                                                          'and image preparation. Built-in text read/write is '
-                                                          'default; PDF, Office, image/VLM preparation, and '
-                                                          'HTML/Markdown export are optional fail-closed handlers. '
-                                                          'enable_workspace_file_actions(...) delegates to the bound '
-                                                          'Workspace when roots match, keeps isolated-root '
-                                                          'compatibility through the same handler registry, does not '
-                                                          'overwrite user Actions, and registers export_file only '
-                                                          'with export=True and write=True.',
+                                                          'plugin seam for file read/write/export behavior. Workspace '
+                                                          'owns path containment, deterministic file info, handler '
+                                                          'dispatch, sha256/file refs, and structured diagnostics; '
+                                                          'handlers own format-specific parsing, rendering, optional '
+                                                          'dependencies, MCP-backed adapters, and image preparation. '
+                                                          'Built-in text read/write is default; PDF, Office, image/VLM '
+                                                          'preparation, and HTML/Markdown export are optional '
+                                                          'fail-closed handlers. enable_workspace_file_actions(...) '
+                                                          'delegates to the bound Workspace when roots match, keeps '
+                                                          'isolated-root compatibility through the same handler '
+                                                          'registry, does not overwrite user Actions, and registers '
+                                                          'export_file only with export=True and write=True.',
                               'provider_capability_flags': ['supports_cas',
                                                             'supports_lease',
                                                             'supports_artifact_refs',
@@ -464,8 +556,8 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                  'AgentTurn, Agent.create_turn(...), '
                                                                  'Agent.set_turn_prompt(...), '
                                                                  'Agent.set_request_prompt(...), and '
-                                                                 'AgentExecution.set_turn_prompt(...) are removed from '
-                                                                 'the 4.1.3.7 development line. Agent-level persistent '
+                                                                 'AgentExecution.set_turn_prompt(...) remain removed '
+                                                                 'from the current public line. Agent-level persistent '
                                                                  'state remains on define(...), always=True, '
                                                                  'set_agent_prompt(...), and stable setup APIs.',
                                                      'compatibility_policy': 'Expression-local chaining is the '
@@ -474,8 +566,8 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                              'execution = agent.create_execution() or '
                                                                              'use agent.input(...). Removed AgentTurn '
                                                                              'and turn/request prompt aliases are not '
-                                                                             'compatibility surfaces for 4.1.3.7. '
-                                                                             'Explicit low-level '
+                                                                             'compatibility surfaces for the current '
+                                                                             'public line. Explicit low-level '
                                                                              'agent.create_request()/agent.request '
                                                                              'builders remain available for direct '
                                                                              'ModelRequest use.'},
@@ -520,34 +612,32 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                             'in agently.types.data and are deprecated '
                                                                             'in favor of Result-named aliases; they '
                                                                             'will be removed in Agently 4.2.'},
-                   'model_request_result_facade': {'status': 'in-development',
-                                                    'surface': ['ModelRequest.get_result',
-                                                                'AgentExecution.get_result',
-                                                                'AgentExecutionResult',
-                                                                'Agent.get_result',
-                                                                'ModelRequest.get_response',
-                                                                'AgentExecution.get_response',
-                                                                'Agent.get_response',
-                                                                'ModelRequestResult',
-                                                                'ModelResponse'],
-                                                    'contract': 'get_result() is the recommended reusable facade for '
-                                                                'text, data, metadata, and streaming readers. Agent '
-                                                                'quick prompt chains return AgentExecutionResult; '
-                                                                            'direct ModelRequest calls return ModelRequestResult. '
-                                                                'get_response() remains a compatibility alias. '
-                                                                            'ModelRequestResult.result points to itself so older '
-                                                                'response.result reader chains continue to work.',
-                                                    'compatibility_policy': 'Recommended documentation, examples, and '
-                                                                            'Skills guidance use result = '
-                                                                            'agent.input(...).output(...).get_result(); '
-                                                                            'data = result.get_data(). Code that '
-                                                                            'already calls get_response() and then '
-                                                                            'reader methods or response.result reader '
-                                                                            'chains remains supported. ModelResponseResult is '
-                                                                            'no longer a public facade or compatibility alias; '
-                                                                            'use ModelRequestResult. Direct ModelResponse '
-                                                                            'construction is deprecated for removal in '
-                                                                            'Agently 4.2.'},
+                   'model_request_result_facade': {'status': 'released',
+                                                   'surface': ['ModelRequest.get_result',
+                                                               'AgentExecution.get_result',
+                                                               'AgentExecutionResult',
+                                                               'Agent.get_result',
+                                                               'ModelRequest.get_response',
+                                                               'AgentExecution.get_response',
+                                                               'Agent.get_response',
+                                                               'ModelResponse',
+                                                               'ModelRequestResult'],
+                                                   'contract': 'get_result() is the recommended reusable facade for '
+                                                               'text, data, metadata, and streaming readers. Agent '
+                                                               'quick prompt chains return AgentExecutionResult; '
+                                                               'direct ModelRequest calls return ModelRequestResult. '
+                                                               'get_response() remains a compatibility alias. '
+                                                               'ModelRequestResult.result points to itself so older '
+                                                               'response.result reader chains continue to work.',
+                                                   'compatibility_policy': 'Recommended documentation, examples, and '
+                                                                           'Skills guidance use result = '
+                                                                           'agent.input(...).output(...).get_result(); '
+                                                                           'data = result.get_data(). '
+                                                                           'ModelResponseResult is no longer a public '
+                                                                           'facade or compatibility alias; use '
+                                                                           'ModelRequestResult. Direct ModelResponse '
+                                                                           'construction remains deprecated for '
+                                                                           'removal in Agently 4.2.'},
                    'agent_execution_task_loop': {'status': 'released',
                                                  'surface': ['Agent.goal',
                                                              'Agent.goals',
@@ -566,8 +656,15 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'AgentExecutionResult.get_async_generator',
                                                              'AgentExecutionResult.async_get_meta',
                                                              'AgentExecutionResult.async_resume'],
-                                                 'contract': 'The 4.1.3.7 task-loop contract is a narrow single-task, '
-                                                             'single-Agent-owner strategy carried by AgentExecution. '
+                                                 'contract': 'The 4.1.3.7 task-loop contract remains the published '
+                                                             'baseline for a narrow single-task, single-Agent-owner '
+                                                             'strategy carried by AgentExecution. Agently 4.1.3.8 '
+                                                             'hardens that baseline through framework-level '
+                                                             'task-execution quality fixes: planner-visible capability '
+                                                             'summaries, structured bounded-step scope, '
+                                                             'capability/evidence requirements, verifier guards, and '
+                                                             'removal of strong-instruction or business-specific '
+                                                             'special-case fixes from framework paths. '
                                                              'agent.goal(goal_or_goals, success_criteria=None), its '
                                                              'plural alias agent.goals(...), agent.create_task(...), '
                                                              'and agent.create_task_loop(...) return task-strategy '
@@ -578,23 +675,54 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'builders are not current public surfaces. effort(...) '
                                                              'accepts preset names or a detailed strategy expansion '
                                                              'for budget, planning, execution, verification, replan, '
-                                                             'and progress; effort budget iteration_limit maps to '
-                                                             'task-loop max_iterations, while model_call_limit and '
-                                                             'wall_time_seconds map to AgentExecution limits unless '
-                                                             'explicit limits were already set. effort '
+                                                             'progress, and reflection_density; effort budget '
+                                                             'iteration_limit maps to task-loop max_iterations, while '
+                                                             'model_call_limit and wall_time_seconds map to '
+                                                             'AgentExecution limits unless explicit limits were '
+                                                             'already set. effort reflection_density maps low to final '
+                                                             'reflection plus planner-marked important process points, '
+                                                             'medium to each major task node or TaskBoard card/tick, '
+                                                             'and high to every framework-observable bounded step, '
+                                                             'Action/ACP call, TaskBoard card, and final reflection; '
+                                                             'reflection records are Workspace evidence and '
+                                                             'verifier/replan input but are not completion evidence by '
+                                                             'themselves. Strong-format intermediate process requests '
+                                                             'use Agently .output(..., format=...) with the '
+                                                             'appropriate format; declared non-JSON parser failures '
+                                                             'try JSON fallback, and structured control/final output '
+                                                             'contracts accept fallback only when the parsed value is '
+                                                             'dict-shaped with diagnostics. Task execution_strategy '
+                                                             'defaults to auto. In auto, AgentTaskLoop runs one '
+                                                             'task_shape_analysis ModelRequest that first gives '
+                                                             'natural-language task-shape analysis and then a thin '
+                                                             'structured execution_hint; strategy policy resolves '
+                                                             'effective_execution_strategy to flat or taskboard. '
+                                                             'Explicit execution flat/taskboard or '
+                                                             'AgentExecution.strategy("flat"|"taskboard") beats the '
+                                                             'hint, and nested AgentExecution instances inherit parent '
+                                                             'strategy context unless explicitly overridden. TaskBoard '
+                                                             'remains an execution substrate after strategy selection '
+                                                             'and does not classify task complexity. effort '
                                                              'execution.step_plan defaults to auto and can guide '
                                                              'whether a Goal Pursuit iteration keeps one direct '
                                                              'bounded step or may expand into a TaskDAG / DAG-shaped '
                                                              'bounded step; DAG completion feeds evidence back to '
                                                              'AgentTaskLoop and does not bypass model verification '
-                                                             'plus host guards. DynamicTask is the current '
+                                                             'plus host guards. ACP is a first-class Action plus '
+                                                             'ExecutionResource(kind="acp"); planner/user direct ACP '
+                                                             'use and recovery fallback after retry exhaustion use the '
+                                                             'same capability/evidence contract, and ACP is not a '
+                                                             'route that bypasses AgentExecution or AgentTaskLoop '
+                                                             'policy. DynamicTask is the current '
                                                              'compatibility/convenience facade over DAG planning and '
                                                              'execution, not the strategic task lifecycle. '
                                                              'AgentExecution.use_dynamic_task(...) adds an '
                                                              'execution-local DAG candidate through that facade, while '
                                                              'agent.use_dynamic_task(...) remains the Agent-level DAG '
                                                              'candidate pool. Consumers read final data, text, '
-                                                             'streams, metadata, and task refs through '
+                                                             'streams, metadata, execution_strategy, '
+                                                             'effective_execution_strategy, task_shape_analysis, '
+                                                             'reflection refs, Workspace refs, and task refs through '
                                                              'AgentExecutionResult or the execution stream/meta '
                                                              'facade. Completion acceptance requires model-owned '
                                                              'verification plus conservative host guards; completed '
@@ -605,35 +733,45 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'strategy writes Workspace checkpoints through the '
                                                              'checkpoint-store port and records task evidence '
                                                              'relationships with Workspace evidence links. '
-                                                             'agent.resume(task_id) and '
-                                                             'agent.async_resume(task_id) rebuild resumable '
-                                                             'AgentTaskLoop snapshots as task-strategy '
-                                                             'AgentExecution drafts; AgentExecutionResult resume '
-                                                             'delegates to the same Agent facade when task_refs '
-                                                             'carry a resumable task id. Agent.resume_task and '
-                                                             'Agent.async_resume_task are compatibility aliases only '
-                                                             'and should not be promoted as the recommended '
-                                                             'lifecycle.',
+                                                             'agent.resume(task_id) and agent.async_resume(task_id) '
+                                                             'rebuild resumable AgentTaskLoop snapshots as '
+                                                             'task-strategy AgentExecution drafts; '
+                                                             'AgentExecutionResult resume delegates to the same Agent '
+                                                             'facade when task_refs carry a resumable task id. '
+                                                             'Agent.resume_task and Agent.async_resume_task are '
+                                                             'compatibility aliases only and should not be promoted as '
+                                                             'the recommended lifecycle.',
                                                  'scope': {'current_slice': ['one Agent-owned business task',
                                                                              'bounded 2-5 iteration task-loop guidance',
-                                                                             'explicitly enabled Actions, Skills, or '
-                                                                             'DAG candidates as step capabilities',
+                                                                             'explicitly enabled Actions, Skills, '
+                                                                             'Skill packs, or DAG candidates as step '
+                                                                             'capabilities',
+                                                                             'planner-visible capability summaries '
+                                                                             'instead of provider- or example-specific '
+                                                                             'prompt patches',
+                                                                             'structured bounded-step capability scope '
+                                                                             'instead of prose-only step instructions',
+                                                                             'Agently .output(..., format=...) control '
+                                                                             'for strong-format intermediate requests '
+                                                                             'with JSON dict fallback diagnostics',
                                                                              'model-owned planning, verification, and '
                                                                              'replan decisions',
                                                                              'host guards for missing criteria, risky '
                                                                              'action evidence, approval-required '
-                                                                             'actions, and missing final deliverables',
+                                                                             'actions, missing final deliverables, and '
+                                                                             'structured capability/evidence '
+                                                                             'requirements',
                                                                              'structured task refs, diagnostics, '
                                                                              'progress/snapshot stream items, result '
                                                                              'facade consumption, and provider-backed '
                                                                              'Workspace evidence links'],
                                                            'deferred': ['multi-task scheduling',
-                                                                       'background autonomous scheduler',
-                                                                       'distributed lease or cross-worker ownership',
-                                                                       'distributed pause/resume beyond the '
-                                                                       'single-task agent.resume(...) snapshot slice',
-                                                                       'TriggerFlow-backed AdaptiveLoop or '
-                                                                       'BootstrapLoop packaging']},
+                                                                        'background autonomous scheduler',
+                                                                        'distributed lease or cross-worker ownership',
+                                                                        'distributed pause/resume beyond the '
+                                                                        'single-task agent.resume(...) snapshot slice',
+                                                                        'TriggerFlow-backed AdaptiveLoop or '
+                                                                        'BootstrapLoop packaging']},
                                                  'compatibility_policy': 'New documentation and examples should keep '
                                                                          'AgentExecutionResult as the common '
                                                                          'consumption surface and use '
@@ -643,10 +781,10 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                          'compatibility readers and resume_task '
                                                                          'aliases may remain callable, but they should '
                                                                          'not be promoted as a second recommended '
-                                                                         'public lifecycle. Future '
-                                                                         'AgentTaskLoop hardening must strengthen the '
-                                                                         'task strategy behind AgentExecution without '
-                                                                         'changing this public ownership boundary.'},
+                                                                         'public lifecycle. Future AgentTaskLoop '
+                                                                         'hardening must strengthen the task strategy '
+                                                                         'behind AgentExecution without changing this '
+                                                                         'public ownership boundary.'},
                    'image': {'status': 'released',
                              'surface': ['ModelRequest.image', 'Agent.image'],
                              'shape': 'image(question=..., file=...|url=...|files=[...]|urls=[...])',

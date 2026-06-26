@@ -828,6 +828,56 @@ def test_strategy_method_maps_execution_shapes_and_nested_inheritance(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_agent_execution_runtime_observes_flat_agent_task_stream(tmp_path):
+    MockAgentTaskRequester.reset()
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_agent_task_loop.agent_execution_runtime_stream_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        agent = _create_agent("agent-flat-runtime-observation").use_workspace(tmp_path / "workspace")
+        execution = agent.goal(
+            "Repair a legacy Agently script.",
+            [
+                "The original failure is recorded.",
+                "The script runs successfully.",
+            ],
+        ).strategy("flat", max_iterations=2)
+
+        result = await execution.async_get_data()
+
+        assert result["status"] == "completed"
+        execution_events = [
+            event
+            for event in captured
+            if event.run is not None and event.run.run_kind == "agent_execution" and event.run.execution_id == execution.id
+        ]
+        event_types = [event.event_type for event in execution_events]
+        assert event_types[0] == "agent_execution.started"
+        assert event_types[-1] == "agent_execution.completed"
+        stream_events = [event for event in execution_events if event.event_type == "agent_execution.stream"]
+        stream_paths = [event.payload.get("path") for event in stream_events if isinstance(event.payload, dict)]
+        assert "route.selected" in stream_paths
+        assert "agent_task.created" in stream_paths
+        assert any(str(path).startswith("agent_task.iteration.") for path in stream_paths)
+        assert any(str(path).endswith(".execution.completed") for path in stream_paths)
+        task_stream_event = next(
+            event
+            for event in stream_events
+            if isinstance(event.payload, dict) and event.payload.get("path") == "agent_task.created"
+        )
+        assert task_stream_event.payload["execution_id"] == execution.id
+        assert task_stream_event.payload["task_id"] == execution.task_refs["task_id"]
+        assert task_stream_event.payload["execution_strategy"] == "flat"
+        assert task_stream_event.payload["effective_execution_strategy"] == "flat"
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
 async def test_effort_reflection_density_records_expected_points(tmp_path):
     async def run_with_effort(label: str, effort: dict[str, Any]):
         agent = _create_agent(f"agent-reflection-{label}").use_workspace(tmp_path / label)

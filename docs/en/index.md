@@ -49,6 +49,7 @@ This handbook is organized as a learning path. If you have not run a single requ
    - [Event Center](observability/event-center.md)
    - [DevTools](observability/devtools.md)
    - [Coding Agents](development/coding-agents.md)
+   - [Agently 4.1.3.8 Release Notes](development/release-notes-4.1.3.8.md)
    - [Agently 4.1.3.7 Release Notes](development/release-notes-4.1.3.7.md)
    - [Agently 4.1.3.6 Release Notes](development/release-notes-4.1.3.6.md)
    - [Agently 4.1.3.5 Release Notes](development/release-notes-4.1.3.5.md)

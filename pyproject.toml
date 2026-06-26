@@ -1,6 +1,6 @@
 [project]
 name = "agently"
-version = "4.1.3.7"
+version = "4.1.3.8"
 description = "AI application development framework for stable structured outputs, observable actions, and durable workflows."
 authors = [
     {name = "Agently Team",email = "developer@agently.tech"},

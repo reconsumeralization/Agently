@@ -912,14 +912,16 @@ async def test_agent_execution_wraps_request_and_model_request_runs():
         assert "Morning briefing prepared." in text
 
         execution_events = [event for event in captured if event.run and event.run.run_kind == "agent_execution"]
-        assert [event.event_type for event in execution_events] == [
-            "agent_execution.started",
-            "agent_execution.completed",
-        ]
+        execution_event_types = [event.event_type for event in execution_events]
+        assert execution_event_types[0] == "agent_execution.started"
+        assert "agent_execution.stream" in execution_event_types
+        assert "agent_execution.completed" in execution_event_types
+        assert execution_event_types.index("agent_execution.started") < execution_event_types.index("agent_execution.completed")
 
         execution_run = execution_events[0].run
         assert execution_run is not None
         assert execution_run.parent_run_id == workflow_run.run_id
+        assert execution_run.execution_id == execution.id
 
         request_events = [
             event

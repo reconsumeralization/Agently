@@ -36,7 +36,7 @@ class Settings(SerializableStateData):
         *,
         name: str | None = None,
         parent: "Settings | None" = None,
-    ):
+    ) -> None:
         super().__init__(
             data,
             name=name,
@@ -54,7 +54,7 @@ class Settings(SerializableStateData):
         return dict(os.environ)
 
     @classmethod
-    def _substitute_env_placeholder(cls, value: Any, *, raise_empty: bool = False):
+    def _substitute_env_placeholder(cls, value: Any, *, raise_empty: bool = False) -> Any:
         return DataFormatter.substitute_placeholder(
             value,
             cls._load_environ(),
@@ -62,7 +62,7 @@ class Settings(SerializableStateData):
             raise_empty=raise_empty,
         )
 
-    def register_path_mappings(self, simplify_path: str, actual_path: str):
+    def register_path_mappings(self, simplify_path: str, actual_path: str) -> "Settings":
         if simplify_path in self._kv_mappings:
             raise ValueError(
                 f"Cannot register '{ simplify_path }' to path mappings, because it was registered in key-value mappings."
@@ -75,7 +75,7 @@ class Settings(SerializableStateData):
         simplify_path: str,
         simplify_value: str | int | float | bool,
         actual_settings: "SerializableMapping",
-    ):
+    ) -> "Settings":
         if simplify_path in self._path_mappings:
             raise ValueError(
                 f"Cannot register '{ simplify_path }' to key-value mappings, because it was registered in path mappings."
@@ -86,7 +86,7 @@ class Settings(SerializableStateData):
         )
         return self
 
-    def update_mappings(self, mappings_dict: dict):
+    def update_mappings(self, mappings_dict: dict[str, Any]) -> None:
         if "path_mappings" in mappings_dict and isinstance(mappings_dict["path_mappings"], dict):
             self._path_mappings.update(mappings_dict["path_mappings"])
         if "key_value_mappings" in mappings_dict and isinstance(mappings_dict["key_value_mappings"], dict):
@@ -111,7 +111,7 @@ class Settings(SerializableStateData):
             "toml",
         ],
         value: str,
-    ):
+    ) -> None:
         data = None
         if data_type.endswith("_file"):
             with open(value, "r", encoding="utf-8") as file:
@@ -151,7 +151,7 @@ class Settings(SerializableStateData):
         *,
         auto_load_env: bool = False,
         raise_empty: bool = False,
-    ):
+    ) -> "Settings":
         data = None
         if data_type.endswith("_file"):
             with open(value, "r", encoding="utf-8") as file:
@@ -198,7 +198,7 @@ class Settings(SerializableStateData):
         *,
         auto_load_env: bool = False,
         raise_empty: bool = False,
-    ):
+    ) -> "Settings":
         if value is _UNSET:
             from agently.types.config import settings_model_to_pair
 
@@ -221,5 +221,5 @@ class Settings(SerializableStateData):
 
 
 class SettingsNamespace(SerializableStateDataNamespace):
-    def __init__(self, root_settings: "Settings", namespace: str):
+    def __init__(self, root_settings: "Settings", namespace: str) -> None:
         super().__init__(root_runtime_data=root_settings, namespace=namespace)

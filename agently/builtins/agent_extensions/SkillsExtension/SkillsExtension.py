@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, cast
+from typing_extensions import Self
 
 from agently.core import BaseAgent
 from agently.types.data import SkillContextPack, SkillContextPackIncludeMode, SkillContract, SkillExecutionPlan, SkillMode, SkillRuntimeStreamHandler
@@ -32,10 +33,11 @@ if TYPE_CHECKING:
     from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecution
     from agently.core import Prompt
     from agently.utils import Settings
+    from agently.types.plugins import AgentExecution
 
 
 class SkillsExtension(BaseAgent):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
         from agently.base import skills_executor
@@ -61,7 +63,7 @@ class SkillsExtension(BaseAgent):
         mode: SkillMode = "model_decision",
         auto_allow: bool = False,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if not always:
             return self.create_execution().use_skills(skills, mode=mode, auto_allow=auto_allow)
         self._add_skill_selectors(skills, mode=mode, auto_allow=auto_allow)
@@ -107,7 +109,7 @@ class SkillsExtension(BaseAgent):
         *,
         auto_allow: bool = False,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         return self.use_skills(skills, mode="required", auto_allow=auto_allow, always=always)
 
     def use_skills_packs(
@@ -116,7 +118,7 @@ class SkillsExtension(BaseAgent):
         *,
         mode: SkillMode = "model_decision",
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if not always:
             return self.create_execution().use_skills_packs(skills_packs, mode=mode)
         if mode not in {"model_decision", "required"}:
@@ -136,7 +138,7 @@ class SkillsExtension(BaseAgent):
         http_request: dict[str, Any] | None = None,
         capability_scope: Literal["agent", "execution"] | None = None,
         min_auto_mount_confidence: float | None = None,
-    ):
+    ) -> Self:
         policy = _ensure_dict(self.settings.get("skills.capability_policy", {}))
         if auto_load is not None:
             policy["auto_load"] = dict(auto_load)
