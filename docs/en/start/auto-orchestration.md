@@ -222,6 +222,15 @@ diagnostics such as low-level Workspace/SQLite fallback details remain in
 snapshots and `task.meta()["diagnostics"]`, but are omitted from the progress
 model input.
 
+During long quiet waits, AgentTask may emit an `agent_task.heartbeat` stream item
+after `agent_task.heartbeat_interval_seconds` seconds without any other stream
+item. The default interval is 10 seconds. Heartbeats are observational status
+only: they help UI and log consumers understand the current stage, but they do
+not satisfy evidence, hide a stall, or replace request/no-progress and
+task-deadline timeouts. Any normal progress, snapshot, child-execution, delta,
+or phase event resets the quiet timer, so active streams do not get heartbeat
+spam.
+
 Terminal task status and artifact acceptance are separate. `completed` means
 the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`).
 `max_iterations` can still leave a useful Workspace file or checkpoint, but it
@@ -237,6 +246,11 @@ plane rather than the primary prose transport. Model-declared `file_refs` are
 diagnostics only until the framework has produced this Workspace readback
 evidence, preserving a real `final.md` or other deliverable for host-side
 review.
+
+If the structured task input or output contract declares required deliverables,
+AgentTask host guards require those Workspace files to exist and read back before
+accepting completion. A verifier response that says a file exists is not enough
+unless Workspace readback confirms it.
 
 `examples/agent_task/goal_effort_public_stream.py` is the public-chain
 streaming proof for this contract. It runs

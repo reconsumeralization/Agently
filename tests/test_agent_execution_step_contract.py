@@ -544,6 +544,46 @@ class MockFlatActionPlanningStallRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockWorkspaceArtifactDraftStallRequester(MockAgentExecutionRequester):
+    name = "MockWorkspaceArtifactDraftStallRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Write only the final Markdown artifact body for the AgentTask" in text:
+            await asyncio.sleep(5)
+            yield "message", "# Late artifact body"
+            return
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "direct",
+                "step_instruction": "Prepare a Workspace-backed final artifact.",
+                "expected_evidence": "final.md is written and read back.",
+                "rationale": "The task requests a deliverable file.",
+                "deliverable_mode": "workspace_artifact",
+            }
+        elif "Execute exactly one bounded step" in text:
+            payload = {
+                "step_result": "Control result ready; framework should draft the Workspace artifact.",
+                "artifact_manifest": {"path": "final.md", "sections": [{"id": "summary", "title": "Summary"}]},
+                "evidence": ["artifact source evidence"],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": False,
+                "requires_block": True,
+                "reason": "The Workspace artifact was not delivered.",
+                "missing_criteria": ["final.md readback is missing."],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "",
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockFlatParallelActionRequester(MockAgentExecutionRequester):
     name = "MockFlatParallelActionRequester"
     action_planning_calls = 0
@@ -1050,6 +1090,13 @@ def _create_flat_action_planning_stall_agent(name: str = "agent-execution-flat-a
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def _create_workspace_artifact_draft_stall_agent(name: str = "agent-execution-artifact-draft-stall"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockWorkspaceArtifactDraftStallRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
 def _create_flat_parallel_action_agent(name: str = "agent-execution-flat-parallel-action"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -1164,6 +1211,36 @@ async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate
     assert task_meta["iterations"][0]["plan"]["step_execution"]["policy"]["allow_dag_steps"] is False
     assert task_meta["iterations"][0]["verification"]["is_complete"] is False
     assert task_meta["iterations"][1]["verification"]["is_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_structured_deliverable_contract_requires_workspace_readback(tmp_path):
+    agent = _create_goal_pursuit_agent("execution-deliverable-contract-guard").use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Produce the requested final file.",
+        success_criteria=["The final deliverable file exists."],
+        execution="flat",
+        max_iterations=1,
+    )
+    execution.input(
+        {
+            "output_contract": {
+                "deliverables": [{"path": "final.md", "media_type": "text/markdown"}],
+            }
+        }
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    verification = task_meta["iterations"][0]["verification"]
+
+    assert result["accepted"] is False
+    assert result["status"] == "max_iterations"
+    assert verification["is_complete"] is False
+    assert "required_workspace_deliverable_missing" in verification["guard_reasons"]
+    assert "Missing required Workspace deliverable(s): final.md" in verification["missing_criteria"]
 
 
 @pytest.mark.asyncio
@@ -1284,6 +1361,54 @@ async def test_flat_action_planning_timeout_returns_structured_failure(tmp_path)
     assert "AgentTask execution request timed out" in execution_error["message"]
     assert task_meta["iterations"][0]["execution_meta"]["status"] == "failed"
     assert task_meta["iterations"][0]["verification"]["is_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(tmp_path):
+    agent = _create_workspace_artifact_draft_stall_agent("execution-workspace-artifact-draft-timeout").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Produce final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="flat",
+        max_iterations=1,
+        options={
+            "request_timeout_seconds": 0.2,
+            "agent_task": {
+                "request_timeout_seconds": 0.2,
+                "heartbeat_interval_seconds": 0.05,
+            },
+        },
+    )
+
+    async def collect_stream() -> list[Any]:
+        return [item async for item in execution.get_async_generator(type="instant")]
+
+    started_at = asyncio.get_running_loop().time()
+    stream_task = asyncio.create_task(collect_stream())
+    result = await execution.async_get_data()
+    stream_items = await stream_task
+    meta = await execution.async_get_meta()
+    elapsed = asyncio.get_running_loop().time() - started_at
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
+    failed_delivery = deliveries[-1]
+    heartbeat_items = [item for item in stream_items if getattr(item, "path", "") == "agent_task.heartbeat"]
+
+    assert elapsed < 2
+    assert result["accepted"] is False
+    assert failed_delivery["status"] == "failed"
+    assert failed_delivery["error"]["type"] == "_AgentTaskDeadlineExceeded"
+    assert "workspace_artifact_draft stream produced no event" in failed_delivery["error"]["message"]
+    assert heartbeat_items
+    assert any(
+        getattr(item, "value", {}).get("stage") == "workspace_artifact_draft"
+        for item in heartbeat_items
+        if isinstance(getattr(item, "value", None), dict)
+    )
+    assert not (tmp_path / "workspace" / "final.md").exists()
 
 
 @pytest.mark.asyncio
@@ -1640,7 +1765,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
         options={
             "request_timeout_seconds": 5.0,
             "agent_task": {
-                "taskboard_card_timeout_seconds": 0.05,
+                "taskboard_card_timeout_seconds": 0.1,
                 "taskboard_card_max_attempts": 2,
             },
         },

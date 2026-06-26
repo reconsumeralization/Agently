@@ -244,6 +244,7 @@ class AgentTask:
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []
         self._background_stream_tasks: set[asyncio.Task[Any]] = set()
+        self._last_stream_emit_monotonic = time.monotonic()
         self._flow = self._build_flow()
 
         self.run: Any = self._run
@@ -625,6 +626,10 @@ class AgentTask:
                 limit_name=error.limit_name,
                 timeout_seconds=error.timeout_seconds,
             )
+        if bool(verification.get("is_complete")):
+            missing_deliverables = await self._missing_required_workspace_deliverables()
+            if missing_deliverables:
+                self._guard_missing_required_deliverables(verification, missing_deliverables)
         await self._record_phase(
             "verified",
             iteration=iteration_index,
@@ -1531,11 +1536,15 @@ class AgentTask:
                 "artifact_path": path,
                 "plan": DataFormatter.sanitize(plan or {}),
                 "execution_result": DataFormatter.sanitize(execution_result),
-                "execution_meta_summary": self._execution_log_summary(execution_meta or {}),
+                "execution_meta_summary": self._execution_log_summary(dict(execution_meta or {})),
                 "context_pack": DataFormatter.sanitize(context_pack or {}),
-                "card": DataFormatter.sanitize(getattr(card_context, "card", None).to_dict())
-                if card_context is not None and hasattr(getattr(card_context, "card", None), "to_dict")
-                else {},
+                "card": DataFormatter.sanitize(
+                    card_context.card.to_dict()
+                    if card_context is not None
+                    and getattr(card_context, "card", None) is not None
+                    and hasattr(card_context.card, "to_dict")
+                    else {}
+                ),
                 "dependency_results": DataFormatter.sanitize(
                     {
                         key: value.to_dict() if hasattr(value, "to_dict") else value
@@ -1566,8 +1575,16 @@ class AgentTask:
         }
         wrote_any = False
         bytes_written = 0
+        draft_stream = draft_execution.get_async_generator(type="delta")
         try:
-            async for delta in draft_execution.get_async_generator(type="delta"):
+            while True:
+                try:
+                    delta = await self._await_stream_next(
+                        draft_stream,
+                        stage="workspace_artifact_draft",
+                    )
+                except StopAsyncIteration:
+                    break
                 chunk = str(delta or "")
                 if not chunk:
                     continue
@@ -1589,7 +1606,10 @@ class AgentTask:
                             "path": path,
                         },
                     )
-            draft_meta = await draft_execution.async_get_meta()
+            draft_meta = await self._await_task_request(
+                draft_execution.async_get_meta(),
+                stage="workspace_artifact_draft_meta",
+            )
             delivery_record["draft_meta"] = {
                 "execution_id": draft_meta.get("execution_id"),
                 "status": draft_meta.get("status"),
@@ -1605,6 +1625,11 @@ class AgentTask:
             )
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
             return None
+        finally:
+            aclose = getattr(draft_stream, "aclose", None)
+            if callable(aclose):
+                with suppress(Exception):
+                    await cast(Awaitable[Any], aclose())
         if not wrote_any:
             delivery_record.update(
                 {
@@ -2939,6 +2964,92 @@ class AgentTask:
 
     def _apply_language_policy_to_request(self, request: Any, policy: Mapping[str, Any] | None = None) -> None:
         apply_language_policy_to_prompt(getattr(request, "prompt", request), policy or self._language_policy())
+
+    def _required_workspace_deliverables(self) -> list[str]:
+        paths: list[str] = []
+
+        def add_path(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in paths:
+                paths.append(text)
+
+        def add_deliverables(value: Any) -> None:
+            if isinstance(value, str):
+                add_path(value)
+                return
+            if isinstance(value, Mapping):
+                path = value.get("path") or value.get("file") or value.get("name")
+                if path is not None:
+                    add_path(path)
+                return
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+                for item in value:
+                    add_deliverables(item)
+
+        def add_contract(value: Any) -> None:
+            if not isinstance(value, Mapping):
+                add_deliverables(value)
+                return
+            add_deliverables(value.get("deliverables"))
+            add_deliverables(value.get("required_deliverables"))
+
+        add_contract(self._agent_task_option("output_contract", None))
+        add_deliverables(self._agent_task_option("required_deliverables", None))
+        add_deliverables(self._agent_task_option("deliverables", None))
+
+        execution_prompt = self._execution_prompt_context()
+        add_contract(execution_prompt.get("output_contract"))
+        prompt_input = execution_prompt.get("input")
+        if isinstance(prompt_input, Mapping):
+            add_contract(prompt_input.get("output_contract"))
+            add_deliverables(prompt_input.get("required_deliverables"))
+            case = prompt_input.get("case")
+            if isinstance(case, Mapping):
+                add_contract(case.get("output_contract"))
+        return paths
+
+    async def _missing_required_workspace_deliverables(self) -> list[str]:
+        missing: list[str] = []
+        for path in self._required_workspace_deliverables():
+            try:
+                read_result = await self.workspace.read_file(path, max_bytes=1)
+            except Exception:
+                missing.append(path)
+                continue
+            try:
+                size = int(read_result.get("bytes") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size <= 0:
+                missing.append(path)
+        return missing
+
+    def _guard_missing_required_deliverables(
+        self,
+        verification: dict[str, Any],
+        missing_deliverables: Sequence[str],
+    ) -> None:
+        if not missing_deliverables:
+            return
+        message = "Missing required Workspace deliverable(s): " + ", ".join(str(item) for item in missing_deliverables)
+        verification["is_complete"] = False
+        verification["final_result_required"] = True
+        verification["missing_criteria"] = self._merge_string_lists(
+            verification.get("missing_criteria"),
+            [message],
+        )
+        verification["acceptance_delta"] = self._merge_string_lists(
+            verification.get("acceptance_delta"),
+            [message],
+        )
+        verification["guard_reasons"] = self._merge_string_lists(
+            verification.get("guard_reasons"),
+            ["required_workspace_deliverable_missing"],
+        )
+        if not str(verification.get("failure_analysis") or "").strip():
+            verification["failure_analysis"] = message
+        if not str(verification.get("replan_instruction") or "").strip():
+            verification["replan_instruction"] = "Write and read back the required Workspace deliverable before accepting completion."
 
     def _normalize_step_plan(self, plan: Any) -> dict[str, Any]:
         normalized: dict[str, Any]
@@ -4744,11 +4855,16 @@ class AgentTask:
 
     async def _await_task_request(self, awaitable, *, stage: str):
         timeout = self._task_request_timeout()
-        if timeout is None:
-            return await awaitable
+        task = asyncio.ensure_future(awaitable)
+        heartbeat_task = self._start_heartbeat(stage=stage)
         try:
-            return await asyncio.wait_for(awaitable, timeout=timeout)
+            if timeout is None:
+                return await task
+            return await asyncio.wait_for(task, timeout=timeout)
         except (asyncio.TimeoutError, TimeoutError) as error:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
             reason = f"AgentTask {stage} request timed out after {timeout} seconds."
             raise _AgentTaskDeadlineExceeded(
                 stage,
@@ -4756,6 +4872,121 @@ class AgentTask:
                 limit_name="request_timeout_seconds",
                 timeout_seconds=timeout,
             ) from error
+        finally:
+            await self._stop_heartbeat(heartbeat_task)
+
+    async def _await_stream_next(self, stream: Any, *, stage: str) -> Any:
+        timeout = self._task_request_timeout()
+        limit_name = "request_timeout_seconds"
+        timeout_seconds = timeout
+        remaining = self._task_deadline_remaining()
+        if remaining is not None and (timeout_seconds is None or remaining < timeout_seconds):
+            timeout_seconds = remaining
+            limit_name = "max_seconds"
+        if timeout_seconds is None:
+            heartbeat_task = self._start_heartbeat(stage=stage)
+            try:
+                return await stream.__anext__()
+            finally:
+                await self._stop_heartbeat(heartbeat_task)
+        if timeout_seconds <= 0:
+            raise _AgentTaskDeadlineExceeded(
+                stage,
+                limit_name=limit_name,
+                timeout_seconds=timeout if limit_name == "request_timeout_seconds" else self._task_max_seconds(),
+            )
+        heartbeat_task = self._start_heartbeat(stage=stage)
+        try:
+            return await asyncio.wait_for(stream.__anext__(), timeout=timeout_seconds)
+        except StopAsyncIteration:
+            raise
+        except (asyncio.TimeoutError, TimeoutError) as error:
+            if limit_name == "max_seconds":
+                reason = f"AgentTask {stage} stream exceeded task max_seconds before the next event."
+                configured_timeout = self._task_max_seconds()
+            else:
+                reason = f"AgentTask {stage} stream produced no event for {timeout_seconds} seconds."
+                configured_timeout = timeout
+            raise _AgentTaskDeadlineExceeded(
+                stage,
+                reason=reason,
+                limit_name=limit_name,
+                timeout_seconds=configured_timeout,
+            ) from error
+        finally:
+            await self._stop_heartbeat(heartbeat_task)
+
+    def _heartbeat_interval_seconds(self) -> float | None:
+        agent_task_options = self.options.get("agent_task")
+        configured = None
+        if isinstance(agent_task_options, dict):
+            configured = agent_task_options.get("heartbeat_interval_seconds")
+        if configured is None:
+            configured = self.options.get("heartbeat_interval_seconds", 10)
+        interval = self._normalize_timeout(configured)
+        if interval is None or interval <= 0:
+            return None
+        return interval
+
+    def _start_heartbeat(
+        self,
+        *,
+        stage: str,
+        iteration: int | None = None,
+    ) -> asyncio.Task[Any] | None:
+        interval = self._heartbeat_interval_seconds()
+        if interval is None:
+            return None
+        task = asyncio.create_task(
+            self._heartbeat_loop(
+                stage=stage,
+                iteration=iteration,
+                interval=interval,
+            )
+        )
+        self._track_background_stream_task(task)
+        return task
+
+    async def _stop_heartbeat(self, task: asyncio.Task[Any] | None) -> None:
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+        self._background_stream_tasks.discard(task)
+
+    async def _heartbeat_loop(
+        self,
+        *,
+        stage: str,
+        iteration: int | None,
+        interval: float,
+    ) -> None:
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                quiet_for = time.monotonic() - self._last_stream_emit_monotonic
+                if quiet_for < interval:
+                    continue
+                await self._emit(
+                    "agent_task.heartbeat",
+                    {
+                        "task_id": self.id,
+                        "stage": stage,
+                        "iteration": iteration,
+                        "status": self.status,
+                        "quiet_for_seconds": round(quiet_for, 3),
+                    },
+                    meta={
+                        "task_id": self.id,
+                        "status": self.status,
+                        "stage": stage,
+                        "iteration": iteration,
+                        "stream_kind": "heartbeat",
+                    },
+                )
+        except asyncio.CancelledError:
+            raise
 
     def _task_request_timeout(self) -> float | None:
         # Per plan/verify request timeout. max_seconds is the task wall-clock
@@ -4775,7 +5006,7 @@ class AgentTask:
         return None
 
     def _child_execution_limits(self) -> dict[str, Any]:
-        limits = dict(self.limits)
+        limits: dict[str, Any] = dict(self.limits)
         if limits.get("max_no_progress_seconds") is None:
             request_timeout = self._task_request_timeout()
             if request_timeout is not None:
@@ -4797,31 +5028,38 @@ class AgentTask:
 
     async def _await_task_deadline(self, awaitable: Awaitable[Any], *, stage: str) -> Any:
         remaining = self._task_deadline_remaining()
+        heartbeat_task = self._start_heartbeat(stage=stage)
         if remaining is None:
-            return await awaitable
-        if remaining <= 0:
-            self._close_unawaited(awaitable)
-            raise _AgentTaskDeadlineExceeded(
-                stage,
-                limit_name="max_seconds",
-                timeout_seconds=self._task_max_seconds(),
-            )
-        task = asyncio.ensure_future(awaitable)
-        done, pending = await asyncio.wait({task}, timeout=remaining)
-        if pending:
-            task.cancel()
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-            raise _AgentTaskDeadlineExceeded(
-                stage,
-                limit_name="max_seconds",
-                timeout_seconds=self._task_max_seconds(),
-            )
-        return await next(iter(done))
+                return await awaitable
+            finally:
+                await self._stop_heartbeat(heartbeat_task)
+        try:
+            if remaining <= 0:
+                self._close_unawaited(awaitable)
+                raise _AgentTaskDeadlineExceeded(
+                    stage,
+                    limit_name="max_seconds",
+                    timeout_seconds=self._task_max_seconds(),
+                )
+            task = asyncio.ensure_future(awaitable)
+            done, pending = await asyncio.wait({task}, timeout=remaining)
+            if pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                raise _AgentTaskDeadlineExceeded(
+                    stage,
+                    limit_name="max_seconds",
+                    timeout_seconds=self._task_max_seconds(),
+                )
+            return await next(iter(done))
+        finally:
+            await self._stop_heartbeat(heartbeat_task)
 
     @staticmethod
     def _close_unawaited(awaitable: Awaitable[Any]) -> None:
@@ -5955,6 +6193,7 @@ class AgentTask:
         completed = event_type == "done"
         if is_complete is not None:
             completed = is_complete
+        self._last_stream_emit_monotonic = time.monotonic()
         item = AgentExecutionStreamData(
             path=path,
             value=DataFormatter.sanitize(value),
