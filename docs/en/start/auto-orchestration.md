@@ -238,6 +238,13 @@ diagnostics such as low-level Workspace/SQLite fallback details remain in
 snapshots and `task.meta()["diagnostics"]`, but are omitted from the progress
 model input.
 
+For text consumers, `get_async_generator(type="delta")` remains the public text
+stream. In task-strategy executions it includes model-generated text increments
+and also projects selected process events into paragraph text: template progress,
+snapshots, heartbeat status, phase status, retry markers, and the terminal task result.
+Use `type="instant"` when the UI needs the original structured event payloads
+with `path`, `value`, `delta`, `is_complete`, and `meta`.
+
 During long quiet waits, AgentTask may emit an `agent_task.heartbeat` stream item
 after `agent_task.heartbeat_interval_seconds` seconds without any other stream
 item. The default interval is 10 seconds. Heartbeats are observational status
@@ -263,10 +270,26 @@ diagnostics only until the framework has produced this Workspace readback
 evidence, preserving a real `final.md` or other deliverable for host-side
 review.
 
+When the write succeeds and readback is trusted, verifier input includes the
+readback fields and `capability_evidence.artifacts.readback`; with
+`max_iterations=1`, a real readable artifact should not become partial only
+because the evidence chain was omitted. If readback fails or lacks trusted
+`path` / `bytes` / `sha256` evidence, diagnostics use
+`agent_task.workspace_artifact.readback_failed` or
+`agent_task.workspace_artifact.readback_insufficient` so the problem is reported
+as Workspace artifact readback missing/insufficient, not as a generic budget or
+iteration shortfall.
+
 If the structured task input or output contract declares required deliverables,
 AgentTask host guards require those Workspace files to exist and read back before
 accepting completion. A verifier response that says a file exists is not enough
 unless Workspace readback confirms it.
+
+For public reference material, such as framework introductions or API guidance,
+task verifier acceptance is still not a source-quality guarantee by itself. Feed
+current docs/spec/source references into the task or add an Agently model-judge /
+source-reference check so stale or generalized API claims cannot pass only
+because the task-level verifier accepted the draft.
 
 Intermediate process steps with strong structured contracts use Agently
 `.output(..., format=...)` on the owning `ModelRequest` or `AgentExecution`.

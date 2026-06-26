@@ -1888,6 +1888,7 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
     result = await execution.async_get_data()
     stream_items = await stream_task
     meta = await execution.async_get_meta()
+    delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
     elapsed = asyncio.get_running_loop().time() - started_at
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
@@ -1905,6 +1906,7 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
         for item in heartbeat_items
         if isinstance(getattr(item, "value", None), dict)
     )
+    assert "Still working on workspace_artifact_draft" in delta_text
     assert not (tmp_path / "workspace" / "final.md").exists()
 
 

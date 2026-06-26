@@ -4,6 +4,7 @@ import json
 import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from agently import Agently
 from agently.core import PluginManager
 from agently.core.application.AgentTask import AgentTask
-from agently.types.data import AgentlyRequestData
+from agently.types.data import AgentlyRequestData, TaskBoardCard, TaskBoardCardResult, TaskBoardGraph, TaskBoardRevision
 from agently.utils import DataFormatter, Settings
 from examples.agent_task.interview_question_preparation import judge_interview_semantics
 
@@ -169,6 +170,46 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_reports_readback_failure(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-readback-failure")
+
+    class ReadbackFailingWorkspace:
+        files_root = workspace.files_root
+
+        async def write_file(self, *args: Any, **kwargs: Any) -> Any:
+            return await workspace.write_file(*args, **kwargs)
+
+        async def read_file(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("readback unavailable")
+
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-readback-failure"
+    task.workspace = ReadbackFailingWorkspace()
+    task.diagnostics = {}
+    execution_meta = {"logs": {}}
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_markdown": "# Actual Report\n\nThis content was written but cannot be read back.",
+            "artifact_manifest": {"path": "reports/final.md"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.workspace_artifact",
+    )
+
+    assert (workspace.files_root / "reports/final.md").is_file()
+    assert delivered["file_refs"] == []
+    assert "artifact_refs" not in execution_meta["logs"]
+    assert delivered["workspace_artifact_delivery"]["status"] == "readback_failed"
+    diagnostic = delivered["diagnostics"][0]
+    assert diagnostic["code"] == "agent_task.workspace_artifact.readback_failed"
+    assert "readback failed" in diagnostic["message"]
+    assert "write_failed" not in json.dumps(DataFormatter.sanitize(delivered), ensure_ascii=False)
+    assert task.diagnostics["workspace_artifact_delivery"][0]["status"] == "readback_failed"
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_delivery_prefers_complete_body(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-complete-body")
     task = AgentTask.__new__(AgentTask)
@@ -317,11 +358,21 @@ async def test_agent_task_workspace_artifact_delivery_preserves_existing_full_bo
 async def test_agent_task_flat_workspace_artifact_delivery_before_verification(tmp_path):
     class WorkspaceArtifactRequester(MockAgentTaskRequester):
         name = "WorkspaceArtifactRequester"
+        verify_text = ""
 
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
             if "Verify the task against every success criterion" in text:
+                self.__class__.verify_text = text
                 assert "reports/final.md" in text
+                assert "bytes" in text
+                assert "sha256" in text
+                assert "file_refs" in text
+                assert "artifact_preview" in text
+                assert "Delivered Report" in text
+                assert "capability_evidence" in text
+                assert "artifacts" in text
+                assert "readback" in text
                 assert "agent_task.workspace_artifact.untrusted_model_file_refs" in text
                 payload = {
                     "is_complete": True,
@@ -380,7 +431,11 @@ async def test_agent_task_flat_workspace_artifact_delivery_before_verification(t
     delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
     assert delivery["status"] == "delivered"
     assert delivery["file_refs"][0]["path"] == "reports/final.md"
+    assert delivery["file_refs"][0]["bytes"] > 0
+    assert delivery["file_refs"][0]["sha256"]
+    assert delivery["file_refs"][0]["preview"].startswith("# Delivered Report")
     assert meta["iterations"][0]["verification"]["reason"] == "trusted Workspace readback evidence is present"
+    assert delivery["file_refs"][0]["sha256"][:12] in WorkspaceArtifactRequester.verify_text
 
 
 @pytest.mark.asyncio
@@ -996,6 +1051,84 @@ async def test_acp_recovery_policy_uses_registered_action_after_exhaustion(tmp_p
     assert task.workspace_refs["acp_recovery"]
 
 
+@pytest.mark.asyncio
+async def test_taskboard_card_failure_uses_acp_recovery_after_card_attempts(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-acp-recovery").use_workspace(tmp_path / "workspace")
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_execute_action(action_id: str, payload: dict[str, Any]):
+        calls.append((action_id, payload))
+        return {
+            "ok": True,
+            "status": "success",
+            "agent_id": payload.get("agent_id"),
+            "result": {"final_result": "taskboard card recovered by acp"},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(agent.action, "async_execute_action", fake_execute_action)
+    task = AgentTask(
+        agent,
+        task_id="taskboard-acp-recovery",
+        goal="Recover a failed TaskBoard card.",
+        success_criteria=["ACP recovery evidence is accepted."],
+        execution="taskboard",
+        max_iterations=1,
+        options={"agent_task": {"acp_recovery": {"enabled": True, "agent_id": "codex"}}},
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "collect",
+            "objective": "Collect evidence for the final answer.",
+            "required_outputs": ["Recovered evidence"],
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-acp-recovery",
+        graph=TaskBoardGraph.from_value({"graph_id": "taskboard-acp-recovery-graph", "cards": [card.to_dict()]}),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+
+    async def failing_card(_context, _context_pack):
+        return TaskBoardCardResult(
+            card_id=card.id,
+            status="failed",
+            preview={"error": "missing dynamic handler"},
+            diagnostics=({"code": "taskboard.card.missing_handler", "card_id": card.id},),
+            metadata={"execution_kind": "taskboard_agent_card"},
+        )
+
+    monkeypatch.setattr(cast(Any, task), "_run_taskboard_agent_card", failing_card)
+    monkeypatch.setattr(cast(Any, task), "_should_record_process_reflection", lambda *_args, **_kwargs: False)
+
+    result = await task._run_taskboard_card(
+        context,
+        {
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert result.status == "completed"
+    assert result.metadata["acp_recovery"] is True
+    assert result.metadata["acp_recovered"] is True
+    assert any(item.get("code") == "taskboard.card.acp_recovery" for item in result.diagnostics)
+    assert calls and calls[0][0] == "acp_run_task"
+    payload = calls[0][1]
+    assert payload["agent_id"] == "codex"
+    assert payload["context"]["plan"]["taskboard_card_id"] == "collect"
+    assert payload["context"]["failed_execution_result"]["taskboard_card_result"]["status"] == "failed"
+    assert task.workspace_refs["acp_recovery"]
+
+
 def test_output_contract_guards_invalid_final_result_after_json_fallback(tmp_path):
     agent = _create_agent("agent-output-final-guard").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -1118,6 +1251,7 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     result = await result_facade.async_get_data()
     execution_meta = await result_facade.async_get_meta()
     meta = await task.meta()
+    delta_text = "".join([chunk async for chunk in task.get_async_generator(type="delta")])
     resumed_execution = await result_facade.async_resume()
     resumed_result = await resumed_execution.async_start()
     resumed_meta = await resumed_execution.async_get_meta()
@@ -1168,6 +1302,12 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert all((item.meta or {}).get("child_execution_id") for item in child_execution_items)
     assert any(item.path.endswith(".replan") for item in stream_items)
     assert any(item.path == "result" for item in stream_items)
+    assert "building a Workspace context pack" in delta_text
+    assert "plan ready" in delta_text
+    assert "bounded step finished" in delta_text
+    assert "all success criteria are satisfied" in delta_text
+    assert "Final result:" in delta_text
+    assert "Operator summary for INC-4242." in delta_text
     phase_names = [item["phase"] for item in meta["diagnostics"]["phases"]]
     assert "configured" in phase_names
     assert "planned" in phase_names

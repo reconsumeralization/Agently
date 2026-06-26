@@ -163,6 +163,24 @@ def test_agent_use_acp_skips_missing_or_failed_agents(tmp_path):
     diagnostics = list_result.get("diagnostics", [])
     assert isinstance(diagnostics, list)
     assert diagnostics[0].get("code") == "fake.discovery"
+    assert diagnostics[-1].get("code") == "acp.adapter_hints"
+
+    adapter_hints = cast(list[dict[str, Any]], list_result.get("adapter_hints", []))
+    adapter_aliases = {alias for item in adapter_hints for alias in item.get("aliases", [])}
+    assert {
+        "codex",
+        "claude code",
+        "cc",
+        "openclaw",
+        "hermes",
+        "hermes agent",
+        "gemini",
+    }.issubset(adapter_aliases)
+    assert list_result.get("data", {}).get("adapter_hints") == adapter_hints
+
+    action_info = agent.action.get_action_info(tags=[f"agent-{ agent.name }"])["acp_list_agents"]
+    assert "claude code/cc" in action_info["desc"]
+    assert action_info.get("meta", {}).get("adapter_hints") == adapter_hints
 
 
 def test_agent_use_acp_error_on_missing_agents(tmp_path):

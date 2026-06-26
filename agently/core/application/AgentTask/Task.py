@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import os
 import time
@@ -34,6 +33,7 @@ from agently.core.orchestration import (
     task_board_planning_output_schema,
 )
 from agently.core.orchestration.TaskBoard.TaskBoardValidation import task_board_card_required
+from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
 from agently.core.model.StructuredOutputParser import parse_output_contract_dict
 from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult, TaskBoardRevision
 from agently.types.trigger_flow import TriggerFlowRuntimeData
@@ -75,22 +75,6 @@ _AGENT_TASK_EXECUTION_STRATEGY_ALIASES = {
 }
 
 
-def _is_retry_status_marker_source(path: str, value: Any) -> bool:
-    return (
-        (path == "$status" or path.endswith(".$status"))
-        and isinstance(value, Mapping)
-        and value.get("status") == "failed"
-        and value.get("retry") is True
-    )
-
-
-def _format_retry_marker(value: Any) -> str:
-    reason = value.get("reason") if isinstance(value, Mapping) else None
-    text = str(reason).strip() if reason is not None else ""
-    if not text:
-        text = "Retrying model request."
-    return f"<$retry>{html.escape(text, quote=False)}</$retry>"
-
 _STEP_EXECUTION_SHAPES = {
     "direct",
     "actions",
@@ -122,6 +106,7 @@ _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS = 4
 _TASKBOARD_SOURCE_REFS_MAX = 16
 _TASKBOARD_PROMPT_RESULT_CHARS = 1600
 _TASKBOARD_STREAM_SUMMARY_CHARS = 3000
+_TASKBOARD_RECOVERABLE_CARD_STATUSES = {"failed", "error", "timed_out", "blocked"}
 _WORKSPACE_ARTIFACT_PREVIEW_BYTES = 4000
 _WORKSPACE_ARTIFACT_CONTENT_KEYS = ("content", "markdown", "body", "text")
 _WORKSPACE_ARTIFACT_RESULT_BODY_KEYS = (
@@ -1408,6 +1393,8 @@ class AgentTask:
             result = await self._run_taskboard_control_card(context, context_pack)
         else:
             result = await self._run_taskboard_agent_card(context, context_pack)
+        if str(result.status).strip().lower() in _TASKBOARD_RECOVERABLE_CARD_STATUSES:
+            result = await self._maybe_run_taskboard_card_acp_recovery(context, result)
         if self._should_record_process_reflection("taskboard_card", plan={}):
             await self._record_reflection(
                 max(0, len(self.iterations)),
@@ -1421,6 +1408,119 @@ class AgentTask:
                 },
             )
         return result
+
+    async def _maybe_run_taskboard_card_acp_recovery(
+        self,
+        context: Any,
+        result: TaskBoardCardResult,
+    ) -> TaskBoardCardResult:
+        status = str(result.status).strip().lower()
+        if status not in _TASKBOARD_RECOVERABLE_CARD_STATUSES:
+            return result
+        card = getattr(context, "card", None)
+        card_id = str(getattr(card, "id", "") or getattr(card, "card_id", "") or result.card_id).strip()
+        card_to_dict = getattr(card, "to_dict", None)
+        card_payload = card_to_dict() if callable(card_to_dict) else DataFormatter.sanitize(card)
+        plan = {
+            "execution_shape": "taskboard",
+            "effective_execution_shape": "taskboard",
+            "step_instruction": str(getattr(card, "objective", "") or ""),
+            "expected_evidence": list(getattr(card, "required_outputs", ()) or ()),
+            "rationale": "TaskBoard card failed after its execution attempts; ACP recovery may provide fallback evidence.",
+            "taskboard_card_id": card_id,
+            "taskboard_card": DataFormatter.sanitize(card_payload),
+        }
+        failed_result = {
+            "status": status,
+            "step_result": result.output_digest or result.preview or "",
+            "evidence": ["TaskBoard card failure evidence was captured."],
+            "remaining_work": ["Recover or replace the failed TaskBoard card output."],
+            "taskboard_card_result": result.to_dict(),
+        }
+        failed_meta = {
+            "execution_id": f"{self.id}:taskboard:{card_id or result.card_id}:failed-card",
+            "status": status,
+            "route": {
+                "selected_route": "taskboard_card",
+                "status": status,
+                "card_id": card_id,
+                "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
+            },
+            "logs": {
+                "route_logs": {"taskboard_card": result.to_dict()},
+                "errors": list(result.diagnostics),
+            },
+            "diagnostics": {
+                "taskboard_card": result.to_dict(),
+            },
+        }
+        recovery_iteration_index = max(int(self.max_iterations or 1), len(self.iterations) + 1, 1)
+        recovered_result, recovered_meta = await self._maybe_run_acp_recovery(
+            recovery_iteration_index,
+            plan=plan,
+            execution_result=failed_result,
+            execution_meta=failed_meta,
+        )
+        route = recovered_meta.get("route") if isinstance(recovered_meta, Mapping) else {}
+        if not isinstance(route, Mapping) or route.get("selected_route") != "acp_recovery":
+            return result
+        return self._taskboard_card_result_from_acp_recovery(
+            original=result,
+            recovered_result=recovered_result,
+            recovered_meta=recovered_meta,
+        )
+
+    def _taskboard_card_result_from_acp_recovery(
+        self,
+        *,
+        original: TaskBoardCardResult,
+        recovered_result: Any,
+        recovered_meta: Mapping[str, Any],
+    ) -> TaskBoardCardResult:
+        recovered_status = str(recovered_meta.get("status") or "").strip().lower()
+        route = recovered_meta.get("route") if isinstance(recovered_meta.get("route"), Mapping) else {}
+        route_status = str(route.get("status") or "").strip().lower() if isinstance(route, Mapping) else ""
+        recovered_ok = recovered_status in {"success", "completed"} or route_status in {"success", "completed"}
+        recovered_map = recovered_result if isinstance(recovered_result, Mapping) else {}
+        diagnostics = [
+            *list(original.diagnostics),
+            {
+                "code": "taskboard.card.acp_recovery",
+                "status": "completed" if recovered_ok else "failed",
+                "recovered": recovered_ok,
+                "original_status": original.status,
+                "route": DataFormatter.sanitize(route),
+                "workspace_refs": DataFormatter.sanitize(recovered_meta.get("workspace_refs", {})),
+            },
+        ]
+        preview = {
+            "status": "completed" if recovered_ok else "failed",
+            "answer": recovered_map.get("step_result") or "ACP fallback completed.",
+            "acp_recovery": DataFormatter.sanitize(recovered_map.get("acp_recovery", recovered_result)),
+            "original_card_result": original.to_dict(),
+            "recovery_meta": DataFormatter.sanitize(recovered_meta),
+        }
+        metadata = dict(original.metadata)
+        metadata.update(
+            {
+                "acp_recovery": True,
+                "acp_recovered": recovered_ok,
+                "original_status": original.status,
+                "recovery_route": DataFormatter.sanitize(route),
+            }
+        )
+        return TaskBoardCardResult(
+            card_id=original.card_id,
+            status="completed" if recovered_ok else original.status,
+            output_digest=str(recovered_map.get("step_result") or "ACP fallback completed."),
+            preview=preview,
+            artifact_refs=original.artifact_refs,
+            file_refs=original.file_refs,
+            diagnostics=tuple(diagnostics),
+            patch_proposal=original.patch_proposal,
+            metadata=metadata,
+        )
 
     def _bind_action_workspace(self, execution: Any) -> None:
         request = getattr(execution, "request", None)
@@ -1837,6 +1937,55 @@ class AgentTask:
         workspace_refs.setdefault("agent_task_artifacts", []).extend(DataFormatter.sanitize(refs))
         logs["workspace_refs"] = workspace_refs
 
+    @staticmethod
+    def _workspace_artifact_readback_missing_diagnostic(
+        *,
+        code: str,
+        path: str,
+        source: str,
+        message: str,
+        error: Exception | None = None,
+        readback: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        diagnostic: dict[str, Any] = {
+            "code": code,
+            "message": message,
+            "path": path,
+            "source": source,
+        }
+        if error is not None:
+            diagnostic["error"] = {"type": error.__class__.__name__, "message": str(error)}
+        if readback is not None:
+            diagnostic["readback"] = DataFormatter.sanitize(dict(readback))
+        return diagnostic
+
+    @staticmethod
+    def _workspace_artifact_ref_has_trusted_readback(ref: Mapping[str, Any]) -> bool:
+        path = str(ref.get("path") or "").strip()
+        sha256 = str(ref.get("sha256") or "").strip()
+        try:
+            byte_count = int(ref.get("bytes") or 0)
+        except (TypeError, ValueError):
+            byte_count = 0
+        return bool(path and sha256 and byte_count > 0)
+
+    @classmethod
+    def _artifact_readback_evidence_ids(cls, refs: Any) -> list[str]:
+        if not isinstance(refs, Sequence) or isinstance(refs, str | bytes | bytearray):
+            return []
+        evidence_ids: list[str] = []
+        for ref in refs:
+            if not isinstance(ref, Mapping):
+                continue
+            if not cls._workspace_artifact_ref_has_trusted_readback(ref):
+                continue
+            path = str(ref.get("path") or "").strip()
+            sha256 = str(ref.get("sha256") or "").strip()
+            evidence_id = f"{path}#{sha256[:12]}" if sha256 else path
+            if evidence_id and evidence_id not in evidence_ids:
+                evidence_ids.append(evidence_id)
+        return evidence_ids
+
     async def _deliver_workspace_artifact(
         self,
         execution_result: Any,
@@ -2023,7 +2172,6 @@ class AgentTask:
             return DataFormatter.sanitize(result)
         try:
             write_result = await self.workspace.write_file(path, content, append=False)
-            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
         except Exception as error:
             delivery_record.update(
                 {
@@ -2044,6 +2192,32 @@ class AgentTask:
             result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
             return DataFormatter.sanitize(result)
 
+        try:
+            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+        except Exception as error:
+            delivery_record.update(
+                {
+                    "status": "readback_failed",
+                    "write": DataFormatter.sanitize(write_result),
+                    "error": {"type": error.__class__.__name__, "message": str(error)},
+                }
+            )
+            diagnostics.append(
+                self._workspace_artifact_readback_missing_diagnostic(
+                    code="agent_task.workspace_artifact.readback_failed",
+                    message=(
+                        "Workspace artifact readback failed after write; trusted file_refs were not produced."
+                    ),
+                    path=path,
+                    source=source,
+                    error=error,
+                )
+            )
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+            result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
+            return DataFormatter.sanitize(result)
+
         ref = {
             "path": str(read_result.get("path") or write_result.get("path") or path),
             "bytes": int(read_result.get("bytes") or write_result.get("bytes") or 0),
@@ -2057,6 +2231,38 @@ class AgentTask:
             "read_bytes": int(read_result.get("read_bytes") or 0),
             "handler_id": read_result.get("handler_id"),
         }
+        if not self._workspace_artifact_ref_has_trusted_readback(ref):
+            delivery_record.update(
+                {
+                    "status": "readback_insufficient",
+                    "write": DataFormatter.sanitize(write_result),
+                    "readback": {
+                        "path": ref["path"],
+                        "bytes": ref["bytes"],
+                        "sha256": ref["sha256"],
+                        "truncated": ref["truncated"],
+                        "read_bytes": ref["read_bytes"],
+                        "handler_id": ref["handler_id"],
+                    },
+                }
+            )
+            diagnostics.append(
+                self._workspace_artifact_readback_missing_diagnostic(
+                    code="agent_task.workspace_artifact.readback_insufficient",
+                    message=(
+                        "Workspace artifact readback was missing or insufficient; "
+                        "trusted file_refs were not produced."
+                    ),
+                    path=path,
+                    source=source,
+                    readback=read_result,
+                )
+            )
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+            result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
+            return DataFormatter.sanitize(result)
+
         delivery_record.update(
             {
                 "status": "delivered",
@@ -2336,11 +2542,19 @@ class AgentTask:
         try:
             read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
         except Exception as error:
+            diagnostic = self._workspace_artifact_readback_missing_diagnostic(
+                code="agent_task.workspace_artifact.readback_failed",
+                message="Workspace artifact draft readback failed after write; trusted file_refs were not produced.",
+                path=path,
+                source=source,
+                error=error,
+            )
             delivery_record.update(
                 {
-                    "status": "failed",
+                    "status": "readback_failed",
                     "error": {"type": error.__class__.__name__, "message": str(error)},
                     "bytes_written": bytes_written,
+                    "diagnostics": [diagnostic],
                 }
             )
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
@@ -2359,6 +2573,35 @@ class AgentTask:
             "read_bytes": int(read_result.get("read_bytes") or 0),
             "handler_id": read_result.get("handler_id"),
         }
+        if not self._workspace_artifact_ref_has_trusted_readback(ref):
+            diagnostic = self._workspace_artifact_readback_missing_diagnostic(
+                code="agent_task.workspace_artifact.readback_insufficient",
+                message=(
+                    "Workspace artifact draft readback was missing or insufficient; "
+                    "trusted file_refs were not produced."
+                ),
+                path=path,
+                source=source,
+                readback=read_result,
+            )
+            delivery_record.update(
+                {
+                    "status": "readback_insufficient",
+                    "bytes_written": bytes_written,
+                    "readback": {
+                        "path": ref["path"],
+                        "bytes": ref["bytes"],
+                        "sha256": ref["sha256"],
+                        "truncated": ref["truncated"],
+                        "read_bytes": ref["read_bytes"],
+                        "handler_id": ref["handler_id"],
+                    },
+                    "diagnostics": [diagnostic],
+                }
+            )
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
+            return None
+
         delivery_record.update(
             {
                 "status": "delivered",
@@ -7217,16 +7460,7 @@ class AgentTask:
         if type == "all":
             return ("agent_task", item)
         if type == "delta":
-            path = str(getattr(item, "path", "") or "")
-            value = getattr(item, "value", None)
-            if _is_retry_status_marker_source(path, value):
-                return _format_retry_marker(value)
-            if getattr(item, "event_type", None) != "delta":
-                return None
-            delta = getattr(item, "delta", None)
-            if delta is None:
-                return None
-            return str(delta)
+            return project_agent_execution_text_delta(item)
         return item
 
     async def _emit_progress(
@@ -7609,6 +7843,7 @@ class AgentTask:
         )
         route = execution_meta.get("route", {})
         artifact_refs = logs.get("artifact_refs", [])
+        artifact_readbacks = AgentTask._artifact_readback_evidence_ids(artifact_refs)
         workspace_refs = execution_meta.get("workspace_refs") or logs.get("workspace_refs", {})
         raw_errors = logs.get("errors", [])
         execution_errors: list[Any]
@@ -7649,7 +7884,7 @@ class AgentTask:
             "capability_evidence": {
                 "actions": {"succeeded": succeeded_actions, "failed": failed_actions},
                 "skills": {"selected": selected_skill_ids},
-                "artifacts": {"readback": []},
+                "artifacts": {"readback": artifact_readbacks},
                 "validations": {"passed": [], "failed": []},
             },
             "artifact_refs": DataFormatter.sanitize(artifact_refs),

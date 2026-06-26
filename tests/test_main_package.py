@@ -272,7 +272,7 @@ async def test_agent_execution_max_no_progress_seconds_raises_typed_stall():
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_stream_keeps_delta_events_raw():
+async def test_agent_execution_stream_preserves_delta_event_structure():
     stream = AgentExecutionStream(
         execution_id="exec-output-policy",
         lineage={"task_id": "issue-intake", "step_id": "collect"},

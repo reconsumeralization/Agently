@@ -37,6 +37,52 @@ def _resolve_sync(value: Any) -> Any:
     return value
 
 
+COMMON_ACP_ADAPTER_HINTS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "codex",
+        "label": "Codex",
+        "aliases": ("codex",),
+    },
+    {
+        "name": "claude code",
+        "label": "Claude Code",
+        "aliases": ("claude code", "cc", "claude"),
+    },
+    {
+        "name": "openclaw",
+        "label": "OpenClaw",
+        "aliases": ("openclaw",),
+    },
+    {
+        "name": "hermes",
+        "label": "Hermes Agent",
+        "aliases": ("hermes", "hermes agent"),
+    },
+    {
+        "name": "gemini",
+        "label": "Gemini",
+        "aliases": ("gemini",),
+    },
+)
+
+COMMON_ACP_ADAPTER_HINT_MESSAGE = (
+    "Common ACP adapter names/aliases include codex, claude code/cc, "
+    "openclaw, hermes/hermes agent, and gemini. These are hints only; "
+    "acp_run_task is registered only after local discovery verifies a runnable agent."
+)
+
+
+def common_acp_adapter_hints() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": str(item["name"]),
+            "label": str(item["label"]),
+            "aliases": [str(alias) for alias in item["aliases"]],
+        }
+        for item in COMMON_ACP_ADAPTER_HINTS
+    ]
+
+
 @runtime_checkable
 class ACPProvider(Protocol):
     def discover_agents(
@@ -572,7 +618,10 @@ class ACP:
         list_action_id = self._action_name("acp_list_agents")
         action.register_action(
             action_id=list_action_id,
-            desc="List handshake-verified local Agent Client Protocol coding agents available to this Agent.",
+            desc=(
+                "List handshake-verified local Agent Client Protocol coding agents available to this Agent. "
+                + COMMON_ACP_ADAPTER_HINT_MESSAGE
+            ),
             kwargs={},
             func=self.list_agents,
             tags=tags,
@@ -585,6 +634,7 @@ class ACP:
                 "root": str(self.root),
                 "session_scope": self.session_scope,
                 "diagnostics": list(self._diagnostics),
+                "adapter_hints": common_acp_adapter_hints(),
             },
         )
         action_ids.append(list_action_id)
@@ -615,6 +665,7 @@ class ACP:
                     "root": str(self.root),
                     "session_scope": self.session_scope,
                     "agent_ids": [agent["agent_id"] for agent in self._agents],
+                    "adapter_hints": common_acp_adapter_hints(),
                 },
             )
             action_ids.append(run_action_id)
@@ -622,10 +673,21 @@ class ACP:
 
     def list_agents(self) -> dict[str, Any]:
         self._discover()
+        diagnostics = list(self._diagnostics)
+        adapter_hints = common_acp_adapter_hints()
+        if not self._agents:
+            diagnostics.append(
+                {
+                    "code": "acp.adapter_hints",
+                    "message": COMMON_ACP_ADAPTER_HINT_MESSAGE,
+                    "adapter_hints": adapter_hints,
+                }
+            )
         data = {
             "agents": list(self._agents or []),
-            "diagnostics": list(self._diagnostics),
+            "diagnostics": diagnostics,
             "root": str(self.root),
+            "adapter_hints": adapter_hints,
         }
         return {
             "ok": bool(self._agents),

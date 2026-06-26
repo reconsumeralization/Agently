@@ -146,7 +146,10 @@ Agent Client Protocol (ACP) coding agents are exposed as Action capability, not
 as an AgentExecution route. Use `agent.use_acp(on_missing="skip")` to
 scan local ACP endpoints and built-in local coding-agent CLI adapters, then
 register `acp_list_agents` plus `acp_run_task` only when a runnable agent is
-verified. Built-in adapters cover common Codex and Claude Code command
+verified. `acp_list_agents` also returns non-binding adapter-name hints for
+common ACP adapters such as `codex`, `claude code` / `cc`, `openclaw`,
+`hermes` / `hermes agent`, and `gemini`; these hints do not make an agent
+runnable. Built-in local CLI adapters cover common Codex and Claude Code command
 locations in addition to the current process `PATH`; they use fixed
 framework-owned argv templates and do not expose model-visible shell execution.
 The default `on_missing="skip"` records diagnostics and avoids fake runnable

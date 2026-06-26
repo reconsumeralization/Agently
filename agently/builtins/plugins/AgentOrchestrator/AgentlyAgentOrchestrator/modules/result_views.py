@@ -15,12 +15,12 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import json
-from collections.abc import AsyncGenerator, Generator, Mapping
+from collections.abc import AsyncGenerator, Generator
 from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
+from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
 from agently.utils import DataFormatter, FunctionShifter
 
 from .diagnostics import build_execution_meta
@@ -112,34 +112,8 @@ def _project_stream_item(item: Any, type: Any) -> Any:
     if type == "all":
         return ("agent_execution", item)
     if type == "delta":
-        path = str(getattr(item, "path", "") or "")
-        value = getattr(item, "value", None)
-        if _is_retry_status_marker_source(path, value):
-            return _format_retry_marker(value)
-        if getattr(item, "event_type", None) != "delta":
-            return None
-        delta = getattr(item, "delta", None)
-        if delta is None:
-            return None
-        return str(delta)
+        return project_agent_execution_text_delta(item)
     return item
-
-
-def _is_retry_status_marker_source(path: str, value: Any) -> bool:
-    return (
-        (path == "$status" or path.endswith(".$status"))
-        and isinstance(value, Mapping)
-        and value.get("status") == "failed"
-        and value.get("retry") is True
-    )
-
-
-def _format_retry_marker(value: Any) -> str:
-    reason = value.get("reason") if isinstance(value, Mapping) else None
-    text = str(reason).strip() if reason is not None else ""
-    if not text:
-        text = "Retrying model request."
-    return f"<$retry>{html.escape(text, quote=False)}</$retry>"
 
 
 def _retrieve_generator_start_exception(task: "asyncio.Task[Any]") -> None:
