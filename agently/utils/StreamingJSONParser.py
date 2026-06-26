@@ -37,7 +37,7 @@ class StreamingJSONParser:
         schema (PromptOutputStructure): The schema describing the expected JSON structure.
     """
 
-    DEFAULT_MAX_INCOMPLETE_PARSE_CHARS = 8192
+    DEFAULT_MAX_INCOMPLETE_PARSE_CHARS = 1024
 
     def __init__(
         self,
@@ -52,13 +52,18 @@ class StreamingJSONParser:
             schema (PromptOutputStructure): The schema describing the expected JSON structure.
         """
         self.schema = schema
-        self.max_incomplete_parse_chars = max_incomplete_parse_chars
+        self.max_incomplete_parse_chars = (
+            self.DEFAULT_MAX_INCOMPLETE_PARSE_CHARS
+            if max_incomplete_parse_chars is None
+            else max_incomplete_parse_chars
+        )
         self.completer = StreamingJSONCompleter()
         self.previous_data = {}
         self.current_data = {}
         self.field_completion_status = set()  # Tracks completed field paths
         self.string_values = {}  # Tracks current string values for fields
         self.last_complete_structure = {}  # Last complete structure for completion checks
+        self._large_incremental_parse_deferred = False
 
         # Get the expected field parsing order and all possible paths
         self.expected_field_order = DataPathBuilder.extract_parsing_key_orders(schema, style="dot")
@@ -117,13 +122,14 @@ class StreamingJSONParser:
         return False
 
     def _should_skip_large_incremental_parse(self) -> bool:
-        if self.max_incomplete_parse_chars is None or self.max_incomplete_parse_chars <= 0:
+        if self.max_incomplete_parse_chars <= 0:
             return False
         raw_buffer = str(getattr(self.completer, "_buffer", "") or "")
         return len(raw_buffer) > self.max_incomplete_parse_chars
 
     def _large_incremental_parse_status(self) -> StreamingData:
         raw_buffer = str(getattr(self.completer, "_buffer", "") or "")
+        self._large_incremental_parse_deferred = True
         return StreamingData(
             path="$status",
             value={
@@ -593,7 +599,8 @@ class StreamingJSONParser:
         """
         self.completer.append(chunk)
         if self._should_skip_large_incremental_parse():
-            yield self._large_incremental_parse_status()
+            if not self._large_incremental_parse_deferred:
+                yield self._large_incremental_parse_status()
             return
         if self._parse_buffer_once():
             async for event in self._compare_and_generate_events():

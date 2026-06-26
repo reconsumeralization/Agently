@@ -465,8 +465,10 @@ class AgentlyResponseParser(ResponseParser):
             yield streaming_data
 
     def _new_streaming_json_parser(self) -> StreamingJSONParser:
-        max_chars = self.settings.get("response.streaming_parse_max_incomplete_chars", None)
-        if max_chars is not None:
+        max_chars: Any = self.settings.get("response.streaming_parse_max_incomplete_chars", None)
+        if max_chars is None:
+            max_chars = StreamingJSONParser.DEFAULT_MAX_INCOMPLETE_PARSE_CHARS
+        else:
             try:
                 max_chars = int(max_chars)
             except (TypeError, ValueError):

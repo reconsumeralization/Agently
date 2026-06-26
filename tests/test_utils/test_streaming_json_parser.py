@@ -217,6 +217,46 @@ async def test_streaming_json_parser_skips_large_incomplete_parse(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_streaming_json_parser_treats_none_threshold_as_default(monkeypatch):
+    schema = {"report": (str,)}
+    parser = StreamingJSONParser(schema, max_incomplete_parse_chars=None)
+
+    def fail_if_called(_value):
+        raise AssertionError("None threshold should keep the default large-delta guard")
+
+    parser_module = importlib.import_module("agently.utils.StreamingJSONParser")
+    monkeypatch.setattr(parser_module.json5, "loads", fail_if_called)
+
+    events = []
+    async for item in parser.parse_chunk('{"report": "' + ("x" * 20000)):
+        events.append(item)
+
+    assert len(events) == 1
+    assert events[0].path == "$status"
+    assert events[0].value["status"] == "streaming_parse_deferred"
+
+
+@pytest.mark.asyncio
+async def test_streaming_json_parser_emits_large_deferred_status_once(monkeypatch):
+    schema = {"report": (str,)}
+    parser = StreamingJSONParser(schema, max_incomplete_parse_chars=32)
+
+    def fail_if_called(_value):
+        raise AssertionError("large JSON deltas should stay deferred until finalize")
+
+    parser_module = importlib.import_module("agently.utils.StreamingJSONParser")
+    monkeypatch.setattr(parser_module.json5, "loads", fail_if_called)
+
+    events = []
+    for chunk in ['{"report": "' + ("x" * 128), "more text", "even more text"]:
+        async for item in parser.parse_chunk(chunk):
+            events.append(item)
+
+    assert [item.path for item in events] == ["$status"]
+    assert events[0].value["status"] == "streaming_parse_deferred"
+
+
+@pytest.mark.asyncio
 async def test_streaming_json_parser_parses_large_complete_payload_after_threshold():
     schema = {"report": (str,)}
     parser = StreamingJSONParser(schema, max_incomplete_parse_chars=32)
