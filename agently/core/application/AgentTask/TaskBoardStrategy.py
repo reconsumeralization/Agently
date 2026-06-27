@@ -1142,6 +1142,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                         *output_file_refs,
                     ]
                 ),
+                file_refs=tuple(ref for ref in output_file_refs if isinstance(ref, Mapping)),
                 diagnostics=tuple(diagnostics),
                 metadata={
                     "execution_id": execution_meta.get("execution_id"),
@@ -1446,6 +1447,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             status=card_status,
             preview=DataFormatter.sanitize(card_output),
             artifact_refs=tuple(output_file_refs),
+            file_refs=tuple(ref for ref in output_file_refs if isinstance(ref, Mapping)),
             diagnostics=tuple(diagnostics),
             patch_proposal=patch_proposal,
             metadata={
@@ -2082,6 +2084,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             status=str(payload.get("status") or "failed"),
             preview=DataFormatter.sanitize(payload),
             artifact_refs=tuple(refs),
+            file_refs=tuple(file_refs),
             diagnostics=tuple(diagnostics),
             metadata={
                 "execution_id": execution_meta.get("execution_id"),
@@ -2820,10 +2823,12 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 refs.append(dict(DataFormatter.sanitize(item)))
 
         collect(evidence_view.get("file_refs"))
+        collect(evidence_view.get("artifact_refs"))
         cards = evidence_view.get("cards")
         if isinstance(cards, Sequence) and not isinstance(cards, str | bytes | bytearray):
             for card in cards:
                 if isinstance(card, Mapping):
+                    collect(card.get("artifact_refs"))
                     collect(card.get("file_refs"))
         return refs
 

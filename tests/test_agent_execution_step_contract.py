@@ -1848,6 +1848,72 @@ async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     assert result.metadata["file_ref_count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_taskboard_readback_card_reads_workspace_file_refs_from_artifact_refs(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-file-readback-legacy").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Read cold Workspace file evidence from an upstream card result.",
+        success_criteria=["The readback card reads the Workspace file ref."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    write_result = await task.workspace.write_file(
+        "deliverables/final.md",
+        "# Final Deliverable\n\nThe complete Workspace-backed deliverable body is here.",
+    )
+    file_ref = dict(write_result["file_refs"][0])
+    revision = TaskBoardRevision.create(
+        board_id="workspace-file-readback-artifact-ref",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "workspace-file-readback-artifact-ref-graph",
+                "cards": [
+                    {"id": "draft", "objective": "Write the Workspace-backed deliverable."},
+                    {
+                        "id": "readback",
+                        "objective": "Read the upstream Workspace-backed deliverable.",
+                        "depends_on": ["draft"],
+                        "allowed_execution_shape": "readback",
+                        "required_outputs": ["Workspace file content preview."],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": "Workspace artifact delivered at deliverables/final.md",
+                        "artifact_refs": [file_ref],
+                    },
+                }
+            ],
+        },
+    )
+    card = revision.graph.card_by_id()["readback"]
+    result = await task._run_taskboard_readback_card(
+        SimpleNamespace(
+            card=card,
+            revision=revision,
+        ),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    assert result.metadata["file_ref_count"] == 1
+    assert result.file_refs[0]["path"] == "deliverables/final.md"
+    assert result.preview["file_readbacks"][0]["ok"] is True
+    assert "complete Workspace-backed deliverable body" in result.preview["file_readbacks"][0]["content_preview"]
+
+
 def test_execution_options_validate_known_route_schema():
     with pytest.raises(ValueError):
         ExecutionOptions.model_validate({"routes": {"skills": {"unknown": True}}})
