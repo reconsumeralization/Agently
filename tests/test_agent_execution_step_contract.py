@@ -1906,6 +1906,75 @@ def test_taskboard_control_direct_target_refs_become_action_evidence_patch():
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
 
 
+def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readback():
+    discovered_refs = AgentTask._collect_taskboard_source_refs(
+        {
+            "url": "https://example.test/source.pdf",
+            "title": "Discovered source document",
+            "media_type": "application/pdf",
+        }
+    )
+    read_refs = AgentTask._collect_taskboard_source_refs(
+        {
+            "url": "https://example.test/source.pdf",
+            "title": "Read source document",
+            "content_preview": "Bounded extracted source content.",
+        }
+    )
+    policy = AgentTask._taskboard_source_ref_policy()
+
+    assert discovered_refs[0]["content_state"] == "ref_only"
+    assert read_refs[0]["content_state"] == "bounded_readback_available"
+    assert "ref_only" in policy["content_states"]
+
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="ref-only-target-readback",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "ref-only-target-readback-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect discovered intermediate source refs."},
+                    {
+                        "id": "final",
+                        "objective": "Synthesize only after unread source refs are materialized.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "control",
+                        "required_outputs": ["final.md"],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": {"card_id": "collect", "status": "completed"}}],
+        },
+    )
+    card = revision.graph.card_by_id()["final"]
+    diagnostics: list[dict[str, Any]] = []
+    patch = AgentTask._taskboard_control_patch_proposal(
+        SimpleNamespace(revision=revision, card=card),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "target_refs": [discovered_refs[0]["url"]],
+            "gaps": ["The source ref is discovered-only; scoped source content is still needed."],
+            "remaining_work": ["Materialize the ref before final synthesis."],
+        },
+        diagnostics,
+    )
+
+    assert patch is not None
+    next_revision = validator.apply_patch(revision, patch)
+    cards = next_revision.graph.card_by_id()
+    assert cards["final.evidence"].allowed_execution_shape == "actions"
+    assert cards["final.evidence"].metadata["target_refs"] == ["https://example.test/source.pdf"]
+    assert cards["final.continue"].depends_on == ("collect", "final.evidence")
+
+
 def test_taskboard_control_readback_required_patch_type_becomes_readback_patch():
     validator = TaskBoardValidator()
     revision = TaskBoardRevision.create(

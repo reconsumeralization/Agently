@@ -288,10 +288,15 @@ notes, or persist large extracted text as Workspace or Action artifact refs.
 Hot prompts should carry compact refs and bounded previews; later blocks can
 open scoped snippets with `read_file(max_bytes=..., offset=...)` or artifact
 readback when they need the content. These intermediate refs are execution
-evidence, not final deliverable proof. If an Action artifact readback exposes
-Workspace `file_refs` for a materialized download, TaskBoard readback promotes
-those nested refs to card-level `file_refs` so later work can use Workspace
-readback instead of relying on a buried JSON preview. When a non-final
+evidence, not final deliverable proof. A discovered URL, path, download, or
+snapshot ref is also not evidence that the content has been read; it remains
+`ref_only` until a bounded readback or content preview is visible.
+Source-grounded deliverables should either request structured `target_refs`
+readback for unread refs or label them as discovered-only rather than claiming
+facts from them. If an Action artifact readback exposes Workspace `file_refs`
+for a materialized download, TaskBoard readback promotes those nested refs to
+card-level `file_refs` so later work can use Workspace readback instead of
+relying on a buried JSON preview. When a non-final
 TaskBoard card proposes a required final path such as `final.md`, AgentTask
 relocates that intermediate artifact to `working/taskboard/<card-id>/...` and
 keeps the declared final path for the final synthesis or finalization card.

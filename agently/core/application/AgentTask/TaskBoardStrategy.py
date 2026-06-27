@@ -21,6 +21,15 @@ from agently.types.data import TaskBoardPatch
 from .TaskShared import *
 
 
+_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION = (
+    "Apply source_ref_policy. A source ref with content_state='ref_only' proves only that a URL, path, "
+    "download, snapshot, note, or artifact ref was discovered or materialized; it is not evidence that the "
+    "source content has been read. Use it as content support only after a bounded readback/content preview is "
+    "available. If the deliverable depends on unread source content, request readback with target_refs or call "
+    "the available readback action; otherwise label the ref as discovered-only and do not claim facts from it. "
+)
+
+
 class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
     async def _run_taskboard(self) -> dict[str, Any]:
         iteration_index = 1
@@ -909,6 +918,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
                 "dependency_readbacks": dependency_readbacks,
                 "available_readback": self._taskboard_available_readback(evidence_view),
+                "source_ref_policy": self._taskboard_source_ref_policy(),
                 "source_refs": source_refs,
                 "previous_attempt_errors": previous_errors,
                 "attempt": {
@@ -942,7 +952,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "for deliverables. If the task is source-grounded, include concrete source URLs, file paths, or "
                 "evidence refs from source_refs/dependency_readbacks in the deliverable body; do not mention a "
                 "source title or local downloaded filename without its verifier-visible URL/path when such a ref "
-                "exists. Review or "
+                f"exists. {_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION}Review or "
                 "verification cards must not put review notes in those deliverable fields unless they include the "
                 "full corrected deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask "
                 "own lifecycle completion."
@@ -1198,6 +1208,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
             "dependency_readbacks": dependency_readbacks,
             "available_readback": self._taskboard_available_readback(evidence_view),
+            "source_ref_policy": self._taskboard_source_ref_policy(),
             "source_refs": source_refs,
             "context_pack": DataFormatter.sanitize(context_pack),
             "execution_prompt": self._execution_prompt_context(),
@@ -1226,7 +1237,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "trusted file_refs. Do not invent file_refs for deliverables. If the task is source-grounded, include "
             "the concrete source URLs, file paths, or evidence refs used by the deliverable in the deliverable body; "
             "do not mention a source title without its verifier-visible URL/path when such a ref exists. "
-            "Also return whether the card is sufficient "
+            f"{_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION}Also return whether the card is sufficient "
             "and what continuation, if any, the board should consider."
         )
         control_output_schema = {
@@ -3523,6 +3534,64 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         }
 
     @classmethod
+    def _taskboard_source_ref_policy(cls) -> dict[str, Any]:
+        return {
+            "schema_version": "agent_task_taskboard_source_refs/v1",
+            "content_states": {
+                "ref_only": (
+                    "The URL/path/artifact was discovered or materialized, but the current input does not contain "
+                    "a bounded content readback for it."
+                ),
+                "bounded_readback_available": (
+                    "The current input contains a bounded readback or content preview for this ref. Use only the "
+                    "visible preview unless a later block reads more."
+                ),
+            },
+            "rules": [
+                "Keep downloads, webpage snapshots, notes, generated code, and extracted text as cold refs unless "
+                "a later block needs scoped content.",
+                "Do not claim source contents from ref_only records.",
+                "When unread source content is required, return next_board_action=readback with concrete "
+                "target_refs or use an available readback action.",
+                "If a ref remains unread but is still useful, label it as discovered-only in the deliverable or "
+                "diagnostics.",
+            ],
+        }
+
+    @classmethod
+    def _taskboard_source_ref_content_state(cls, candidate: Mapping[str, Any]) -> str:
+        raw_state = str(
+            candidate.get("content_state")
+            or candidate.get("readback_state")
+            or candidate.get("materialization_state")
+            or ""
+        ).strip()
+        if raw_state in {"bounded_readback_available", "bounded_preview_available", "content_read"}:
+            return "bounded_readback_available"
+        if raw_state in {"ref_only", "discovered_only", "unread"}:
+            return "ref_only"
+
+        readback_keys = (
+            "content_preview",
+            "value_preview",
+            "readback_preview",
+            "bounded_preview",
+            "file_readbacks",
+            "readbacks",
+            "workspace_readback",
+            "artifact_readback",
+        )
+        for key in readback_keys:
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return "bounded_readback_available"
+            if isinstance(value, Mapping) and value:
+                return "bounded_readback_available"
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray) and value:
+                return "bounded_readback_available"
+        return "ref_only"
+
+    @classmethod
     def _collect_taskboard_source_refs(
         cls,
         *values: Any,
@@ -3583,6 +3652,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 return
             if not any(key in record for key in url_keys) and not record.get("path"):
                 return
+            record["content_state"] = cls._taskboard_source_ref_content_state(candidate)
             dedupe_key = "|".join(
                 str(record.get(field) or "")
                 for field in (
