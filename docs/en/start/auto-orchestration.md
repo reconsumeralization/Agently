@@ -300,6 +300,9 @@ relying on a buried JSON preview. When a non-final
 TaskBoard card proposes a required final path such as `final.md`, AgentTask
 relocates that intermediate artifact to `working/taskboard/<card-id>/...` and
 keeps the declared final path for the final synthesis or finalization card.
+Framework-generated final repair or continuation cards that are marked with the
+required final deliverable path are authorized to write that path, so repair
+does not loop by repeatedly producing only working evidence files.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 Workspace file refs with bounded cold readback previews. Framework-generated

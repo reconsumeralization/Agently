@@ -1941,6 +1941,7 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
                         "depends_on": ["collect"],
                         "allowed_execution_shape": "control",
                         "required_outputs": ["final.md"],
+                        "metadata": {"final_workspace_deliverables": ["final.md"]},
                     },
                 ],
             }
@@ -1973,6 +1974,8 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
     assert cards["final.evidence"].allowed_execution_shape == "actions"
     assert cards["final.evidence"].metadata["target_refs"] == ["https://example.test/source.pdf"]
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
+    assert cards["final.continue"].metadata["final_workspace_deliverables"] == ["final.md"]
+    assert "final.md" in cards["final.continue"].objective
 
 
 def test_taskboard_control_readback_required_patch_type_becomes_readback_patch():
@@ -2380,6 +2383,68 @@ async def test_taskboard_intermediate_card_relocates_required_final_deliverable_
     assert not (task.workspace.files_root / "final.md").exists()
     assert delivered["diagnostics"][0]["code"] == (
         "taskboard.workspace_artifact.final_path_relocated_for_intermediate_card"
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_final_repair_card_keeps_required_final_deliverable_path(tmp_path):
+    agent = _create_agent("execution-taskboard-final-repair-final-path").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Repair and materialize the final deliverable.",
+        success_criteria=["The final deliverable file exists."],
+        execution="taskboard",
+        max_iterations=None,
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    revision = TaskBoardRevision.create(
+        board_id="final-repair-final-path",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "final-repair-final-path-graph",
+                "cards": [
+                    {
+                        "id": "repair",
+                        "objective": "Repair the final deliverable.",
+                        "metadata": {"final_workspace_deliverables": ["final.md"]},
+                    },
+                    {
+                        "id": "audit",
+                        "objective": "Audit after repair.",
+                        "depends_on": ["repair"],
+                    },
+                ],
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        card=revision.graph.card_by_id()["repair"],
+        revision=revision,
+    )
+    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+        {
+            "artifact_markdown": "# Final Repair\n\nMaterialized at the required final path.",
+            "artifact_manifest": {"path": "working/taskboard/repair/final.md"},
+        },
+        context,
+        deliverable_mode="workspace_artifact",
+    )
+
+    delivered = await task._deliver_workspace_artifact(
+        prepared,
+        plan=plan,
+        execution_meta={"logs": {}},
+        source="test.taskboard.final_repair.workspace_artifact",
+        card_context=context,
+    )
+
+    assert delivered["file_refs"][0]["path"] == "final.md"
+    assert (task.workspace.files_root / "final.md").is_file()
+    assert not (task.workspace.files_root / "working/taskboard/repair/final.md").exists()
+    assert any(
+        item.get("code") == "taskboard.workspace_artifact.final_path_authorized"
+        for item in delivered["diagnostics"]
+        if isinstance(item, dict)
     )
 
 

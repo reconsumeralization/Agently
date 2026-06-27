@@ -267,6 +267,8 @@ artifact readback 暴露了已物化下载文件的 Workspace `file_refs`，Task
 readback，而不是依赖埋在 JSON preview 里的路径字符串。若非最终 TaskBoard card 提议写入 `final.md` 这类
 required final path，AgentTask 会把该中间 artifact 重定位到
 `working/taskboard/<card-id>/...`，并把声明的最终路径留给最终 synthesis/finalization card。
+由框架生成且显式标记了 required final deliverable path 的 final repair / continuation
+card 可以写入该最终路径，避免 repair 只反复产出 working evidence 文件而无法满足 host guard。
 
 TaskBoard readback card 可以用有界冷读回读取 Action artifact refs 和可信的
 Workspace file refs。框架生成的 readback card 会把 evidence scope 扩展到直接依赖和

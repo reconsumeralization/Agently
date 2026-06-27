@@ -1920,6 +1920,7 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
         success_criteria=["Unsupported facts are removed or backed by evidence."],
         execution="taskboard",
         max_iterations=2,
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
     )
     collect = TaskBoardCard.from_value(
         {
@@ -1977,6 +1978,8 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     assert repair.allowed_execution_shape == "control"
     assert set(repair.depends_on) == {"collect", "draft"}
     assert "Remove unsupported sub-section labels." in repair.evidence_contract["missing_criteria"]
+    assert repair.metadata["final_workspace_deliverables"] == ["final.md"]
+    assert any("final.md" in item for item in repair.required_outputs)
     assert any(item.get("code") == "taskboard.final_verification.repair_patch" for item in repaired.diagnostics)
     schedule = TaskBoard(repaired, handler=lambda _context: None).schedule()
     assert schedule.runnable_card_ids == (repair.id,)

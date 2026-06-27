@@ -919,6 +919,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "dependency_readbacks": dependency_readbacks,
                 "available_readback": self._taskboard_available_readback(evidence_view),
                 "source_ref_policy": self._taskboard_source_ref_policy(),
+                "workspace_delivery_policy": self._taskboard_workspace_delivery_policy(context),
                 "source_refs": source_refs,
                 "previous_attempt_errors": previous_errors,
                 "attempt": {
@@ -949,7 +950,9 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "do not include full section content in artifact_manifest, artifact_markdown, candidate_final_result, "
                 "final_result, or answer. AgentTask will stream the long body into Workspace and read it back. "
                 "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
-                "for deliverables. If the task is source-grounded, include concrete source URLs, file paths, or "
+                "for deliverables. Apply workspace_delivery_policy: when this card is authorized to write required "
+                "final deliverable paths, use the required path in artifact_manifest.path instead of a working/evidence path. "
+                "If the task is source-grounded, include concrete source URLs, file paths, or "
                 "evidence refs from source_refs/dependency_readbacks in the deliverable body; do not mention a "
                 "source title or local downloaded filename without its verifier-visible URL/path when such a ref "
                 f"exists. {_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION}Review or "
@@ -1209,6 +1212,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "dependency_readbacks": dependency_readbacks,
             "available_readback": self._taskboard_available_readback(evidence_view),
             "source_ref_policy": self._taskboard_source_ref_policy(),
+            "workspace_delivery_policy": self._taskboard_workspace_delivery_policy(context),
             "source_refs": source_refs,
             "context_pack": DataFormatter.sanitize(context_pack),
             "execution_prompt": self._execution_prompt_context(),
@@ -1237,6 +1241,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "trusted file_refs. Do not invent file_refs for deliverables. If the task is source-grounded, include "
             "the concrete source URLs, file paths, or evidence refs used by the deliverable in the deliverable body; "
             "do not mention a source title without its verifier-visible URL/path when such a ref exists. "
+            "Apply workspace_delivery_policy: when this card is authorized to write required final deliverable paths, "
+            "use the required path in artifact_manifest.path instead of a working/evidence path. "
             f"{_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION}Also return whether the card is sufficient "
             "and what continuation, if any, the board should consider."
         )
@@ -1711,6 +1717,14 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         continuation_objective = str(getattr(card, "objective", "") or "Continue the blocked TaskBoard card.").strip()
         if remaining_work:
             continuation_objective = f"{continuation_objective} Remaining work: {'; '.join(remaining_work[:3])}"
+        final_workspace_deliverables = cls._normalize_string_list(
+            current_metadata.get("final_workspace_deliverables")
+        )
+        if final_workspace_deliverables:
+            continuation_objective = (
+                f"{continuation_objective} Materialize required Workspace final deliverable path(s): "
+                f"{'; '.join(final_workspace_deliverables)}"
+            )
         evidence_metadata = {
             "evidence_scope": readback_dependencies,
             "generated_by": source,
@@ -1718,6 +1732,14 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         }
         if target_ref_list:
             evidence_metadata["target_refs"] = target_ref_list
+        continuation_metadata = {
+            "generated_by": source,
+            "continues_card_id": current_id,
+            "readback_card_id": evidence_card_id,
+            "evidence_card_id": evidence_card_id if target_ref_list else "",
+        }
+        if final_workspace_deliverables:
+            continuation_metadata["final_workspace_deliverables"] = final_workspace_deliverables
         evidence_card = {
             "id": evidence_card_id,
             "objective": readback_objective,
@@ -1749,12 +1771,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                         "required_outputs": list(getattr(card, "required_outputs", ()) or ()),
                         "allowed_execution_shape": str(getattr(card, "allowed_execution_shape", "") or "control"),
                         "failure_policy": str(getattr(card, "failure_policy", "") or "required"),
-                        "metadata": {
-                            "generated_by": source,
-                            "continues_card_id": current_id,
-                            "readback_card_id": evidence_card_id,
-                            "evidence_card_id": evidence_card_id if target_ref_list else "",
-                        },
+                        "metadata": continuation_metadata,
                     },
                 },
                 {
@@ -1838,6 +1855,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         if not gaps:
             return None
 
+        required_deliverables = self._required_workspace_deliverables()
+
         def safe_id(raw: str) -> str:
             text = "".join(ch if ch.isalnum() or ch in {"_", ".", "-"} else "-" for ch in raw.strip())
             text = text.strip(".-")
@@ -1855,6 +1874,13 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
 
         repair_id = unique_id("final-verification-repair")
         gap_text = "; ".join(gaps[:6])
+        required_outputs = [
+            "Corrected final deliverable that resolves final verification gaps using existing evidence.",
+        ]
+        if required_deliverables:
+            required_outputs.append(
+                "Trusted Workspace final deliverable path(s): " + ", ".join(required_deliverables)
+            )
         repair_card = {
             "id": repair_id,
             "objective": (
@@ -1864,9 +1890,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "facts instead of inventing evidence."
             ),
             "depends_on": completed_dependencies,
-            "required_outputs": [
-                "Corrected final deliverable that resolves final verification gaps using existing evidence.",
-            ],
+            "required_outputs": required_outputs,
             "allowed_execution_shape": "control",
             "failure_policy": "required",
             "evidence_contract": {
@@ -1880,6 +1904,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "generated_by": "agent_task.taskboard.final_verification_repair",
                 "repair_source": "final_verification",
                 "previous_revision_id": effective_revision.revision_id,
+                "final_workspace_deliverables": required_deliverables,
             },
         }
         diagnostic = {
@@ -3028,6 +3053,34 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         if not plan["deliverable_mode"] or not isinstance(card_output, Mapping):
             return card_output, plan
         required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
+        final_card_paths = [
+            path for path in self._taskboard_context_final_workspace_deliverables(context) if path in required_paths
+        ]
+        if final_card_paths:
+            manifest = card_output.get("artifact_manifest")
+            manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
+            requested_path = self._workspace_artifact_manifest_path(manifest_dict)
+            if requested_path in final_card_paths:
+                return card_output, plan
+            manifest_dict["path"] = final_card_paths[0]
+            result = dict(card_output)
+            result["artifact_manifest"] = manifest_dict
+            diagnostics: list[Any] = []
+            raw_diagnostics = result.get("diagnostics")
+            if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+                diagnostics.extend(raw_diagnostics)
+            elif raw_diagnostics:
+                diagnostics.append(raw_diagnostics)
+            diagnostics.append(
+                {
+                    "code": "taskboard.workspace_artifact.final_path_authorized",
+                    "message": "A framework-marked final TaskBoard card is authorized to write the required deliverable path.",
+                    "requested_path": requested_path,
+                    "final_path": final_card_paths[0],
+                }
+            )
+            result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            return result, plan
         if not required_paths or self._taskboard_context_card_is_leaf(context):
             return card_output, plan
 
@@ -3063,6 +3116,31 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         )
         result["diagnostics"] = DataFormatter.sanitize(diagnostics)
         return result, plan
+
+    @classmethod
+    def _taskboard_context_final_workspace_deliverables(cls, context: Any) -> list[str]:
+        card = getattr(context, "card", None)
+        metadata = getattr(card, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            return []
+        return cls._normalize_string_list(metadata.get("final_workspace_deliverables"))
+
+    def _taskboard_workspace_delivery_policy(self, context: Any) -> dict[str, Any]:
+        required_paths = self._required_workspace_deliverables()
+        final_card_paths = [
+            path for path in self._taskboard_context_final_workspace_deliverables(context) if path in required_paths
+        ]
+        can_write_required = bool(required_paths and (final_card_paths or self._taskboard_context_card_is_leaf(context)))
+        return {
+            "schema_version": "agent_task_taskboard_workspace_delivery/v1",
+            "required_deliverables": required_paths,
+            "authorized_final_deliverable_paths": final_card_paths or (required_paths if can_write_required else []),
+            "can_write_required_deliverables": can_write_required,
+            "policy": (
+                "Use required deliverable paths for final or framework-marked repair/continuation cards. "
+                "Use working refs for intermediate evidence cards."
+            ),
+        }
 
     @classmethod
     def _taskboard_readback_file_refs(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
