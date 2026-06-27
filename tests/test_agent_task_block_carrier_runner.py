@@ -271,6 +271,44 @@ def test_real_sample_runner_defaults_do_not_apply_iteration_caps(monkeypatch):
     )
 
 
+def test_block_carrier_runner_rejects_strategy_caps(monkeypatch):
+    runner = _load_block_carrier_runner()
+    for env_name in runner.DISALLOWED_STRATEGY_CAP_ENVS:
+        monkeypatch.delenv(env_name, raising=False)
+
+    args = SimpleNamespace(
+        flat_max_iterations=1,
+        taskboard_route_timeout_seconds=None,
+        taskboard_tick_timeout_seconds=None,
+        taskboard_card_timeout_seconds=None,
+        taskboard_max_ticks=None,
+        taskboard_card_max_steps=None,
+    )
+
+    try:
+        runner._validate_no_strategy_caps(args)
+    except ValueError as error:
+        message = str(error)
+    else:
+        raise AssertionError("hard route-shaping CLI caps must be rejected")
+
+    assert "--flat-max-iterations" in message
+    assert "strategy inputs" in message
+
+    args.flat_max_iterations = None
+    monkeypatch.setenv("REAL_SAMPLE_FRAMEWORK_MAX_ITERATIONS", "3")
+
+    try:
+        runner._validate_no_strategy_caps(args)
+    except ValueError as error:
+        message = str(error)
+    else:
+        raise AssertionError("hard route-shaping env caps must be rejected")
+
+    assert "REAL_SAMPLE_FRAMEWORK_MAX_ITERATIONS" in message
+    assert "watchdog" in message
+
+
 def test_block_carrier_runner_model_pool_uses_requested_provider_for_bare_models():
     runner = _load_block_carrier_runner()
     args = SimpleNamespace(
