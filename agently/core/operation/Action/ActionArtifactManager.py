@@ -33,6 +33,9 @@ from .ActionNormalization import normalize_execution_record
 
 class ActionArtifactManager:
     _RECALL_ACTION_ID = "read_action_artifact"
+    _MODEL_VISIBLE_RECORD_MAX_BYTES = 6000
+    _MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES = 2400
+    _MODEL_VISIBLE_INSTRUCTION_MAX_BYTES = 1200
     _INSTRUCTION_HEAVY_EXECUTOR_TYPES = {
         "bash_sandbox",
         "python_sandbox",
@@ -154,6 +157,17 @@ class ActionArtifactManager:
             return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
         except Exception:
             return len(str(value).encode("utf-8", errors="ignore"))
+
+    @classmethod
+    def _json_preview(cls, value: Any, *, max_bytes: int) -> dict[str, Any]:
+        raw = cls._json_bytes(value)
+        preview = raw[:max_bytes].decode("utf-8", errors="ignore")
+        return {
+            "preview": preview,
+            "truncated": len(raw) > max_bytes,
+            "original_size": len(raw),
+            "preview_size": len(preview.encode("utf-8", errors="ignore")),
+        }
 
     @classmethod
     def _json_bytes(cls, value: Any) -> bytes:
@@ -470,11 +484,41 @@ class ActionArtifactManager:
         digest = record.get("model_digest")
         if not isinstance(digest, dict):
             return record
-        visible = cast(ActionResult, dict(record))
-        visible["result"] = digest
-        visible["data"] = digest
-        artifact_refs = record.get("artifact_refs", record.get("artifacts", []))
-        visible["artifacts"] = artifact_refs if isinstance(artifact_refs, list) else []
+        visible_digest = cls._to_hot_path_digest(digest)
+        visible = cast(ActionResult, {
+            "action_call_id": record.get("action_call_id", visible_digest.get("action_call_id", "")),
+            "action_id": record.get("action_id", visible_digest.get("action_id", "")),
+            "tool_name": record.get("tool_name", record.get("action_id", visible_digest.get("action_id", ""))),
+            "purpose": record.get("purpose", visible_digest.get("purpose", "")),
+            "status": record.get("status", visible_digest.get("status", "")),
+            "success": bool(record.get("success", visible_digest.get("success", False))),
+            "ok": bool(record.get("ok", record.get("success", visible_digest.get("success", False)))),
+            "todo_suggestion": record.get("todo_suggestion", record.get("next", "")),
+            "next": record.get("next", record.get("todo_suggestion", "")),
+            "executor_type": record.get("executor_type", visible_digest.get("executor_type", "")),
+        })
+        visible["result"] = visible_digest
+        preview_meta = visible_digest.get("result_preview_meta")
+        hot_path_compacted = isinstance(preview_meta, dict) and preview_meta.get("hot_path_compacted") is True
+        if hot_path_compacted:
+            visible["data"] = {
+                "same_as": "result",
+                "action_call_id": visible_digest.get("action_call_id", ""),
+                "hot_path_compacted": True,
+            }
+            visible["model_digest"] = {
+                "same_as": "result",
+                "action_call_id": visible_digest.get("action_call_id", ""),
+                "hot_path_compacted": True,
+            }
+        else:
+            visible["data"] = visible_digest
+            visible["model_digest"] = visible_digest
+        artifact_refs = visible_digest.get("artifact_refs", [])
+        visible["artifact_refs"] = artifact_refs if isinstance(artifact_refs, list) else []
+        visible["artifacts"] = visible["artifact_refs"]
+        if record.get("error"):
+            visible["error"] = cls._compact_text(record.get("error"), limit=1200)
         return visible
 
     @classmethod
@@ -482,6 +526,67 @@ class ActionArtifactManager:
         if not isinstance(records, list):
             return []
         return [cls._to_model_visible_record(record) for record in records]
+
+    @classmethod
+    def _to_hot_path_digest(cls, digest: dict[str, Any]) -> dict[str, Any]:
+        if cls._safe_json_size(digest) <= cls._MODEL_VISIBLE_RECORD_MAX_BYTES:
+            return dict(digest)
+        compact = dict(digest)
+        compact["instruction"] = cls._compact_hot_path_field(
+            digest.get("instruction"),
+            max_bytes=cls._MODEL_VISIBLE_INSTRUCTION_MAX_BYTES,
+        )
+        compact["result_preview"] = cls._compact_hot_path_field(
+            digest.get("result_preview"),
+            max_bytes=cls._MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES,
+        )
+        preview_meta = dict(digest.get("result_preview_meta") or {})
+        preview_meta["hot_path_compacted"] = True
+        preview_meta["hot_path_preview_size"] = cls._safe_json_size(compact["result_preview"])
+        compact["result_preview_meta"] = preview_meta
+        compact["artifact_refs"] = [
+            cls._compact_hot_path_artifact_ref(ref)
+            for ref in digest.get("artifact_refs", [])
+            if isinstance(ref, dict)
+        ]
+        if "artifacts" in compact:
+            compact["artifacts"] = compact["artifact_refs"]
+        if "file_refs" in compact:
+            compact["file_refs"] = cls._compact_hot_path_field(compact.get("file_refs"), max_bytes=1200)
+        if "error" in compact:
+            compact["error"] = cls._compact_text(compact.get("error"), limit=1200)
+        return compact
+
+    @classmethod
+    def _compact_hot_path_field(cls, value: Any, *, max_bytes: int) -> Any:
+        compact_value = cls._compact_value(value, limit=max(400, max_bytes // 2))
+        if cls._safe_json_size(compact_value) <= max_bytes:
+            return compact_value
+        return cls._json_preview(compact_value, max_bytes=max_bytes)
+
+    @classmethod
+    def _compact_hot_path_artifact_ref(cls, ref: dict[str, Any]) -> dict[str, Any]:
+        keep_keys = (
+            "artifact_id",
+            "action_call_id",
+            "artifact_type",
+            "role",
+            "label",
+            "media_type",
+            "available",
+            "full_value_available",
+            "size",
+            "bytes",
+            "sha256",
+            "truncated",
+            "preview_size",
+            "meta",
+        )
+        compact = {key: ref.get(key) for key in keep_keys if key in ref}
+        if "preview" in ref:
+            compact["preview_omitted"] = True
+            compact["readback_action_id"] = cls._RECALL_ACTION_ID
+        return compact
 
     # ── recall action injection ────────────────────────────────────────────
 

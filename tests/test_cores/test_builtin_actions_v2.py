@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from typing import Any, cast
 import importlib
@@ -937,6 +938,78 @@ async def test_action_loop_uses_digest_and_exposes_recall_after_artifacts(tmp_pa
     visible_record = second_round["last_round_records"][0]
     assert visible_record.get("data") == records[0].get("model_digest")
     assert visible_record.get("result") == records[0].get("model_digest")
+
+
+@pytest.mark.asyncio
+async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_context():
+    agent = Agently.create_agent()
+    marker = "RAW_OUTPUT_SHOULD_STAY_COLD"
+
+    @agent.action_func
+    def produce_large_action_output() -> dict[str, Any]:
+        return {
+            "summary": "small visible prefix",
+            "body": "x" * 12000 + marker,
+        }
+
+    prompt = Agently.create_prompt()
+    prompt.set("input", "collect and then decide")
+    seen_rounds: list[dict[str, Any]] = []
+
+    async def planning_handler(context, request):
+        seen_rounds.append(
+            {
+                "round_index": context.get("round_index"),
+                "done_plans": context.get("done_plans", []),
+                "last_round_records": context.get("last_round_records", []),
+                "action_ids": [item.get("action_id") for item in request.get("action_list", [])],
+            }
+        )
+        if context.get("round_index") == 0:
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "purpose": "Collect large output",
+                        "action_id": "produce_large_action_output",
+                        "action_input": {},
+                        "todo_suggestion": "inspect bounded digest",
+                    }
+                ],
+            }
+        return {
+            "next_action": "response",
+            "action_calls": [],
+        }
+
+    records = await agent.action.async_plan_and_execute(
+        prompt=prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(tags=[f"agent-{agent.name}"]),
+        agent_name=agent.name,
+        planning_handler=planning_handler,
+    )
+
+    assert marker in json.dumps(records, ensure_ascii=False)
+    assert len(seen_rounds) >= 2
+    second_round = seen_rounds[1]
+    hot_context = json.dumps(
+        {
+            "done_plans": second_round["done_plans"],
+            "last_round_records": second_round["last_round_records"],
+        },
+        ensure_ascii=False,
+    )
+    assert marker not in hot_context
+    assert len(hot_context) < 9000
+    assert "read_action_artifact" in second_round["action_ids"]
+    visible_record = second_round["last_round_records"][0]
+    assert visible_record["data"]["same_as"] == "result"
+    visible_digest = visible_record["result"]
+    assert visible_digest["result_preview_meta"]["hot_path_compacted"] is True
+    assert visible_digest["artifact_refs"]
+    assert "preview" not in visible_digest["artifact_refs"][0]
+    assert visible_record["artifacts"] == visible_record["artifact_refs"]
 
 
 def test_search_package_does_not_load_backend_during_registration(monkeypatch):

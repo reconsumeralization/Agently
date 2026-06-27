@@ -204,6 +204,12 @@ code, shell output, SQL rows, page HTML, screenshots, or logs is retained as a
 redacted artifact instead of being inserted into every prompt. Artifact refs
 include role, media type, size/bytes, preview size, SHA-256, and truncation
 flags so consumers can tell that a preview is not complete evidence.
+When the digest is still too large for later planning or reply hot paths,
+Agently compacts the model-visible digest again: `result` keeps the bounded
+digest, duplicate `data` / `model_digest` fields may become `same_as="result"`
+pointers, and artifact refs omit preview bodies while keeping readback ids.
+That compaction only applies to hot-path model context; full redacted content
+stays in the Action artifact store for explicit readback.
 
 When the model or application needs the omitted detail, read it explicitly:
 

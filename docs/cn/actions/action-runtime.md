@@ -187,6 +187,11 @@ host 的 `direct` / `dry_run` 调用保持既有行为，不做这类过滤。
 完整代码、shell 输出、SQL 结果集、页面 HTML、截图、日志等原始内容会以脱敏 artifact 形式保留，
 不会默认塞进每一轮 prompt。artifact refs 会包含 role、media type、size/bytes、preview size、
 SHA-256 和截断标记，消费方可以明确知道 preview 不是完整证据。
+如果 digest 对后续规划或回复 hot path 仍然过大，Agently 会再次压缩模型可见 digest：
+`result` 保留有界 digest，重复的 `data` / `model_digest` 字段可能变成
+`same_as="result"` 指针，artifact refs 会省略 preview 正文但保留 readback id。
+这个压缩只作用于 hot-path 模型上下文；完整脱敏内容仍留在 Action artifact store 里，
+需要显式读回。
 
 如果模型或应用需要回溯细节，可以显式读取：
 
