@@ -1517,6 +1517,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             }
         )
         dependencies = list(getattr(card, "depends_on", ()) or [])
+        readback_dependencies = cls._taskboard_auto_readback_scope(card, graph)
         gaps = cls._normalize_string_list(card_output.get("gaps"))
         remaining_work = cls._normalize_string_list(card_output.get("remaining_work"))
         readback_objective = "Read scoped cold evidence required before continuing the blocked control card."
@@ -1535,11 +1536,12 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "card": {
                         "id": readback_id,
                         "objective": readback_objective,
-                        "depends_on": dependencies,
+                        "depends_on": readback_dependencies,
                         "required_outputs": ["Bounded readback previews for verifier-visible cold evidence."],
                         "allowed_execution_shape": "readback",
                         "failure_policy": "required",
                         "metadata": {
+                            "evidence_scope": readback_dependencies,
                             "generated_by": "agent_task.taskboard.control_auto_readback",
                             "source_card_id": current_id,
                         },
@@ -1581,6 +1583,34 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             ],
         }
         return DataFormatter.sanitize(patch)
+
+    @classmethod
+    def _taskboard_auto_readback_scope(cls, card: Any, graph: Any) -> list[str]:
+        """Scope auto-readback to direct dependencies plus their upstream evidence."""
+
+        if graph is None or not hasattr(graph, "card_by_id"):
+            return list(getattr(card, "depends_on", ()) or [])
+        card_by_id = graph.card_by_id()
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def add(card_id: str) -> None:
+            if not card_id or card_id in seen:
+                return
+            seen.add(card_id)
+            ordered.append(card_id)
+
+        def visit(card_id: str) -> None:
+            add(card_id)
+            dependency_card = card_by_id.get(card_id)
+            if dependency_card is None:
+                return
+            for dependency_id in getattr(dependency_card, "depends_on", ()) or ():
+                visit(str(dependency_id))
+
+        for dependency_id in getattr(card, "depends_on", ()) or ():
+            visit(str(dependency_id))
+        return ordered
 
     def _taskboard_final_verification_repair_revision(
         self,

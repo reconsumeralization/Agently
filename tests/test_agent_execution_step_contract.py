@@ -12,7 +12,7 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
-from agently.core import PluginManager, TaskBoardGraph, TaskBoardRevision, TaskBoardValidator
+from agently.core import PluginManager, TaskBoardGraph, TaskBoardRevision, TaskBoardValidator, build_task_board_evidence_view
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, AgentExecutionResult
 from agently.core.application.AgentTask import AgentTask
 from agently.types.data import AgentlyRequestData
@@ -1645,6 +1645,80 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
     )
 
     assert repeated_patch is None
+
+
+def test_taskboard_control_auto_readback_scope_includes_upstream_evidence_cards():
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="auto-readback-upstream",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "auto-readback-upstream-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect source evidence."},
+                    {
+                        "id": "analyze",
+                        "objective": "Analyze source evidence.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "control",
+                    },
+                    {
+                        "id": "final",
+                        "objective": "Write final answer after full source readback.",
+                        "depends_on": ["analyze"],
+                        "allowed_execution_shape": "control",
+                        "required_outputs": ["final.md"],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "artifact_refs": [
+                            {
+                                "artifact_id": "source-artifact",
+                                "action_call_id": "source-call",
+                                "role": "output",
+                            }
+                        ],
+                    },
+                },
+                {"op": "record_card_result", "result": {"card_id": "analyze", "status": "completed"}},
+            ],
+        },
+    )
+    card = revision.graph.card_by_id()["final"]
+    patch = AgentTask._taskboard_control_auto_patch(
+        SimpleNamespace(revision=revision, card=card),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "gaps": ["Need upstream source artifact."],
+            "remaining_work": ["Generate final.md after readback."],
+        },
+    )
+
+    assert patch is not None
+    next_revision = validator.apply_patch(revision, patch)
+    cards = next_revision.graph.card_by_id()
+
+    assert cards["final.readback"].depends_on == ("analyze", "collect")
+    assert cards["final.readback"].metadata["evidence_scope"] == ["analyze", "collect"]
+    assert cards["final.continue"].depends_on == ("analyze", "final.readback")
+    schedule = validator.schedule(next_revision)
+    assert "final.readback" in schedule.runnable_card_ids
+
+    scoped_view = build_task_board_evidence_view(next_revision, card_ids=cards["final.readback"].depends_on).to_dict()
+    assert scoped_view["artifact_refs"][0]["artifact_id"] == "source-artifact"
 
 
 @pytest.mark.asyncio
