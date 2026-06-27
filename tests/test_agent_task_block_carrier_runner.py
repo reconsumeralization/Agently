@@ -362,6 +362,20 @@ def test_block_carrier_runner_records_model_pool_resource_exhaustion_fact(tmp_pa
     assert "AllocationQuota.FreeTierOnly" in evidence[0]["preview"]
 
 
+def test_block_carrier_runner_omits_provider_request_payload_from_attempt_preview():
+    runner = _load_block_carrier_runner()
+    preview = runner._compact_attempt_text(
+        "Status Code: 403\n"
+        "Detail: AllocationQuota.FreeTierOnly\n"
+        "Request Data: {'messages': [{'role': 'user', 'content': 'large private prompt'}]}"
+    )
+
+    assert "AllocationQuota.FreeTierOnly" in preview
+    assert "[provider payload omitted]" in preview
+    assert "large private prompt" not in preview
+    assert "messages" not in preview
+
+
 def test_hidden_source_audit_records_fact_without_overriding_judge(tmp_path):
     runner = _load_block_carrier_runner()
     legacy = runner._load_legacy_runner()
