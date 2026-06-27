@@ -28,7 +28,7 @@ Run and retry naming:
 Model request telemetry:
 
 - Model RuntimeEvents may include `payload["model_request_telemetry"]` on `model.request_started`, `model.requesting`, `model.status`, `model.completed`, `model.meta`, `model.request_failed`, and `model.requester.error`.
-- The telemetry payload is observation-only. It can contain `response_id`, `attempt_index`, run ids, provider/model, request URL, duration, usage, side-channel, and normalized error facts.
+- The telemetry payload is observation-only. It can contain `response_id`, `attempt_index`, run ids, provider/model, request URL, duration, raw usage, normalized usage summary, estimated input/output character lengths, side-channel, and normalized error facts.
 - Telemetry dedupe only removes duplicate telemetry sub-payloads for the same `response_id + attempt_index + event kind`; it does not suppress the original RuntimeEvent.
 - Do not feed these telemetry facts back into route selection, retry policy, verifier judgment, quality scoring, planner context, or prompt content. Use them for logs, DevTools display, and diagnostics.
 
@@ -193,6 +193,7 @@ For model request events, `payload.model_request_telemetry` is an extensible sub
 | `request_url` | provider endpoint or provider-owned symbolic URL when known |
 | `duration_ms` | elapsed time from model request start when available |
 | `usage` | provider-reported usage metadata when available |
+| `usage_summary` | observation-only usage summary with normalized provider token fields and estimated input/output character lengths; missing provider tokens should be displayed as unknown, not as a failure |
 | `side_channel` | whether the model event came from a side-channel request path |
 | `error` | normalized error facts for failed/requester-error events |
 

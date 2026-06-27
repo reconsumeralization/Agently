@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -85,6 +87,121 @@ def _extract_usage(payload: Mapping[str, Any]) -> Any:
     if payload.get("usage") is not None:
         return payload.get("usage")
     return None
+
+
+def _usage_number(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    return None
+
+
+def _first_usage_number(usage: Mapping[str, Any], *keys: str) -> int | float | None:
+    for key in keys:
+        number = _usage_number(usage.get(key))
+        if number is not None:
+            return number
+    return None
+
+
+def _normalize_usage(usage: Any) -> dict[str, int | float | None]:
+    usage_mapping = _mapping(usage)
+    prompt_tokens = _first_usage_number(
+        usage_mapping,
+        "prompt_tokens",
+        "input_tokens",
+        "input_token_count",
+        "input",
+    )
+    completion_tokens = _first_usage_number(
+        usage_mapping,
+        "completion_tokens",
+        "output_tokens",
+        "output_token_count",
+        "completion",
+    )
+    total_tokens = _first_usage_number(usage_mapping, "total_tokens", "total_token_count", "total")
+    if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+        total_tokens = prompt_tokens + completion_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "input_tokens": _first_usage_number(usage_mapping, "input_tokens", "prompt_tokens", "input_token_count"),
+        "output_tokens": _first_usage_number(
+            usage_mapping,
+            "output_tokens",
+            "completion_tokens",
+            "output_token_count",
+        ),
+    }
+
+
+def _safe_text_length(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return len(value)
+    try:
+        return len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+    except Exception:
+        return len(str(value))
+
+
+def _first_text_length(payload: Mapping[str, Any], candidates: tuple[tuple[str, Any], ...]) -> tuple[int | None, str | None]:
+    for source, value in candidates:
+        if value is None:
+            continue
+        length = _safe_text_length(value)
+        if length is not None:
+            return length, source
+    return None, None
+
+
+def _estimate_usage_lengths(payload: Mapping[str, Any]) -> dict[str, int | str | None]:
+    request = _extract_request(payload)
+    input_chars, input_source = _first_text_length(
+        payload,
+        (
+            ("prompt_text", payload.get("prompt_text")),
+            ("prompt", payload.get("prompt")),
+            ("request", request or None),
+            ("input", payload.get("input")),
+            ("request_data", payload.get("request_data")),
+        ),
+    )
+    output_chars, output_source = _first_text_length(
+        payload,
+        (
+            ("raw_text", payload.get("raw_text")),
+            ("streamed_text", payload.get("streamed_text")),
+            ("cleaned_text", payload.get("cleaned_text")),
+            ("result", payload.get("result")),
+            ("parsed_data", payload.get("parsed_data")),
+            ("output", payload.get("output")),
+            ("data", payload.get("data")),
+        ),
+    )
+    return {
+        "input_chars": input_chars,
+        "input_source": input_source,
+        "output_chars": output_chars,
+        "output_source": output_source,
+    }
+
+
+def _build_usage_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_usage(_extract_usage(payload))
+    usage_available = any(value is not None for value in normalized.values())
+    return {
+        "available": usage_available,
+        "source": "provider" if usage_available else "estimated_lengths",
+        "provider": normalized,
+        "estimated_lengths": _estimate_usage_lengths(payload),
+    }
 
 
 def _extract_request_url(payload: Mapping[str, Any]) -> Any:
@@ -165,6 +282,7 @@ def attach_model_request_telemetry(
         "request_url": _extract_request_url(payload),
         "duration_ms": _duration_ms(run),
         "usage": _extract_usage(payload),
+        "usage_summary": _build_usage_summary(payload),
         "side_channel": payload.get("side_channel"),
         "error": error_info,
     }

@@ -10,6 +10,7 @@ from agently.builtins.plugins.ResponseParser.AgentlyResponseParser import Agentl
 from agently.core import ModelRequest, ModelRequestResult, PluginManager
 from agently.core.model.AttemptRunner import core_attempt_runner_entrypoint
 from agently.core.runtime.RuntimeEvents import (
+    attach_model_request_telemetry,
     async_emit_action_flow_observation,
     async_emit_response_parser_observation,
 )
@@ -790,6 +791,78 @@ async def test_model_request_telemetry_dedupes_same_kind_for_same_attempt():
         assert "model_request_telemetry" not in meta_events[1].payload
     finally:
         Agently.event_center.unregister_hook(hook_name)
+
+
+def test_model_request_telemetry_summarizes_usage_and_estimated_lengths():
+    provider_run = RunContext.create(
+        run_kind="model_request",
+        agent_name="usage-agent",
+        response_id="response-usage",
+        meta={"attempt_index": 1},
+    )
+    provider_payload: dict[str, Any] = {
+        "response_id": "response-usage",
+        "meta": {
+            "provider": "mock-provider",
+            "model": "mock-model",
+            "usage": {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19},
+        },
+        "raw_text": "provider text",
+    }
+
+    attach_model_request_telemetry(
+        provider_payload,
+        event_kind="model.completed",
+        run=provider_run,
+        source="TestParser",
+    )
+
+    provider_summary = provider_payload["model_request_telemetry"]["usage_summary"]
+    assert provider_payload["model_request_telemetry"]["usage"] == {
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "total_tokens": 19,
+    }
+    assert provider_summary["available"] is True
+    assert provider_summary["source"] == "provider"
+    assert provider_summary["provider"]["prompt_tokens"] == 12
+    assert provider_summary["provider"]["completion_tokens"] == 7
+    assert provider_summary["provider"]["input_tokens"] == 12
+    assert provider_summary["provider"]["output_tokens"] == 7
+    assert provider_summary["provider"]["total_tokens"] == 19
+    assert provider_summary["estimated_lengths"]["output_chars"] == len("provider text")
+
+    estimated_run = RunContext.create(
+        run_kind="model_request",
+        agent_name="usage-agent",
+        response_id="response-estimated",
+        meta={"attempt_index": 1},
+    )
+    estimated_payload: dict[str, Any] = {
+        "response_id": "response-estimated",
+        "prompt_text": "summarize this",
+        "raw_text": "estimated response",
+    }
+
+    attach_model_request_telemetry(
+        estimated_payload,
+        event_kind="model.completed",
+        run=estimated_run,
+        source="TestParser",
+    )
+
+    estimated_summary = estimated_payload["model_request_telemetry"]["usage_summary"]
+    assert estimated_summary["available"] is False
+    assert estimated_summary["source"] == "estimated_lengths"
+    assert estimated_summary["provider"]["prompt_tokens"] is None
+    assert estimated_summary["provider"]["completion_tokens"] is None
+    assert estimated_summary["provider"]["total_tokens"] is None
+    assert estimated_summary["estimated_lengths"] == {
+        "input_chars": len("summarize this"),
+        "input_source": "prompt_text",
+        "output_chars": len("estimated response"),
+        "output_source": "raw_text",
+    }
 
 
 @pytest.mark.asyncio
