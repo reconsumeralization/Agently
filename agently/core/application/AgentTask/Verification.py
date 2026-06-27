@@ -934,11 +934,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 normalized["replan_instruction"] = "Handle structured ReplanSignal before accepting completion" + (
                     f": {'; '.join(reasons)}." if reasons else "."
                 )
-        risky_actions = [
-            *self._normalize_string_list(execution_evidence_summary.get("failed_actions")),
-            *self._normalize_string_list(execution_evidence_summary.get("blocked_actions")),
-            *self._normalize_string_list(execution_evidence_summary.get("approval_required_actions")),
-        ]
+        risky_actions, non_blocking_failed_actions = self._execution_risk_actions(execution_evidence_summary)
+        if non_blocking_failed_actions:
+            normalized["non_blocking_failed_actions"] = non_blocking_failed_actions
         if risky_actions:
             normalized["is_complete"] = False
             guard_reasons.append("execution_risk_actions_present")
@@ -1144,6 +1142,49 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         for key, value in verification.items():
             normalized.setdefault(key, DataFormatter.sanitize(value))
         return normalized
+
+    def _execution_risk_actions(
+        self,
+        execution_evidence_summary: Mapping[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        failed_actions = self._normalize_string_list(execution_evidence_summary.get("failed_actions"))
+        blocked_actions = self._normalize_string_list(execution_evidence_summary.get("blocked_actions"))
+        approval_required_actions = self._normalize_string_list(
+            execution_evidence_summary.get("approval_required_actions")
+        )
+        required_actions = set(self._normalize_string_list(execution_evidence_summary.get("required_actions")))
+        for requirement in self._capability_evidence_requirements():
+            if not requirement.get("required", True):
+                continue
+            if str(requirement.get("kind") or "capability_used") != "action_succeeded":
+                continue
+            capability_id = str(requirement.get("capability_id") or "").strip()
+            if capability_id:
+                required_actions.add(capability_id)
+
+        read_safe_actions = {
+            str(item.get("id") or "").strip()
+            for item in self._planner_capabilities()
+            if isinstance(item, Mapping)
+            and str(item.get("kind") or "").strip() == "action"
+            and str(item.get("id") or "").strip()
+            and (
+                str(item.get("side_effect_level") or "").strip().lower() == "read"
+                or bool(item.get("replay_safe")) is True
+            )
+        }
+        risky_failed: list[str] = []
+        non_blocking_failed: list[str] = []
+        for action_id in failed_actions:
+            if action_id in read_safe_actions and action_id not in required_actions:
+                non_blocking_failed.append(action_id)
+            else:
+                risky_failed.append(action_id)
+        risky_actions = self._merge_string_lists(
+            risky_failed,
+            [*blocked_actions, *approval_required_actions],
+        )
+        return risky_actions, non_blocking_failed
 
     def _parse_final_result_output_contract(self, final_result_text: str) -> dict[str, Any] | None:
         execution_prompt = self._execution_prompt_context()

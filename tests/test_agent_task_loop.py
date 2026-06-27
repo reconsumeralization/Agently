@@ -2598,6 +2598,138 @@ def test_agent_task_verifier_block_continues_when_untried_read_action_exists(tmp
     assert task.diagnostics["verification_continuations"][0]["untried_action_ids"] == ["browse"]
 
 
+def test_optional_failed_read_action_does_not_force_execution_risk_guard(tmp_path):
+    agent = _create_agent("agent-task-optional-read-action").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a source-grounded brief.",
+        success_criteria=["The brief is complete and cites available evidence."],
+        execution="flat",
+        options={
+            "planner_capabilities": [
+                {
+                    "id": "read_skill_guidance",
+                    "kind": "action",
+                    "side_effect_level": "read",
+                    "replay_safe": True,
+                }
+            ]
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The final brief is complete; optional guidance was unavailable and disclosed.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "final.md",
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "action_ids": ["read_skill_guidance"],
+            "failed_actions": ["read_skill_guidance"],
+            "blocked_actions": [],
+            "approval_required_actions": [],
+            "required_actions": [],
+        },
+    )
+
+    assert verification["is_complete"] is True
+    assert "execution_risk_actions_present" not in verification.get("guard_reasons", [])
+    assert verification["non_blocking_failed_actions"] == ["read_skill_guidance"]
+    assert "Unresolved execution risk actions" not in " ".join(verification.get("missing_criteria", []))
+
+
+def test_required_failed_read_action_still_blocks_execution_risk_guard(tmp_path):
+    agent = _create_agent("agent-task-required-read-action").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a source-grounded brief.",
+        success_criteria=["The required read action succeeds."],
+        execution="flat",
+        options={
+            "planner_capabilities": [
+                {
+                    "id": "read_skill_guidance",
+                    "kind": "action",
+                    "side_effect_level": "read",
+                    "replay_safe": True,
+                }
+            ],
+            "capability_evidence_requirements": [
+                {"capability_id": "read_skill_guidance", "kind": "action_succeeded"}
+            ],
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The final brief is complete.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "final.md",
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "action_ids": ["read_skill_guidance"],
+            "failed_actions": ["read_skill_guidance"],
+            "blocked_actions": [],
+            "approval_required_actions": [],
+            "required_actions": [],
+        },
+    )
+
+    assert verification["is_complete"] is False
+    assert "execution_risk_actions_present" in verification["guard_reasons"]
+    assert "read_skill_guidance" in " ".join(verification.get("missing_criteria", []))
+    assert verification.get("non_blocking_failed_actions") in (None, [])
+
+
+def test_unknown_failed_action_still_blocks_execution_risk_guard(tmp_path):
+    agent = _create_agent("agent-task-unsafe-action").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a report.",
+        success_criteria=["The report is complete."],
+        execution="flat",
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The final report is complete.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "final.md",
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "action_ids": ["write_file"],
+            "failed_actions": ["write_file"],
+            "blocked_actions": [],
+            "approval_required_actions": [],
+        },
+    )
+
+    assert verification["is_complete"] is False
+    assert "execution_risk_actions_present" in verification["guard_reasons"]
+    assert "write_file" in " ".join(verification.get("missing_criteria", []))
+
+
 @pytest.mark.asyncio
 async def test_agent_task_loop_verification_guard_replans_when_missing_criteria_is_present(tmp_path):
     class CompleteWithMissingRequester(MockAgentTaskRequester):
