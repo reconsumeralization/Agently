@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+from agently.core.orchestration import TaskBoardValidator
+from agently.types.data import TaskBoardPatch
+
 from .TaskShared import *
 
 
@@ -1423,13 +1426,25 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         )
         card_status = self._taskboard_control_card_status(card_output)
         patch_proposal = (
-            dict(card_output["patch_proposal"])
-            if isinstance(card_output, Mapping) and isinstance(card_output.get("patch_proposal"), Mapping)
+            self._taskboard_control_patch_proposal(context, card_output, diagnostics)
+            if isinstance(card_output, Mapping)
             else None
         )
-        if patch_proposal is None and isinstance(card_output, Mapping):
-            patch_proposal = self._taskboard_control_auto_patch(context, card_output)
-            if patch_proposal is not None:
+        if patch_proposal is not None and any(
+            str(item.get("code") or "") == "taskboard.control.invalid_model_patch_proposal"
+            for item in diagnostics
+            if isinstance(item, Mapping)
+        ):
+            diagnostics.append(
+                {
+                    "code": "taskboard.control.auto_readback_patch",
+                    "message": "Converted invalid model readback intent into a TaskBoardPatch with readback and continuation cards.",
+                    "card_id": context.card.id,
+                }
+            )
+        elif patch_proposal is not None and isinstance(card_output, Mapping):
+            raw_patch_proposal = card_output.get("patch_proposal")
+            if not isinstance(raw_patch_proposal, Mapping):
                 diagnostics.append(
                     {
                         "code": "taskboard.control.auto_readback_patch",
@@ -1461,6 +1476,46 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 ),
             },
         )
+
+    @classmethod
+    def _taskboard_control_patch_proposal(
+        cls,
+        context: Any,
+        card_output: Mapping[str, Any],
+        diagnostics: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        raw_patch = card_output.get("patch_proposal")
+        if isinstance(raw_patch, Mapping):
+            try:
+                patch = TaskBoardPatch.from_value(raw_patch)
+                revision = getattr(context, "revision", None)
+                if revision is None:
+                    raise ValueError("TaskBoard control patch validation requires a revision.")
+                TaskBoardValidator().apply_patch(cast(TaskBoardRevision | Mapping[str, Any], revision), patch)
+            except Exception as error:
+                diagnostics.append(
+                    {
+                        "code": "taskboard.control.invalid_model_patch_proposal",
+                        "message": _compact_agent_task_error_message(
+                            error,
+                            fallback="Model patch_proposal was not a valid TaskBoardPatch.",
+                        ),
+                        "card_id": str(getattr(getattr(context, "card", None), "id", "") or ""),
+                        "requested_action": str(raw_patch.get("action") or ""),
+                    }
+                )
+                if cls._taskboard_patch_proposal_requests_readback(raw_patch):
+                    auto_patch_input = dict(card_output)
+                    auto_patch_input["next_board_action"] = "readback"
+                    return cls._taskboard_control_auto_patch(context, auto_patch_input)
+                return None
+            return DataFormatter.sanitize(patch.to_dict())
+        return cls._taskboard_control_auto_patch(context, card_output)
+
+    @staticmethod
+    def _taskboard_patch_proposal_requests_readback(patch_proposal: Mapping[str, Any]) -> bool:
+        action = str(patch_proposal.get("action") or patch_proposal.get("next_board_action") or "").strip().lower()
+        return action.replace("-", "_") in {"readback", "needs_readback", "cold_readback", "artifact_readback"}
 
     @classmethod
     def _taskboard_control_auto_patch(cls, context: Any, card_output: Mapping[str, Any]) -> dict[str, Any] | None:

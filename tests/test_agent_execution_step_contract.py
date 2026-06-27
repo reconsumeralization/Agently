@@ -1780,6 +1780,74 @@ def test_taskboard_control_auto_readback_scope_includes_upstream_evidence_cards(
     assert scoped_view["artifact_refs"][0]["artifact_id"] == "source-artifact"
 
 
+def test_taskboard_control_invalid_readback_patch_proposal_becomes_framework_patch():
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="invalid-readback-patch",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "invalid-readback-patch-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect source evidence."},
+                    {
+                        "id": "final",
+                        "objective": "Write final answer after source readback.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "control",
+                        "required_outputs": ["final.md"],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "artifact_refs": [
+                            {
+                                "artifact_id": "source-artifact",
+                                "action_call_id": "source-call",
+                                "role": "output",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    card = revision.graph.card_by_id()["final"]
+    diagnostics: list[dict[str, Any]] = []
+    patch = AgentTask._taskboard_control_patch_proposal(
+        SimpleNamespace(revision=revision, card=card),
+        {
+            "status": "blocked",
+            "patch_proposal": {
+                "action": "readback",
+                "target_refs": ["https://example.test/source"],
+                "reason": "Need scoped source readback.",
+            },
+            "gaps": ["Need source details."],
+            "remaining_work": ["Continue after readback."],
+        },
+        diagnostics,
+    )
+
+    assert patch is not None
+    assert diagnostics[0]["code"] == "taskboard.control.invalid_model_patch_proposal"
+    next_revision = validator.apply_patch(revision, patch)
+    cards = next_revision.graph.card_by_id()
+    assert cards["final.readback"].allowed_execution_shape == "readback"
+    assert cards["final.readback"].depends_on == ("collect",)
+    assert cards["final.continue"].depends_on == ("collect", "final.readback")
+
+
 @pytest.mark.asyncio
 async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     agent = _create_agent("execution-taskboard-workspace-file-readback").use_workspace(tmp_path / "workspace")
