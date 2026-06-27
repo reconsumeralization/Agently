@@ -37,6 +37,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             verification = record.get("verification")
             if not isinstance(verification, dict):
                 verification = {}
+            execution_meta = record.get("execution_meta")
+            evidence_anchors = (
+                self._planner_evidence_anchors_from_execution_meta(execution_meta)
+                if isinstance(execution_meta, Mapping)
+                else {}
+            )
             summaries.append(
                 {
                     "iteration": record.get("iteration"),
@@ -55,6 +61,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     "observation_ref": record.get("observation_ref"),
                     "verification_ref": record.get("verification_ref"),
                     "reflection_refs": DataFormatter.sanitize(record.get("reflection_refs", [])),
+                    "evidence_anchors": evidence_anchors,
                 }
             )
         # Prior-run summaries (from a resumed snapshot) come first so the model
@@ -83,8 +90,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             )
         return summaries
 
-    @staticmethod
-    def _planner_repair_context(previous_iterations: list[dict[str, Any]]) -> dict[str, Any]:
+    @classmethod
+    def _planner_repair_context(cls, previous_iterations: list[dict[str, Any]]) -> dict[str, Any]:
         if not previous_iterations:
             return {}
         latest = previous_iterations[-1]
@@ -122,7 +129,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             ]
         ):
             return {}
-        return {
+        repair_context = {
             "source_iteration": latest.get("iteration"),
             "verification_ref": latest.get("verification_ref"),
             "reason": str(verification.get("reason") or ""),
@@ -133,6 +140,162 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "advisory_next_step_requirements": next_step_requirements,
             "replan_instruction": replan_instruction,
         }
+        cumulative_anchors = cls._cumulative_planner_evidence_anchors(previous_iterations)
+        if cumulative_anchors:
+            repair_context["available_evidence_anchors"] = cumulative_anchors
+        return repair_context
+
+    @classmethod
+    def _planner_evidence_anchors_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+        """Compact exact refs and previews that later planning can safely reuse.
+
+        The planner should not receive full execution metadata on every turn, but
+        repair steps need stable URLs, paths, and bounded action previews so they
+        do not reconstruct source refs from prose verification feedback.
+        """
+
+        summary = cls._execution_log_summary(dict(execution_meta))
+        source_refs = cls._compact_planner_source_refs(summary.get("source_refs", []), max_refs=24)
+        action_previews = cls._compact_planner_action_previews(summary.get("actions", []), max_actions=8)
+        artifact_refs = summary.get("artifact_refs")
+        compact_artifact_refs: list[Any] = []
+        if isinstance(artifact_refs, list):
+            compact_artifact_refs = [cls._compact_artifact_ref_for_verifier(ref) for ref in artifact_refs[:8]]
+        anchors: dict[str, Any] = {}
+        if source_refs:
+            anchors["source_refs"] = source_refs
+        if action_previews:
+            anchors["action_result_previews"] = action_previews
+        if compact_artifact_refs:
+            anchors["artifact_refs"] = compact_artifact_refs
+        if summary.get("action_ids"):
+            anchors["action_ids"] = DataFormatter.sanitize(summary.get("action_ids", []))
+        status = str(summary.get("status") or "").strip()
+        if status:
+            anchors["status"] = status
+        return anchors
+
+    @classmethod
+    def _cumulative_planner_evidence_anchors(cls, previous_iterations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        source_refs: list[Any] = []
+        action_previews: list[Any] = []
+        artifact_refs: list[Any] = []
+        action_ids: list[str] = []
+        for iteration in previous_iterations:
+            anchors = iteration.get("evidence_anchors")
+            if not isinstance(anchors, Mapping):
+                continue
+            raw_source_refs = anchors.get("source_refs")
+            if isinstance(raw_source_refs, list):
+                source_refs.extend(raw_source_refs)
+            raw_action_previews = anchors.get("action_result_previews")
+            if isinstance(raw_action_previews, list):
+                action_previews.extend(raw_action_previews)
+            raw_artifact_refs = anchors.get("artifact_refs")
+            if isinstance(raw_artifact_refs, list):
+                artifact_refs.extend(raw_artifact_refs)
+            for action_id in cls._normalize_string_list(anchors.get("action_ids")):
+                if action_id not in action_ids:
+                    action_ids.append(action_id)
+
+        cumulative: dict[str, Any] = {}
+        compact_source_refs = cls._compact_planner_source_refs(source_refs, max_refs=32)
+        if compact_source_refs:
+            cumulative["source_refs"] = compact_source_refs
+        compact_action_previews = cls._dedupe_planner_action_previews(action_previews)[:10]
+        if compact_action_previews:
+            cumulative["action_result_previews"] = compact_action_previews
+        compact_artifact_refs = cls._dedupe_ref_records(artifact_refs)[:12]
+        if compact_artifact_refs:
+            cumulative["artifact_refs"] = compact_artifact_refs
+        if action_ids:
+            cumulative["action_ids"] = action_ids
+        return DataFormatter.sanitize(cumulative)
+
+    @classmethod
+    def _compact_planner_source_refs(cls, refs: Any, *, max_refs: int) -> list[dict[str, Any]]:
+        if not isinstance(refs, Sequence) or isinstance(refs, str | bytes | bytearray):
+            return []
+        allowed_fields = {"source_url", "selected_url", "requested_url", "url", "href", "path"}
+        compact: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for ref in refs:
+            if not isinstance(ref, Mapping):
+                continue
+            field = str(ref.get("field") or "").strip()
+            value = str(ref.get("value") or "").strip()
+            action_call_id = str(ref.get("action_call_id") or "").strip()
+            if field not in allowed_fields or not value:
+                continue
+            key = (field, value, action_call_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            compact_ref = {
+                "field": field,
+                "value": value,
+                "action_id": str(ref.get("action_id") or ""),
+                "action_call_id": action_call_id,
+                "path": str(ref.get("path") or ""),
+            }
+            compact.append(compact_ref)
+            if len(compact) >= max_refs:
+                break
+        return compact
+
+    @classmethod
+    def _compact_planner_action_previews(cls, actions: Any, *, max_actions: int) -> list[dict[str, Any]]:
+        if not isinstance(actions, Sequence) or isinstance(actions, str | bytes | bytearray):
+            return []
+        compact: list[dict[str, Any]] = []
+        for action in actions:
+            if not isinstance(action, Mapping):
+                continue
+            preview = action.get("result_preview")
+            refs = cls._compact_planner_source_refs(cls._collect_source_refs_from_action_records([action]), max_refs=12)
+            if preview is None and not refs:
+                continue
+            compact_action: dict[str, Any] = {
+                "id": str(action.get("id") or action.get("name") or ""),
+                "status": str(action.get("status") or ""),
+            }
+            action_call_id = str(action.get("action_call_id") or "").strip()
+            if action_call_id:
+                compact_action["action_call_id"] = action_call_id
+            if action.get("input_preview"):
+                compact_action["input_preview"] = cls._compact_verifier_prompt_value(
+                    action.get("input_preview"),
+                    max_chars=500,
+                )
+            if preview is not None:
+                compact_action["result_preview"] = cls._compact_action_preview_value(preview, max_chars=1800)
+            if refs:
+                compact_action["source_refs"] = refs
+            compact.append(compact_action)
+            if len(compact) >= max_actions:
+                break
+        return cls._dedupe_planner_action_previews(compact)
+
+    @staticmethod
+    def _dedupe_planner_action_previews(actions: Sequence[Any]) -> list[Any]:
+        deduped: list[Any] = []
+        seen: set[str] = set()
+        for action in actions:
+            if isinstance(action, Mapping):
+                key = "|".join(
+                    [
+                        str(action.get("id") or ""),
+                        str(action.get("action_call_id") or ""),
+                        str(action.get("status") or ""),
+                    ]
+                )
+            else:
+                key = str(action)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(action)
+        return deduped
 
     def _iterations_prompt_limit(self) -> int | None:
         configured = self._agent_task_option("iterations_prompt_limit", None)

@@ -4089,6 +4089,87 @@ def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(t
     )
 
 
+def test_planner_repair_context_keeps_previous_exact_evidence_anchors(tmp_path):
+    agent = _create_agent("agent-task-planner-evidence-anchors").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Repair a source-grounded report without inventing source URLs.",
+        success_criteria=["The report cites exact source URLs from action evidence."],
+        execution="flat",
+    )
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "plan": {"step_instruction": "Search for source evidence.", "execution_shape": "actions"},
+            "execution_meta": {
+                "status": "failed",
+                "logs": {
+                    "action_logs": [
+                        {
+                            "action_id": "web_search",
+                            "status": "partial_success",
+                            "action_call_id": "call-search",
+                            "model_digest": {
+                                "result_preview": [
+                                    {
+                                        "title": "NVDA: NVIDIA Corp - Stock Price, Quote and News - CNBC",
+                                        "href": "https://www.cnbc.com/quotes/NVDA",
+                                        "body": "Nvidia stock coverage and related news snippets.",
+                                    },
+                                    {
+                                        "title": "NVDA Stock Quote Price and Forecast | CNN",
+                                        "href": "https://www.cnn.com/markets/stocks/NVDA",
+                                        "body": "NVIDIA BioNeMo and Halos announcement snippets.",
+                                    },
+                                ],
+                                "result_preview_meta": {"truncated": False},
+                            },
+                        }
+                    ],
+                    "route_logs": {},
+                },
+            },
+            "verification": {
+                "is_complete": False,
+                "reason": "Source URLs must be exact.",
+                "missing_criteria": ["Generated report cited fabricated article URLs."],
+                "replan_instruction": "Rewrite using exact URLs from evidence.",
+            },
+        }
+    )
+    task.iterations.append(
+        {
+            "iteration": 2,
+            "plan": {"step_instruction": "Rewrite the report.", "execution_shape": "direct"},
+            "execution_meta": {"status": "completed", "logs": {"action_logs": [], "route_logs": {}}},
+            "verification": {
+                "is_complete": False,
+                "reason": "Latest rewrite still missed exact evidence refs.",
+                "missing_criteria": ["Exact source URLs are still missing."],
+                "replan_instruction": "Repair citations from available evidence.",
+            },
+        }
+    )
+
+    summaries = task._iteration_prompt_summaries()
+    first_anchors = summaries[0]["evidence_anchors"]
+    assert any(
+        ref["field"] == "href" and ref["value"] == "https://www.cnbc.com/quotes/NVDA"
+        for ref in first_anchors["source_refs"]
+    )
+    assert first_anchors["action_result_previews"][0]["result_preview"][1]["href"] == (
+        "https://www.cnn.com/markets/stocks/NVDA"
+    )
+
+    repair_context = task._planner_repair_context(summaries)
+    available = repair_context["available_evidence_anchors"]
+    assert any(
+        ref["field"] == "href" and ref["value"] == "https://www.cnbc.com/quotes/NVDA"
+        for ref in available["source_refs"]
+    )
+    assert available["action_result_previews"][0]["result_preview"][0]["href"] == "https://www.cnbc.com/quotes/NVDA"
+
+
 @pytest.mark.asyncio
 async def test_action_succeeded_evidence_satisfied_in_earlier_iteration(tmp_path):
     """action_succeeded evidence accumulates across iterations: the action
