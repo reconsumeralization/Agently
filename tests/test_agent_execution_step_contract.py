@@ -2182,6 +2182,62 @@ async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_
     )
 
 
+@pytest.mark.asyncio
+async def test_taskboard_intermediate_card_relocates_required_final_deliverable_path(tmp_path):
+    agent = _create_agent("execution-taskboard-intermediate-final-path").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Use an intermediate card artifact before the final deliverable.",
+        success_criteria=["Intermediate artifacts do not occupy final.md."],
+        execution="taskboard",
+        max_iterations=None,
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    revision = TaskBoardRevision.create(
+        board_id="intermediate-final-path",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "intermediate-final-path-graph",
+                "cards": [
+                    {"id": "extract", "objective": "Write an intermediate source summary."},
+                    {
+                        "id": "synthesize",
+                        "objective": "Write final.md.",
+                        "depends_on": ["extract"],
+                    },
+                ],
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        card=revision.graph.card_by_id()["extract"],
+        revision=revision,
+    )
+    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+        {
+            "artifact_markdown": "# Source Summary\n\nIntermediate evidence only.",
+            "artifact_manifest": {"path": "final.md"},
+        },
+        context,
+        deliverable_mode="workspace_artifact",
+    )
+
+    delivered = await task._deliver_workspace_artifact(
+        prepared,
+        plan=plan,
+        execution_meta={"logs": {}},
+        source="test.taskboard.intermediate.workspace_artifact",
+        card_context=context,
+    )
+
+    assert delivered["file_refs"][0]["path"] == "working/taskboard/extract/final.md"
+    assert (task.workspace.files_root / "working/taskboard/extract/final.md").is_file()
+    assert not (task.workspace.files_root / "final.md").exists()
+    assert delivered["diagnostics"][0]["code"] == (
+        "taskboard.workspace_artifact.final_path_relocated_for_intermediate_card"
+    )
+
+
 def test_execution_options_validate_known_route_schema():
     with pytest.raises(ValueError):
         ExecutionOptions.model_validate({"routes": {"skills": {"unknown": True}}})

@@ -1093,9 +1093,14 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     error=error,
                     execution_id=execution_id,
                 )
+            card_output, delivery_plan = self._prepare_taskboard_workspace_artifact_delivery(
+                card_output,
+                context,
+                deliverable_mode=self._workspace_artifact_delivery_mode(card_output),
+            )
             card_output = await self._deliver_workspace_artifact(
                 card_output,
-                plan={"deliverable_mode": self._workspace_artifact_delivery_mode(card_output)},
+                plan=delivery_plan,
                 execution_meta=cast(dict[str, Any], execution_meta),
                 source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
                 context_pack=context_pack,
@@ -1396,12 +1401,15 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     ],
                 }
         if allow_workspace_delivery:
+            card_output, delivery_plan = self._prepare_taskboard_workspace_artifact_delivery(
+                card_output,
+                context,
+                deliverable_mode=deliverable_mode,
+                prefer_stream_draft=prefer_stream_draft,
+            )
             card_output = await self._deliver_workspace_artifact(
                 card_output,
-                plan={
-                    "deliverable_mode": deliverable_mode,
-                    "prefer_stream_draft": prefer_stream_draft,
-                },
+                plan=delivery_plan,
                 execution_meta=cast(dict[str, Any], execution_meta),
                 source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
                 context_pack=context_pack,
@@ -2964,6 +2972,56 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         if not isinstance(refs, list):
             return []
         return [dict(ref) for ref in refs if isinstance(ref, Mapping)]
+
+    def _prepare_taskboard_workspace_artifact_delivery(
+        self,
+        card_output: Any,
+        context: Any,
+        *,
+        deliverable_mode: str | None,
+        prefer_stream_draft: bool = False,
+    ) -> tuple[Any, dict[str, Any]]:
+        plan: dict[str, Any] = {"deliverable_mode": str(deliverable_mode or "").strip()}
+        if prefer_stream_draft:
+            plan["prefer_stream_draft"] = True
+        if not plan["deliverable_mode"] or not isinstance(card_output, Mapping):
+            return card_output, plan
+        required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
+        if not required_paths or self._taskboard_context_card_is_leaf(context):
+            return card_output, plan
+
+        manifest = card_output.get("artifact_manifest")
+        manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
+        requested_path = self._workspace_artifact_manifest_path(manifest_dict)
+        if requested_path not in required_paths:
+            return card_output, plan
+
+        card = getattr(context, "card", None)
+        card_id = str(getattr(card, "id", "") or "card").strip() or "card"
+        safe_card_id = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in card_id) or "card"
+        file_name = Path(requested_path).name or "artifact.md"
+        relocated_path = f"working/taskboard/{safe_card_id}/{file_name}"
+        manifest_dict["path"] = relocated_path
+
+        result = dict(card_output)
+        result["artifact_manifest"] = manifest_dict
+        diagnostics: list[Any] = []
+        raw_diagnostics = result.get("diagnostics")
+        if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+            diagnostics.extend(raw_diagnostics)
+        elif raw_diagnostics:
+            diagnostics.append(raw_diagnostics)
+        diagnostics.append(
+            {
+                "code": "taskboard.workspace_artifact.final_path_relocated_for_intermediate_card",
+                "message": "A non-leaf TaskBoard card cannot write a required final deliverable path.",
+                "card_id": card_id,
+                "requested_path": requested_path,
+                "relocated_path": relocated_path,
+            }
+        )
+        result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        return result, plan
 
     @classmethod
     def _taskboard_readback_file_refs(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:

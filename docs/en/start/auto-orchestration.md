@@ -291,7 +291,10 @@ readback when they need the content. These intermediate refs are execution
 evidence, not final deliverable proof. If an Action artifact readback exposes
 Workspace `file_refs` for a materialized download, TaskBoard readback promotes
 those nested refs to card-level `file_refs` so later work can use Workspace
-readback instead of relying on a buried JSON preview.
+readback instead of relying on a buried JSON preview. When a non-final
+TaskBoard card proposes a required final path such as `final.md`, AgentTask
+relocates that intermediate artifact to `working/taskboard/<card-id>/...` and
+keeps the declared final path for the final synthesis or finalization card.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 Workspace file refs with bounded cold readback previews. Framework-generated
