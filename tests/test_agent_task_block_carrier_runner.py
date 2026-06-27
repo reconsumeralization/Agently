@@ -376,6 +376,39 @@ def test_block_carrier_runner_omits_provider_request_payload_from_attempt_previe
     assert "messages" not in preview
 
 
+def test_real_sample_runner_omits_provider_request_payload_from_stream_preview():
+    runner = _load_real_samples_runner()
+    item = SimpleNamespace(
+        path="error",
+        value={
+            "message": (
+                "Status Code: 400\n"
+                "Detail: invalid input\n"
+                "Request Data: {'messages': [{'role': 'user', 'content': 'large private prompt'}]}"
+            )
+        },
+        delta=None,
+        is_complete=True,
+        event_type="done",
+        source="agent_execution",
+        route="agent_task",
+        stage_id="",
+        task_id="task-1",
+        action_id="",
+        graph_id="",
+        wildcard_path="error",
+        indexes=[],
+        meta={},
+    )
+
+    serialized = runner.serialize_framework_stream_item(item)
+
+    assert serialized["value"]["redacted"] is True
+    assert "[provider payload omitted]" in serialized["value"]["preview"]
+    assert "large private prompt" not in serialized["value"]["preview"]
+    assert "messages" not in serialized["value"]["preview"]
+
+
 def test_hidden_source_audit_records_fact_without_overriding_judge(tmp_path):
     runner = _load_block_carrier_runner()
     legacy = runner._load_legacy_runner()
