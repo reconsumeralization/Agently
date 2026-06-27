@@ -209,6 +209,7 @@ def test_block_carrier_summary_records_runtime_observability_without_verdict(tmp
                     "runtime_observability": {
                         "provider_stream_idle_timeout_seconds": 30.0,
                         "response_materialization_idle_timeout_seconds": 45.0,
+                        "framework_no_progress_seconds": 90.0,
                         "strategy_input": False,
                     },
                 },
@@ -222,9 +223,26 @@ def test_block_carrier_summary_records_runtime_observability_without_verdict(tmp
     observability = summary["runtime_observability"]
     assert observability["provider_stream_idle_timeout_seconds"] == 30.0
     assert observability["response_materialization_idle_timeout_seconds"] == 45.0
+    assert observability["framework_no_progress_seconds"] == 90.0
     assert observability["strategy_input"] is False
     assert observability["runner_classifies_failures"] is False
     assert "quality" in observability["notes"]
+
+
+def test_block_carrier_runner_allows_framework_no_progress_as_liveness(monkeypatch):
+    runner = _load_block_carrier_runner()
+    monkeypatch.setenv("REAL_SAMPLE_FRAMEWORK_NO_PROGRESS_SECONDS", "90")
+
+    args = SimpleNamespace(
+        flat_max_iterations=None,
+        taskboard_route_timeout_seconds=None,
+        taskboard_tick_timeout_seconds=None,
+        taskboard_card_timeout_seconds=None,
+        taskboard_max_ticks=None,
+        taskboard_card_max_steps=None,
+    )
+
+    runner._validate_no_strategy_caps(args)
 
 
 def test_framework_route_metrics_count_model_request_events_from_stream_summary():
