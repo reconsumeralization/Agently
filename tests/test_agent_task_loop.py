@@ -270,11 +270,40 @@ def test_taskboard_prompt_compaction_drops_recursive_block_carrier_payload():
         "schema_version": "task_board_evidence_view/v1",
         "revision_id": "rev-1",
         "status_counts": {"completed": 1},
+        "source_refs": [
+            {
+                "source_url": "https://example.test/source",
+                "title": "Official source",
+                "content": huge,
+            }
+        ],
+        "file_refs": [
+            {
+                "path": "final.md",
+                "sha256": "abc123",
+                "preview": huge,
+                "bytes": len(huge),
+            }
+        ],
         "cards": [
             {
                 "card_id": "deliver",
                 "status": "completed",
                 "preview": {"answer": huge},
+                "source_refs": [
+                    {
+                        "url": "https://example.test/card-source",
+                        "label": "Card source",
+                        "content": huge,
+                    }
+                ],
+                "file_refs": [
+                    {
+                        "path": "evidence/source.md",
+                        "sha256": "def456",
+                        "preview": huge,
+                    }
+                ],
                 "diagnostics": [{"block_carrier": block_carrier}],
                 "metadata": {"block_carrier": block_carrier},
             }
@@ -286,7 +315,12 @@ def test_taskboard_prompt_compaction_drops_recursive_block_carrier_payload():
     assert len(compact_view_text) < 10000
     assert len(huge) > len(compact_view_text)
     assert "taskboard:deliver:attempt:1" in compact_view_text
+    assert "https://example.test/source" in compact_view_text
+    assert "https://example.test/card-source" in compact_view_text
+    assert "final.md" in compact_view_text
+    assert "evidence/source.md" in compact_view_text
     assert "input_payload" not in compact_view_text
+    assert huge not in compact_view_text
 
 
 def test_block_carrier_hot_metadata_compacts_recursive_payload():

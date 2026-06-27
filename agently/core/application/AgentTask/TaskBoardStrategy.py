@@ -640,6 +640,9 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 metadata["block_carrier"] = cls._compact_block_carrier_for_taskboard_meta(metadata.get("block_carrier"))
             artifact_refs_source = cls._prompt_sequence(card.get("artifact_refs"))
             file_refs_source = cls._prompt_sequence(card.get("file_refs"))
+            source_refs_value = card.get("source_refs")
+            source_refs_sequence = cls._prompt_sequence(source_refs_value)
+            source_refs_source = cls._collect_taskboard_source_refs(source_refs_value, max_refs=8)
             artifact_refs = [
                 cls._compact_artifact_ref_for_verifier(ref)
                 for ref in list(artifact_refs_source)[:8]
@@ -663,6 +666,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "artifact_refs_omitted": max(0, len(artifact_refs_source) - 8),
                     "file_refs": file_refs,
                     "file_refs_omitted": max(0, len(file_refs_source) - 8),
+                    "source_refs": source_refs_source,
+                    "source_refs_omitted": max(0, len(source_refs_sequence) - 8),
                     "diagnostics": cls._compact_verifier_prompt_value(
                         diagnostics,
                         max_chars=800,
@@ -672,6 +677,9 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             )
         artifact_refs_source = cls._prompt_sequence(evidence_view.get("artifact_refs"))
         file_refs_source = cls._prompt_sequence(evidence_view.get("file_refs"))
+        source_refs_value = evidence_view.get("source_refs")
+        source_refs_sequence = cls._prompt_sequence(source_refs_value)
+        source_refs_source = cls._collect_taskboard_source_refs(source_refs_value, max_refs=16)
         artifact_refs = [
             cls._compact_artifact_ref_for_verifier(ref)
             for ref in list(artifact_refs_source)[:16]
@@ -693,6 +701,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "artifact_refs_omitted": max(0, len(artifact_refs_source) - 16),
             "file_refs": file_refs,
             "file_refs_omitted": max(0, len(file_refs_source) - 16),
+            "source_refs": source_refs_source,
+            "source_refs_omitted": max(0, len(source_refs_sequence) - 16),
         }
 
     @classmethod
