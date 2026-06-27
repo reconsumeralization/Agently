@@ -1539,8 +1539,20 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
 
     @staticmethod
     def _taskboard_patch_proposal_requests_readback(patch_proposal: Mapping[str, Any]) -> bool:
-        action = str(patch_proposal.get("action") or patch_proposal.get("next_board_action") or "").strip().lower()
-        return action.replace("-", "_") in {"readback", "needs_readback", "cold_readback", "artifact_readback"}
+        action = str(
+            patch_proposal.get("action")
+            or patch_proposal.get("next_board_action")
+            or patch_proposal.get("patch_type")
+            or patch_proposal.get("type")
+            or ""
+        ).strip().lower()
+        return action.replace("-", "_") in {
+            "readback",
+            "needs_readback",
+            "cold_readback",
+            "artifact_readback",
+            "readback_required",
+        }
 
     @staticmethod
     def _taskboard_patch_proposal_target_refs(patch_proposal: Mapping[str, Any]) -> list[str]:

@@ -1849,6 +1849,77 @@ def test_taskboard_control_invalid_readback_patch_proposal_becomes_framework_pat
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
 
 
+def test_taskboard_control_readback_required_patch_type_becomes_readback_patch():
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="readback-required-patch-type",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "readback-required-patch-type-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect source evidence."},
+                    {
+                        "id": "analyze",
+                        "objective": "Analyze source evidence after cold readback.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "control",
+                    },
+                ],
+            }
+        ),
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "artifact_refs": [
+                            {
+                                "artifact_id": "source-artifact",
+                                "action_call_id": "source-call",
+                                "role": "output",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    card = revision.graph.card_by_id()["analyze"]
+    diagnostics: list[dict[str, Any]] = []
+    patch = AgentTask._taskboard_control_patch_proposal(
+        SimpleNamespace(revision=revision, card=card),
+        {
+            "status": "blocked",
+            "patch_proposal": {
+                "patch_type": "readback_required",
+                "readback_targets": [
+                    {
+                        "artifact_id": "source-artifact",
+                        "action_call_id": "source-call",
+                    }
+                ],
+            },
+            "gaps": ["Need the cold artifact body."],
+            "remaining_work": ["Continue after readback."],
+        },
+        diagnostics,
+    )
+
+    assert patch is not None
+    assert diagnostics[0]["code"] == "taskboard.control.invalid_model_patch_proposal"
+    next_revision = validator.apply_patch(revision, patch)
+    cards = next_revision.graph.card_by_id()
+    assert cards["analyze.readback"].allowed_execution_shape == "readback"
+    assert cards["analyze.readback"].depends_on == ("collect",)
+    assert cards["analyze.continue"].depends_on == ("collect", "analyze.readback")
+
+
 def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
     assert AgentTask._taskboard_control_output_allows_workspace_delivery(
         {
