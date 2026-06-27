@@ -2075,6 +2075,113 @@ async def test_taskboard_readback_card_reads_workspace_file_refs_from_artifact_r
     assert "complete Workspace-backed deliverable body" in result.preview["file_readbacks"][0]["content_preview"]
 
 
+@pytest.mark.asyncio
+async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_action_readback(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("execution-taskboard-nested-workspace-file-readback").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Read a downloaded file ref discovered inside Action artifact readback.",
+        success_criteria=["The readback card promotes nested Workspace file refs."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    write_result = await task.workspace.write_file(
+        "downloads/source.md",
+        "# Downloaded Source\n\nWorkspace-only PDF text extracted after download.",
+    )
+    file_ref = dict(write_result["file_refs"][0])
+    file_ref["role"] = "download"
+
+    async def fake_read_action_artifact(artifact_id: str, action_call_id: str | None = None) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "success",
+            "artifact_id": artifact_id,
+            "action_call_id": action_call_id,
+            "artifact_type": "action_output",
+            "value": {
+                "kind": "remote_file",
+                "file_refs": [file_ref],
+                "read_preview": {
+                    "content": "Only the first page preview is here.",
+                    "file_refs": [file_ref],
+                    "truncated": True,
+                },
+            },
+        }
+
+    monkeypatch.setattr(agent.action, "async_read_action_artifact", fake_read_action_artifact, raising=False)
+    revision = TaskBoardRevision.create(
+        board_id="nested-workspace-file-readback",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "nested-workspace-file-readback-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Download source material."},
+                    {
+                        "id": "readback",
+                        "objective": "Read scoped downloaded Workspace file evidence.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "readback",
+                        "required_outputs": ["Downloaded file content preview."],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "preview": "Action artifact ref only; file refs are nested in readback.",
+                        "artifact_refs": [
+                            {
+                                "action_call_id": "act-call-download",
+                                "artifact_id": "act-art-download-output",
+                                "artifact_type": "action_output",
+                                "available": True,
+                                "full_value_available": True,
+                                "role": "output",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    card = revision.graph.card_by_id()["readback"]
+    result = await task._run_taskboard_readback_card(
+        SimpleNamespace(
+            card=card,
+            revision=revision,
+        ),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    assert result.file_refs[0]["path"] == "downloads/source.md"
+    assert result.metadata["file_ref_count"] == 1
+    assert result.metadata["file_success_count"] == 1
+    payload = result.preview
+    assert payload["file_refs"][0]["path"] == "downloads/source.md"
+    assert payload["file_readbacks"][0]["ok"] is True
+    assert "Workspace-only PDF text" in payload["file_readbacks"][0]["content_preview"]
+    assert any(
+        item.get("code") == "taskboard.readback.workspace_file_refs_discovered"
+        for item in payload["diagnostics"]
+        if isinstance(item, dict)
+    )
+
+
 def test_execution_options_validate_known_route_schema():
     with pytest.raises(ValueError):
         ExecutionOptions.model_validate({"routes": {"skills": {"unknown": True}}})

@@ -288,7 +288,10 @@ notes, or persist large extracted text as Workspace or Action artifact refs.
 Hot prompts should carry compact refs and bounded previews; later blocks can
 open scoped snippets with `read_file(max_bytes=..., offset=...)` or artifact
 readback when they need the content. These intermediate refs are execution
-evidence, not final deliverable proof.
+evidence, not final deliverable proof. If an Action artifact readback exposes
+Workspace `file_refs` for a materialized download, TaskBoard readback promotes
+those nested refs to card-level `file_refs` so later work can use Workspace
+readback instead of relying on a buried JSON preview.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 Workspace file refs with bounded cold readback previews. Framework-generated

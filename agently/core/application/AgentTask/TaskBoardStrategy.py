@@ -1983,6 +1983,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             )
             readbacks: list[dict[str, Any]] = []
             file_readbacks: list[dict[str, Any]] = []
+            effective_file_refs = [dict(ref) for ref in file_refs if isinstance(ref, Mapping)]
             diagnostics: list[dict[str, Any]] = []
             if not refs and not file_refs:
                 status = "blocked"
@@ -2059,7 +2060,17 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
 
                     success_count = sum(1 for item in readbacks if item.get("ok"))
                     failed_count = len(readbacks) - success_count
-                for ref in file_refs:
+                discovered_file_refs = self._taskboard_file_refs_from_action_readbacks(readbacks)
+                added_file_refs = self._merge_taskboard_file_refs(effective_file_refs, discovered_file_refs)
+                if added_file_refs:
+                    diagnostics.append(
+                        {
+                            "code": "taskboard.readback.workspace_file_refs_discovered",
+                            "card_id": context.card.id,
+                            "file_ref_count": len(added_file_refs),
+                        }
+                    )
+                for ref in effective_file_refs:
                     path = str(ref.get("path") or "").strip()
                     try:
                         raw_file_readback = await self._await_taskboard_card_execution(
@@ -2101,10 +2112,11 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "status": status,
                     "answer": (
                         f"Read { success_count } of { len(refs) } Action artifact refs and "
-                        f"{ file_success_count } of { len(file_refs) } Workspace file refs with bounded previews."
+                        f"{ file_success_count } of { len(effective_file_refs) } Workspace file refs with bounded previews."
                     ),
                     "readbacks": readbacks,
                     "file_readbacks": file_readbacks,
+                    "file_refs": DataFormatter.sanitize(effective_file_refs),
                     "evidence": [
                         *[
                             f"artifact:{ item.get('artifact_id') } status={ item.get('status') }"
@@ -2131,7 +2143,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "ref_count": len(refs),
                     "file_success_count": file_success_count,
                     "file_failed_count": file_failed_count,
-                    "file_ref_count": len(file_refs),
+                    "file_ref_count": len(effective_file_refs),
                 },
             )
             execution_diagnostic = {
@@ -2141,7 +2153,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "ref_count": len(refs),
                 "success_count": success_count,
                 "failed_count": failed_count,
-                "file_ref_count": len(file_refs),
+                "file_ref_count": len(effective_file_refs),
                 "file_success_count": file_success_count,
                 "file_failed_count": file_failed_count,
             }
@@ -2161,14 +2173,14 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     },
                     "diagnostics": [execution_diagnostic],
                     "artifact_refs": DataFormatter.sanitize(refs),
-                    "file_refs": DataFormatter.sanitize(file_refs),
+                    "file_refs": DataFormatter.sanitize(effective_file_refs),
                 },
                 "action_evidence": [
                     {
                         "kind": "taskboard_artifact_readback",
                         "card_id": context.card.id,
                         "artifact_refs": DataFormatter.sanitize(refs),
-                        "file_refs": DataFormatter.sanitize(file_refs),
+                        "file_refs": DataFormatter.sanitize(effective_file_refs),
                         "readbacks": DataFormatter.sanitize(readbacks),
                         "file_readbacks": DataFormatter.sanitize(file_readbacks),
                         "status": status,
@@ -2205,8 +2217,15 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         file_success_count = 0
         if isinstance(file_readbacks, Sequence) and not isinstance(file_readbacks, str | bytes | bytearray):
             file_success_count = sum(1 for item in file_readbacks if isinstance(item, Mapping) and item.get("ok"))
+        result_file_refs = [dict(ref) for ref in file_refs if isinstance(ref, Mapping)]
+        raw_result_file_refs = payload.get("file_refs")
+        if isinstance(raw_result_file_refs, Sequence) and not isinstance(
+            raw_result_file_refs,
+            str | bytes | bytearray,
+        ):
+            result_file_refs = [dict(ref) for ref in raw_result_file_refs if isinstance(ref, Mapping)]
         failed_count = max(0, len(refs) - success_count)
-        file_failed_count = max(0, len(file_refs) - file_success_count)
+        file_failed_count = max(0, len(result_file_refs) - file_success_count)
         diagnostics.append(
             {
                 "execution_kind": "taskboard_artifact_readback",
@@ -2215,7 +2234,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "ref_count": len(refs),
                 "success_count": success_count,
                 "failed_count": failed_count,
-                "file_ref_count": len(file_refs),
+                "file_ref_count": len(result_file_refs),
                 "file_success_count": file_success_count,
                 "file_failed_count": file_failed_count,
                 "block_carrier": self._compact_block_carrier_for_taskboard_meta(
@@ -2229,7 +2248,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             status=str(payload.get("status") or "failed"),
             preview=DataFormatter.sanitize(payload),
             artifact_refs=tuple(refs),
-            file_refs=tuple(file_refs),
+            file_refs=tuple(result_file_refs),
             diagnostics=tuple(diagnostics),
             metadata={
                 "execution_id": execution_meta.get("execution_id"),
@@ -2238,7 +2257,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "ref_count": len(refs),
                 "success_count": success_count,
                 "failed_count": failed_count,
-                "file_ref_count": len(file_refs),
+                "file_ref_count": len(result_file_refs),
                 "file_success_count": file_success_count,
                 "file_failed_count": file_failed_count,
                 "block_carrier": self._compact_block_carrier_for_taskboard_meta(
@@ -2975,6 +2994,73 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 if isinstance(card, Mapping):
                     collect(card.get("artifact_refs"))
                     collect(card.get("file_refs"))
+        return refs
+
+    @staticmethod
+    def _taskboard_file_ref_key(ref: Mapping[str, Any]) -> tuple[str, str]:
+        return (str(ref.get("path") or "").strip(), str(ref.get("sha256") or "").strip())
+
+    @classmethod
+    def _merge_taskboard_file_refs(
+        cls,
+        refs: list[dict[str, Any]],
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        seen = {cls._taskboard_file_ref_key(ref) for ref in refs if cls._taskboard_file_ref_key(ref)[0]}
+        added: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            path = str(candidate.get("path") or "").strip()
+            if not path:
+                continue
+            item = dict(DataFormatter.sanitize(candidate))
+            key = cls._taskboard_file_ref_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(item)
+            added.append(item)
+        return added
+
+    @classmethod
+    def _taskboard_file_refs_from_action_readbacks(cls, readbacks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def collect(value: Any, *, source_ref: Mapping[str, Any] | None = None) -> None:
+            if not isinstance(value, Mapping):
+                return
+            raw_refs = value.get("file_refs")
+            if isinstance(raw_refs, Sequence) and not isinstance(raw_refs, str | bytes | bytearray):
+                for raw_ref in raw_refs:
+                    if not isinstance(raw_ref, Mapping):
+                        continue
+                    path = str(raw_ref.get("path") or "").strip()
+                    if not path:
+                        continue
+                    item = dict(DataFormatter.sanitize(raw_ref))
+                    if source_ref is not None:
+                        item.setdefault("source", "taskboard_action_artifact_readback")
+                        artifact_id = str(source_ref.get("artifact_id") or "").strip()
+                        action_call_id = str(source_ref.get("action_call_id") or "").strip()
+                        if artifact_id:
+                            item.setdefault("source_artifact_id", artifact_id)
+                        if action_call_id:
+                            item.setdefault("source_action_call_id", action_call_id)
+                    key = cls._taskboard_file_ref_key(item)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    refs.append(item)
+            for key in ("artifact_manifest", "read_preview", "value_preview", "data", "result"):
+                nested = value.get(key)
+                if isinstance(nested, Mapping):
+                    collect(nested, source_ref=source_ref)
+
+        for readback in readbacks:
+            if isinstance(readback, Mapping):
+                collect(readback, source_ref=readback)
         return refs
 
     @staticmethod
