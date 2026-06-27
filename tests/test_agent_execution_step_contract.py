@@ -1843,9 +1843,10 @@ def test_taskboard_control_invalid_readback_patch_proposal_becomes_framework_pat
     assert diagnostics[0]["code"] == "taskboard.control.invalid_model_patch_proposal"
     next_revision = validator.apply_patch(revision, patch)
     cards = next_revision.graph.card_by_id()
-    assert cards["final.readback"].allowed_execution_shape == "readback"
-    assert cards["final.readback"].depends_on == ("collect",)
-    assert cards["final.continue"].depends_on == ("collect", "final.readback")
+    assert cards["final.evidence"].allowed_execution_shape == "actions"
+    assert cards["final.evidence"].depends_on == ("collect",)
+    assert cards["final.evidence"].metadata["target_refs"] == ["https://example.test/source"]
+    assert cards["final.continue"].depends_on == ("collect", "final.evidence")
 
 
 def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():

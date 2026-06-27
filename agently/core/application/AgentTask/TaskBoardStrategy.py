@@ -1528,7 +1528,11 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 if cls._taskboard_patch_proposal_requests_readback(raw_patch):
                     auto_patch_input = dict(card_output)
                     auto_patch_input["next_board_action"] = "readback"
-                    return cls._taskboard_control_auto_patch(context, auto_patch_input)
+                    return cls._taskboard_control_auto_patch(
+                        context,
+                        auto_patch_input,
+                        target_refs=cls._taskboard_patch_proposal_target_refs(raw_patch),
+                    )
                 return None
             return DataFormatter.sanitize(patch.to_dict())
         return cls._taskboard_control_auto_patch(context, card_output)
@@ -1538,11 +1542,33 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         action = str(patch_proposal.get("action") or patch_proposal.get("next_board_action") or "").strip().lower()
         return action.replace("-", "_") in {"readback", "needs_readback", "cold_readback", "artifact_readback"}
 
+    @staticmethod
+    def _taskboard_patch_proposal_target_refs(patch_proposal: Mapping[str, Any]) -> list[str]:
+        raw_refs = patch_proposal.get("target_refs") or patch_proposal.get("refs") or patch_proposal.get("urls")
+        if not isinstance(raw_refs, Sequence) or isinstance(raw_refs, str | bytes | bytearray):
+            return []
+        refs: list[str] = []
+        seen: set[str] = set()
+        for item in raw_refs:
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            refs.append(text)
+        return refs[:8]
+
     @classmethod
-    def _taskboard_control_auto_patch(cls, context: Any, card_output: Mapping[str, Any]) -> dict[str, Any] | None:
+    def _taskboard_control_auto_patch(
+        cls,
+        context: Any,
+        card_output: Mapping[str, Any],
+        *,
+        target_refs: Sequence[str] | None = None,
+    ) -> dict[str, Any] | None:
         next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
         if next_action not in {"readback", "needs_readback"}:
             return None
+        target_ref_list = [str(ref).strip() for ref in list(target_refs or ()) if str(ref).strip()]
         revision = getattr(context, "revision", None)
         card = getattr(context, "card", None)
         if revision is None or card is None:
@@ -1570,17 +1596,31 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             existing_ids.add(candidate)
             return candidate
 
-        readback_id = unique_id(f"{current_id}.readback")
         continuation_id = unique_id(f"{current_id}.continue")
         current_card = dict(card.to_dict() if hasattr(card, "to_dict") else {})
         if not current_card:
             return None
         current_metadata = dict(current_card.get("metadata") or {})
         if (
-            str(current_metadata.get("generated_by") or "") == "agent_task.taskboard.control_auto_readback"
-            and str(current_metadata.get("readback_card_id") or "").strip()
+            str(current_metadata.get("generated_by") or "")
+            in {
+                "agent_task.taskboard.control_auto_readback",
+                "agent_task.taskboard.control_auto_target_refs",
+            }
+            and (
+                str(current_metadata.get("readback_card_id") or "").strip()
+                or str(current_metadata.get("evidence_card_id") or "").strip()
+            )
         ):
             return None
+        source = (
+            "agent_task.taskboard.control_auto_target_refs"
+            if target_ref_list
+            else "agent_task.taskboard.control_auto_readback"
+        )
+        evidence_card_id = (
+            unique_id(f"{current_id}.evidence") if target_ref_list else unique_id(f"{current_id}.readback")
+        )
         current_metadata.update(
             {
                 "superseded_by": continuation_id,
@@ -1598,46 +1638,61 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         readback_dependencies = cls._taskboard_auto_readback_scope(card, graph)
         gaps = cls._normalize_string_list(card_output.get("gaps"))
         remaining_work = cls._normalize_string_list(card_output.get("remaining_work"))
-        readback_objective = "Read scoped cold evidence required before continuing the blocked control card."
+        if target_ref_list:
+            readback_objective = (
+                "Collect scoped evidence from the explicit target refs required before continuing the blocked "
+                f"control card. Target refs: {'; '.join(target_ref_list)}"
+            )
+        else:
+            readback_objective = "Read scoped cold evidence required before continuing the blocked control card."
         if gaps:
             readback_objective = f"{readback_objective} Gaps: {'; '.join(gaps[:3])}"
         continuation_objective = str(getattr(card, "objective", "") or "Continue the blocked TaskBoard card.").strip()
         if remaining_work:
             continuation_objective = f"{continuation_objective} Remaining work: {'; '.join(remaining_work[:3])}"
+        evidence_metadata = {
+            "evidence_scope": readback_dependencies,
+            "generated_by": source,
+            "source_card_id": current_id,
+        }
+        if target_ref_list:
+            evidence_metadata["target_refs"] = target_ref_list
+        evidence_card = {
+            "id": evidence_card_id,
+            "objective": readback_objective,
+            "depends_on": readback_dependencies,
+            "required_outputs": (
+                ["Evidence gathered from target refs or diagnostics explaining inaccessible refs."]
+                if target_ref_list
+                else ["Bounded readback previews for verifier-visible cold evidence."]
+            ),
+            "allowed_execution_shape": "actions" if target_ref_list else "readback",
+            "failure_policy": "required",
+            "metadata": evidence_metadata,
+        }
         patch = {
             "base_revision": str(getattr(revision, "revision_id", "") or ""),
-            "source": "agent_task.taskboard.control_auto_readback",
+            "source": source,
             "operations": [
                 {"op": "update_card", "card": current_card},
                 {
                     "op": "add_card",
-                    "card": {
-                        "id": readback_id,
-                        "objective": readback_objective,
-                        "depends_on": readback_dependencies,
-                        "required_outputs": ["Bounded readback previews for verifier-visible cold evidence."],
-                        "allowed_execution_shape": "readback",
-                        "failure_policy": "required",
-                        "metadata": {
-                            "evidence_scope": readback_dependencies,
-                            "generated_by": "agent_task.taskboard.control_auto_readback",
-                            "source_card_id": current_id,
-                        },
-                    },
+                    "card": evidence_card,
                 },
                 {
                     "op": "add_card",
                     "card": {
                         "id": continuation_id,
                         "objective": continuation_objective,
-                        "depends_on": [*dependencies, readback_id],
+                        "depends_on": [*dependencies, evidence_card_id],
                         "required_outputs": list(getattr(card, "required_outputs", ()) or ()),
                         "allowed_execution_shape": str(getattr(card, "allowed_execution_shape", "") or "control"),
                         "failure_policy": str(getattr(card, "failure_policy", "") or "required"),
                         "metadata": {
-                            "generated_by": "agent_task.taskboard.control_auto_readback",
+                            "generated_by": source,
                             "continues_card_id": current_id,
-                            "readback_card_id": readback_id,
+                            "readback_card_id": evidence_card_id,
+                            "evidence_card_id": evidence_card_id if target_ref_list else "",
                         },
                     },
                 },
@@ -1646,8 +1701,9 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "diagnostic": {
                         "code": "taskboard.control.auto_readback_patch",
                         "card_id": current_id,
-                        "readback_card_id": readback_id,
+                        "readback_card_id": evidence_card_id,
                         "continuation_card_id": continuation_id,
+                        "target_ref_count": len(target_ref_list),
                     },
                 },
             ],
@@ -1655,8 +1711,9 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 {
                     "code": "taskboard.control.auto_readback_patch",
                     "card_id": current_id,
-                    "readback_card_id": readback_id,
+                    "readback_card_id": evidence_card_id,
                     "continuation_card_id": continuation_id,
+                    "target_ref_count": len(target_ref_list),
                 }
             ],
         }
