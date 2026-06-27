@@ -545,8 +545,13 @@ def test_hidden_source_audit_records_fact_without_overriding_judge(tmp_path):
 
     updated = legacy.apply_hidden_source_audit(record, case, run_dir, final_outputs)
 
-    assert updated["source_audit"]["passed"] is False
+    assert updated["source_audit"]["schema_version"] == "hidden_source_audit/v2"
+    assert updated["source_audit"]["quality_gate"] is False
     assert updated["source_audit"]["required_source_refs"] == [
+        "https://lmcc.ccf.org.cn/101/1010/10261.html"
+    ]
+    assert updated["source_audit"]["exact_source_refs"] == []
+    assert updated["source_audit"]["missing_exact_refs"] == [
         "https://lmcc.ccf.org.cn/101/1010/10261.html"
     ]
     assert updated["judge"] == record["judge"]
