@@ -135,7 +135,6 @@ class AgentExecution:
         self.local_required_action_ids: list[str] = []
         self.local_skill_selectors: list[dict[str, Any]] = []
         self.local_skills_pack_selectors: list[dict[str, Any]] = []
-        self.local_dynamic_task_candidates: list[dict[str, Any]] = []
         self._agent_task_step_overrides: dict[str, Any] = {}
         self.task_options: dict[str, Any] = {}
         self.strategy_name: str | None = None
@@ -847,9 +846,6 @@ class AgentExecution:
 
     async def close_streams(self) -> None:
         await self.stream.close()
-
-    def dynamic_task_candidates(self) -> list[dict[str, Any]]:
-        return []
 
     def action_candidates(self) -> list[dict[str, Any]]:
         return self.route_planner.action_candidates()

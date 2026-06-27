@@ -82,13 +82,6 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     effort_strategy = execution.effective_options.get("effort_strategy")
     effort_strategy = dict(effort_strategy) if isinstance(effort_strategy, dict) else {}
     max_iterations = task_options.get("max_iterations")
-    if max_iterations is None and effort_strategy:
-        max_iterations = effort_strategy.get("max_iterations")
-        execution.record_consumed_option(
-            "effort.max_iterations",
-            max_iterations,
-            owner="AgentTaskLoop",
-        )
     agent_task_options = dict(task_options.get("options") or {})
     if effort_strategy:
         agent_task_options.setdefault("agent_task", {})
@@ -142,7 +135,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             success_criteria=success_criteria,
             execution=execution_strategy,
             workspace=task_options.get("workspace"),
-            max_iterations=int(max_iterations or 3),
+            max_iterations=AgentTask.normalize_max_iterations(max_iterations),
             verify=cast(Any, task_options.get("verify", "before_done")),
             context_profile=str(task_options.get("context_profile", "auto")),
             context_budget=cast(Any, task_options.get("context_budget")),

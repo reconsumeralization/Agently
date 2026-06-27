@@ -234,7 +234,7 @@ CASES = [
             "research_notes.json",
             "source_index.json",
             "comparison_matrix.xlsx",
-            "full_report.docx",
+            "complete_deliverable.docx",
             "executive_summary.pdf",
             "briefing_deck.pptx",
             "qa_report.json",
@@ -539,7 +539,7 @@ _OUTPUT_ROLE_ALIASES = {
     "compliance_notes": ["compliance", "not investment advice", "non-investment", "合规", "不是投资建议"],
     "research_notes": ["research notes", "notes", "调研笔记"],
     "comparison_matrix": ["comparison matrix", "matrix", "对比表"],
-    "full_report": ["full report", "report", "完整报告"],
+    "complete_deliverable": ["complete deliverable", "report", "完整交付物"],
     "executive_summary": ["executive summary", "summary", "摘要"],
     "briefing_deck": ["briefing deck", "deck", "slides", "汇报材料"],
     "qa_report": ["qa report", "quality check", "quality assurance", "质量检查"],
@@ -635,7 +635,7 @@ def _semantic_rules(case: ComboCase) -> list[str]:
         ])
     elif case.case_id == "research_to_briefing_pack":
         rules.extend([
-            "The plan covers Agent Skills ecosystem research with sources, comparison analysis, full report, spreadsheet, deck, PDF summary, and QA log.",
+            "The plan covers Agent Skills ecosystem research with sources, comparison analysis, a complete deliverable, spreadsheet, deck, PDF summary, and QA log.",
             "The plan treats current ecosystem facts as source-backed research data.",
             "The plan repairs missing artifact-writer dependencies through controlled Actions or environments before fallback; if a writer still fails, it records explicit fallback or fail-closed behavior.",
         ])

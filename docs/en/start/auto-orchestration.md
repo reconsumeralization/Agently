@@ -108,10 +108,15 @@ result = (
 
 Simple code can keep using `.effort("low" | "medium" | "high")`. The expanded
 form keeps the same owner: effort controls strategy and resource intensity, not
-whether an execution is a goal-pursuit task. `budget.iteration_limit` maps to
-the task-loop iteration budget, while `model_call_limit` and
-`wall_time_seconds` map to AgentExecution limits unless explicit limits were
-already set. Completion still requires both model verification and host guards.
+whether an execution is a goal-pursuit task. `budget.iteration_limit`,
+`model_call_limit`, and `wall_time_seconds` are soft strategy metadata: they
+may shape planning, reflection, repair posture, and evidence depth, but they do
+not silently set task-loop `max_iterations` or AgentExecution hard limits. Use
+explicit task options or `limits={...}` when the host needs hard resource
+controls. By default, AgentTask does not impose model-request, iteration,
+TaskBoard tick, or Action round quotas; no-progress and idle timeouts remain
+liveness guards for stuck executions, not strategy evidence. Completion still
+requires both model verification and host guards.
 For task-strategy executions, effort also controls reflection density:
 `low` records the final reflection and only planner-marked important process
 points, `medium` reflects after each major task node or TaskBoard card/tick, and
@@ -133,6 +138,12 @@ loop instead of one direct AgentExecution. It returns a task-strategy
 `AgentExecution` draft; internally the retained `AgentTask` record runs one task
 owned by one Agent: plan, execute one bounded step, write Workspace evidence,
 verify, replan when needed, then finish as complete or blocked.
+
+Internally, `flat` and `taskboard` are coordination strategies, not separate
+execution carriers. Both lower strategy-owned work units through the internal
+Block carrier into `ExecutionPlan` / Blocks / TriggerFlow evidence. The
+TaskBoard primitive still owns board scheduling, dependency state, and patch
+validation; AgentTask uses the carrier for bounded card execution evidence.
 
 In the current 4.1.3 line this is a hardened bounded public task-loop strategy,
 not the full future AgentTask system. `agent.create_task_loop(...)` is the explicit spelling
@@ -258,12 +269,18 @@ completed business result.
 When a bounded step or TaskBoard card returns a short `artifact_markdown` body
 or a sectioned `artifact_manifest`, AgentTask writes the deliverable through the
 bound Workspace and immediately reads it back for `path`, `bytes`, `sha256`,
-bounded preview, and `file_refs`. Long reports, exam papers, and multi-section
-deliverables should use `artifact_manifest.sections` so JSON remains the control
-plane rather than the primary prose transport. Model-declared `file_refs` are
-diagnostics only until the framework has produced this Workspace readback
-evidence, preserving a real `final.md` or other deliverable for host-side
-review.
+bounded preview, and `file_refs`. For long, sectioned, or prose-heavy
+deliverables, choose the content carrier deliberately. A single freeform
+document can draft as natural Markdown/plain text with no `.output()` contract.
+When the caller needs separately addressable fields, use Agently
+`.output(..., format=...)` with `xml_field`, `hybrid`, or `yaml_literal` when
+that format fits the payload instead of forcing the long body into compact JSON
+fields. Keep status, evidence, and verification in separate compact
+judgment/readback contracts. When AgentTask must deliver a trusted file
+artifact, use `artifact_manifest.sections` plus Workspace readback.
+Model-declared `file_refs` are diagnostics only until the framework has
+produced this Workspace readback evidence, preserving a real `final.md` or other
+deliverable for host-side review.
 
 When the write succeeds and readback is trusted, verifier input includes the
 readback fields and `capability_evidence.artifacts.readback`; with
@@ -288,12 +305,15 @@ because the task-level verifier accepted the draft.
 
 Intermediate process steps with strong structured contracts use Agently
 `.output(..., format=...)` on the owning `ModelRequest` or `AgentExecution`.
-Compact control payloads use JSON; content-heavy payloads may use
-`hybrid`, `flat_markdown`, `xml_field`, or `yaml_literal` when that format fits
-the payload. If a declared non-JSON format cannot be parsed, Agently tries JSON
-as a recovery parser and accepts it only when the parsed value is a dict. The
-same guard applies to task `final_result` when an execution output contract is
-present.
+Do not add a restrictive JSON `.output()` contract to a pure long-prose drafting
+request only to control the body. Compact control payloads can use JSON; when a
+structured contract is genuinely needed for a content-heavy payload, use
+`xml_field` for XML-like field boundaries, `hybrid` for prose plus typed control
+fields, or `yaml_literal` for a literal document payload when that format fits
+the target model and consumer. If a declared non-JSON format cannot be parsed,
+Agently tries JSON as a recovery parser and accepts it only when the parsed
+value is a dict. The same guard applies to task `final_result` when an
+execution output contract is present.
 
 `examples/agent_task/goal_effort_public_stream.py` is the public-chain
 streaming proof for this contract. It runs

@@ -81,7 +81,10 @@ class DAGActionFlow:
             return []
 
         if max_rounds is None:
-            max_rounds = action.action_settings.get("loop.max_rounds", action.tool_settings.get("loop.max_rounds", 5))
+            max_rounds = action.action_settings.get(
+                "loop.max_rounds",
+                action.tool_settings.get("loop.max_rounds", None),
+            )
         if concurrency is None:
             concurrency = action.action_settings.get(
                 "loop.concurrency",
@@ -91,7 +94,7 @@ class DAGActionFlow:
             timeout = action.action_settings.get("loop.timeout", action.tool_settings.get("loop.timeout", None))
 
         if not isinstance(max_rounds, int) or max_rounds < 0:
-            max_rounds = 5
+            max_rounds = None
         if not isinstance(concurrency, int) or concurrency <= 0:
             concurrency = None
         if not isinstance(timeout, (int, float)) or timeout <= 0:

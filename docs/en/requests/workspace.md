@@ -39,8 +39,8 @@ Scoped `files_root` guides also name the standard editable file areas:
   providers before `read_file(...)` / `export_file(...)` handling;
 - `artifacts/`: generated supporting artifacts, structured outputs, evidence
   bundles, and non-primary deliverables;
-- `reports/`: user-facing readable deliverables such as Markdown, HTML, PDF
-  reports, exams, or briefs.
+- `reports/`: user-facing readable deliverables, including long, sectioned, or
+  file-backed deliverables.
 
 Use `workspace.file_area_path(...)` when framework or application code needs a
 contained path inside one of those areas:

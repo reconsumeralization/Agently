@@ -130,7 +130,7 @@ class Action:
             parent=parent_settings,
         )
         self.action_settings = SettingsNamespace(self.settings, "action")
-        self.action_settings.setdefault("loop.max_rounds", 5)
+        self.action_settings.setdefault("loop.max_rounds", None)
         self.action_settings.setdefault("loop.concurrency", None)
         self.action_settings.setdefault("loop.timeout", None)
         self.action_settings.setdefault("loop.max_consecutive_failed_rounds_per_action", 2)
@@ -140,7 +140,7 @@ class Action:
         self.action_settings.setdefault("policy.agent", {})
 
         self.tool_settings = SettingsNamespace(self.settings, "tool")
-        self.tool_settings.setdefault("loop.max_rounds", 5)
+        self.tool_settings.setdefault("loop.max_rounds", None)
         self.tool_settings.setdefault("loop.concurrency", None)
         self.tool_settings.setdefault("loop.timeout", None)
         self.tool_settings.setdefault("loop.max_consecutive_failed_rounds_per_action", 2)

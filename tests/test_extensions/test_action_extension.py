@@ -150,6 +150,15 @@ def test_action_extension_set_tool_loop_config():
     assert agent.settings.get("tool.loop.timeout") == 6.5
 
 
+def test_action_extension_default_loop_has_no_round_cap():
+    agent = Agently.create_agent()
+
+    assert agent.settings.get("action.loop.max_rounds") is None
+    assert agent.settings.get("tool.loop.max_rounds") is None
+    assert agent.action.action_settings.get("loop.max_rounds") is None
+    assert agent.action.tool_settings.get("loop.max_rounds") is None
+
+
 def test_action_extension_use_sandbox_registers_agent_scoped_bash_action(tmp_path):
     agent = Agently.create_agent()
     action_id = f"agent_bash_sandbox_{ agent.name }"

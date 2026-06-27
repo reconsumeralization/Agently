@@ -493,10 +493,13 @@ class AgentlyActionRuntime:
 
         standard_planning_handler = self.resolve_planning_handler(planning_handler)
         if max_rounds is None:
-            configured_max_rounds = self.action_settings.get("loop.max_rounds", self.tool_settings.get("loop.max_rounds", 5))
-            max_rounds = configured_max_rounds if isinstance(configured_max_rounds, int) else 5
+            configured_max_rounds = self.action_settings.get(
+                "loop.max_rounds",
+                self.tool_settings.get("loop.max_rounds", None),
+            )
+            max_rounds = configured_max_rounds if isinstance(configured_max_rounds, int) else None
         if not isinstance(max_rounds, int) or max_rounds < 0:
-            max_rounds = 5
+            max_rounds = None
 
         safe_done_plans = self.action.to_model_visible_records(done_plans if isinstance(done_plans, list) else [])
         safe_last_round_records = self.action.to_model_visible_records(

@@ -100,9 +100,13 @@ result = (
 
 简单代码仍然可以只写 `.effort("low" | "medium" | "high")`。展开形式仍然属于
 同一个入口：effort 只控制策略和资源强度，不决定 execution 是否进入目标追求。
-`budget.iteration_limit` 会映射到 task-loop iteration budget；
-`model_call_limit` 和 `wall_time_seconds` 会映射到 AgentExecution limits，除非
-调用方已经显式设置了 limits。完成仍然必须同时通过 model verification 和 host guards。
+`budget.iteration_limit`、`model_call_limit` 和 `wall_time_seconds` 是软策略元数据：
+它们可以影响 planning、reflection、repair 倾向和 evidence 深度，但不会静默设置
+task-loop `max_iterations` 或 AgentExecution hard limits。宿主需要硬资源控制时，
+应显式使用 task options 或 `limits={...}`。默认情况下，AgentTask 不施加模型请求数、
+迭代数、TaskBoard tick 数或 Action round 数配额；no-progress 和 idle timeout 仍作为
+卡死执行的活性保护，而不是策略效果证据。完成仍然必须同时通过 model verification 和
+host guards。
 对于 task-strategy execution，effort 还控制 reflection 密度：`low` 总是记录最终
 reflection，只在 planner 标记的重要过程节点记录过程 reflection；`medium` 在每个
 大任务节点或 TaskBoard card/tick 后记录 reflection；`high` 在每个框架可观测的
@@ -122,6 +126,12 @@ direct bounded execution，并留下 diagnostics。当宿主拥有提交式 DAG 
 内部保留的 `AgentTask` record 运行一个由单个 Agent 持有的任务：计划、执行一个
 bounded step、写入 Workspace 证据、验证、必要时 replan，最后以 complete 或
 blocked 结束。
+
+内部实现上，`flat` 和 `taskboard` 是协调策略，不是两套独立 execution carrier。
+两者都会把 strategy 拥有的 work unit 下沉到内部 Block carrier，再进入
+`ExecutionPlan` / Blocks / TriggerFlow evidence 路径。TaskBoard primitive 仍然
+负责 board schedule、dependency state 和 patch validation；AgentTask 只把 bounded
+card execution evidence 交给 carrier 承载。
 
 在当前 4.1.3 线里，这是一个加固后的有边界公开 task-loop strategy，
 不是完整未来版 AgentTask 系统。`agent.create_task_loop(...)` 是同一个长任务
@@ -234,10 +244,15 @@ progress、snapshot、child-execution、delta 或 phase 事件都会重置静默
 
 当某个 bounded step 或 TaskBoard card 返回短小 `artifact_markdown` 正文或分段
 `artifact_manifest` 时，AgentTask 会通过绑定的 Workspace 写入交付物，并立刻
-readback `path`、`bytes`、`sha256`、有界 preview 和 `file_refs`。长报告、试卷和
-多章节制品应使用 `artifact_manifest.sections`，让 JSON 只承载控制面而不是主要
-正文传输。模型声明的 `file_refs` 只作为 diagnostics，只有框架完成 Workspace
-写入和读回后才是可信证据，同时仍保留真实 `final.md` 或其他成品文件供 host 复核。
+readback `path`、`bytes`、`sha256`、有界 preview 和 `file_refs`。对于长篇、
+分段或重自然语言交付物，应先选择合适的内容载体：单一自由正文可以直接生成自然
+Markdown / plain text，不必为了携带正文而声明 `.output()`；如果调用方需要可独立寻址
+的字段，可在适合目标模型和消费方的情况下使用
+`.output(..., format=...)` 的 `xml_field`、`hybrid` 或 `yaml_literal`；状态、
+证据和校验保持为单独的紧凑 judgment/readback contract。若 AgentTask 必须交付可信文件
+artifact，再使用 `artifact_manifest.sections` 加 Workspace readback。模型声明的
+`file_refs` 只作为 diagnostics，只有框架完成 Workspace 写入和读回后才是可信证据，
+同时仍保留真实 `final.md` 或其他成品文件供 host 复核。
 
 写入成功且读回可信时，verifier 输入会包含这些读回字段和
 `capability_evidence.artifacts.readback`；在 `max_iterations=1` 下，真实已写入且可读回的
@@ -256,11 +271,12 @@ guard 会要求这些 Workspace 文件真实存在并可读回，才允许验收
 source-reference 校验，避免旧 API、泛化 API 只因为 task-level verifier 接受草稿而通过。
 
 带强结构合同的中间处理步骤必须在所属的 `ModelRequest` 或 `AgentExecution` 上使用
-Agently `.output(..., format=...)`。紧凑控制 payload 使用 JSON；内容较重的
-payload 可以按场景使用 `hybrid`、`flat_markdown`、`xml_field` 或
-`yaml_literal`。如果声明的非 JSON 格式解析失败，Agently 会尝试用 JSON 解析兜底，
-并且只有解析结果是 dict 时才接受。execution output contract 存在时，task
-`final_result` 也执行同一守卫。
+Agently `.output(..., format=...)`。不要只为了控制长篇自然语言正文而给纯正文生成请求
+添加限制性的 JSON `.output()` contract。紧凑控制 payload 可以使用 JSON；当内容较重的
+payload 确实需要结构化合同，可按场景使用 `xml_field` 表达 XML-like 字段边界，使用
+`hybrid` 表达正文加类型化控制字段，或在适合目标模型和消费方时使用 `yaml_literal`。
+如果声明的非 JSON 格式解析失败，Agently 会尝试用 JSON 解析兜底，并且只有解析结果是
+dict 时才接受。execution output contract 存在时，task `final_result` 也执行同一守卫。
 
 `examples/agent_task/goal_effort_public_stream.py` 是这个合同的公开链式 API
 流式证明。它运行

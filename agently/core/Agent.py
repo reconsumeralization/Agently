@@ -190,7 +190,6 @@ class BaseAgent:
         )
         self.request_prompt = self.request.prompt
         self.prompt = self.request_prompt
-        self._dynamic_task_candidates: list[dict[str, Any]] = []
 
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
@@ -1030,7 +1029,7 @@ class BaseAgent:
         success_criteria: list[str] | None = None,
         execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
         workspace: str | os.PathLike[str] | None = None,
-        max_iterations: int = 3,
+        max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
         context_profile: str = "auto",
         context_budget: dict[str, Any] | None = None,
@@ -1188,7 +1187,7 @@ class BaseAgent:
         success_criteria: list[str] | None = None,
         execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
         workspace: str | os.PathLike[str] | None = None,
-        max_iterations: int = 3,
+        max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
         context_profile: str = "auto",
         context_budget: dict[str, Any] | None = None,

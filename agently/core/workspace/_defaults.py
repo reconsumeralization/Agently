@@ -26,7 +26,7 @@ WORKSPACE_GUIDE_FILENAME = "AGENTLY_WORKSPACE.md"
 WORKSPACE_FILE_AREAS: dict[str, str] = {
     "downloads": "Remote files materialized by Browse, Actions, or external providers before read_file/export_file handling.",
     "artifacts": "Generated supporting artifacts, structured outputs, evidence bundles, and non-primary deliverables.",
-    "reports": "User-facing readable deliverables such as Markdown, HTML, PDF reports, exams, or briefs.",
+    "reports": "User-facing readable deliverables, including long, sectioned, or file-backed deliverables.",
 }
 WORKSPACE_FILE_AREA_ALIASES: dict[str, str] = {
     "download": "downloads",

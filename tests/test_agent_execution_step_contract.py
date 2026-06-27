@@ -51,7 +51,9 @@ class MockAgentExecutionRequester:
         )
 
     async def request_model(self, request_data: AgentlyRequestData):
-        MockAgentExecutionRequester.requests.append(json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False))
+        MockAgentExecutionRequester.requests.append(
+            json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        )
         yield "message", json.dumps(
             {
                 "answer": f"ok-{ len(MockAgentExecutionRequester.requests) }",
@@ -567,6 +569,12 @@ class MockFlatActionPlanningStallRequester(MockAgentExecutionRequester):
 
 class MockFlatActionPlanningSlowRequester(MockAgentExecutionRequester):
     name = "MockFlatActionPlanningSlowRequester"
+    action_planning_calls = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockFlatActionPlanningSlowRequester.action_planning_calls = 0
 
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
@@ -579,17 +587,21 @@ class MockFlatActionPlanningSlowRequester(MockAgentExecutionRequester):
                 "rationale": "The task needs action evidence.",
             }
         elif "next_action" in text and "execution_commands" in text:
+            MockFlatActionPlanningSlowRequester.action_planning_calls += 1
             await asyncio.sleep(0.35)
-            payload = {
-                "next_action": "execute",
-                "execution_commands": [
-                    {
-                        "purpose": "Collect probe action evidence.",
-                        "action_id": "probe_action",
-                        "action_input": {},
-                    }
-                ],
-            }
+            if MockFlatActionPlanningSlowRequester.action_planning_calls == 1:
+                payload = {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "Collect probe action evidence.",
+                            "action_id": "probe_action",
+                            "action_input": {},
+                        }
+                    ],
+                }
+            else:
+                payload = {"next_action": "response", "execution_commands": []}
         elif "[ACTION RESULTS]" in text:
             payload = {
                 "step_result": "action evidence collected",
@@ -1090,6 +1102,8 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
     last_action_id = ""
     readback_planning_seen = False
     review_planning_prompt = ""
+    collect_action_planning_calls = 0
+    review_action_planning_calls = 0
 
     @staticmethod
     def _on_register():
@@ -1097,6 +1111,8 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
         MockTaskBoardReadbackRequester.last_action_id = ""
         MockTaskBoardReadbackRequester.readback_planning_seen = False
         MockTaskBoardReadbackRequester.review_planning_prompt = ""
+        MockTaskBoardReadbackRequester.collect_action_planning_calls = 0
+        MockTaskBoardReadbackRequester.review_action_planning_calls = 0
 
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
@@ -1140,31 +1156,39 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                 MockTaskBoardReadbackRequester.review_planning_prompt = text
                 MockTaskBoardReadbackRequester.readback_planning_seen = True
                 MockTaskBoardReadbackRequester.last_action_id = "read_action_artifact"
-                payload = {
-                    "next_action": "execute",
-                    "execution_commands": [
-                        {
-                            "purpose": "Read dependency cold artifact.",
-                            "action_id": "read_action_artifact",
-                            "action_input": {
-                                "artifact_id": artifact_id_match.group(0) if artifact_id_match else "missing",
-                                "action_call_id": action_call_id_match.group(0) if action_call_id_match else "",
-                            },
-                        }
-                    ],
-                }
+                MockTaskBoardReadbackRequester.review_action_planning_calls += 1
+                if MockTaskBoardReadbackRequester.review_action_planning_calls == 1:
+                    payload = {
+                        "next_action": "execute",
+                        "execution_commands": [
+                            {
+                                "purpose": "Read dependency cold artifact.",
+                                "action_id": "read_action_artifact",
+                                "action_input": {
+                                    "artifact_id": artifact_id_match.group(0) if artifact_id_match else "missing",
+                                    "action_call_id": action_call_id_match.group(0) if action_call_id_match else "",
+                                },
+                            }
+                        ],
+                    }
+                else:
+                    payload = {"next_action": "response", "execution_commands": []}
             else:
                 MockTaskBoardReadbackRequester.last_action_id = "produce_large_evidence"
-                payload = {
-                    "next_action": "execute",
-                    "execution_commands": [
-                        {
-                            "purpose": "Produce an opaque artifact.",
-                            "action_id": "produce_large_evidence",
-                            "action_input": {},
-                        }
-                    ],
-                }
+                MockTaskBoardReadbackRequester.collect_action_planning_calls += 1
+                if MockTaskBoardReadbackRequester.collect_action_planning_calls == 1:
+                    payload = {
+                        "next_action": "execute",
+                        "execution_commands": [
+                            {
+                                "purpose": "Produce an opaque artifact.",
+                                "action_id": "produce_large_evidence",
+                                "action_input": {},
+                            }
+                        ],
+                    }
+                else:
+                    payload = {"next_action": "response", "execution_commands": []}
         elif "[ACTION RESULTS]" in text:
             if MockTaskBoardReadbackRequester.last_action_id == "read_action_artifact":
                 payload = {
@@ -1209,6 +1233,7 @@ class MockTaskBoardDependencyReadbackRequester(MockAgentExecutionRequester):
     last_action_id = ""
     dependency_readback_seen = False
     source_refs_seen = False
+    collect_action_planning_calls = 0
 
     @staticmethod
     def _on_register():
@@ -1216,6 +1241,7 @@ class MockTaskBoardDependencyReadbackRequester(MockAgentExecutionRequester):
         MockTaskBoardDependencyReadbackRequester.last_action_id = ""
         MockTaskBoardDependencyReadbackRequester.dependency_readback_seen = False
         MockTaskBoardDependencyReadbackRequester.source_refs_seen = False
+        MockTaskBoardDependencyReadbackRequester.collect_action_planning_calls = 0
 
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
@@ -1249,26 +1275,27 @@ class MockTaskBoardDependencyReadbackRequester(MockAgentExecutionRequester):
                 "risk_notes": [],
             }
         elif "next_action" in text and "execution_commands" in text:
-            if (
-                "dependency_readbacks" in text
-                and "Hidden evidence" in text
-            ):
+            if "dependency_readbacks" in text and "Hidden evidence" in text:
                 MockTaskBoardDependencyReadbackRequester.dependency_readback_seen = True
                 if "source_refs" in text and "https://example.test/evidence" in text:
                     MockTaskBoardDependencyReadbackRequester.source_refs_seen = True
                 payload = {"next_action": "response", "execution_commands": []}
             else:
                 MockTaskBoardDependencyReadbackRequester.last_action_id = "produce_large_evidence"
-                payload = {
-                    "next_action": "execute",
-                    "execution_commands": [
-                        {
-                            "purpose": "Produce an opaque artifact.",
-                            "action_id": "produce_large_evidence",
-                            "action_input": {},
-                        }
-                    ],
-                }
+                MockTaskBoardDependencyReadbackRequester.collect_action_planning_calls += 1
+                if MockTaskBoardDependencyReadbackRequester.collect_action_planning_calls == 1:
+                    payload = {
+                        "next_action": "execute",
+                        "execution_commands": [
+                            {
+                                "purpose": "Produce an opaque artifact.",
+                                "action_id": "produce_large_evidence",
+                                "action_input": {},
+                            }
+                        ],
+                    }
+                else:
+                    payload = {"next_action": "response", "execution_commands": []}
         elif "[ACTION RESULTS]" in text:
             payload = {
                 "status": "completed",
@@ -1277,7 +1304,10 @@ class MockTaskBoardDependencyReadbackRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Execute exactly one TaskBoard card" in text and "Use dependency evidence without a dedicated readback card" in text:
+        elif (
+            "Execute exactly one TaskBoard card" in text
+            and "Use dependency evidence without a dedicated readback card" in text
+        ):
             if "dependency_readbacks" in text and "Hidden evidence" in text:
                 MockTaskBoardDependencyReadbackRequester.dependency_readback_seen = True
                 if "source_refs" in text and "https://example.test/evidence" in text:
@@ -1323,12 +1353,14 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
     name = "MockTaskBoardControlDependencyReadbackRequester"
     dependency_readback_seen = False
     source_refs_seen = False
+    collect_action_planning_calls = 0
 
     @staticmethod
     def _on_register():
         MockAgentExecutionRequester.requests = []
         MockTaskBoardControlDependencyReadbackRequester.dependency_readback_seen = False
         MockTaskBoardControlDependencyReadbackRequester.source_refs_seen = False
+        MockTaskBoardControlDependencyReadbackRequester.collect_action_planning_calls = 0
 
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
@@ -1362,16 +1394,20 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
                 "risk_notes": [],
             }
         elif "next_action" in text and "execution_commands" in text:
-            payload = {
-                "next_action": "execute",
-                "execution_commands": [
-                    {
-                        "purpose": "Produce an opaque artifact.",
-                        "action_id": "produce_large_evidence",
-                        "action_input": {},
-                    }
-                ],
-            }
+            MockTaskBoardControlDependencyReadbackRequester.collect_action_planning_calls += 1
+            if MockTaskBoardControlDependencyReadbackRequester.collect_action_planning_calls == 1:
+                payload = {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "Produce an opaque artifact.",
+                            "action_id": "produce_large_evidence",
+                            "action_input": {},
+                        }
+                    ],
+                }
+            else:
+                payload = {"next_action": "response", "execution_commands": []}
         elif "[ACTION RESULTS]" in text:
             payload = {
                 "status": "completed",
@@ -1573,9 +1609,7 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
         revision,
         {
             "base_revision": revision.revision_id,
-            "operations": [
-                {"op": "record_card_result", "result": {"card_id": "collect", "status": "completed"}}
-            ],
+            "operations": [{"op": "record_card_result", "result": {"card_id": "collect", "status": "completed"}}],
         },
     )
     card = revision.graph.card_by_id()["final"]
@@ -1615,6 +1649,7 @@ def test_create_task_execution_parameter_normalizes_and_rejects(tmp_path):
         execution="flat_react",
     )
     assert execution.task_options["execution"] == "flat"
+    assert "max_iterations" not in execution.task_options
 
     taskboard_execution = agent.create_task(
         goal="Do the board task.",
@@ -1622,6 +1657,15 @@ def test_create_task_execution_parameter_normalizes_and_rejects(tmp_path):
         execution="task_board",
     )
     assert taskboard_execution.task_options["execution"] == "taskboard"
+    assert "max_iterations" not in taskboard_execution.task_options
+
+    explicit_limit_execution = agent.create_task(
+        goal="Do the explicitly bounded task.",
+        success_criteria=["The task is done."],
+        execution="flat",
+        max_iterations=2,
+    )
+    assert explicit_limit_execution.task_options["max_iterations"] == 2
 
     with pytest.raises(ValueError, match="execution must be one of"):
         agent.create_task(
@@ -1632,11 +1676,11 @@ def test_create_task_execution_parameter_normalizes_and_rejects(tmp_path):
 
 
 def test_taskboard_final_normalization_preserves_complete_workspace_candidate():
-    candidate = "# Full Report\n\n" + ("complete section body\n" * 120)
+    candidate = "# Complete Deliverable\n\n" + ("complete section body\n" * 120)
     final = {
         "accepted": True,
-        "reason": "The report is complete.",
-        "final_result": "The full report has been written to final.md.",
+        "reason": "The deliverable is complete.",
+        "final_result": "The complete deliverable has been written to final.md.",
         "missing_criteria": [],
     }
 
@@ -1737,10 +1781,7 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
         "Revise the candidate report; do not restart evidence gathering."
         in first_verification["next_step_requirements"]
     )
-    assert (
-        "Revise the report to satisfy the item-count constraint."
-        in first_verification["next_step_requirements"]
-    )
+    assert "Revise the report to satisfy the item-count constraint." in first_verification["next_step_requirements"]
     assert second_plan["step_instruction"].startswith("Revise the candidate report")
     assert "repair_context" in second_plan_prompt
     assert "advisory_repair_constraints" in second_plan_prompt
@@ -1757,15 +1798,12 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
     def probe_action() -> dict[str, str]:
         return {"status": "ok", "evidence": "framework action executed"}
 
-    execution = (
-        agent.create_task(
-            goal="Collect action evidence.",
-            success_criteria=["The probe action executes."],
-            execution="flat",
-            max_iterations=1,
-        )
-        .use_actions(["probe_action"])
-    )
+    execution = agent.create_task(
+        goal="Collect action evidence.",
+        success_criteria=["The probe action executes."],
+        execution="flat",
+        max_iterations=1,
+    ).use_actions(["probe_action"])
 
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
@@ -1795,19 +1833,16 @@ async def test_flat_request_timeout_does_not_cancel_progressing_child_execution(
     def probe_action() -> dict[str, str]:
         return {"status": "ok"}
 
-    execution = (
-        agent.create_task(
-            goal="Collect action evidence.",
-            success_criteria=["The probe action executes."],
-            execution="flat",
-            max_iterations=1,
-            options={
-                "request_timeout_seconds": 0.2,
-                "agent_task": {"request_timeout_seconds": 0.2},
-            },
-        )
-        .use_actions(["probe_action"])
-    )
+    execution = agent.create_task(
+        goal="Collect action evidence.",
+        success_criteria=["The probe action executes."],
+        execution="flat",
+        max_iterations=1,
+        options={
+            "request_timeout_seconds": 0.2,
+            "agent_task": {"request_timeout_seconds": 0.2},
+        },
+    ).use_actions(["probe_action"])
 
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
@@ -1829,16 +1864,13 @@ async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_p
     def probe_action() -> dict[str, str]:
         return {"status": "ok"}
 
-    execution = (
-        agent.create_task(
-            goal="Collect action evidence.",
-            success_criteria=["The probe action executes."],
-            execution="flat",
-            max_iterations=1,
-            limits={"max_no_progress_seconds": 0.2},
-        )
-        .use_actions(["probe_action"])
-    )
+    execution = agent.create_task(
+        goal="Collect action evidence.",
+        success_criteria=["The probe action executes."],
+        execution="flat",
+        max_iterations=1,
+        limits={"max_no_progress_seconds": 0.2},
+    ).use_actions(["probe_action"])
 
     started_at = asyncio.get_running_loop().time()
     result = await execution.async_get_data()
@@ -1932,15 +1964,12 @@ async def test_flat_actions_shape_fans_out_multiple_commands_in_one_step(tmp_pat
     async def slow_b() -> dict[str, str]:
         return await run_probe("b")
 
-    execution = (
-        agent.create_task(
-            goal="Collect two independent action evidence records.",
-            success_criteria=["Both independent action results are collected."],
-            execution="flat",
-            max_iterations=1,
-        )
-        .use_actions(["slow_a", "slow_b"])
-    )
+    execution = agent.create_task(
+        goal="Collect two independent action evidence records.",
+        success_criteria=["Both independent action results are collected."],
+        execution="flat",
+        max_iterations=1,
+    ).use_actions(["slow_a", "slow_b"])
 
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
@@ -1970,15 +1999,12 @@ async def test_flat_verifier_uses_bounded_action_evidence_prompt(tmp_path):
             "payload": ("x" * 8000) + hidden_tail + ("z" * 8000),
         }
 
-    execution = (
-        agent.create_task(
-            goal="Collect action evidence without flooding the verifier.",
-            success_criteria=["The probe action executes."],
-            execution="flat",
-            max_iterations=1,
-        )
-        .use_actions(["probe_action"])
-    )
+    execution = agent.create_task(
+        goal="Collect action evidence without flooding the verifier.",
+        success_criteria=["The probe action executes."],
+        execution="flat",
+        max_iterations=1,
+    ).use_actions(["probe_action"])
 
     result = await execution.async_get_data()
     verify_requests = [
@@ -2054,7 +2080,12 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
     assert lifecycle_phase["diagnostics"]["runtime_topology"]["driver"] == "triggerflow_taskboard_lifecycle"
     assert tick_phase["diagnostics"]["runtime_topology"]["driver"] == "triggerflow_taskboard_lifecycle"
     assert tick_phase["diagnostics"]["runtime_topology"]["tick"]["fanout"] == "signal_net_dynamic_overlay"
-    assert taskboard["revision"]["card_results"]["collect"]["status"] == "completed"
+    collect_result = taskboard["revision"]["card_results"]["collect"]
+    assert collect_result["status"] == "completed"
+    block_carrier = collect_result["metadata"]["block_carrier"]
+    assert block_carrier["work_unit"]["origin"] == "taskboard_card"
+    assert block_carrier["work_unit_result"]["id"] == block_carrier["work_unit"]["id"]
+    assert block_carrier["output_policy"]["body_transport"] == "structured_control"
     assert taskboard["evidence_view"]["cards"][0]["card_id"] == "collect"
     assert "content" not in taskboard["evidence_view"]["cards"][0]["artifact_refs"]
     assert any(item.path == "agent_task.taskboard.card.collect.execution.started" for item in stream_items)
@@ -2068,7 +2099,7 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_taskboard_control_card_uses_single_model_request_without_child_execution(tmp_path):
+async def test_taskboard_control_card_runs_single_model_request_through_block_carrier(tmp_path):
     agent = _create_taskboard_control_agent("execution-taskboard-control-card").use_workspace(tmp_path / "workspace")
 
     execution = agent.create_task(
@@ -2090,22 +2121,25 @@ async def test_taskboard_control_card_uses_single_model_request_without_child_ex
     assert result["final_result"] == "# Control Result\n\nComplete deliverable body."
     assert card_result["status"] == "completed"
     assert card_result["metadata"]["execution_kind"] == "taskboard_control_request"
-    assert any(
-        item.path == "agent_task.taskboard.card.synthesize.control.started"
-        for item in stream_items
-    )
+    block_carrier = card_result["metadata"]["block_carrier"]
+    assert block_carrier["work_unit"]["origin"] == "taskboard_card"
+    assert block_carrier["work_unit"]["runtime_preferences"]["handler"] == "agent_task_control_request"
+    assert block_carrier["work_unit_result"]["id"] == block_carrier["work_unit"]["id"]
+    assert block_carrier["output_policy"]["control_format"] == "json"
+    assert block_carrier["block_graph"]["execution_block_kinds"] == ["agent_step"]
+    assert block_carrier["block_graph"]["evidence_present"] is True
+    assert block_carrier["block_graph"]["execution_block_result_kinds"] == ["agent_step"]
+    assert any(item.path == "agent_task.taskboard.card.synthesize.control.started" for item in stream_items)
     assert any(
         (item.meta or {}).get("stream_kind") == "taskboard_control_request"
         and (item.meta or {}).get("card_id") == "synthesize"
         for item in stream_items
     )
-    assert not any(
-        item.path == "agent_task.taskboard.card.synthesize.execution.started"
-        for item in stream_items
-    )
+    assert not any(item.path == "agent_task.taskboard.card.synthesize.execution.started" for item in stream_items)
     assert not any("Execute exactly one TaskBoard card" in request for request in MockAgentExecutionRequester.requests)
     planning_requests = [
-        request for request in MockAgentExecutionRequester.requests
+        request
+        for request in MockAgentExecutionRequester.requests
         if "Plan a TaskBoard for this submitted task" in request
     ]
     assert planning_requests
@@ -2134,11 +2168,14 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
     deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
     delivered = next(item for item in deliveries if item.get("status") == "delivered")
     tick_completed_items = [
-        item for item in stream_items if str(getattr(item, "path", "")).endswith(".completed")
+        item
+        for item in stream_items
+        if str(getattr(item, "path", "")).endswith(".completed")
         and ".taskboard.tick." in str(getattr(item, "path", ""))
     ]
     final_requests = [
-        request for request in MockAgentExecutionRequester.requests
+        request
+        for request in MockAgentExecutionRequester.requests
         if "Synthesize the final result for this TaskBoard task" in request
     ]
     marker = MockTaskBoardSectionedArtifactRequester.tail_marker
@@ -2203,15 +2240,12 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
             "padding": "x" * 9000,
         }
 
-    execution = (
-        agent.create_task(
-            goal="Use a dependency cold artifact to finish the board.",
-            success_criteria=["The review card reads back dependency evidence."],
-            execution="taskboard",
-            max_iterations=3,
-        )
-        .use_actions(["produce_large_evidence"])
-    )
+    execution = agent.create_task(
+        goal="Use a dependency cold artifact to finish the board.",
+        success_criteria=["The review card reads back dependency evidence."],
+        execution="taskboard",
+        max_iterations=3,
+    ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_data()
@@ -2226,6 +2260,13 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     assert result["final_result"] == "taskboard readback accepted result"
     assert review_result["status"] == "completed"
     assert review_result["metadata"]["execution_kind"] == "taskboard_artifact_readback"
+    block_carrier = review_result["metadata"]["block_carrier"]
+    assert block_carrier["work_unit"]["origin"] == "taskboard_card"
+    assert block_carrier["work_unit"]["runtime_preferences"]["handler"] == "agent_task_artifact_readback"
+    assert block_carrier["work_unit"]["runtime_preferences"]["plan_block_kind"] == "action_call"
+    assert block_carrier["block_graph"]["execution_block_kinds"] == ["action_call"]
+    assert block_carrier["block_graph"]["evidence_present"] is True
+    assert block_carrier["block_graph"]["execution_block_result_kinds"] == ["action_call"]
     assert readbacks[0]["ok"] is True
     assert "Hidden evidence" in json.dumps(readbacks[0]["value_preview"], ensure_ascii=False)
     assert any(item.path == "agent_task.taskboard.card.review.readback.started" for item in stream_items)
@@ -2235,9 +2276,9 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
 
 @pytest.mark.asyncio
 async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(tmp_path):
-    agent = _create_taskboard_dependency_readback_agent(
-        "execution-taskboard-dependency-readback"
-    ).use_workspace(tmp_path / "workspace")
+    agent = _create_taskboard_dependency_readback_agent("execution-taskboard-dependency-readback").use_workspace(
+        tmp_path / "workspace"
+    )
 
     @agent.action_func
     def produce_large_evidence() -> dict[str, Any]:
@@ -2252,15 +2293,12 @@ async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(t
             "padding": "x" * 9000,
         }
 
-    execution = (
-        agent.create_task(
-            goal="Use a dependency cold artifact without a dedicated readback card.",
-            success_criteria=["The downstream card uses dependency readback evidence."],
-            execution="taskboard",
-            max_iterations=3,
-        )
-        .use_actions(["produce_large_evidence"])
-    )
+    execution = agent.create_task(
+        goal="Use a dependency cold artifact without a dedicated readback card.",
+        success_criteria=["The downstream card uses dependency readback evidence."],
+        execution="taskboard",
+        max_iterations=3,
+    ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_data()
@@ -2268,20 +2306,24 @@ async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(t
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
     synthesize_result = taskboard["revision"]["card_results"]["synthesize"]
+    dependency_carrier = task_meta["diagnostics"]["taskboard_dependency_readback_block_carriers"][0][
+        "block_carrier"
+    ]
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["final_result"] == "taskboard dependency readback accepted result"
     assert synthesize_result["status"] == "completed"
+    assert dependency_carrier["work_unit"]["runtime_preferences"]["handler"] == (
+        "agent_task_dependency_artifact_readback"
+    )
+    assert dependency_carrier["work_unit"]["runtime_preferences"]["plan_block_kind"] == "action_call"
+    assert dependency_carrier["block_graph"]["execution_block_kinds"] == ["action_call"]
     assert MockTaskBoardDependencyReadbackRequester.dependency_readback_seen is True
     assert MockTaskBoardDependencyReadbackRequester.source_refs_seen is True
+    assert any(item.path == "agent_task.taskboard.card.synthesize.dependency_readback.started" for item in stream_items)
     assert any(
-        item.path == "agent_task.taskboard.card.synthesize.dependency_readback.started"
-        for item in stream_items
-    )
-    assert any(
-        item.path == "agent_task.taskboard.card.synthesize.dependency_readback.completed"
-        for item in stream_items
+        item.path == "agent_task.taskboard.card.synthesize.dependency_readback.completed" for item in stream_items
     )
 
 
@@ -2304,15 +2346,12 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
             "padding": "x" * 9000,
         }
 
-    execution = (
-        agent.create_task(
-            goal="Use a dependency cold artifact in a control synthesis card.",
-            success_criteria=["The control card uses dependency readback evidence."],
-            execution="taskboard",
-            max_iterations=3,
-        )
-        .use_actions(["produce_large_evidence"])
-    )
+    execution = agent.create_task(
+        goal="Use a dependency cold artifact in a control synthesis card.",
+        success_criteria=["The control card uses dependency readback evidence."],
+        execution="taskboard",
+        max_iterations=3,
+    ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_data()
@@ -2320,20 +2359,29 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
     synthesize_result = taskboard["revision"]["card_results"]["synthesize"]
+    dependency_carrier = task_meta["diagnostics"]["taskboard_dependency_readback_block_carriers"][0][
+        "block_carrier"
+    ]
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["final_result"] == "taskboard control dependency readback accepted result"
     assert synthesize_result["status"] == "completed"
+    assert dependency_carrier["work_unit"]["runtime_preferences"]["handler"] == (
+        "agent_task_dependency_artifact_readback"
+    )
+    assert dependency_carrier["work_unit"]["runtime_preferences"]["plan_block_kind"] == "action_call"
+    assert dependency_carrier["block_graph"]["execution_block_kinds"] == ["action_call"]
+    block_carrier = synthesize_result["metadata"]["block_carrier"]
+    assert block_carrier["work_unit"]["origin"] == "taskboard_card"
+    assert block_carrier["work_unit"]["runtime_preferences"]["handler"] == "agent_task_control_request"
+    assert block_carrier["block_graph"]["execution_block_kinds"] == ["agent_step"]
+    assert block_carrier["block_graph"]["evidence_present"] is True
     assert MockTaskBoardControlDependencyReadbackRequester.dependency_readback_seen is True
     assert MockTaskBoardControlDependencyReadbackRequester.source_refs_seen is True
+    assert any(item.path == "agent_task.taskboard.card.synthesize.dependency_readback.started" for item in stream_items)
     assert any(
-        item.path == "agent_task.taskboard.card.synthesize.dependency_readback.started"
-        for item in stream_items
-    )
-    assert any(
-        item.path == "agent_task.taskboard.card.synthesize.dependency_readback.completed"
-        for item in stream_items
+        item.path == "agent_task.taskboard.card.synthesize.dependency_readback.completed" for item in stream_items
     )
 
 
@@ -2449,8 +2497,7 @@ async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(t
     agent = _create_goal_pursuit_agent("execution-first-goal-chain").use_workspace(tmp_path / "workspace")
 
     execution = (
-        agent
-        .goal("Build the site.", success_criteria=["The runnable page exists."])
+        agent.goal("Build the site.", success_criteria=["The runnable page exists."])
         .use_skills(str(skill_pack), auto_allow=True)
         .input("Use the supplied product facts.")
         .effort("low")
@@ -2464,7 +2511,8 @@ async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(t
     assert execution.success_criteria_items == ["The runnable page exists."]
     assert execution.prompt_snapshot["input"] == "Use the supplied product facts."
     assert meta["route"]["selected_route"] == "agent_task"
-    assert meta["effective_options"]["effort_strategy"]["max_iterations"] == 1
+    assert meta["effective_options"]["effort_strategy"]["reflection_density"] == "final"
+    assert "max_iterations" not in meta["effective_options"]["effort_strategy"]
     assert any(item.path == "agent_task.phase.configured" for item in stream_items)
     assert any(item.path == "agent_task.phase.terminal" for item in stream_items)
     assert any((item.meta or {}).get("stream_kind") == "child_execution" for item in stream_items)
@@ -2473,81 +2521,93 @@ async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(t
 def test_goal_alias_and_detailed_effort_strategy_are_normalized(tmp_path):
     agent = _create_agent("execution-goals-effort-alias").use_workspace(tmp_path / "workspace")
 
-    execution = (
-        agent
-        .goals(
-            ["Build the site.", "Publish a launch checklist."],
-            success_criteria=["The runnable page exists."],
-        )
-        .effort(
-            "high",
-            budget={
-                "iteration_limit": 4,
-                "model_call_limit": 8,
-                "wall_time_seconds": 90,
-                "no_progress_seconds": 30,
-            },
-            planning={"depth": "expanded", "max_plan_items": 8},
-            verification={"strictness": "strict"},
-            replan={"policy": "on_verification_failure", "limit": 2},
-            progress={"detail": "phase"},
-        )
+    execution = agent.goals(
+        ["Build the site.", "Publish a launch checklist."],
+        success_criteria=["The runnable page exists."],
+    ).effort(
+        "high",
+        budget={
+            "iteration_limit": 4,
+            "model_call_limit": 8,
+            "wall_time_seconds": 90,
+            "no_progress_seconds": 30,
+        },
+        planning={"depth": "expanded", "max_plan_items": 8},
+        verification={"strictness": "strict"},
+        replan={"policy": "on_verification_failure", "limit": 2},
+        progress={"detail": "phase"},
     )
 
     effort_strategy = execution.effective_options["effort_strategy"]
     assert execution.goal_items == ["Build the site.", "Publish a launch checklist."]
     assert execution.success_criteria_items == ["The runnable page exists."]
     assert effort_strategy["name"] == "high"
-    assert effort_strategy["max_iterations"] == 4
+    assert effort_strategy["budget"]["iteration_limit"] == 4
+    assert effort_strategy["budget"]["model_call_limit"] == 8
+    assert effort_strategy["budget"]["wall_time_seconds"] == 90.0
+    assert effort_strategy["budget"]["no_progress_seconds"] == 30.0
+    assert "max_iterations" not in effort_strategy
+    assert "max_model_requests" not in effort_strategy
+    assert "max_seconds" not in effort_strategy
     assert effort_strategy["planning_depth"] == "expanded"
     assert effort_strategy["verifier_strength"] == "strict"
     assert effort_strategy["planning"]["max_plan_items"] == 8
     assert effort_strategy["replan"]["limit"] == 2
     assert effort_strategy["progress"]["detail"] == "phase"
-    assert execution.limits["max_model_requests"] == 8
-    assert execution.limits["max_seconds"] == 90.0
-    assert execution.limits["max_no_progress_seconds"] == 30.0
-    assert execution.effective_options["execution"]["limits"]["max_model_requests"] == 8
+    assert execution.limits["max_model_requests"] is None
+    assert execution.limits["max_seconds"] is None
+    assert execution.limits["max_no_progress_seconds"] is None
+    assert execution.effective_options["execution"]["limits"]["max_model_requests"] is None
 
-    explicit_limits = (
-        agent
-        .create_execution(limits={"max_model_requests": 2})
-        .effort("high", budget={"model_call_limit": 8})
+    explicit_limits = agent.create_execution(limits={"max_model_requests": 2}).effort(
+        "high", budget={"model_call_limit": 8}
     )
     assert explicit_limits.limits["max_model_requests"] == 2
 
     mutable_effort_limits = agent.create_execution().effort("medium", budget={"model_call_limit": 4})
     mutable_effort_limits.effort("high", budget={"model_call_limit": 6})
-    assert mutable_effort_limits.limits["max_model_requests"] == 6
+    assert mutable_effort_limits.limits["max_model_requests"] is None
+    assert mutable_effort_limits.effective_options["effort_strategy"]["budget"]["model_call_limit"] == 6
     mutable_effort_limits.effort("low")
     assert mutable_effort_limits.limits["max_model_requests"] is None
 
+    legacy_aliases = agent.create_execution().effort(
+        "high",
+        max_iterations=4,
+        max_model_requests=8,
+        max_seconds=90,
+        max_no_progress_seconds=30,
+    )
+    legacy_strategy = legacy_aliases.effective_options["effort_strategy"]
+    assert legacy_strategy["budget"]["iteration_limit"] == 4
+    assert legacy_strategy["budget"]["model_call_limit"] == 8
+    assert legacy_strategy["budget"]["wall_time_seconds"] == 90.0
+    assert legacy_strategy["budget"]["no_progress_seconds"] == 30.0
+    assert "max_iterations" not in legacy_strategy
+    assert "max_model_requests" not in legacy_strategy
+    assert legacy_aliases.limits["max_model_requests"] is None
+
 
 @pytest.mark.asyncio
-async def test_goal_pursuit_uses_detailed_effort_iteration_limit(tmp_path):
+async def test_goal_pursuit_effort_iteration_limit_is_soft_strategy_metadata(tmp_path):
     agent = _create_goal_pursuit_agent("execution-detailed-effort-task").use_workspace(tmp_path / "workspace")
-    execution = (
-        agent
-        .goal("Build the site.", success_criteria=["The runnable page exists."])
-        .effort("low", budget={"iteration_limit": 2})
+    execution = agent.goal("Build the site.", success_criteria=["The runnable page exists."]).effort(
+        "low", budget={"iteration_limit": 2}
     )
 
     await execution.async_start()
     meta = await execution.async_get_meta()
 
-    assert meta["logs"]["route_logs"]["agent_task"]["max_iterations"] == 2
-    assert meta["consumed_options"]["effort.max_iterations"] == {
-        "value": 2,
-        "owner": "AgentTaskLoop",
-    }
+    assert meta["logs"]["route_logs"]["agent_task"]["max_iterations"] is None
+    assert meta["effective_options"]["effort_strategy"]["budget"]["iteration_limit"] == 2
+    assert "effort.max_iterations" not in meta["consumed_options"]
 
 
 @pytest.mark.asyncio
 async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task_loop(tmp_path):
     agent = _create_goal_pursuit_agent("execution-task-route-deadline-owner").use_workspace(tmp_path / "workspace")
     execution = (
-        agent
-        .create_execution(limits={"max_seconds": 0.2, "max_no_progress_seconds": 5})
+        agent.create_execution(limits={"max_seconds": 0.2, "max_no_progress_seconds": 5})
         .goal("Build the site.", success_criteria=["The runnable page exists."])
         .strategy("flat")
     )
@@ -2577,8 +2637,7 @@ def test_execution_first_chain_allows_capabilities_before_goal(tmp_path):
     agent = _create_agent("execution-first-skill-first").use_workspace(tmp_path / "workspace")
 
     execution = (
-        agent
-        .use_skills(str(skill_pack), auto_allow=True)
+        agent.use_skills(str(skill_pack), auto_allow=True)
         .goal("Build the site.", success_criteria=["The runnable page exists."])
         .input("Use the supplied product facts.")
     )
@@ -2609,8 +2668,7 @@ def test_goal_accepts_multiple_goals_and_optional_success_criteria():
 async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
     agent = _create_goal_pursuit_agent("execution-first-goal-after-prompt").use_workspace(tmp_path / "workspace")
     execution = (
-        agent
-        .input("Use these facts.")
+        agent.input("Use these facts.")
         .output({"summary": (str, "summary", True)}, format="json")
         .goal("Write the final summary.", success_criteria=["The final summary is returned."])
     )
@@ -2629,10 +2687,8 @@ async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
 async def test_allow_create_task_false_blocks_goal_pursuit(tmp_path):
     """ISSUE-007: allow_create_task=False is an enforced limit, not a no-op."""
     agent = _create_goal_pursuit_agent("execution-no-create-task").use_workspace(tmp_path / "workspace")
-    execution = (
-        agent
-        .goal("Build the site.", success_criteria=["The runnable page exists."])
-        .create_execution(limits={"allow_create_task": False})
+    execution = agent.goal("Build the site.", success_criteria=["The runnable page exists."]).create_execution(
+        limits={"allow_create_task": False}
     )
 
     result = await execution.async_get_data()
@@ -2654,7 +2710,6 @@ async def test_route_policy_block_and_deterministic_fallback():
     blocked_exec = SimpleNamespace(
         options={"route_policy": {"allowed_routes": ["skills"], "on_violation": "block"}},
         effective_options={},
-        local_dynamic_task_candidates=[],
         local_skill_selectors=[],
         local_skills_pack_selectors=[],
         local_action_ids=[],
@@ -2671,7 +2726,6 @@ async def test_route_policy_block_and_deterministic_fallback():
     fallback_exec = SimpleNamespace(
         options={"route_policy": {"allowed_routes": ["skills"]}},
         effective_options={},
-        local_dynamic_task_candidates=[],
         local_skill_selectors=[],
         local_skills_pack_selectors=[],
         local_action_ids=[],
@@ -2695,9 +2749,7 @@ def test_agent_execution_context_enforces_nesting_budget():
     )
     root.raise_if_nesting_exceeded()  # depth 0 within budget 1
 
-    nested_ok = AgentExecutionContext(
-        execution_id="nested-1", lineage={}, limits={}, nesting_depth=1, nesting_budget=1
-    )
+    nested_ok = AgentExecutionContext(execution_id="nested-1", lineage={}, limits={}, nesting_depth=1, nesting_budget=1)
     nested_ok.raise_if_nesting_exceeded()  # depth 1 within budget 1
 
     nested_over = AgentExecutionContext(
@@ -2818,10 +2870,7 @@ async def test_agent_execution_default_stream_meta_uses_execution_id_and_lineage
     MockAgentExecutionRequester.requests = []
     agent = _create_agent("default-execution-stream")
     execution = (
-        agent
-        .input("classify this ticket")
-        .output({"answer": (str, "answer", True)}, format="json")
-        .create_execution()
+        agent.input("classify this ticket").output({"answer": (str, "answer", True)}, format="json").create_execution()
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant") if item.is_complete]
@@ -2866,8 +2915,7 @@ async def test_agent_execution_rejects_removed_mode_argument():
 
     with pytest.raises(TypeError):
         (
-            agent
-            .input("legacy mode argument")
+            agent.input("legacy mode argument")
             .output({"answer": (str, "answer", True)}, format="json")
             .create_execution(**removed_mode_kwargs)
         )
@@ -2876,12 +2924,7 @@ async def test_agent_execution_rejects_removed_mode_argument():
 @pytest.mark.asyncio
 async def test_agent_execution_select_route_is_reused_by_start():
     agent = _create_agent("route-reuse")
-    execution = (
-        agent
-        .input("route reuse")
-        .output({"answer": (str, "answer", True)}, format="json")
-        .create_execution()
-    )
+    execution = agent.input("route reuse").output({"answer": (str, "answer", True)}, format="json").create_execution()
 
     first_route = await execution.select_route()
     second_route = await execution.select_route()
@@ -2900,8 +2943,7 @@ async def test_agent_execution_model_request_exposes_action_logs_and_artifacts()
     agent.set_action_loop(max_rounds=2, timeout=5)
     agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
     execution = (
-        agent
-        .input("use echo action")
+        agent.input("use echo action")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
             lineage={"task_id": "action-task", "iteration_id": "iter-1", "step_id": "echo"},
@@ -2938,8 +2980,7 @@ async def test_agent_execution_action_scope_filters_action_runtime_boundary():
         return {"status": "blocked"}
 
     execution = (
-        agent
-        .create_execution()
+        agent.create_execution()
         .use_actions(["allowed_action"])
         .input("use the scoped action")
         .output({"answer": (str, "answer", True)}, format="json")
@@ -2948,9 +2989,7 @@ async def test_agent_execution_action_scope_filters_action_runtime_boundary():
     data = await execution.async_get_data()
     meta = await execution.async_get_meta()
     planning_calls = [
-        call
-        for call in MockAgentExecutionRequester.requests
-        if "next_action" in call and "execution_commands" in call
+        call for call in MockAgentExecutionRequester.requests if "next_action" in call and "execution_commands" in call
     ]
     action_ids = [item.get("action_id") for item in meta["logs"]["action_logs"]]
 
@@ -2971,8 +3010,7 @@ async def test_required_action_blocks_when_model_skips_required_evidence():
         return {"status": "looked-up"}
 
     execution = (
-        agent
-        .require_actions("required_lookup")
+        agent.require_actions("required_lookup")
         .input("answer directly without using the required action")
         .output({"answer": (str, "answer", True)}, format="json")
     )
@@ -3014,8 +3052,7 @@ async def test_agent_execution_bounded_step_meta_lineage_and_limit_success():
     MockAgentExecutionRequester.requests = []
     agent = _create_agent("task-step-success")
     execution = (
-        agent
-        .input("produce one bounded answer")
+        agent.input("produce one bounded answer")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
             lineage={"task_id": "task-1", "iteration_id": "iter-1", "step_id": "draft"},
@@ -3036,8 +3073,7 @@ async def test_agent_execution_bounded_step_meta_lineage_and_limit_success():
 async def test_agent_execution_bounded_step_blocks_when_direct_model_budget_exceeded():
     agent = _create_agent("task-step-direct-budget")
     execution = (
-        agent
-        .input("this should exceed budget before provider call")
+        agent.input("this should exceed budget before provider call")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
             lineage={"task_id": "budget-task", "iteration_id": "iter-1", "step_id": "direct"},
@@ -3081,7 +3117,7 @@ def test_agent_execution_bounded_step_rejects_dynamic_task_route():
             timeout=3,
         )
 
-    assert getattr(agent, "_dynamic_task_candidates", []) == []
+    assert not hasattr(agent, "_dynamic_task_candidates")
 
 
 @pytest.mark.asyncio
@@ -3094,13 +3130,9 @@ async def test_agent_execution_bounded_step_budget_covers_skills_model_stage(tmp
         mode="required",
         auto_allow=True,
     )
-    execution = (
-        agent
-        .input("use the task step skill")
-        .create_execution(
-            lineage={"task_id": "budget-task", "iteration_id": "iter-1", "step_id": "skills"},
-            limits={"max_model_requests": 0},
-        )
+    execution = agent.input("use the task step skill").create_execution(
+        lineage={"task_id": "budget-task", "iteration_id": "iter-1", "step_id": "skills"},
+        limits={"max_model_requests": 0},
     )
 
     with pytest.raises(AgentExecutionLimitExceeded):
@@ -3127,8 +3159,7 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
 
     agent.async_execute_skills_plan = capture_execute_skills_plan
     execution = (
-        agent
-        .use_skills(str(tmp_path / "skill-pack"), mode="required", auto_allow=True)
+        agent.use_skills(str(tmp_path / "skill-pack"), mode="required", auto_allow=True)
         .input("use the task step skill")
         .create_execution(
             options=ExecutionOptions.model_validate(
@@ -3161,8 +3192,7 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
 async def test_two_bounded_step_executions_can_be_correlated_as_developer_loop():
     agent = _create_agent("task-step-loop")
     first = (
-        agent
-        .input("first step")
+        agent.input("first step")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
             lineage={"task_id": "loop-task", "iteration_id": "iter-1", "step_id": "first"},
@@ -3173,8 +3203,7 @@ async def test_two_bounded_step_executions_can_be_correlated_as_developer_loop()
     first_meta = await first.async_get_meta()
 
     second = (
-        agent
-        .input({"previous": first_data})
+        agent.input({"previous": first_data})
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
             lineage={
@@ -3200,8 +3229,7 @@ async def test_two_bounded_step_executions_can_be_correlated_as_developer_loop()
 async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace(tmp_path):
     agent = _create_agent("task-step-workspace-binding").use_workspace(tmp_path / "run")
     execution = (
-        agent
-        .input("workspace-bound step")
+        agent.input("workspace-bound step")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
             lineage={
@@ -3248,8 +3276,7 @@ async def test_agent_execution_workspace_record_uses_execution_scoped_lazy_defau
     workspace = agent.workspace
     assert getattr(workspace, "is_materialized") is False
     execution = (
-        agent
-        .input("missing workspace")
+        agent.input("missing workspace")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(limits={"max_model_requests": 1})
     )
@@ -3265,8 +3292,7 @@ async def test_agent_execution_workspace_record_uses_execution_scoped_lazy_defau
 def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp_path):
     agent = _create_agent("task-step-workspace-sync").use_workspace(tmp_path / "run")
     execution = (
-        agent
-        .input("workspace-bound sync step")
+        agent.input("workspace-bound sync step")
         .output({"answer": (str, "answer", True)}, format="json")
         .create_execution(
             lineage={"task_id": "workspace-sync-task", "step_id": "record-sync"},

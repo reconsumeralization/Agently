@@ -218,7 +218,7 @@ def test_agent_use_dynamic_task_fails_fast_with_migration_guidance():
             handlers={"local_handler": lambda context: context.task.id},
         )
 
-    assert getattr(agent, "_dynamic_task_candidates", []) == []
+    assert not hasattr(agent, "_dynamic_task_candidates")
 
 
 def test_agent_execution_use_dynamic_task_fails_fast_with_migration_guidance():
@@ -235,7 +235,7 @@ def test_agent_execution_use_dynamic_task_fails_fast_with_migration_guidance():
             handlers={"local_handler": lambda context: context.task.id},
         )
 
-    assert execution.dynamic_task_candidates() == []
+    assert not hasattr(execution, "dynamic_task_candidates")
 
 
 @pytest.mark.asyncio
@@ -870,7 +870,7 @@ def test_agent_execution_dynamic_task_route_is_removed_from_public_execution():
             handlers={"local_handler": lambda context: context.task.id},
         )
 
-    assert execution.dynamic_task_candidates() == []
+    assert not hasattr(execution, "dynamic_task_candidates")
 
 
 def test_deprecated_action_manager_aliases_warn():

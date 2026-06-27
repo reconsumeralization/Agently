@@ -42,9 +42,10 @@ explicitly. `yaml_literal` is explicit opt-in and is not selected by auto.
 
 Use `get_generator(type="instant")` or `get_async_generator(type="instant")`
 when the caller benefits from field-level structured updates before the full
-response is finished: progress panels, live forms, long reports with
-independently renderable sections, model-stage dashboards, or workflow UIs that
-can route one field while the rest of the response is still generating. For one
+response is finished: progress panels, live forms, long, sectioned, or
+file-backed deliverables with independently renderable sections,
+model-stage dashboards, or workflow UIs that can route one field while the rest
+of the response is still generating. For one
 freeform text artifact, use `type="delta"` instead; plain text has no structured
 field paths for instant events.
 

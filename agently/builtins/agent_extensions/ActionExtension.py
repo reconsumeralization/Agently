@@ -54,12 +54,12 @@ class ActionExtension(BaseAgent):
         self.use_docker = self.enable_docker
         self.use_workspace_file_actions = self.enable_workspace_file_actions
 
-        self.settings.setdefault("action.loop.max_rounds", 5, inherit=True)
+        self.settings.setdefault("action.loop.max_rounds", None, inherit=True)
         self.settings.setdefault("action.loop.concurrency", None, inherit=True)
         self.settings.setdefault("action.loop.timeout", None, inherit=True)
         self.settings.setdefault("action.loop.max_consecutive_failed_rounds_per_action", 2, inherit=True)
         self.settings.setdefault("action.loop.enabled", True, inherit=True)
-        self.settings.setdefault("tool.loop.max_rounds", 5, inherit=True)
+        self.settings.setdefault("tool.loop.max_rounds", None, inherit=True)
         self.settings.setdefault("tool.loop.concurrency", None, inherit=True)
         self.settings.setdefault("tool.loop.timeout", None, inherit=True)
         self.settings.setdefault("tool.loop.max_consecutive_failed_rounds_per_action", 2, inherit=True)
@@ -1125,7 +1125,7 @@ class ActionExtension(BaseAgent):
             agent_name=self.name,
             planning_handler=self.__action_planning_handler,
             action_execution_handler=self.__action_execution_handler,
-            max_rounds=settings.get("action.loop.max_rounds", settings.get("tool.loop.max_rounds", 5)),  # type: ignore[arg-type]
+            max_rounds=settings.get("action.loop.max_rounds", settings.get("tool.loop.max_rounds", None)),  # type: ignore[arg-type]
             concurrency=settings.get("action.loop.concurrency", settings.get("tool.loop.concurrency", None)),  # type: ignore[arg-type]
             timeout=settings.get("action.loop.timeout", settings.get("tool.loop.timeout", None)),  # type: ignore[arg-type]
         )
