@@ -304,6 +304,13 @@ earlier evidence-gathering cards. If a generated continuation card still
 reports that the same readback is insufficient, the framework does not
 recursively synthesize another readback/continuation chain; the card must
 propose different executable work or remain blocked with diagnostics.
+When the missing evidence is a new concrete URL, path, or ref rather than an
+existing Action/Workspace ref, the control card should return
+`next_board_action="readback"` plus structured `target_refs`. AgentTask turns
+that compact intent into an action-capable evidence card that can download,
+snapshot, or otherwise materialize the target before the continuation card
+runs. URLs mentioned only inside `gaps` prose are diagnostics; they are not
+parsed as executable targets.
 
 When the write succeeds and readback is trusted, verifier input includes the
 readback fields and `capability_evidence.artifacts.readback`; with

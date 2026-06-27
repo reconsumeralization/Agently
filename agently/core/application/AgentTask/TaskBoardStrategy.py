@@ -1214,7 +1214,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "readback previews for dependency Action artifacts that were structurally truncated or marked "
             "full_value_available; inspect those before declaring dependency evidence missing. If bounded previews "
             "and dependency_readbacks are insufficient, set next_board_action to 'readback' or 'repair' and explain "
-            "the exact missing refs or gaps instead of inventing facts. "
+            "the exact missing refs or gaps instead of inventing facts. If a concrete URL, path, or ref must be "
+            "fetched or materialized before continuing, put it in target_refs; do not mention it only in gaps prose. "
             "When the card can produce the user-facing deliverable, use artifact_markdown, candidate_final_result, "
             "or final_result only when the complete body is short enough for the bounded output. When this bounded "
             "card response is a compact control plane for a long, sectioned, or file-backed deliverable, return only "
@@ -1263,6 +1264,11 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 False,
             ),
             "gaps": ([str], "Evidence or quality gaps that remain after this control request", False),
+            "target_refs": (
+                [str],
+                "Concrete URLs, paths, or refs that must be fetched/materialized as new evidence when readback needs more than existing refs",
+                False,
+            ),
             "evidence": ([str], "Evidence used by this control card", False),
             "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
             "diagnostics": ([dict], "Optional control-card diagnostics", False),
@@ -1534,16 +1540,23 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     }
                 )
                 if cls._taskboard_patch_proposal_requests_readback(raw_patch):
+                    target_refs = cls._taskboard_patch_proposal_target_refs(raw_patch)
+                    if not target_refs:
+                        target_refs = cls._taskboard_control_output_target_refs(card_output)
                     auto_patch_input = dict(card_output)
                     auto_patch_input["next_board_action"] = "readback"
                     return cls._taskboard_control_auto_patch(
                         context,
                         auto_patch_input,
-                        target_refs=cls._taskboard_patch_proposal_target_refs(raw_patch),
+                        target_refs=target_refs,
                     )
                 return None
             return DataFormatter.sanitize(patch.to_dict())
-        return cls._taskboard_control_auto_patch(context, card_output)
+        return cls._taskboard_control_auto_patch(
+            context,
+            card_output,
+            target_refs=cls._taskboard_control_output_target_refs(card_output),
+        )
 
     @staticmethod
     def _taskboard_patch_proposal_requests_readback(patch_proposal: Mapping[str, Any]) -> bool:
@@ -1562,15 +1575,31 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "readback_required",
         }
 
-    @staticmethod
-    def _taskboard_patch_proposal_target_refs(patch_proposal: Mapping[str, Any]) -> list[str]:
+    @classmethod
+    def _taskboard_patch_proposal_target_refs(cls, patch_proposal: Mapping[str, Any]) -> list[str]:
         raw_refs = patch_proposal.get("target_refs") or patch_proposal.get("refs") or patch_proposal.get("urls")
+        return cls._normalize_taskboard_target_refs(raw_refs)
+
+    @classmethod
+    def _taskboard_control_output_target_refs(cls, card_output: Mapping[str, Any]) -> list[str]:
+        return cls._normalize_taskboard_target_refs(card_output.get("target_refs"))
+
+    @staticmethod
+    def _normalize_taskboard_target_refs(raw_refs: Any) -> list[str]:
         if not isinstance(raw_refs, Sequence) or isinstance(raw_refs, str | bytes | bytearray):
             return []
         refs: list[str] = []
         seen: set[str] = set()
         for item in raw_refs:
-            text = str(item or "").strip()
+            text = ""
+            if isinstance(item, Mapping):
+                for key in ("target_ref", "url", "href", "uri", "path", "ref"):
+                    value = str(item.get(key) or "").strip()
+                    if value:
+                        text = value
+                        break
+            else:
+                text = str(item or "").strip()
             if not text or text in seen:
                 continue
             seen.add(text)

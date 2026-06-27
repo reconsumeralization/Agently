@@ -1849,6 +1849,63 @@ def test_taskboard_control_invalid_readback_patch_proposal_becomes_framework_pat
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
 
 
+def test_taskboard_control_direct_target_refs_become_action_evidence_patch():
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="direct-target-refs",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "direct-target-refs-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect initial source links."},
+                    {
+                        "id": "final",
+                        "objective": "Write final answer after missing target refs are materialized.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "control",
+                        "required_outputs": ["final.md"],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": {"card_id": "collect", "status": "completed"}}],
+        },
+    )
+    card = revision.graph.card_by_id()["final"]
+    diagnostics: list[dict[str, Any]] = []
+    patch = AgentTask._taskboard_control_patch_proposal(
+        SimpleNamespace(revision=revision, card=card),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "target_refs": [
+                "https://example.test/source.pdf",
+                {"url": "https://example.test/examples.html"},
+            ],
+            "gaps": ["Need full PDF text and example page content."],
+            "remaining_work": ["Download or snapshot target refs, then continue final synthesis."],
+        },
+        diagnostics,
+    )
+
+    assert patch is not None
+    assert diagnostics == []
+    next_revision = validator.apply_patch(revision, patch)
+    cards = next_revision.graph.card_by_id()
+    assert cards["final.evidence"].allowed_execution_shape == "actions"
+    assert cards["final.evidence"].metadata["target_refs"] == [
+        "https://example.test/source.pdf",
+        "https://example.test/examples.html",
+    ]
+    assert "https://example.test/source.pdf" in cards["final.evidence"].objective
+    assert cards["final.continue"].depends_on == ("collect", "final.evidence")
+
+
 def test_taskboard_control_readback_required_patch_type_becomes_readback_patch():
     validator = TaskBoardValidator()
     revision = TaskBoardRevision.create(

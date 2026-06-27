@@ -271,6 +271,10 @@ Workspace file refs。框架生成的 readback card 会把 evidence scope 扩展
 产出的 Action refs。若框架生成的 continuation card 仍报告同一批 readback 不足，框架不会
 继续递归合成新的 readback/continuation 链；该 card 必须提出其他可执行工作，或者带
 diagnostics 保持 blocked。
+当缺失证据是新的具体 URL、路径或 ref，而不是已有 Action / Workspace ref 时，control card
+应返回 `next_board_action="readback"` 加结构化 `target_refs`。AgentTask 会把这个紧凑意图
+转成可执行 action 的 evidence card，由它负责下载、保存快照或物化目标，再运行 continuation
+card。只写在 `gaps` 自然语言里的 URL 属于 diagnostics，不会被解析成可执行目标。
 
 写入成功且读回可信时，verifier 输入会包含这些读回字段和
 `capability_evidence.artifacts.readback`；在 `max_iterations=1` 下，真实已写入且可读回的
