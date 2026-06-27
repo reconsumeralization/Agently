@@ -170,6 +170,8 @@ class AgentExecutionContext:
         self._progress_callback: Callable[[dict[str, Any]], Any] | None = None
         self.action_scope: dict[str, Any] = {}
         self.action_artifact_recall_records: list[dict[str, Any]] = []
+        self.action_records: list[dict[str, Any]] = []
+        self._seen_action_record_keys: set[str] = set()
         # Depth of this AgentExecution in a nested agent-step chain (root = 0).
         self.nesting_depth = int(nesting_depth)
         # Effective max nesting depth inherited from the constraining ancestor
@@ -242,6 +244,9 @@ class AgentExecutionContext:
                     if isinstance(item.get("artifact_refs"), list)
                 ),
             },
+            "action_records": {
+                "record_count": len(self.action_records),
+            },
             "stages": {
                 "events": [dict(item) for item in self.stage_events[-50:]],
             },
@@ -312,6 +317,36 @@ class AgentExecutionContext:
                 }
             )
         self.action_artifact_recall_records = normalized
+
+    def record_action_records(
+        self,
+        records: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+        *,
+        source: str,
+    ) -> None:
+        for item in records or []:
+            if not isinstance(item, dict):
+                continue
+            record = DataFormatter.sanitize(dict(item))
+            if not isinstance(record, dict):
+                continue
+            record.setdefault("source", source)
+            key = self._action_record_key(record)
+            if key in self._seen_action_record_keys:
+                continue
+            self._seen_action_record_keys.add(key)
+            self.action_records.append(record)
+
+    @staticmethod
+    def _action_record_key(record: dict[str, Any]) -> str:
+        action_call_id = record.get("action_call_id")
+        if action_call_id is not None:
+            return f"call:{ action_call_id }"
+        action_id = str(record.get("action_id") or record.get("tool_name") or "action")
+        status = str(record.get("status") or "")
+        data = record.get("data") if record.get("data") is not None else record.get("result")
+        digest = str(DataFormatter.sanitize(data))
+        return f"{ action_id }:{ status }:{ hash(digest) }"
 
     def scoped_action_artifact_recall_records(self) -> list[dict[str, Any]]:
         return [dict(item) for item in self.action_artifact_recall_records]

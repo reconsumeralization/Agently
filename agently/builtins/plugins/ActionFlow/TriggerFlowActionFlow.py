@@ -501,6 +501,10 @@ class TriggerFlowActionFlow:
                 ),
                 action_calls,
             )
+            agent_execution_context = get_current_agent_execution_context()
+            record_action_records = getattr(agent_execution_context, "record_action_records", None)
+            if callable(record_action_records):
+                record_action_records(records, source="ActionFlow")
             should_stop_after_failed_actions = self._update_failed_action_counts(
                 data,
                 records,

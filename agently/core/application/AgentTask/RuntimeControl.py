@@ -154,6 +154,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         error: Exception,
         execution_id: str | None = None,
+        child_meta: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         message = _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
         error_info = {
@@ -164,6 +165,12 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         }
         self.diagnostics.setdefault("execution_errors", []).append(error_info)
         selected_route = str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "unknown")
+        failed_meta = self._failed_execution_meta_from_child(
+            child_meta,
+            execution_id=execution_id,
+            selected_route=selected_route,
+            error_info=error_info,
+        )
         return (
             {
                 "step_result": "",
@@ -171,23 +178,63 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 "remaining_work": [f"Retry or replan after execution failure: {message}"],
                 "error": error_info,
             },
-            {
-                "execution_id": execution_id or f"{self.id}:iter-{iteration_index}:failed-step",
-                "status": "failed",
-                "route": {
-                    "selected_route": selected_route,
-                    "status": "failed",
-                },
-                "logs": {
-                    "action_logs": {},
-                    "route_logs": {},
-                    "errors": [error_info],
-                },
-                "diagnostics": {
-                    "execution_error": error_info,
-                },
-            },
+            failed_meta,
         )
+
+    def _failed_execution_meta_from_child(
+        self,
+        child_meta: Mapping[str, Any] | None,
+        *,
+        execution_id: str | None,
+        selected_route: str,
+        error_info: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if isinstance(child_meta, Mapping):
+            failed_meta = DataFormatter.sanitize(dict(child_meta))
+            if not isinstance(failed_meta, dict):
+                failed_meta = {}
+        else:
+            failed_meta = {}
+        failed_meta["execution_id"] = str(
+            failed_meta.get("execution_id") or execution_id or f"{self.id}:failed-step"
+        )
+        failed_meta["status"] = "failed"
+        route = failed_meta.get("route")
+        if not isinstance(route, Mapping):
+            route = {"selected_route": selected_route}
+        route = dict(route)
+        route.setdefault("selected_route", selected_route)
+        route["status"] = "failed"
+        failed_meta["route"] = DataFormatter.sanitize(route)
+        logs = failed_meta.get("logs")
+        if not isinstance(logs, Mapping):
+            logs = {}
+        logs = dict(logs)
+        logs.setdefault("action_logs", {})
+        logs.setdefault("route_logs", {})
+        errors = logs.get("errors")
+        if not isinstance(errors, list):
+            errors = []
+        errors.append(DataFormatter.sanitize(dict(error_info)))
+        logs["errors"] = errors
+        failed_meta["logs"] = DataFormatter.sanitize(logs)
+        diagnostics = failed_meta.get("diagnostics")
+        if not isinstance(diagnostics, Mapping):
+            diagnostics = {}
+        diagnostics = dict(diagnostics)
+        diagnostics["execution_error"] = DataFormatter.sanitize(dict(error_info))
+        failed_meta["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        return failed_meta
+
+    async def _read_child_execution_meta(self, execution: Any) -> dict[str, Any] | None:
+        getter = getattr(execution, "async_get_meta", None)
+        if not callable(getter):
+            return None
+        try:
+            meta = await cast(Callable[[], Awaitable[Any]], getter)()
+        except Exception:
+            return None
+        return cast(dict[str, Any], meta) if isinstance(meta, Mapping) else None
 
     async def _await_task_request(self, awaitable, *, stage: str):
         timeout = self._task_request_timeout()

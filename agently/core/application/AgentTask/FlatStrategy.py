@@ -1237,11 +1237,13 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 ),
             )
         except Exception as error:
+            child_meta = await self._read_child_execution_meta(execution)
             result, failed_meta = self._failed_execution_result(
                 iteration_index,
                 plan=plan,
                 error=error,
                 execution_id=str(getattr(execution, "id", "") or "") or None,
+                child_meta=child_meta,
             )
             await self._emit(
                 f"agent_task.iteration.{iteration_index}.execution.failed",
