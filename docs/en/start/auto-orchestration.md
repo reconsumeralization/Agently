@@ -282,6 +282,13 @@ Model-declared `file_refs` are diagnostics only until the framework has
 produced this Workspace readback evidence, preserving a real `final.md` or other
 deliverable for host-side review.
 
+TaskBoard readback cards can inspect both Action artifact refs and trusted
+Workspace file refs with bounded cold readback previews. If a generated
+continuation card still reports that the same readback is insufficient, the
+framework does not recursively synthesize another readback/continuation chain;
+the card must propose different executable work or remain blocked with
+diagnostics.
+
 When the write succeeds and readback is trusted, verifier input includes the
 readback fields and `capability_evidence.artifacts.readback`; with
 `max_iterations=1`, a real readable artifact should not become partial only

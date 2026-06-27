@@ -1634,6 +1634,86 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
     schedule = validator.schedule(next_revision)
     assert "final.readback" in schedule.runnable_card_ids
 
+    repeated_patch = AgentTask._taskboard_control_auto_patch(
+        SimpleNamespace(revision=next_revision, card=cards["final.continue"]),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "gaps": ["The same readback was still insufficient."],
+            "remaining_work": ["Do not create another continue/readback chain."],
+        },
+    )
+
+    assert repeated_patch is None
+
+
+@pytest.mark.asyncio
+async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-file-readback").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Read cold Workspace file evidence.",
+        success_criteria=["The readback card reads the Workspace file ref."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    write_result = await task.workspace.write_file(
+        "sources/source.md",
+        "# Official Evidence\n\nWorkspace-only detail that is not in the hot preview.",
+    )
+    file_ref = dict(write_result["file_refs"][0])
+    revision = TaskBoardRevision.create(
+        board_id="workspace-file-readback",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "workspace-file-readback-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect Workspace file evidence."},
+                    {
+                        "id": "readback",
+                        "objective": "Read scoped Workspace file evidence.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "readback",
+                        "required_outputs": ["Workspace file content preview."],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "preview": "file ref only",
+                        "file_refs": [file_ref],
+                    },
+                }
+            ],
+        },
+    )
+    card = revision.graph.card_by_id()["readback"]
+    result = await task._run_taskboard_readback_card(
+        SimpleNamespace(
+            card=card,
+            revision=revision,
+        ),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    payload = result.preview
+    assert payload["file_readbacks"][0]["ok"] is True
+    assert payload["file_readbacks"][0]["path"] == "sources/source.md"
+    assert "Workspace-only detail" in payload["file_readbacks"][0]["content_preview"]
+    assert result.metadata["execution_kind"] == "taskboard_artifact_readback"
+    assert result.metadata["file_ref_count"] == 1
+
 
 def test_execution_options_validate_known_route_schema():
     with pytest.raises(ValueError):
