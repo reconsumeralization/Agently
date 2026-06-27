@@ -2574,10 +2574,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         return self._taskboard_option_timeout("taskboard_tick_timeout_seconds")
 
     def _taskboard_card_timeout(self) -> float | None:
-        timeout = self._taskboard_option_timeout("taskboard_card_timeout_seconds")
-        if timeout is not None:
-            return timeout
-        return self._task_request_timeout()
+        return self._taskboard_option_timeout("taskboard_card_timeout_seconds")
 
     def _taskboard_card_max_attempts(self) -> int:
         value = self._taskboard_option("taskboard_card_max_attempts")

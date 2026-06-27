@@ -2631,6 +2631,36 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
 
 
 @pytest.mark.asyncio
+async def test_taskboard_request_timeout_does_not_cancel_progressing_card_by_default(tmp_path):
+    agent = _create_taskboard_slow_card_agent("execution-taskboard-card-request-timeout-isolated").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Run a slow TaskBoard card without default card cancellation.",
+        success_criteria=["The slow card is allowed to finish without an explicit card timeout."],
+        execution="taskboard",
+        max_iterations=1,
+        options={
+            "request_timeout_seconds": 0.2,
+            "agent_task": {"request_timeout_seconds": 0.2},
+        },
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    revision = task_meta["result"]["taskboard"]["revision"]
+    slow_result = revision["card_results"]["slow"]
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert slow_result["status"] == "completed"
+    assert slow_result["preview"]["answer"] == "slow card eventually completed"
+    assert not task_meta["diagnostics"].get("taskboard_card_errors")
+
+
+@pytest.mark.asyncio
 async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
     agent = _create_taskboard_slow_card_agent("execution-taskboard-card-timeout").use_workspace(tmp_path / "workspace")
 
