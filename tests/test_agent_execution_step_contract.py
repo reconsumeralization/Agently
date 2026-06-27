@@ -1848,6 +1848,27 @@ def test_taskboard_control_invalid_readback_patch_proposal_becomes_framework_pat
     assert cards["final.continue"].depends_on == ("collect", "final.readback")
 
 
+def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
+    assert AgentTask._taskboard_control_output_allows_workspace_delivery(
+        {
+            "status": "blocked",
+            "sufficient": False,
+            "next_board_action": "readback",
+            "artifact_manifest": {"path": "final.md", "sections": [{"id": "deliverable"}]},
+            "remaining_work": ["Read scoped evidence before generating the deliverable."],
+        }
+    ) is False
+    assert AgentTask._taskboard_control_output_allows_workspace_delivery(
+        {
+            "status": "completed",
+            "sufficient": True,
+            "artifact_manifest": {"path": "final.md", "sections": [{"id": "deliverable"}]},
+            "remaining_work": [],
+            "gaps": [],
+        }
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     agent = _create_agent("execution-taskboard-workspace-file-readback").use_workspace(tmp_path / "workspace")

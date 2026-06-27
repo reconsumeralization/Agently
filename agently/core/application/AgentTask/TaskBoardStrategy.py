@@ -1371,10 +1371,12 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 execution_id=None,
             )
         required_deliverables = self._required_workspace_deliverables()
-        deliverable_mode = self._workspace_artifact_delivery_mode(card_output)
+        allow_workspace_delivery = self._taskboard_control_output_allows_workspace_delivery(card_output)
+        deliverable_mode = self._workspace_artifact_delivery_mode(card_output) if allow_workspace_delivery else None
         prefer_stream_draft = False
         if (
-            not deliverable_mode
+            allow_workspace_delivery
+            and not deliverable_mode
             and required_deliverables
             and self._taskboard_context_card_is_leaf(context)
             and isinstance(card_output, Mapping)
@@ -1393,17 +1395,18 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                         }
                     ],
                 }
-        card_output = await self._deliver_workspace_artifact(
-            card_output,
-            plan={
-                "deliverable_mode": deliverable_mode,
-                "prefer_stream_draft": prefer_stream_draft,
-            },
-            execution_meta=cast(dict[str, Any], execution_meta),
-            source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
-            context_pack=context_pack,
-            card_context=context,
-        )
+        if allow_workspace_delivery:
+            card_output = await self._deliver_workspace_artifact(
+                card_output,
+                plan={
+                    "deliverable_mode": deliverable_mode,
+                    "prefer_stream_draft": prefer_stream_draft,
+                },
+                execution_meta=cast(dict[str, Any], execution_meta),
+                source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
+                context_pack=context_pack,
+                card_context=context,
+            )
         diagnostics = []
         if isinstance(card_output, Mapping):
             raw_diagnostics = card_output.get("diagnostics")
@@ -1476,6 +1479,24 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 ),
             },
         )
+
+    @classmethod
+    def _taskboard_control_output_allows_workspace_delivery(cls, card_output: Any) -> bool:
+        if not isinstance(card_output, Mapping):
+            return True
+        status = str(card_output.get("status") or "").strip().lower()
+        if status in {"blocked", "failed", "skipped", "error", "timed_out"}:
+            return False
+        next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
+        if next_action in {"readback", "needs_readback", "repair", "patch", "block", "stop"}:
+            return False
+        if card_output.get("sufficient") is False:
+            return False
+        if cls._has_remaining_work(card_output.get("remaining_work")) or cls._has_remaining_work(
+            card_output.get("gaps")
+        ):
+            return False
+        return True
 
     @classmethod
     def _taskboard_control_patch_proposal(
