@@ -275,6 +275,9 @@ diagnostics 保持 blocked。
 应返回 `next_board_action="readback"` 加结构化 `target_refs`。AgentTask 会把这个紧凑意图
 转成可执行 action 的 evidence card，由它负责下载、保存快照或物化目标，再运行 continuation
 card。只写在 `gaps` 自然语言里的 URL 属于 diagnostics，不会被解析成可执行目标。
+对于 `completed` 且 `sufficient=True` 的 control 输出，非致命 `gaps` 不会阻止 Workspace
+artifact 物化；`remaining_work`、blocked 状态、repair 或 readback 仍会阻止写入。写入
+artifact 只是为后续 readback 和 verification 创建证据，不代表最终任务已经被接受。
 
 写入成功且读回可信时，verifier 输入会包含这些读回字段和
 `capability_evidence.artifacts.readback`；在 `max_iterations=1` 下，真实已写入且可读回的

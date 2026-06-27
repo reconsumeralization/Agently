@@ -311,6 +311,10 @@ that compact intent into an action-capable evidence card that can download,
 snapshot, or otherwise materialize the target before the continuation card
 runs. URLs mentioned only inside `gaps` prose are diagnostics; they are not
 parsed as executable targets.
+For completed and sufficient control outputs, non-fatal `gaps` do not prevent
+Workspace artifact materialization; `remaining_work`, blocked status, repair,
+or readback still do. Writing the artifact only creates evidence for later
+readback and verification. It does not mean the final task has been accepted.
 
 When the write succeeds and readback is trusted, verifier input includes the
 readback fields and `capability_evidence.artifacts.readback`; with

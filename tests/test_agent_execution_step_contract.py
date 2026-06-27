@@ -1996,6 +1996,25 @@ def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
             "gaps": [],
         }
     ) is True
+    assert AgentTask._taskboard_control_output_allows_workspace_delivery(
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "finalize",
+            "artifact_manifest": {"path": "final.md", "sections": [{"id": "deliverable"}]},
+            "remaining_work": [],
+            "gaps": ["Non-fatal evidence limitation disclosed for verifier review."],
+        }
+    ) is True
+    assert AgentTask._taskboard_control_output_allows_workspace_delivery(
+        {
+            "status": "completed",
+            "sufficient": True,
+            "artifact_manifest": {"path": "final.md", "sections": [{"id": "deliverable"}]},
+            "remaining_work": ["Write the actual deliverable body."],
+            "gaps": [],
+        }
+    ) is False
 
 
 @pytest.mark.asyncio

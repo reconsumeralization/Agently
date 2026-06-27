@@ -1506,10 +1506,11 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             return False
         if card_output.get("sufficient") is False:
             return False
-        if cls._has_remaining_work(card_output.get("remaining_work")) or cls._has_remaining_work(
-            card_output.get("gaps")
-        ):
+        if cls._has_remaining_work(card_output.get("remaining_work")):
             return False
+        if cls._has_remaining_work(card_output.get("gaps")):
+            if not (status == "completed" and card_output.get("sufficient") is True):
+                return False
         return True
 
     @classmethod
