@@ -71,6 +71,21 @@ def test_block_carrier_output_policy_selects_schema_and_body_transport():
     assert plain_text_policy.requires_structured_judge is True
 
 
+def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():
+    schema = AgentTask._bounded_step_output_schema(
+        {
+            "body_transport": "workspace_artifact",
+            "body_uses_output": False,
+            "control_format": "json",
+        }
+    )
+
+    assert "artifact_manifest" in schema
+    assert "candidate_final_result" not in schema
+    assert "artifact_markdown" not in schema
+    assert "file_refs" not in schema
+
+
 def test_agent_task_defaults_do_not_apply_resource_caps(tmp_path):
     agent = _create_agent("agent-task-default-resource-caps").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -830,6 +845,76 @@ async def test_agent_task_workspace_artifact_delivery_preserves_existing_full_bo
     assert second["workspace_artifact_delivery"]["status"] == "preserved_existing"
     assert second["workspace_artifact_delivery"]["content_key"] == "artifact_markdown"
     assert second["diagnostics"][0]["code"] == "agent_task.workspace_artifact.preserved_existing"
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_outline_sections_trigger_stream_draft(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-outline-sections")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-outline-sections"
+    task.goal = "Revise a source-grounded artifact."
+    task.success_criteria = ["The final artifact cites only supported sources."]
+    task.execution_strategy = "flat"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    old_body = "# Complete Report\n\nUnsupported source: https://example.test/old\n" + (
+        "Existing body.\n" * 200
+    )
+    replacement_body = "# Complete Report\n\nSupported source: https://example.test/source\n"
+    await workspace.write_file("reports/final.md", old_body)
+
+    async def fake_stream_workspace_artifact_draft(**kwargs: Any) -> dict[str, Any]:
+        path = kwargs["path"]
+        await workspace.write_file(path, replacement_body, append=False)
+        readback = await workspace.read_file(path)
+        ref = {
+            "path": readback["path"],
+            "bytes": readback["bytes"],
+            "sha256": readback["sha256"],
+            "media_type": readback.get("media_type"),
+            "content_kind": readback.get("content_kind", "text"),
+            "role": "workspace_artifact",
+            "source": kwargs.get("source"),
+            "preview": readback["content"],
+            "truncated": False,
+            "read_bytes": readback["bytes"],
+            "handler_id": readback.get("handler_id"),
+        }
+        return {
+            "source": kwargs.get("source"),
+            "path": path,
+            "status": "delivered",
+            "mode": "streamed_workspace_artifact",
+            "file_refs": [ref],
+        }
+
+    task._stream_workspace_artifact_draft = fake_stream_workspace_artifact_draft
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {
+                "path": "reports/final.md",
+                "sections": [
+                    "official source references",
+                    "syllabus boundary",
+                    "mock questions",
+                    "answer key",
+                ],
+            },
+            "evidence": ["Outline is ready; framework should draft the body."],
+            "remaining_work": [],
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact.outline",
+    )
+
+    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    assert written == replacement_body
+    assert delivered["workspace_artifact_delivery"]["mode"] == "streamed_workspace_artifact"
+    assert delivered["workspace_artifact_delivery"]["status"] == "delivered"
+    assert delivered["file_refs"][0]["bytes"] == len(replacement_body.encode("utf-8"))
 
 
 @pytest.mark.asyncio

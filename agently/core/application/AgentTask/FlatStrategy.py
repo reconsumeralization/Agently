@@ -1203,32 +1203,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "same-site index/list/download/navigation links before relying on a broad announcement page as the "
                     "source boundary. "
                     "Do not claim final completion unless evidence supports it."
+                    + self._bounded_step_carrier_instruction(carrier_output_policy)
                 ),
-                output_schema={
-                    "step_result": (str, "Concrete result of this bounded step", True),
-                    "candidate_final_result": (
-                        str,
-                        "Complete answer/report/artifact body produced by this step when it may satisfy the final task",
-                        False,
-                    ),
-                    "artifact_markdown": (
-                        str,
-                        "Short markdown deliverable body when this step creates one and it fits bounded output",
-                        False,
-                    ),
-                    "artifact_manifest": (
-                        dict,
-                        "Workspace artifact manifest for file-backed or sectioned deliverables",
-                        False,
-                    ),
-                    "file_refs": (
-                        [dict],
-                        "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
-                        False,
-                    ),
-                    "evidence": ([str], "Evidence produced by the step", True),
-                    "remaining_work": ([str], "Known remaining work, empty when none"),
-                },
+                output_schema=self._bounded_step_output_schema(carrier_output_policy),
                 output_format=self._carrier_control_output_format(carrier_output_policy),
                 use_output=self._carrier_uses_control_output(carrier_output_policy),
                 carrier_output_policy=carrier_output_policy,
@@ -1262,6 +1239,67 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             )
             return result, failed_meta
         return result, cast(dict[str, Any], meta)
+
+    @staticmethod
+    def _bounded_step_output_schema(carrier_output_policy: Mapping[str, Any] | None) -> dict[str, Any]:
+        if (
+            isinstance(carrier_output_policy, Mapping)
+            and str(carrier_output_policy.get("body_transport") or "") == "workspace_artifact"
+            and carrier_output_policy.get("body_uses_output") is False
+        ):
+            return {
+                "step_result": (
+                    str,
+                    "Concise status and evidence summary for this bounded step; do not include the artifact body",
+                    True,
+                ),
+                "artifact_manifest": (
+                    dict,
+                    "Optional Workspace artifact manifest with path and section outline only; no full body content and no file_refs",
+                    False,
+                ),
+                "evidence": ([str], "Evidence produced by the step", True),
+                "remaining_work": ([str], "Known remaining work, empty when none"),
+            }
+        return {
+            "step_result": (str, "Concrete result of this bounded step", True),
+            "candidate_final_result": (
+                str,
+                "Complete answer/report/artifact body produced by this step when it may satisfy the final task",
+                False,
+            ),
+            "artifact_markdown": (
+                str,
+                "Short markdown deliverable body when this step creates one and it fits bounded output",
+                False,
+            ),
+            "artifact_manifest": (
+                dict,
+                "Workspace artifact manifest for file-backed or sectioned deliverables",
+                False,
+            ),
+            "file_refs": (
+                [dict],
+                "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
+                False,
+            ),
+            "evidence": ([str], "Evidence produced by the step", True),
+            "remaining_work": ([str], "Known remaining work, empty when none"),
+        }
+
+    @staticmethod
+    def _bounded_step_carrier_instruction(carrier_output_policy: Mapping[str, Any] | None) -> str:
+        if (
+            isinstance(carrier_output_policy, Mapping)
+            and str(carrier_output_policy.get("body_transport") or "") == "workspace_artifact"
+            and carrier_output_policy.get("body_uses_output") is False
+        ):
+            return (
+                " This work unit uses a Workspace artifact carrier: return compact control data only. "
+                "Use artifact_manifest for the target path and section outline when the artifact is ready, "
+                "and keep the full prose body out of structured output fields."
+            )
+        return ""
 
     async def _bridge_step_execution_stream(self, iteration_index: int, execution: Any) -> None:
         try:

@@ -50,7 +50,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         for section in sections:
             if isinstance(section, str):
                 text = section.strip()
-                if text:
+                if text and cls._manifest_section_string_is_body(text):
                     chunks.append(text)
                 continue
             if not isinstance(section, Mapping):
@@ -69,6 +69,13 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             else:
                 chunks.append(body)
         return "\n\n".join(chunks).strip()
+
+    @staticmethod
+    def _manifest_section_string_is_body(text: str) -> bool:
+        """Treat short section-name strings as outlines, not artifact bodies."""
+
+        stripped = text.strip()
+        return bool("\n" in stripped or len(stripped) > 120 or stripped.startswith("#"))
 
     @classmethod
     def _workspace_artifact_manifest_needs_body(cls, manifest: Mapping[str, Any] | None) -> bool:
