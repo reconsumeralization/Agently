@@ -237,7 +237,15 @@ def test_framework_route_metrics_count_model_request_events_from_stream_summary(
             "agent_task.iteration.1.progress.verify": 1,
             "agent_task.iteration.1.execution.runtime.progress.action_execution.started": 5,
             "agent_task.iteration.1.progress.completed": 1,
-        }
+        },
+        "model_usage_records": [
+            runner.model_usage_record(
+                source="framework_stream:agent_task.iteration.1.execution.$status",
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                input_chars=100,
+                output_chars=50,
+            )
+        ],
     }
 
     runner.apply_framework_model_request_metrics(metrics, stream_summary)
@@ -248,6 +256,40 @@ def test_framework_route_metrics_count_model_request_events_from_stream_summary(
     as_dict = metrics.to_dict()
     assert as_dict["framework_model_request_events"] == 7
     assert as_dict["model_request_count_source"] == "framework_stream_model_stage_starts"
+    assert as_dict["model_usage"]["records"] == 1
+    assert as_dict["model_usage"]["provider_usage_records"] == 1
+    assert as_dict["model_usage"]["provider"]["prompt_tokens"] == 10
+    assert as_dict["model_usage"]["provider"]["completion_tokens"] == 5
+    assert as_dict["model_usage"]["provider"]["total_tokens"] == 15
+    assert as_dict["model_usage"]["estimated_lengths"]["input_chars"] == 100
+    assert as_dict["model_usage"]["estimated_lengths"]["output_chars"] == 50
+
+
+def test_model_usage_summary_keeps_unknown_tokens_and_estimated_lengths():
+    runner = _load_real_samples_runner()
+    metrics = runner.Metrics(route="flat", case_id="lmcc_mock_exam")
+    metrics.record_model_usage(
+        runner.model_usage_record(
+            source="direct_model_meta",
+            usage=None,
+            input_chars=321,
+            output_chars=123,
+            stage="judge",
+            judge=True,
+        )
+    )
+
+    usage = metrics.to_dict()["model_usage"]
+
+    assert usage["records"] == 1
+    assert usage["provider_usage_records"] == 0
+    assert usage["missing_provider_usage_records"] == 1
+    assert usage["provider"]["prompt_tokens"] is None
+    assert usage["provider"]["completion_tokens"] is None
+    assert usage["provider"]["total_tokens"] is None
+    assert usage["estimated_lengths"]["input_chars"] == 321
+    assert usage["estimated_lengths"]["output_chars"] == 123
+    assert "NaN" in usage["display_policy"]
 
 
 def test_real_sample_runner_defaults_do_not_apply_iteration_caps(monkeypatch):
@@ -331,6 +373,48 @@ def test_block_carrier_runner_model_pool_uses_requested_provider_for_bare_models
         {"provider": "qwen", "model": "glm-5.1"},
         {"provider": "qwen", "model": "deepseek-v4-flash"},
     ]
+
+
+def test_block_carrier_runner_defaults_bare_models_to_deepseek(monkeypatch):
+    runner = _load_block_carrier_runner()
+    args = SimpleNamespace(provider=None, model="deepseek-v4-flash", model_pool=None)
+
+    assert runner._model_pool_candidates(args) == [
+        {"provider": "deepseek", "model": "deepseek-v4-flash"}
+    ]
+    assert runner._infer_provider_for_model("custom-hosted-model", None) == "deepseek"
+
+    legacy = SimpleNamespace(NETWORK_PROXY_ENV="NETWORK_PROXY")
+    env_names = [
+        "REAL_SAMPLE_EXPERIMENT_PROVIDER",
+        "DEEPSEEK_DEFAULT_MODEL",
+        "QWEN_MODEL",
+        "OLLAMA_MODEL",
+    ]
+    for env_name in env_names:
+        monkeypatch.delenv(env_name, raising=False)
+    runner._apply_legacy_cli_environment(
+        SimpleNamespace(
+            provider=None,
+            model="custom-hosted-model",
+            lmcc_syllabus_path=None,
+            lmcc_syllabus_url=None,
+            network_proxy=None,
+            model_timeout_seconds=None,
+            provider_stream_idle_timeout_seconds=None,
+            response_materialization_idle_timeout_seconds=None,
+            flat_max_iterations=None,
+            taskboard_route_timeout_seconds=None,
+            taskboard_tick_timeout_seconds=None,
+            taskboard_card_timeout_seconds=None,
+            taskboard_max_ticks=None,
+            taskboard_card_max_steps=None,
+        ),
+        legacy,
+    )
+
+    assert os.environ["DEEPSEEK_DEFAULT_MODEL"] == "custom-hosted-model"
+    assert "QWEN_MODEL" not in os.environ
 
 
 def test_block_carrier_runner_records_model_pool_resource_exhaustion_fact(tmp_path):
