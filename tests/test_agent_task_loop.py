@@ -663,6 +663,42 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_workspace_intermediate_artifact_stays_ref_backed_without_satisfying_final_contract(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-intermediate")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-intermediate"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.options = {"agent_task": {"required_deliverables": [{"path": "deliverables/final.md"}]}}
+
+    notes_body = "# Search Notes\n\n" + "\n".join(
+        f"- Source note {index}: keep this large intermediate evidence cold." for index in range(20)
+    )
+    execution_meta = {"logs": {}}
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_markdown": notes_body,
+            "artifact_manifest": {"path": "working/search-notes.md"},
+            "evidence": ["Downloaded source snapshot and summarized it into working notes."],
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.workspace_artifact.intermediate",
+    )
+
+    bounded_read = await workspace.read_file("working/search-notes.md", max_bytes=80)
+
+    assert delivered["file_refs"][0]["path"] == "working/search-notes.md"
+    assert execution_meta["logs"]["artifact_refs"][0]["path"] == "working/search-notes.md"
+    assert execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"] == "working/search-notes.md"
+    assert bounded_read["ok"] is True
+    assert bounded_read["truncated"] is True
+    assert bounded_read["content"].startswith("# Search Notes")
+    assert task._required_workspace_deliverables() == ["deliverables/final.md"]
+    assert await task._missing_required_workspace_deliverables() == ["deliverables/final.md"]
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_delivery_reports_readback_failure(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-readback-failure")
 

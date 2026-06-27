@@ -282,6 +282,14 @@ Model-declared `file_refs` are diagnostics only until the framework has
 produced this Workspace readback evidence, preserving a real `final.md` or other
 deliverable for host-side review.
 
+The same ref-backed path is also valid for intermediate work. A step may
+download a file, save a webpage snapshot, write generated code, keep search
+notes, or persist large extracted text as Workspace or Action artifact refs.
+Hot prompts should carry compact refs and bounded previews; later blocks can
+open scoped snippets with `read_file(max_bytes=..., offset=...)` or artifact
+readback when they need the content. These intermediate refs are execution
+evidence, not final deliverable proof.
+
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 Workspace file refs with bounded cold readback previews. Framework-generated
 readback cards scope evidence to direct dependencies plus upstream evidence
@@ -304,7 +312,7 @@ iteration shortfall.
 If the structured task input or output contract declares required deliverables,
 AgentTask host guards require those Workspace files to exist and read back before
 accepting completion. A verifier response that says a file exists is not enough
-unless Workspace readback confirms it.
+unless Workspace readback confirms the declared final path.
 
 For public reference material, such as framework introductions or API guidance,
 task verifier acceptance is still not a source-quality guarantee by itself. Feed
