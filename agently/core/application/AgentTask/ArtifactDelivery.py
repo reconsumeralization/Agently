@@ -749,6 +749,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         )
         language_policy = self._language_policy()
         draft_execution.language(language_policy.get("language", "auto"))
+        cumulative_execution_evidence_summary = self._cumulative_execution_evidence_summary(dict(execution_meta or {}))
+        cumulative_evidence_anchors = self._planner_evidence_anchors_from_summary(cumulative_execution_evidence_summary)
         draft_execution.input(
             {
                 "task_id": self.id,
@@ -759,6 +761,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "plan": DataFormatter.sanitize(plan or {}),
                 "execution_result": DataFormatter.sanitize(execution_result),
                 "execution_meta_summary": self._execution_log_summary(dict(execution_meta or {})),
+                "cumulative_evidence_anchors": DataFormatter.sanitize(cumulative_evidence_anchors),
                 "context_pack": DataFormatter.sanitize(context_pack or {}),
                 "card": DataFormatter.sanitize(
                     card_context.card.to_dict()
@@ -785,6 +788,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "Write only the final Markdown artifact body for the AgentTask. "
                 "Do not output JSON, YAML, XML, code fences, file_refs, or a wrapper object. "
                 "Use only the provided task context, execution result, dependency results, and evidence summaries. "
+                "For source-grounded artifacts, cite exact URLs, file paths, or refs from cumulative_evidence_anchors; "
+                "do not shorten URLs, use ellipses, infer paths from titles, or cite sources that are not visible there. "
                 "If the source evidence is incomplete, write a clear source-boundary section instead of fabricating facts. "
                 "The framework will stream your Markdown into the Workspace artifact path and read it back."
             )

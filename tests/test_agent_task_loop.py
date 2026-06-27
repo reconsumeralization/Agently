@@ -1180,6 +1180,88 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
     assert meta["iterations"][0]["verification"]["reason"] == "trusted streamed Workspace artifact readback is present"
 
 
+@pytest.mark.asyncio
+async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anchors(tmp_path):
+    class WorkspaceArtifactDraftEvidenceRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactDraftEvidenceRequester"
+        draft_text = ""
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Write only the final Markdown artifact body for the AgentTask" in text:
+                self.__class__.draft_text = text
+                assert "cumulative_evidence_anchors" in text
+                assert "https://example.test/exact-source" in text
+                assert "Evidence-backed source snippet" in text
+                yield "message", "# Evidence Draft\n\nSource: https://example.test/exact-source\n"
+                return
+            yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-draft-evidence-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="agent-task-workspace-artifact-draft-evidence-plugins",
+    )
+    plugin_manager.register("ModelRequester", WorkspaceArtifactDraftEvidenceRequester, activate=True)
+    agent = Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="agent-task-workspace-artifact-draft-evidence",
+    )
+    task = AgentTask(
+        agent,
+        task_id="workspace-artifact-draft-evidence",
+        goal="Write a source-grounded Workspace artifact.",
+        success_criteria=["The final artifact cites exact source URLs."],
+        workspace=tmp_path / "task-workspace",
+    )
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "execution_meta": {
+                "status": "completed",
+                "logs": {
+                    "action_logs": [
+                        {
+                            "action_id": "web_search",
+                            "status": "success",
+                            "action_call_id": "call-source",
+                            "model_digest": {
+                                "result_preview": [
+                                    {
+                                        "title": "Exact source",
+                                        "href": "https://example.test/exact-source",
+                                        "body": "Evidence-backed source snippet.",
+                                    }
+                                ],
+                                "result_preview_meta": {"truncated": False},
+                            },
+                        }
+                    ],
+                    "route_logs": {},
+                },
+            },
+        }
+    )
+
+    delivery = await task._stream_workspace_artifact_draft(
+        path="final.md",
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_result={"artifact_manifest": {"path": "final.md"}},
+        execution_meta={"status": "completed", "logs": {"action_logs": [], "route_logs": {}}},
+        source="test.workspace_artifact_draft.evidence",
+        context_pack={},
+        iteration_index=2,
+    )
+
+    assert delivery is not None
+    assert delivery["status"] == "delivered"
+    assert "https://example.test/exact-source" in WorkspaceArtifactDraftEvidenceRequester.draft_text
+    readback = await task.workspace.read_file("final.md")
+    assert "https://example.test/exact-source" in readback["content"]
+
+
 def test_agent_language_policy_normalizes_and_reaches_execution_prompt():
     agent = _create_agent("agent-language-policy")
 

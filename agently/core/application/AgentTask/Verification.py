@@ -155,6 +155,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         """
 
         summary = cls._execution_log_summary(dict(execution_meta))
+        return cls._planner_evidence_anchors_from_summary(summary)
+
+    @classmethod
+    def _planner_evidence_anchors_from_summary(cls, summary: Mapping[str, Any]) -> dict[str, Any]:
         source_refs = cls._compact_planner_source_refs(summary.get("source_refs", []), max_refs=24)
         action_previews = cls._compact_planner_action_previews(summary.get("actions", []), max_actions=8)
         artifact_refs = summary.get("artifact_refs")
