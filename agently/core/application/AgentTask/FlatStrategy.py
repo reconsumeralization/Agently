@@ -1115,7 +1115,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             " For Workspace, repository, or file-backed evidence, prefer scoped retrieval before bulk reads when it can "
             "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
             "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Search/read executors only "
-            "record bounded facts; the planner/verifier must judge semantic usefulness after seeing snippets or readbacks."
+            "record bounded facts; the planner/verifier must judge semantic usefulness after seeing snippets or readbacks. "
+            "When the task context names a concrete Workspace collection, kind, path, or scope for the relevant records, "
+            "carry that into each query group's filters/collection/kind/path so scoped search targets task evidence "
+            "instead of framework planning, checkpoint, verification, or reflection records."
             " For long, sectioned, or prose-heavy deliverables, separate the content-carrier decision from the "
             "control/evidence contract. A single freeform document can be drafted as natural Markdown/plain text. When "
             "field boundaries are required, preserve the caller's declared .output(..., format=...) contract such as "
@@ -1175,15 +1178,18 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         work_unit = self._build_flat_work_unit_intent(iteration_index, plan, context_pack)
 
         async def run_agent_step(_context: Mapping[str, Any]) -> Mapping[str, Any]:
+            scoped_retrieval_results = self._scoped_retrieval_results_from_block_context(_context)
             execution_result, execution_meta = await self._run_bounded_agent_execution_step(
                 iteration_index,
                 plan,
                 context_pack,
                 carrier_output_policy=self._carrier_output_policy_from_block_context(_context),
+                scoped_retrieval_results=scoped_retrieval_results,
             )
             return {
                 "execution_result": DataFormatter.sanitize(execution_result),
                 "execution_meta": DataFormatter.sanitize(execution_meta),
+                "scoped_retrieval_results": DataFormatter.sanitize(scoped_retrieval_results),
             }
 
         try:
@@ -1236,6 +1242,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         context_pack: "WorkspaceContextPackage",
         *,
         carrier_output_policy: Mapping[str, Any] | None = None,
+        scoped_retrieval_results: Sequence[Mapping[str, Any]] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         plan = self._normalize_step_plan(plan)
         execution = self._create_bounded_child_execution(
@@ -1266,6 +1273,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "execution_prompt": self._execution_prompt_context(),
                     "retrieval_policy": scoped_retrieval_policy(),
                     "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+                    "scoped_retrieval_results": DataFormatter.sanitize(list(scoped_retrieval_results or ())),
                     "language_policy": language_policy,
                 },
                 instruction=(
@@ -1293,7 +1301,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "file or artifact before making claims about its content. "
                     "When scoped_retrieval.query_groups is present, try the prioritized scoped search before broad "
                     "reads; use evidence_snippet results as bounded source text and locator_ref results only as targets "
-                    "for later bounded readback. Do not treat a local search hit as semantic acceptance by itself. "
+                    "for later bounded readback. If scoped_retrieval_results is present, those are already executed "
+                    "Blocks/Workspace search facts for the current step; inspect them before choosing broader reads. "
+                    "Do not treat a local search hit as semantic acceptance by itself. "
                     "Do not claim final completion unless evidence supports it."
                     + self._bounded_step_carrier_instruction(carrier_output_policy)
                 ),

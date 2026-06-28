@@ -883,6 +883,12 @@ class LocalWorkspaceBackend:
         filters = filters or {}
         params: list[Any] = []
         clauses: list[str] = []
+        if filters.get("id") is not None:
+            clauses.append("r.id = ?")
+            params.append(str(filters["id"]))
+        if filters.get("path") is not None:
+            clauses.append("r.path = ?")
+            params.append(str(filters["path"]))
         if filters.get("collection") is not None:
             clauses.append("r.collection = ?")
             params.append(str(filters["collection"]))
@@ -930,7 +936,7 @@ class LocalWorkspaceBackend:
                 rows = conn.execute(f"SELECT r.* FROM records r { where } ORDER BY created_at DESC", params).fetchall()
         refs = [self._row_to_ref(row) for row in rows]
         for key, value in filters.items():
-            if key in {"collection", "kind"} or key in scope_filter_keys:
+            if key in {"id", "path", "collection", "kind"} or key in scope_filter_keys:
                 continue
             if key.startswith("scope."):
                 path = key.split(".", 1)[1]

@@ -223,6 +223,10 @@ async def test_workspace_local_ingest_search_link_and_get(tmp_path):
         filters={"collection": "observations", "kind": "test_output"},
     )
     assert [item["id"] for item in results] == [ref["id"]]
+    by_id = await workspace.search("route fallback", filters={"id": ref["id"]})
+    by_path = await workspace.search("route fallback", filters={"path": ref["path"]})
+    assert [item["id"] for item in by_id] == [ref["id"]]
+    assert [item["id"] for item in by_path] == [ref["id"]]
     assert (tmp_path / "run" / "workspace.meta.json").is_file()
     assert (tmp_path / "run" / "workspace.db").is_file()
     assert (tmp_path / "run" / "files").is_dir()

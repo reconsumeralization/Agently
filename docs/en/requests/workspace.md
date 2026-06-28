@@ -79,6 +79,12 @@ context_pack = await agent.workspace.build_context(
 )
 ```
 
+`workspace.search(...)` supports structural filters such as `collection`,
+`kind`, record `id`, record `path`, `scope.<key>`, and `meta.<key>`. Use these
+filters when the planner or application already knows the relevant collection,
+record, path, or task scope; they narrow retrieval without turning a search hit
+into semantic acceptance.
+
 Use `agent.use_workspace(...)` when the application needs a stable explicit
 root, read-only mode, or a registered backend provider:
 
@@ -348,7 +354,12 @@ Blocks `workspace_operation` can also run scoped Workspace searches through the
 Workspace SQLite/FTS index and bounded ref/path reads through `search` and
 `read_bounded` operations. These operations return typed `locator_ref` and
 `evidence_snippet` facts; they do not decide whether a hit is semantically
-useful or whether a task is complete.
+useful or whether a task is complete. In Flat AgentTask steps, planner-provided
+`scoped_retrieval.query_groups` are lowered to these Blocks search facts before
+the bounded `agent_step` consumes them. Query groups may carry the same
+structural filters (`collection`, `kind`, `id`, `path`, `scope`, or `meta`) so
+large retained records can stay out of the hot context until a bounded search
+or readback needs them.
 
 `materialize_file(...)` is for framework-owned or application-owned byte
 materialization, such as a Browse action downloading a remote PDF into

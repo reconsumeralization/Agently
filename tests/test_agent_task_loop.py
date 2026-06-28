@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -150,6 +150,153 @@ def test_taskboard_source_ref_policy_reuses_scoped_retrieval_policy():
     assert policy["scoped_retrieval_policy"] == scoped_retrieval_policy()
     assert "locator_ref" in policy["scoped_retrieval_policy"]["roles"]
     assert "evidence_snippet" in policy["scoped_retrieval_policy"]["roles"]
+
+
+def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-block-plan").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-block-plan",
+        goal="Use scoped search before reading large files.",
+        success_criteria=["Evidence is grounded."],
+    )
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Use the retrieved evidence.",
+            "expected_evidence": "deadline evidence",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "alpha deadline",
+                        "expected_role": "evidence_snippet",
+                        "filters": {"scope.case_id": "alpha"},
+                        "snippet_limit": 64,
+                    }
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+
+    execution_plan = task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
+
+    assert [block.kind for block in execution_plan.plan_blocks] == ["workspace_operation", "agent_step"]
+    assert execution_plan.plan_blocks[0].bound_inputs["operation"] == "search"
+    assert execution_plan.plan_blocks[0].bound_inputs["query"] == "alpha deadline"
+    assert execution_plan.plan_blocks[0].bound_inputs["include_snippets"] is True
+    compact_plan = task._compact_execution_plan_for_meta(execution_plan)
+    assert compact_plan["plan_blocks"][0]["bound_inputs"]["operation"] == "search"
+    assert compact_plan["plan_blocks"][0]["bound_inputs"]["query"] == "alpha deadline"
+    assert compact_plan["plan_blocks"][0]["bound_inputs"]["filters"] == {"scope.case_id": "alpha"}
+    assert execution_plan.edges[0].from_plan_block == execution_plan.plan_blocks[0].id
+    assert execution_plan.edges[0].to_plan_block == execution_plan.plan_blocks[1].id
+    assert execution_plan.edges[0].binding["target_input"] == "scoped_retrieval_results"
+
+
+@pytest.mark.asyncio
+async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-block-exec").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-block-exec",
+        goal="Use scoped search before reading large files.",
+        success_criteria=["Evidence is grounded."],
+    )
+    await task.workspace.ingest(
+        content="Alpha deadline is 2026-07-01. Use this bounded evidence.",
+        collection="observations",
+        kind="note",
+        summary="alpha deadline note",
+        scope={"case_id": "alpha"},
+    )
+    await task.workspace.ingest(
+        content="Beta deadline is unrelated.",
+        collection="observations",
+        kind="note",
+        summary="beta deadline note",
+        scope={"case_id": "beta"},
+    )
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Use the retrieved evidence.",
+            "expected_evidence": "deadline evidence",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "deadline",
+                        "expected_role": "evidence_snippet",
+                        "filters": {"scope.case_id": "alpha"},
+                        "snippet_limit": 48,
+                    }
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+    seen: dict[str, Any] = {}
+
+    async def handler(block_context: Mapping[str, Any]) -> dict[str, Any]:
+        scoped_results = task._scoped_retrieval_results_from_block_context(block_context)
+        seen["scoped_results"] = scoped_results
+        return {
+            "execution_result": {
+                "candidate_final_result": "Alpha deadline found.",
+                "scoped_retrieval_results": scoped_results,
+            },
+            "execution_meta": {
+                "execution_id": "scoped-retrieval-child",
+                "status": "completed",
+                "route": {"selected_route": "test", "status": "completed"},
+                "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+            },
+        }
+
+    execution_result, execution_meta, _work_unit_result = await task._run_work_unit_through_blocks(
+        work_unit=work_unit,
+        plan=plan,
+        context_pack=cast(Any, context_pack),
+        execution_id="scoped-retrieval-block-exec-run",
+        handler=handler,
+        start_payload={"test": True},
+    )
+
+    scoped_results = seen["scoped_results"]
+    assert len(scoped_results) == 1
+    assert scoped_results[0]["query"] == "deadline"
+    assert scoped_results[0]["bounded"]["returned_results"] == 1
+    snippet = scoped_results[0]["evidence_snippets"][0]
+    assert snippet["role"] == "evidence_snippet"
+    assert snippet["content"].startswith("Alpha deadline")
+    assert "semantically_relevant" not in scoped_results[0]
+    assert execution_result["scoped_retrieval_results"][0]["evidence_snippets"][0]["content"].startswith(
+        "Alpha deadline"
+    )
+    block_kinds = [
+        block["kind"]
+        for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]
+    ]
+    assert block_kinds == ["workspace_operation", "agent_step"]
+    compact_search_output = execution_meta["blocks"]["evidence"]["execution_block_results"][0]["output"]
+    assert compact_search_output["operation"] == "search"
+    assert compact_search_output["query"] == "deadline"
+    assert compact_search_output["bounded"]["returned_results"] == 1
+    assert compact_search_output["evidence_snippet_count"] == 1
 
 
 def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():

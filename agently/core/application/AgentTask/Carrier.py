@@ -111,7 +111,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         handler_name = str(work_unit.runtime_preferences.get("handler") or "agent_task_bounded_step")
         blocks_execution = flow.create_execution(
             auto_close=False,
-            workspace=False,
+            workspace=self.workspace,
             runtime_resources={
                 "blocks.handlers": {
                     "agent_task_bounded_step": handler,
@@ -302,7 +302,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         context_pack: "WorkspaceContextPackage",
     ):
-        from agently.types.data import ExecutionPlan, PlanBlockInstance
+        from agently.types.data import ExecutionPlan, ExecutionPlanEdge, PlanBlockInstance
 
         if isinstance(work_unit_or_iteration, WorkUnitIntent):
             work_unit = work_unit_or_iteration
@@ -341,52 +341,64 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             else "agent_step"
         )
         plan_block_id = plan_block_kind
-        plan_block_label = plan_block_kind.replace("_", "-")
         step_scope = plan.get("step_scope")
         if not isinstance(step_scope, dict):
             step_scope = {}
         budget = plan.get("budget")
+        agent_plan_block = PlanBlockInstance(
+            id=f"{work_unit.id}:agent-step",
+            plan_block_id=plan_block_id,
+            kind=plan_block_kind,
+            intent=work_unit.objective,
+            bound_inputs={
+                "task_id": self.id,
+                "work_unit": work_unit.to_dict(),
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "task_context_contract": self._task_context_contract(),
+                "preferred_execution_shape": effective_shape,
+                "step_plan": step_plan,
+                "plan": DataFormatter.sanitize(plan),
+                "execution_prompt": self._execution_prompt_context(),
+                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+                "retrieval_policy": dict(work_unit.retrieval_policy),
+                "context_summary": {
+                    "item_count": len(context_pack.get("items", [])),
+                    "profile": context_pack.get("profile"),
+                },
+            },
+            output_contract={
+                "execution_result": "bounded AgentExecution step result",
+                "execution_meta": "bounded AgentExecution route metadata and evidence",
+            },
+            evidence_contract={
+                "expected_evidence": DataFormatter.sanitize(list(work_unit.evidence_requirements))
+                or str(plan.get("expected_evidence") or ""),
+                "effective_execution_shape": effective_shape,
+                "step_plan": step_plan,
+            },
+            runtime_preferences={"handler": handler_name, **runtime_preferences},
+            budget=dict(budget) if isinstance(budget, Mapping) else {},
+        )
+        retrieval_blocks = self._build_scoped_retrieval_plan_blocks(work_unit, plan)
+        retrieval_edges = tuple(
+            ExecutionPlanEdge(
+                from_plan_block=block.id,
+                to_plan_block=agent_plan_block.id,
+                kind="scoped_retrieval",
+                binding={
+                    "target_input": "scoped_retrieval_results",
+                    "semantic_acceptance_owner": "planner_or_verifier",
+                },
+            )
+            for block in retrieval_blocks
+        )
         return ExecutionPlan(
             plan_id=f"{self.id}:{work_unit.id}:execution-plan",
             task_frame_id=f"{self.id}:{work_unit.id}:task-frame",
-            plan_blocks=(
-                PlanBlockInstance(
-                    id=f"{work_unit.id}:{plan_block_label}",
-                    plan_block_id=plan_block_id,
-                    kind=plan_block_kind,
-                    intent=work_unit.objective,
-                    bound_inputs={
-                        "task_id": self.id,
-                        "work_unit": work_unit.to_dict(),
-                        "goal": self.goal,
-                        "success_criteria": self.success_criteria,
-                        "task_context_contract": self._task_context_contract(),
-                        "preferred_execution_shape": effective_shape,
-                        "step_plan": step_plan,
-                        "plan": DataFormatter.sanitize(plan),
-                        "execution_prompt": self._execution_prompt_context(),
-                        "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-                        "retrieval_policy": dict(work_unit.retrieval_policy),
-                        "context_summary": {
-                            "item_count": len(context_pack.get("items", [])),
-                            "profile": context_pack.get("profile"),
-                        },
-                    },
-                    output_contract={
-                        "execution_result": "bounded AgentExecution step result",
-                        "execution_meta": "bounded AgentExecution route metadata and evidence",
-                    },
-                    evidence_contract={
-                        "expected_evidence": DataFormatter.sanitize(list(work_unit.evidence_requirements))
-                        or str(plan.get("expected_evidence") or ""),
-                        "effective_execution_shape": effective_shape,
-                        "step_plan": step_plan,
-                    },
-                    runtime_preferences={"handler": handler_name, **runtime_preferences},
-                    budget=dict(budget) if isinstance(budget, Mapping) else {},
-                ),
-            ),
-            semantic_outputs={"step": f"{work_unit.id}:{plan_block_label}"},
+            plan_blocks=(*retrieval_blocks, agent_plan_block),
+            edges=retrieval_edges,
+            semantic_outputs={"step": agent_plan_block.id},
             evidence_requirements=tuple(
                 {"capability_id": capability_id, "source": "step_scope"}
                 for capability_id in self._normalize_string_list(step_scope.get("allowed_capability_ids"))
@@ -404,6 +416,122 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             },
         )
 
+    @classmethod
+    def _build_scoped_retrieval_plan_blocks(
+        cls,
+        work_unit: WorkUnitIntent,
+        plan: Mapping[str, Any],
+    ) -> tuple[Any, ...]:
+        from agently.types.data import PlanBlockInstance
+
+        scoped_retrieval = plan.get("scoped_retrieval")
+        if not isinstance(scoped_retrieval, Mapping):
+            return ()
+        query_groups = scoped_retrieval.get("query_groups")
+        if not isinstance(query_groups, Sequence) or isinstance(query_groups, (str, bytes, bytearray)):
+            return ()
+        blocks: list[PlanBlockInstance] = []
+        for index, raw_group in enumerate(query_groups[:8]):
+            if not isinstance(raw_group, Mapping):
+                continue
+            query = str(raw_group.get("query") or "").strip()
+            if not query:
+                continue
+            expected_role = str(raw_group.get("expected_role") or "evidence_snippet").strip()
+            filters = cls._scoped_retrieval_filters(raw_group)
+            include_snippets = expected_role != "locator_ref"
+            bound_inputs: dict[str, Any] = {
+                "operation": "search",
+                "query": query,
+                "filters": filters,
+                "max_results": raw_group.get("max_results", 8),
+                "include_snippets": include_snippets,
+                "snippet_limit": raw_group.get("snippet_limit", 1200),
+                "snippet_offset": raw_group.get("snippet_offset", 0),
+                "expected_role": expected_role,
+                "query_group_index": index,
+            }
+            for key in ("path", "pattern"):
+                value = raw_group.get(key)
+                if value is not None:
+                    bound_inputs[key] = value
+            blocks.append(
+                PlanBlockInstance(
+                    id=f"{work_unit.id}:scoped-retrieval-{index}",
+                    plan_block_id="workspace_operation",
+                    kind="workspace_operation",
+                    intent=f"Run scoped Workspace retrieval for query group {index + 1}.",
+                    bound_inputs=bound_inputs,
+                    output_contract={
+                        "locator_refs": "bounded targets only; content not read",
+                        "evidence_snippets": "bounded source text when requested",
+                    },
+                    evidence_contract={
+                        "role_policy": scoped_retrieval_policy(),
+                        "semantic_acceptance_owner": "planner_or_verifier",
+                    },
+                    runtime_preferences={
+                        "retrieval_policy": scoped_retrieval_policy(),
+                        "query_group_index": index,
+                    },
+                )
+            )
+        return tuple(blocks)
+
+    @staticmethod
+    def _scoped_retrieval_filters(group: Mapping[str, Any]) -> dict[str, Any]:
+        raw_filters = group.get("filters")
+        filters = dict(raw_filters) if isinstance(raw_filters, Mapping) else {}
+        for key in ("collection", "kind"):
+            value = group.get(key)
+            if value is not None:
+                filters.setdefault(key, value)
+        scope = group.get("scope")
+        if isinstance(scope, Mapping):
+            for key, value in scope.items():
+                filters.setdefault(f"scope.{key}", value)
+        meta = group.get("meta")
+        if isinstance(meta, Mapping):
+            for key, value in meta.items():
+                filters.setdefault(f"meta.{key}", value)
+        path = group.get("path")
+        if path is not None:
+            filters.setdefault("path", path)
+        return filters
+
+    @staticmethod
+    def _scoped_retrieval_results_from_block_context(block_context: Mapping[str, Any]) -> list[dict[str, Any]]:
+        state = block_context.get("state")
+        if not isinstance(state, Mapping):
+            return []
+        results = state.get("execution_block_results")
+        if not isinstance(results, Sequence) or isinstance(results, (str, bytes, bytearray)):
+            return []
+        scoped_results: list[dict[str, Any]] = []
+        for item in results:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("kind") or "") != "workspace_operation":
+                continue
+            output = item.get("output")
+            if not isinstance(output, Mapping):
+                continue
+            if str(output.get("operation") or "") != "search":
+                continue
+            scoped_results.append(
+                {
+                    "execution_block_id": item.get("execution_block_id"),
+                    "source_plan_block_id": item.get("source_plan_block_id"),
+                    "query": output.get("query"),
+                    "filters": DataFormatter.sanitize(output.get("filters") or {}),
+                    "bounded": DataFormatter.sanitize(output.get("bounded") or {}),
+                    "locator_refs": DataFormatter.sanitize(output.get("locator_refs") or []),
+                    "evidence_snippets": DataFormatter.sanitize(output.get("evidence_snippets") or []),
+                    "diagnostics": DataFormatter.sanitize(output.get("diagnostics") or []),
+                }
+            )
+        return scoped_results
+
     @staticmethod
     def _extract_work_unit_block_output(
         snapshot: Mapping[str, Any],
@@ -418,6 +546,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             return {}
         expected_prefix = f"{work_unit.id}:"
         fallback: dict[str, Any] = {}
+        prefixed_fallback: dict[str, Any] = {}
         for item in results:
             if not isinstance(item, Mapping):
                 continue
@@ -426,8 +555,19 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             if not fallback and output_dict:
                 fallback = output_dict
             block_id = str(item.get("execution_block_id") or item.get("id") or "")
-            if block_id.startswith(expected_prefix):
-                return output_dict
+            if block_id.startswith(expected_prefix) and output_dict:
+                if "execution_result" in output_dict or "execution_meta" in output_dict:
+                    return output_dict
+                if not prefixed_fallback:
+                    prefixed_fallback = output_dict
+            source_plan_block_id = str(item.get("source_plan_block_id") or "")
+            if source_plan_block_id.startswith(expected_prefix) and output_dict:
+                if "execution_result" in output_dict or "execution_meta" in output_dict:
+                    return output_dict
+                if not prefixed_fallback:
+                    prefixed_fallback = output_dict
+        if prefixed_fallback:
+            return prefixed_fallback
         return fallback
 
     def _blocks_capability_resolution(self, plan: dict[str, Any]):
@@ -592,6 +732,18 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                     key: bound_inputs.get(key)
                     for key in (
                         "task_id",
+                        "operation",
+                        "query",
+                        "filters",
+                        "collection",
+                        "kind",
+                        "path",
+                        "pattern",
+                        "expected_role",
+                        "max_results",
+                        "include_snippets",
+                        "snippet_limit",
+                        "snippet_offset",
                         "preferred_execution_shape",
                         "step_plan",
                         "context_summary",
@@ -688,6 +840,29 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 output = item.get("output")
                 output_summary: dict[str, Any] = {}
                 if isinstance(output, Mapping):
+                    if str(item.get("kind") or "") == "workspace_operation":
+                        for output_key in ("operation", "query", "filters", "bounded", "diagnostics"):
+                            if output_key in output:
+                                output_summary[output_key] = cls._compact_value_for_meta(
+                                    output.get(output_key),
+                                    max_chars=1000,
+                                )
+                        locator_refs = output.get("locator_refs")
+                        if isinstance(locator_refs, (list, tuple)):
+                            output_summary["locator_ref_count"] = len(locator_refs)
+                            if locator_refs:
+                                output_summary["first_locator_ref"] = cls._compact_value_for_meta(
+                                    locator_refs[0],
+                                    max_chars=1000,
+                                )
+                        evidence_snippets = output.get("evidence_snippets")
+                        if isinstance(evidence_snippets, (list, tuple)):
+                            output_summary["evidence_snippet_count"] = len(evidence_snippets)
+                            if evidence_snippets:
+                                output_summary["first_evidence_snippet"] = cls._compact_value_for_meta(
+                                    evidence_snippets[0],
+                                    max_chars=1000,
+                                )
                     execution_meta = output.get("execution_meta")
                     if isinstance(execution_meta, Mapping):
                         output_summary["execution_meta"] = {
@@ -710,7 +885,14 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 compact_results.append(
                     {
                         result_key: item.get(result_key)
-                        for result_key in ("id", "plan_block_id", "execution_block_id", "kind", "status")
+                        for result_key in (
+                            "id",
+                            "plan_block_id",
+                            "source_plan_block_id",
+                            "execution_block_id",
+                            "kind",
+                            "status",
+                        )
                         if result_key in item
                     }
                     | ({"output": output_summary} if output_summary else {})
