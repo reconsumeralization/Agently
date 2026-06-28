@@ -1148,7 +1148,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     for key, item in value.items():
                         key_text = str(key)
                         next_path = f"{path}.{key_text}" if path else key_text
-                        if key_text in {"source_url", "selected_url", "requested_url", "url", "href", "path", "sha256"}:
+                        if key_text in {"source_url", "selected_url", "requested_url", "url", "href", "path"}:
                             ref_value = str(item or "").strip()
                             if ref_value:
                                 content_state = cls._source_ref_content_state(value, field=key_text)
@@ -1181,8 +1181,6 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
 
     @staticmethod
     def _source_ref_content_state(container: Any, *, field: str) -> str:
-        if field == "sha256":
-            return "metadata_only"
         if not isinstance(container, Mapping):
             return "ref_only"
         for key in ("content", "content_preview", "text"):

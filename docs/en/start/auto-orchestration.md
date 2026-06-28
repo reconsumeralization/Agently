@@ -268,8 +268,10 @@ completed business result.
 
 When a bounded step or TaskBoard card returns a short `artifact_markdown` body
 or a sectioned `artifact_manifest`, AgentTask writes the deliverable through the
-bound Workspace and immediately reads it back for `path`, `bytes`, `sha256`,
-bounded preview, and `file_refs`. For long, sectioned, or prose-heavy
+bound Workspace and immediately reads it back. The cold evidence records
+`path`, `bytes`, `sha256`, bounded preview, and `file_refs`; model-hot verifier
+input uses path/ref handles, bounded content or preview, and truncation status.
+For long, sectioned, or prose-heavy
 deliverables, choose the content carrier deliberately. A single freeform
 document can draft as natural Markdown/plain text with no `.output()` contract.
 When the caller needs separately addressable fields, use Agently
@@ -366,7 +368,8 @@ downstream consumer, terminal verifier/final control, and strategy still own
 usefulness, quality, and completion judgment.
 
 When the write succeeds and readback is trusted, verifier input includes the
-readback fields and `capability_evidence.artifacts.readback`; with
+model-hot readback content/preview, refs, and
+`capability_evidence.artifacts.readback`; with
 `max_iterations=1`, a real readable artifact should not become partial only
 because the evidence chain was omitted. If readback fails or lacks trusted
 `path` / `bytes` / `sha256` evidence, diagnostics use

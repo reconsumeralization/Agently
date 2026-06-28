@@ -2368,11 +2368,18 @@ def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provena
     compact = AgentTask._compact_taskboard_workspace_operation(
         {
             "id": "op-1",
+            "plan_block_id": "plan-1",
+            "source_plan_block_id": "source-plan-1",
+            "execution_block_id": "exec-block-1",
             "kind": "workspace_operation",
             "status": "completed",
             "output": {
+                "diagnostics": [{"code": "diag", "message": "visible", "sha256": "1" * 64, "raw": {"bytes": 4096}}],
                 "bounded": {
                     "returned_results": 1,
+                    "diagnostics": [
+                        {"code": "bounded", "message": "bounded visible", "sha256": "1" * 64, "raw": {"bytes": 4096}}
+                    ],
                     "locator_refs": [
                         {
                             "path": "retained/source.md",
@@ -2417,6 +2424,140 @@ def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provena
     assert '"media_type"' not in prompt_text
     assert '"search_engine"' not in prompt_text
     assert '"grep_tool"' not in prompt_text
+    assert '"plan_block_id"' not in prompt_text
+    assert '"source_plan_block_id"' not in prompt_text
+    assert '"execution_block_id"' not in prompt_text
+
+
+def test_model_hot_artifact_refs_omit_programmatic_provenance_noise():
+    compact = AgentTask._compact_artifact_ref_for_verifier(
+        {
+            "artifact_id": "artifact-1",
+            "action_call_id": "call-1",
+            "path": "reports/final.md",
+            "label": "final report",
+            "media_type": "text/markdown",
+            "bytes": 4096,
+            "size": 4096,
+            "sha256": "1" * 64,
+            "content_kind": "text",
+            "handler_id": "workspace_text",
+            "source": "workspace",
+            "truncated": True,
+            "available": True,
+        }
+    )
+
+    hot_text = json.dumps(compact, ensure_ascii=False)
+    assert compact["artifact_id"] == "artifact-1"
+    assert compact["action_call_id"] == "call-1"
+    assert compact["path"] == "reports/final.md"
+    assert compact["truncated"] is True
+    assert '"sha256"' not in hot_text
+    assert '"bytes"' not in hot_text
+    assert '"size"' not in hot_text
+    assert '"media_type"' not in hot_text
+    assert '"content_kind"' not in hot_text
+    assert '"handler_id"' not in hot_text
+
+
+def test_action_source_refs_do_not_treat_sha_as_source_evidence():
+    refs = AgentTask._collect_source_refs_from_action_records(
+        [
+            {
+                "id": "collect",
+                "action_call_id": "call-1",
+                "artifact_refs": [
+                    {
+                        "path": "retained/source.md",
+                        "sha256": "1" * 64,
+                        "source_url": "https://example.test/source",
+                    }
+                ],
+            }
+        ]
+    )
+
+    fields = {ref["field"] for ref in refs}
+    assert "source_url" in fields
+    assert "path" in fields
+    assert "sha256" not in fields
+
+
+def test_taskboard_available_readback_omits_programmatic_provenance_noise():
+    evidence_view = {
+        "artifact_refs": [
+            {
+                "artifact_id": "artifact-1",
+                "action_call_id": "call-1",
+                "role": "output",
+                "label": "search note",
+                "media_type": "text/markdown",
+                "bytes": 4096,
+                "sha256": "1" * 64,
+                "full_value_available": True,
+            }
+        ],
+        "file_refs": [
+            {
+                "path": "retained/source.md",
+                "role": "evidence",
+                "media_type": "text/markdown",
+                "bytes": 4096,
+                "sha256": "2" * 64,
+            }
+        ],
+    }
+
+    available = AgentTask._taskboard_available_readback(evidence_view)
+    hot_text = json.dumps(available, ensure_ascii=False)
+
+    assert available["action_artifact_readback"]["artifact_refs"][0]["artifact_id"] == "artifact-1"
+    assert available["workspace_file_readback"]["file_refs"][0]["path"] == "retained/source.md"
+    assert '"sha256"' not in hot_text
+    assert '"bytes"' not in hot_text
+    assert '"media_type"' not in hot_text
+    assert '"full_value_available"' not in hot_text
+
+
+def test_taskboard_action_artifact_readback_preview_omits_ref_provenance_noise():
+    compact = AgentTask._compact_taskboard_action_artifact_readback(
+        {
+            "ok": True,
+            "status": "read",
+            "artifact_id": "artifact-1",
+            "action_call_id": "call-1",
+            "media_type": "text/markdown",
+            "value": {
+                "summary": "bounded source note",
+                "file_refs": [
+                    {
+                        "path": "retained/source.md",
+                        "role": "evidence",
+                        "media_type": "text/markdown",
+                        "bytes": 4096,
+                        "sha256": "1" * 64,
+                    }
+                ],
+            },
+            "meta": {"sha256": "2" * 64, "bytes": 8192},
+        },
+        {
+            "artifact_id": "artifact-1",
+            "action_call_id": "call-1",
+            "media_type": "text/markdown",
+            "bytes": 4096,
+            "sha256": "1" * 64,
+        },
+    )
+
+    hot_text = json.dumps(compact, ensure_ascii=False)
+    assert compact["artifact_id"] == "artifact-1"
+    assert compact["value_preview"]["summary"] == "bounded source note"
+    assert compact["value_preview"]["file_refs"][0]["path"] == "retained/source.md"
+    assert '"sha256"' not in hot_text
+    assert '"bytes"' not in hot_text
+    assert '"media_type"' not in hot_text
 
 
 def test_taskboard_control_readback_required_patch_type_becomes_readback_patch():

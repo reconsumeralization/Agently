@@ -856,13 +856,15 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "filters",
                 "locator_ref_count",
                 "evidence_snippet_count",
-                "diagnostics",
             ):
                 if output_key in output:
                     output_summary[output_key] = cls._compact_verifier_prompt_value(
                         output.get(output_key),
                         max_chars=700,
                     )
+            diagnostics = output.get("diagnostics")
+            if diagnostics is not None:
+                output_summary["diagnostics"] = cls._model_hot_diagnostics(diagnostics)
             bounded = output.get("bounded")
             if isinstance(bounded, Mapping):
                 output_summary["bounded"] = cls._compact_taskboard_workspace_operation_bounded(bounded)
@@ -886,10 +888,6 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         return {
             key: item.get(key)
             for key in (
-                "id",
-                "plan_block_id",
-                "source_plan_block_id",
-                "execution_block_id",
                 "kind",
                 "status",
             )
@@ -922,7 +920,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         compact = {key: bounded.get(key) for key in keep_keys if key in bounded}
         diagnostics = bounded.get("diagnostics")
         if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
-            compact["diagnostics"] = cls._compact_verifier_prompt_value(list(diagnostics)[:4], max_chars=700)
+            compact["diagnostics"] = cls._model_hot_diagnostics(list(diagnostics)[:4])
         return DataFormatter.sanitize(compact)
 
     @classmethod
@@ -4209,7 +4207,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         action_call_id = str(readback.get("action_call_id") or ref.get("action_call_id") or "")
         value = readback.get("value", readback.get("data", readback.get("result")))
         original_chars = cls._serialized_prompt_chars(value)
-        preview = cls._compact_verifier_prompt_value(value, max_chars=max_chars)
+        preview = cls._compact_taskboard_action_artifact_value_preview(value, max_chars=max_chars)
         preview_chars = cls._serialized_prompt_chars(preview)
         compact: dict[str, Any] = {
             "ok": bool(readback.get("ok")),
@@ -4218,23 +4216,49 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "action_call_id": action_call_id,
             "artifact_type": str(readback.get("artifact_type") or ref.get("artifact_type") or ""),
             "label": str(readback.get("label") or ref.get("label") or ""),
-            "media_type": str(readback.get("media_type") or ref.get("media_type") or ""),
-            "ref": DataFormatter.sanitize(dict(ref)),
+            "ref": cls._compact_artifact_ref_for_verifier(ref),
             "value_preview": preview,
             "value_preview_meta": {
                 "truncated": preview_chars < original_chars,
-                "original_chars": original_chars,
-                "preview_chars": preview_chars,
-                "limit_chars": max_chars,
             },
         }
         error = readback.get("error")
         if error:
             compact["error"] = cls._truncate_prompt_text(error, 1200)
-        meta = readback.get("meta")
-        if isinstance(meta, Mapping):
-            compact["meta"] = cls._compact_verifier_prompt_value(meta, max_chars=1200)
         return compact
+
+    @classmethod
+    def _compact_taskboard_action_artifact_value_preview(
+        cls,
+        value: Any,
+        *,
+        max_chars: int,
+    ) -> Any:
+        preview = cls._compact_verifier_prompt_value(value, max_chars=max_chars)
+        return cls._compact_taskboard_framework_refs_in_hot_value(preview)
+
+    @classmethod
+    def _compact_taskboard_framework_refs_in_hot_value(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            compact: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text in {"artifact_refs", "file_refs"}:
+                    if isinstance(item, Sequence) and not isinstance(item, str | bytes | bytearray):
+                        compact[key_text] = [
+                            cls._compact_artifact_ref_for_verifier(ref)
+                            for ref in item
+                            if isinstance(ref, Mapping)
+                        ]
+                    continue
+                if key_text in {"ref", "locator_ref"} and isinstance(item, Mapping):
+                    compact[key_text] = cls._compact_artifact_ref_for_verifier(item)
+                    continue
+                compact[key_text] = cls._compact_taskboard_framework_refs_in_hot_value(item)
+            return compact
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            return [cls._compact_taskboard_framework_refs_in_hot_value(item) for item in value]
+        return value
 
     @classmethod
     def _compact_taskboard_workspace_file_readback(
@@ -4348,17 +4372,25 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "taskboard_readback_shape": {
                 "available": bool(refs or file_refs),
                 "allowed_execution_shape": "readback",
-                "artifact_refs": DataFormatter.sanitize(refs),
-                "file_refs": DataFormatter.sanitize(file_refs),
+                "artifact_refs": [cls._compact_artifact_ref_for_verifier(ref) for ref in refs],
+                "file_refs": [
+                    cls._compact_taskboard_workspace_ref_for_prompt(ref)
+                    for ref in file_refs
+                    if isinstance(ref, Mapping)
+                ],
             },
             "action_artifact_readback": {
                 "available": bool(refs),
                 "action_id": "read_action_artifact",
-                "artifact_refs": DataFormatter.sanitize(refs),
+                "artifact_refs": [cls._compact_artifact_ref_for_verifier(ref) for ref in refs],
             },
             "workspace_file_readback": {
                 "available": bool(file_refs),
-                "file_refs": DataFormatter.sanitize(file_refs),
+                "file_refs": [
+                    cls._compact_taskboard_workspace_ref_for_prompt(ref)
+                    for ref in file_refs
+                    if isinstance(ref, Mapping)
+                ],
             },
             "policy": (
                 "Use a TaskBoard readback card only when bounded previews are insufficient and the remaining "

@@ -244,7 +244,8 @@ progress、snapshot、child-execution、delta 或 phase 事件都会重置静默
 
 当某个 bounded step 或 TaskBoard card 返回短小 `artifact_markdown` 正文或分段
 `artifact_manifest` 时，AgentTask 会通过绑定的 Workspace 写入交付物，并立刻
-readback `path`、`bytes`、`sha256`、有界 preview 和 `file_refs`。对于长篇、
+readback。冷证据会记录 `path`、`bytes`、`sha256`、有界 preview 和 `file_refs`；
+模型热 verifier 输入使用 path/ref handle、有界内容或 preview、截断状态。对于长篇、
 分段或重自然语言交付物，应先选择合适的内容载体：单一自由正文可以直接生成自然
 Markdown / plain text，不必为了携带正文而声明 `.output()`；如果调用方需要可独立寻址
 的字段，可在适合目标模型和消费方的情况下使用
@@ -317,7 +318,8 @@ result preview、refs、耗时、diagnostics 和 work-unit 归属。已恢复的
 终局 verifier/final control 和 strategy 判断。
 
 写入成功且读回可信时，verifier 输入会包含这些读回字段和
-`capability_evidence.artifacts.readback`；在 `max_iterations=1` 下，真实已写入且可读回的
+模型热 readback 内容/preview、refs 和 `capability_evidence.artifacts.readback`；
+在 `max_iterations=1` 下，真实已写入且可读回的
 artifact 不应只因为 evidence 链缺失而变成 partial。如果读回失败，或缺少可信的
 `path` / `bytes` / `sha256` 证据，diagnostics 会使用
 `agent_task.workspace_artifact.readback_failed` 或

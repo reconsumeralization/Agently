@@ -376,8 +376,12 @@ TaskBoard applies the same split to readback continuations: external
 `target_refs` such as HTTP/HTTPS URLs become Action evidence work, while
 Workspace/content paths and retained-note refs become bounded Workspace readback
 cards. Intermediate readback previews keep content, path, range, and truncation
-facts hot; SHA, byte counts, media/handler details, and backend facts stay in
-cold evidence or final artifact readback metadata.
+facts hot. SHA, byte counts, media/handler details, backend facts, execution
+block ids, and other programmatically traceable provenance stay in cold
+Workspace/Blocks evidence, final artifact audit metadata, DevTools, or runner
+logs. Final verifier hot input uses path/ref handles, bounded content or
+preview, and truncation status; it does not need SHA only to judge task
+sufficiency.
 For `workspace_files`, `query` is the content text to search, `path` is the
 directory or file scope, and `pattern` is a file glob such as `*.md`, `*`, or
 `**` for recursive file search. Local Workspace file search uses `rg` as a

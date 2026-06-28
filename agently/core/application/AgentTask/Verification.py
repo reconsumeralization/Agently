@@ -525,9 +525,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     artifact["readback"] = {
                         "status": "read",
                         "path": str(read_result.get("path") or path),
-                        "bytes": self._coerce_non_negative_int(read_result.get("bytes")),
-                        "sha256": str(read_result.get("sha256") or ""),
-                        "read_bytes": self._coerce_non_negative_int(read_result.get("read_bytes")),
                         "truncated": bool(read_result.get("truncated")),
                         "content": (
                             self._truncate_prompt_text(content, _VERIFIER_PROMPT_VALUE_CHARS)
@@ -579,15 +576,17 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _trusted_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
         summary = {
             "path": str(ref.get("path") or ""),
-            "bytes": cls._coerce_non_negative_int(ref.get("bytes")),
-            "sha256": str(ref.get("sha256") or ""),
-            "media_type": ref.get("media_type"),
-            "content_kind": str(ref.get("content_kind") or ""),
             "role": str(ref.get("role") or ""),
             "source": str(ref.get("source") or ""),
             "truncated": bool(ref.get("truncated")),
-            "read_bytes": cls._coerce_non_negative_int(ref.get("read_bytes")),
         }
+        file_refs = ref.get("file_refs")
+        if isinstance(file_refs, Sequence) and not isinstance(file_refs, str | bytes | bytearray):
+            summary["file_refs"] = [
+                cls._compact_artifact_ref_for_verifier(file_ref)
+                for file_ref in list(file_refs)[:8]
+                if isinstance(file_ref, Mapping)
+            ]
         preview = ref.get("preview")
         if isinstance(preview, str) and preview:
             summary["preview"] = cls._truncate_prompt_text(preview, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
@@ -870,20 +869,33 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         keep_keys = (
             "artifact_id",
             "action_call_id",
+            "path",
             "role",
             "label",
-            "media_type",
-            "size",
-            "bytes",
-            "sha256",
+            "artifact_type",
+            "source",
+            "source_url",
+            "selected_url",
+            "requested_url",
+            "canonical_url",
+            "url",
+            "href",
+            "record_id",
+            "collection",
+            "kind",
+            "content_state",
+            "readback_mode",
             "truncated",
             "available",
-            "full_value_available",
-            "path",
         )
         compact = {key: ref.get(key) for key in keep_keys if key in ref}
         if "preview" in ref:
             compact["preview"] = cls._compact_verifier_prompt_value(ref.get("preview"), max_chars=600)
+        if "content_preview" in ref:
+            compact["content_preview"] = cls._compact_verifier_prompt_value(
+                ref.get("content_preview"),
+                max_chars=600,
+            )
         return compact
 
     @classmethod
@@ -899,9 +911,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "action_call_id",
             "input_preview",
             "result_preview_meta",
-            "result_preview_sha256",
         )
         compact: dict[str, Any] = {key: record.get(key) for key in keep_keys if key in record}
+        result_preview_meta = compact.get("result_preview_meta")
+        if isinstance(result_preview_meta, Mapping):
+            compact["result_preview_meta"] = {
+                key: result_preview_meta.get(key)
+                for key in ("truncated", "omitted", "reason")
+                if key in result_preview_meta
+            }
         if "result_preview" in record:
             compact["result_preview"] = cls._compact_action_preview_value(record.get("result_preview"), max_chars=5200)
         if isinstance(record.get("artifact_refs"), list):
@@ -910,7 +928,17 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if len(refs) > 4:
                 compact["artifact_refs"].append({"omitted": len(refs) - 4, "reason": "prompt_budget"})
         if record.get("file_refs"):
-            compact["file_refs"] = cls._compact_verifier_prompt_value(record.get("file_refs"), max_chars=1000)
+            file_refs = record.get("file_refs")
+            if isinstance(file_refs, Sequence) and not isinstance(file_refs, str | bytes | bytearray):
+                compact["file_refs"] = [
+                    cls._compact_artifact_ref_for_verifier(ref)
+                    for ref in list(file_refs)[:4]
+                    if isinstance(ref, Mapping)
+                ]
+                if len(file_refs) > 4:
+                    compact["file_refs"].append({"omitted": len(file_refs) - 4, "reason": "prompt_budget"})
+            else:
+                compact["file_refs"] = cls._compact_verifier_prompt_value(file_refs, max_chars=1000)
         return compact
 
     @classmethod
