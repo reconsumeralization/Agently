@@ -779,6 +779,33 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
 
 
 @pytest.mark.asyncio
+async def test_workspace_search_files_returns_bounded_retrieval_roles(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-search-files")
+    await workspace.write_file("notes/todo.txt", "alpha\nrelease deadline is 2026-07-01\n")
+    await workspace.write_file("notes/skip.txt", f"{'x' * 100}\ndeadline appears in a skipped large file\n")
+
+    results = await workspace.search_files(
+        "deadline",
+        path="notes",
+        pattern="*.txt",
+        max_results=5,
+        max_file_bytes=64,
+    )
+
+    assert [item["path"] for item in results] == ["notes/todo.txt"]
+    assert results[0]["line"] == 2
+    assert results[0]["text"] == "release deadline is 2026-07-01"
+    assert results[0]["role"] == "evidence_snippet"
+    assert results[0]["content_state"] == "bounded_readback_available"
+    assert results[0]["snippet_bytes"] == len(results[0]["text"].encode("utf-8"))
+    assert results[0]["locator_ref"]["role"] == "locator_ref"
+    assert results[0]["locator_ref"]["content_state"] == "ref_only"
+    assert results[0]["locator_ref"]["path"] == "notes/todo.txt"
+    assert results[0]["search_engine"] == "workspace_file_scan"
+    assert not {"useful", "accepted", "semantically_relevant"}.intersection(results[0])
+
+
+@pytest.mark.asyncio
 async def test_workspace_search_files_action_returns_retrieval_roles(tmp_path):
     agent = Agently.create_agent("workspace-search-files-roles").use_workspace(tmp_path / "run")
     workspace = agent.workspace

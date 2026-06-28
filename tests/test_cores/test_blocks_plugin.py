@@ -531,6 +531,60 @@ async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(
 
 
 @pytest.mark.asyncio
+async def test_blocks_workspace_operation_search_can_use_workspace_files_surface(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-file-search")
+    await workspace.write_file("notes/todo.md", "alpha\nrelease deadline is 2026-07-01\n")
+    await workspace.ingest(
+        content="Indexed record is unrelated to the file-only query.",
+        collection="observations",
+        kind="note",
+        summary="unrelated index record",
+    )
+    graph = Agently.blocks.compile(
+        {
+            "plan_id": "plan-workspace-file-search",
+            "plan_blocks": [
+                {
+                    "id": "search-files",
+                    "plan_block_id": "workspace_operation",
+                    "kind": "workspace_operation",
+                    "bound_inputs": {
+                        "operation": "search",
+                        "query": "deadline",
+                        "search_surface": "workspace_files",
+                        "path": "notes",
+                        "pattern": "*.md",
+                        "max_results": 3,
+                        "max_file_bytes": 1024,
+                    },
+                }
+            ],
+        }
+    )
+
+    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
+    await execution.async_start({"ignored": True})
+    snapshot = await execution.async_close(timeout=5)
+
+    evidence = Agently.blocks.map_evidence(graph, snapshot)
+    output = evidence.execution_block_results[0]["output"]
+    assert output["operation"] == "search"
+    assert output["bounded"]["search_surface"] == "workspace_files"
+    assert output["bounded"]["search_engines"] == ["workspace_file_scan"]
+    assert output["bounded"]["index_total_matches"] == 0
+    assert output["bounded"]["file_returned_results"] == 1
+    assert output["bounded"]["returned_results"] == 1
+    assert output["bounded"]["candidate_bytes"] >= output["bounded"]["returned_snippet_bytes"]
+    assert output["locator_refs"][0]["role"] == "locator_ref"
+    assert output["locator_refs"][0]["content_state"] == "ref_only"
+    assert output["locator_refs"][0]["path"] == "notes/todo.md"
+    assert output["evidence_snippets"][0]["role"] == "evidence_snippet"
+    assert output["evidence_snippets"][0]["content"] == "release deadline is 2026-07-01"
+    assert output["evidence_snippets"][0]["locator_ref"]["path"] == "notes/todo.md"
+    assert not {"useful", "accepted", "semantically_relevant"}.intersection(output)
+
+
+@pytest.mark.asyncio
 async def test_blocks_workspace_operation_read_bounded_returns_evidence_snippet(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace-read-bounded")
     ref = await workspace.put(

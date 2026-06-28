@@ -27,7 +27,9 @@ from agently.types.data.workspace import (
     WorkspaceContentSegment,
     WorkspaceFileExportResult,
     WorkspaceFileDiagnostic,
+    WorkspaceFileRef,
     WorkspaceFileReadResult,
+    WorkspaceFileSearchResult,
     WorkspaceFileWriteResult,
     WorkspaceFileInfo,
     WorkspaceFilePolicyMetadata,
@@ -619,6 +621,112 @@ class Workspace:
             handler=handler,
             options=options,
         )
+
+    async def search_files(
+        self,
+        query: str,
+        *,
+        path: str | Path = ".",
+        pattern: str = "*",
+        max_results: int = 50,
+        include_hidden: bool = False,
+        max_file_bytes: int = 200000,
+    ) -> list[WorkspaceFileSearchResult]:
+        query_text = str(query)
+        if not query_text:
+            return []
+        safe_max_results = max(1, min(int(max_results), 1000))
+        safe_max_file_bytes = max(1, min(int(max_file_bytes), 5_000_000))
+        base = self.resolve_file_path(path)
+        if base.is_file():
+            candidates = [base]
+        elif base.exists():
+            candidates = base.rglob(str(pattern or "*"))
+        else:
+            candidates = []
+
+        results: list[WorkspaceFileSearchResult] = []
+        for candidate in candidates:
+            if len(results) >= safe_max_results:
+                break
+            if not candidate.is_file():
+                continue
+            try:
+                relative = str(candidate.relative_to(self.files_root))
+            except ValueError:
+                continue
+            if not include_hidden and any(part.startswith(".") for part in Path(relative).parts):
+                continue
+            file_size = candidate.stat().st_size
+            if file_size > safe_max_file_bytes:
+                continue
+            read_result = await self.read_file(relative, max_bytes=safe_max_file_bytes)
+            if not read_result.get("readable") or read_result.get("content_kind") != "text":
+                continue
+            text = str(read_result.get("content", ""))
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                if query_text not in line:
+                    continue
+                search_scope = {
+                    "path": str(path),
+                    "pattern": str(pattern or "*"),
+                    "include_hidden": include_hidden,
+                    "max_results": safe_max_results,
+                    "max_file_bytes": safe_max_file_bytes,
+                }
+                file_ref = cast(
+                    WorkspaceFileRef,
+                    {
+                        "path": relative,
+                        "bytes": int(read_result.get("bytes", file_size)),
+                        "sha256": str(read_result.get("sha256", "")),
+                        "media_type": read_result.get("media_type"),
+                        "content_kind": str(read_result.get("content_kind", "unknown")),
+                        "role": "source",
+                    },
+                )
+                locator_ref = {
+                    "role": "locator_ref",
+                    "content_state": "ref_only",
+                    "source": "workspace.search_files",
+                    "query": query_text,
+                    "scope": search_scope,
+                    "path": relative,
+                    "bytes": file_ref["bytes"],
+                    "sha256": file_ref["sha256"],
+                    "media_type": file_ref["media_type"],
+                    "content_kind": file_ref["content_kind"],
+                    "search_engine": "workspace_file_scan",
+                }
+                results.append(
+                    cast(
+                        WorkspaceFileSearchResult,
+                        {
+                            "path": relative,
+                            "line": line_no,
+                            "text": line,
+                            "role": "evidence_snippet",
+                            "content_state": "bounded_readback_available",
+                            "source": "workspace.search_files",
+                            "query": query_text,
+                            "scope": search_scope,
+                            "locator_ref": locator_ref,
+                            "snippet": line,
+                            "snippet_chars": len(line),
+                            "snippet_bytes": len(line.encode("utf-8")),
+                            "line_start": line_no,
+                            "line_end": line_no,
+                            "bytes": file_ref["bytes"],
+                            "sha256": file_ref["sha256"],
+                            "media_type": file_ref["media_type"],
+                            "content_kind": file_ref["content_kind"],
+                            "search_engine": "workspace_file_scan",
+                            "file_ref": file_ref,
+                        },
+                    )
+                )
+                break
+        return results
 
     async def write_file(
         self,

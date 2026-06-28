@@ -351,15 +351,16 @@ as evidence only within that excerpt; use the locator as a target for a later
 bounded `read_file(...)` or Blocks `workspace_operation` readback.
 
 Blocks `workspace_operation` can also run scoped Workspace searches through the
-Workspace SQLite/FTS index and bounded ref/path reads through `search` and
-`read_bounded` operations. These operations return typed `locator_ref` and
-`evidence_snippet` facts; they do not decide whether a hit is semantically
-useful or whether a task is complete. In Flat AgentTask steps, planner-provided
-`scoped_retrieval.query_groups` are lowered to these Blocks search facts before
-the bounded `agent_step` consumes them. Query groups may carry the same
-structural filters (`collection`, `kind`, `id`, `path`, `scope`, or `meta`) so
-large retained records can stay out of the hot context until a bounded search
-or readback needs them.
+Workspace SQLite/FTS index, bounded Workspace file search, and bounded ref/path
+reads through `search` and `read_bounded` operations. These operations return
+typed `locator_ref` and `evidence_snippet` facts; they do not decide whether a
+hit is semantically useful or whether a task is complete. In Flat AgentTask
+steps, planner-provided `scoped_retrieval.query_groups` are lowered to these
+Blocks search facts before the bounded `agent_step` consumes them. Query groups
+may set `search_surface` to `workspace_index`, `workspace_files`, or
+`workspace_index_and_files`, and may carry structural filters (`collection`,
+`kind`, `id`, `path`, `scope`, or `meta`) so large retained records and files
+can stay out of the hot context until a bounded search or readback needs them.
 
 `materialize_file(...)` is for framework-owned or application-owned byte
 materialization, such as a Browse action downloading a remote PDF into

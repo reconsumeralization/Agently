@@ -3932,6 +3932,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "a later block needs scoped content.",
                 "Do not claim source contents from ref_only records.",
                 "Use scoped retrieval query groups for Workspace/repository/file evidence before broad reads when it can reduce prompt input.",
+                "Use search_surface='workspace_index' for Workspace SQLite/FTS records, 'workspace_files' for bounded file search under an explicit path/pattern, or 'workspace_index_and_files' when both bounded surfaces are justified.",
                 "Treat local search results as bounded facts, not as semantic acceptance.",
                 "When unread source content is required, return next_board_action=readback with concrete "
                 "target_refs or use an available readback action.",

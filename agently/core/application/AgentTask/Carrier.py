@@ -455,6 +455,10 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 value = raw_group.get(key)
                 if value is not None:
                     bound_inputs[key] = value
+            for key in ("search_surface", "include_hidden", "max_file_bytes"):
+                value = raw_group.get(key)
+                if value is not None:
+                    bound_inputs[key] = value
             blocks.append(
                 PlanBlockInstance(
                     id=f"{work_unit.id}:scoped-retrieval-{index}",

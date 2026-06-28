@@ -667,7 +667,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             if isinstance(item, Mapping):
                 query = str(item.get("query") or item.get("text") or item.get("keyword") or "").strip()
                 expected_role = str(item.get("expected_role") or item.get("role") or "").strip()
-                candidate = {
+                candidate: dict[str, Any] = {
                     "query": query,
                     "expected_role": expected_role if expected_role in {"evidence_snippet", "locator_ref"} else "",
                 }
@@ -675,6 +675,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     value = str(item.get(key) or "").strip()
                     if value:
                         candidate[key] = value
+                surface = str(item.get("search_surface") or item.get("surface") or "").strip()
+                if surface in {"workspace_index", "workspace_files", "workspace_index_and_files", "files"}:
+                    candidate["search_surface"] = "workspace_files" if surface == "files" else surface
+                for key in ("max_results", "snippet_limit", "snippet_offset", "max_file_bytes"):
+                    value = item.get(key)
+                    if value is not None:
+                        candidate[key] = DataFormatter.sanitize(value)
+                if item.get("include_hidden") is not None:
+                    candidate["include_hidden"] = bool(item.get("include_hidden"))
                 filters = item.get("filters")
                 if isinstance(filters, Mapping):
                     candidate["filters"] = DataFormatter.sanitize(dict(filters))
@@ -1116,6 +1125,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
             "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Search/read executors only "
             "record bounded facts; the planner/verifier must judge semantic usefulness after seeing snippets or readbacks. "
+            "Set query_group.search_surface to 'workspace_index' for SQLite/FTS records, 'workspace_files' for bounded "
+            "file grep-style search under an explicit path/pattern, or 'workspace_index_and_files' when both surfaces "
+            "are worth the bounded cost. "
             "When the task context names a concrete Workspace collection, kind, path, or scope for the relevant records, "
             "carry that into each query group's filters/collection/kind/path so scoped search targets task evidence "
             "instead of framework planning, checkpoint, verification, or reflection records."
@@ -1152,7 +1164,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 ),
                 "scoped_retrieval": (
                     dict,
-                    "Optional retrieval plan: {query_groups: [{query, expected_role, path?, pattern?, filters?}], fallback_order?: [...]}; executors return facts only",
+                    "Optional retrieval plan: {query_groups: [{query, expected_role, search_surface?, path?, pattern?, filters?, max_results?, snippet_limit?, max_file_bytes?}], fallback_order?: [...]}; executors return facts only",
                     False,
                 ),
             },

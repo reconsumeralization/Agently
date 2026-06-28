@@ -699,6 +699,15 @@ class ActionExtension(BaseAgent):
                 max_results: int = 50,
                 include_hidden: bool = False,
             ):
+                if workspace_for_actions is not None:
+                    return await workspace_for_actions.search_files(
+                        query,
+                        path=path,
+                        pattern=pattern,
+                        max_results=max_results,
+                        include_hidden=include_hidden,
+                        max_file_bytes=max_search_file_bytes,
+                    )
                 results: list[dict[str, Any]] = []
                 files = iter_workspace_files(path, pattern, max_results=1000, include_hidden=include_hidden)
                 for file in files:

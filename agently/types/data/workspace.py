@@ -129,6 +129,29 @@ class WorkspaceFileReadResult(TypedDict):
     attachments: NotRequired[list[dict[str, Any]]]
 
 
+class WorkspaceFileSearchResult(TypedDict):
+    path: str
+    line: int
+    text: str
+    role: str
+    content_state: str
+    source: str
+    query: str
+    scope: dict[str, Any]
+    locator_ref: dict[str, Any]
+    snippet: str
+    snippet_chars: int
+    snippet_bytes: int
+    line_start: int
+    line_end: int
+    bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    search_engine: str
+    file_ref: WorkspaceFileRef
+
+
 class WorkspaceFileWriteResult(TypedDict):
     ok: bool
     writable: bool

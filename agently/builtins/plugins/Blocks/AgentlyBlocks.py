@@ -952,7 +952,43 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
         snippet_limit = _bounded_int(bound_inputs.get("snippet_limit"), default=1200, minimum=1, maximum=12000)
         snippet_offset = _bounded_int(bound_inputs.get("snippet_offset"), default=0, minimum=0, maximum=10_000_000)
         include_snippets = bool(bound_inputs.get("include_snippets", False))
-        refs = list(await workspace.search(str(query) if query is not None else None, filters=dict(filters)))
+        raw_surface = str(
+            bound_inputs.get("search_surface")
+            or bound_inputs.get("surface")
+            or filters.get("search_surface")
+            or "auto"
+        ).strip().lower()
+        surface_aliases = {
+            "records": "workspace_index",
+            "index": "workspace_index",
+            "sqlite": "workspace_index",
+            "fts": "workspace_index",
+            "files": "workspace_files",
+            "grep": "workspace_files",
+            "both": "workspace_index_and_files",
+            "records_and_files": "workspace_index_and_files",
+            "files_and_records": "workspace_index_and_files",
+        }
+        search_surface = surface_aliases.get(raw_surface, raw_surface or "auto")
+        path_scope = bound_inputs.get("path", filters.get("path", "."))
+        pattern = str(bound_inputs.get("pattern", filters.get("pattern", "*")) or "*")
+        include_hidden = bool(bound_inputs.get("include_hidden", filters.get("include_hidden", False)))
+        max_file_bytes = _bounded_int(
+            bound_inputs.get("max_file_bytes", filters.get("max_file_bytes")),
+            default=200000,
+            minimum=1,
+            maximum=5_000_000,
+        )
+        file_scope_requested = bound_inputs.get("path") is not None or bound_inputs.get("pattern") is not None
+        search_index = search_surface not in {"workspace_files"}
+        search_files = search_surface in {"workspace_files", "workspace_index_and_files"} or (
+            search_surface == "auto" and file_scope_requested
+        )
+        refs = (
+            list(await workspace.search(str(query) if query is not None else None, filters=dict(filters)))
+            if search_index
+            else []
+        )
         selected_refs = refs[:max_results]
         locator_refs = [
             _workspace_locator_ref(
@@ -999,6 +1035,79 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
                         source="blocks.workspace_operation.search",
                     )
                 )
+        file_results: list[dict[str, Any]] = []
+        remaining_file_results = max_results if not search_index else max_results - len(selected_refs)
+        if search_files and remaining_file_results > 0:
+            search_files_func = getattr(workspace, "search_files", None)
+            if callable(search_files_func):
+                try:
+                    raw_file_results = search_files_func(
+                        str(query or ""),
+                        path=path_scope,
+                        pattern=pattern,
+                        max_results=remaining_file_results,
+                        include_hidden=include_hidden,
+                        max_file_bytes=max_file_bytes,
+                    )
+                    if inspect.isawaitable(raw_file_results):
+                        raw_file_results = await raw_file_results
+                    iterable_file_results = (
+                        raw_file_results if isinstance(raw_file_results, (list, tuple)) else ()
+                    )
+                    file_results = [
+                        dict(item)
+                        for item in iterable_file_results
+                        if isinstance(item, Mapping)
+                    ]
+                except Exception as error:
+                    diagnostics.append(
+                        {
+                            "code": "blocks.workspace_operation.file_search_failed",
+                            "type": error.__class__.__name__,
+                            "message": str(error),
+                            "path": str(path_scope),
+                            "pattern": pattern,
+                        }
+                    )
+            else:
+                diagnostics.append(
+                    {
+                        "code": "blocks.workspace_operation.file_search_unavailable",
+                        "message": "Workspace does not expose search_files(...).",
+                        "path": str(path_scope),
+                        "pattern": pattern,
+                    }
+                )
+        file_locator_refs: list[dict[str, Any]] = []
+        file_evidence_snippets: list[dict[str, Any]] = []
+        for index, item in enumerate(file_results, start=len(locator_refs)):
+            raw_locator = item.get("locator_ref")
+            locator_ref = dict(raw_locator) if isinstance(raw_locator, Mapping) else {}
+            locator_ref.update(
+                {
+                    "role": "locator_ref",
+                    "content_state": "ref_only",
+                    "source": "blocks.workspace_operation.search_files",
+                    "workspace_source": item.get("source") or "workspace.search_files",
+                    "query": query,
+                    "index": index,
+                }
+            )
+            file_locator_refs.append(locator_ref)
+            snippet = dict(item)
+            snippet.update(
+                {
+                    "role": "evidence_snippet",
+                    "content_state": "bounded_readback_available",
+                    "source": "blocks.workspace_operation.search_files",
+                    "workspace_source": item.get("source") or "workspace.search_files",
+                    "content": item.get("text") or item.get("snippet") or "",
+                    "locator_ref": locator_ref,
+                }
+            )
+            file_evidence_snippets.append(snippet)
+        locator_refs.extend(file_locator_refs)
+        evidence_snippets.extend(file_evidence_snippets)
         results = [
             {
                 **locator_ref,
@@ -1006,20 +1115,43 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
             }
             for index, locator_ref in enumerate(locator_refs)
         ]
+        returned_snippet_bytes = sum(
+            int(item.get("snippet_bytes") or len(str(item.get("content") or "").encode("utf-8")))
+            for item in evidence_snippets
+            if isinstance(item, Mapping)
+        )
+        candidate_bytes = sum(
+            int(ref.get("size") or 0) for ref in selected_refs if isinstance(ref, Mapping)
+        ) + sum(int(item.get("bytes") or 0) for item in file_results if isinstance(item, Mapping))
+        search_engines = []
+        if search_index:
+            search_engines.append("workspace_sqlite_fts")
+        if search_files:
+            search_engines.append("workspace_file_scan")
         return {
             "operation": "search",
             "query": query,
             "filters": dict(filters),
             "bounded": {
+                "search_surface": search_surface,
+                "search_engines": search_engines,
                 "max_results": max_results,
-                "total_matches": len(refs),
-                "returned_results": len(selected_refs),
+                "total_matches": len(refs) + len(file_results),
+                "index_total_matches": len(refs),
+                "file_returned_results": len(file_results),
+                "returned_results": len(selected_refs) + len(file_results),
                 "include_snippets": include_snippets,
                 "snippet_offset": snippet_offset,
                 "snippet_limit": snippet_limit,
+                "file_path": str(path_scope),
+                "file_pattern": pattern,
+                "max_file_bytes": max_file_bytes,
+                "candidate_bytes": candidate_bytes,
+                "returned_snippet_bytes": returned_snippet_bytes,
             },
             "locator_refs": locator_refs,
             "evidence_snippets": evidence_snippets,
+            "file_search_results": file_results,
             "results": results,
             "workspace_refs": selected_refs,
             "diagnostics": diagnostics,

@@ -35,6 +35,11 @@ def scoped_retrieval_policy() -> dict[str, Any]:
             "locator_ref": "discovered target; content not read",
             "evidence_snippet": "bounded readable excerpt",
         },
+        "search_surfaces": {
+            "workspace_index": "Workspace SQLite/FTS records",
+            "workspace_files": "Workspace files under an explicit path/pattern scope",
+            "workspace_index_and_files": "Use both bounded surfaces and record the facts separately",
+        },
         "rules": [
             "Use scoped search before full file/resource reads when it can reduce input volume.",
             "Treat locator_ref as discovery only until a bounded readback/snippet is available.",

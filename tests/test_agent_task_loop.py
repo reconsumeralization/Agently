@@ -171,7 +171,11 @@ def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
                         "query": "alpha deadline",
                         "expected_role": "evidence_snippet",
                         "filters": {"scope.case_id": "alpha"},
+                        "search_surface": "workspace_files",
+                        "path": "notes",
+                        "pattern": "*.md",
                         "snippet_limit": 64,
+                        "max_file_bytes": 4096,
                     }
                 ]
             },
@@ -192,10 +196,17 @@ def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
     assert execution_plan.plan_blocks[0].bound_inputs["operation"] == "search"
     assert execution_plan.plan_blocks[0].bound_inputs["query"] == "alpha deadline"
     assert execution_plan.plan_blocks[0].bound_inputs["include_snippets"] is True
+    assert execution_plan.plan_blocks[0].bound_inputs["search_surface"] == "workspace_files"
+    assert execution_plan.plan_blocks[0].bound_inputs["path"] == "notes"
+    assert execution_plan.plan_blocks[0].bound_inputs["pattern"] == "*.md"
+    assert execution_plan.plan_blocks[0].bound_inputs["max_file_bytes"] == 4096
     compact_plan = task._compact_execution_plan_for_meta(execution_plan)
     assert compact_plan["plan_blocks"][0]["bound_inputs"]["operation"] == "search"
     assert compact_plan["plan_blocks"][0]["bound_inputs"]["query"] == "alpha deadline"
-    assert compact_plan["plan_blocks"][0]["bound_inputs"]["filters"] == {"scope.case_id": "alpha"}
+    assert compact_plan["plan_blocks"][0]["bound_inputs"]["filters"] == {
+        "scope.case_id": "alpha",
+        "path": "notes",
+    }
     assert execution_plan.edges[0].from_plan_block == execution_plan.plan_blocks[0].id
     assert execution_plan.edges[0].to_plan_block == execution_plan.plan_blocks[1].id
     assert execution_plan.edges[0].binding["target_input"] == "scoped_retrieval_results"
@@ -296,6 +307,83 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
     assert compact_search_output["operation"] == "search"
     assert compact_search_output["query"] == "deadline"
     assert compact_search_output["bounded"]["returned_results"] == 1
+    assert compact_search_output["evidence_snippet_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_block_carrier_executes_file_scoped_retrieval_and_injects_results(tmp_path):
+    agent = _create_agent("agent-task-file-scoped-retrieval").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="file-scoped-retrieval-block-exec",
+        goal="Use scoped file search before reading broad files.",
+        success_criteria=["Evidence is grounded."],
+    )
+    await task.workspace.write_file("notes/alpha.md", "alpha\nrelease deadline is 2026-07-01\n")
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Use the retrieved file evidence.",
+            "expected_evidence": "deadline evidence",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "deadline",
+                        "expected_role": "evidence_snippet",
+                        "search_surface": "workspace_files",
+                        "path": "notes",
+                        "pattern": "*.md",
+                        "max_file_bytes": 1024,
+                    }
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+    seen: dict[str, Any] = {}
+
+    async def handler(block_context: Mapping[str, Any]) -> dict[str, Any]:
+        scoped_results = task._scoped_retrieval_results_from_block_context(block_context)
+        seen["scoped_results"] = scoped_results
+        return {
+            "execution_result": {
+                "candidate_final_result": "File deadline found.",
+                "scoped_retrieval_results": scoped_results,
+            },
+            "execution_meta": {
+                "execution_id": "file-scoped-retrieval-child",
+                "status": "completed",
+                "route": {"selected_route": "test", "status": "completed"},
+                "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+            },
+        }
+
+    execution_result, execution_meta, _work_unit_result = await task._run_work_unit_through_blocks(
+        work_unit=work_unit,
+        plan=plan,
+        context_pack=cast(Any, context_pack),
+        execution_id="file-scoped-retrieval-block-exec-run",
+        handler=handler,
+        start_payload={"test": True},
+    )
+
+    scoped_results = seen["scoped_results"]
+    assert scoped_results[0]["bounded"]["search_surface"] == "workspace_files"
+    assert scoped_results[0]["bounded"]["search_engines"] == ["workspace_file_scan"]
+    assert scoped_results[0]["bounded"]["file_returned_results"] == 1
+    assert scoped_results[0]["evidence_snippets"][0]["content"] == "release deadline is 2026-07-01"
+    assert scoped_results[0]["locator_refs"][0]["content_state"] == "ref_only"
+    assert execution_result["scoped_retrieval_results"][0]["bounded"]["returned_results"] == 1
+    compact_search_output = execution_meta["blocks"]["evidence"]["execution_block_results"][0]["output"]
+    assert compact_search_output["operation"] == "search"
+    assert compact_search_output["bounded"]["search_surface"] == "workspace_files"
     assert compact_search_output["evidence_snippet_count"] == 1
 
 
