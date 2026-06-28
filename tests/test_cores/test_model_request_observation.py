@@ -83,6 +83,18 @@ class MockObservationRequester:
         yield "meta", {"provider": "mock-observation", "model": "mock-1"}
 
 
+class MockStatusObservationRequester(MockObservationRequester):
+    name = "MockStatusObservationRequester"
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, Any], None],
+    ):
+        async for item in super().broadcast_response(response_generator):
+            yield item
+        yield "status", {"status": "completed"}
+
+
 class MockThinkStructuredRequester:
     name = "MockThinkStructuredRequester"
     DEFAULT_SETTINGS: dict[str, Any] = {}
@@ -334,6 +346,22 @@ def _create_request():
     settings = Settings(name="ObservationTestSettings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="ObservationTestPluginManager")
     plugin_manager.register("ModelRequester", MockObservationRequester, activate=True)
+    return ModelRequest(
+        plugin_manager,
+        agent_name="observation-agent",
+        agent_id="agent-observation",
+        parent_settings=settings,
+    )
+
+
+def _create_status_request():
+    settings = Settings(name="StatusObservationTestSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="StatusObservationTestPluginManager",
+    )
+    plugin_manager.register("ModelRequester", MockStatusObservationRequester, activate=True)
     return ModelRequest(
         plugin_manager,
         agent_name="observation-agent",
@@ -863,6 +891,71 @@ def test_model_request_telemetry_summarizes_usage_and_estimated_lengths():
         "output_chars": len("estimated response"),
         "output_source": "raw_text",
     }
+
+    explicit_run = RunContext.create(
+        run_kind="model_request",
+        agent_name="usage-agent",
+        response_id="response-explicit",
+        meta={"attempt_index": 1},
+    )
+    explicit_payload: dict[str, Any] = {
+        "response_id": "response-explicit",
+        "estimated_input_chars": 4321,
+        "estimated_input_source": "request_text",
+        "estimated_output_chars": 987,
+        "estimated_output_source": "text_result",
+    }
+
+    attach_model_request_telemetry(
+        explicit_payload,
+        event_kind="model.status",
+        run=explicit_run,
+        source="TestParser",
+    )
+
+    explicit_summary = explicit_payload["model_request_telemetry"]["usage_summary"]
+    assert explicit_summary["available"] is False
+    assert explicit_summary["estimated_lengths"] == {
+        "input_chars": 4321,
+        "input_source": "request_text",
+        "output_chars": 987,
+        "output_source": "text_result",
+    }
+
+
+@pytest.mark.asyncio
+async def test_terminal_model_status_includes_estimated_lengths_without_provider_usage():
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.terminal_status_estimated_lengths"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        request = _create_status_request()
+        request.input("Prepare a short operations note.")
+        text = await request.async_get_text()
+
+        assert "Morning briefing prepared." in text
+        status_events = [
+            event
+            for event in captured
+            if event.event_type == "model.status"
+            and event.payload.get("status") == "completed"
+            and "model_request_telemetry" in event.payload
+        ]
+        assert status_events
+        summary = status_events[-1].payload["model_request_telemetry"]["usage_summary"]
+        assert summary["available"] is False
+        assert summary["estimated_lengths"]["input_chars"] > 0
+        assert summary["estimated_lengths"]["input_source"] == "request_text"
+        assert summary["estimated_lengths"]["output_chars"] == len(text)
+        assert summary["estimated_lengths"]["output_source"] == "text_result"
+        assert "request_text" not in status_events[-1].payload
+        assert "request_data" not in status_events[-1].payload
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
 
 
 @pytest.mark.asyncio

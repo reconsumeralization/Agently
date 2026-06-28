@@ -27,6 +27,9 @@ from agently.utils import Settings, DataFormatter
 from .Prompt import Prompt
 from .ModelRequestResult import DEFAULT_SPECIFIC_EVENTS, ModelRequestResult
 
+_MODEL_REQUEST_ESTIMATED_INPUT_CHARS_META = "_model_request_estimated_input_chars"
+_MODEL_REQUEST_ESTIMATED_INPUT_SOURCE_META = "_model_request_estimated_input_source"
+
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
@@ -146,6 +149,7 @@ class ModelRequestRunner:
             "provider_family": provider_family,
             **dict(status_data),
         }
+        self._attach_status_estimated_lengths(payload)
         status = str(payload.get("status", ""))
         retry = bool(payload.get("retry", False))
         attempt_index = payload.get("attempt_index", self.attempt_index)
@@ -173,6 +177,49 @@ class ModelRequestRunner:
             }
         )
         return payload
+
+    @staticmethod
+    def _safe_payload_length(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return len(value)
+        try:
+            return len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+        except Exception:
+            return len(str(value))
+
+    def _response_output_length(self) -> tuple[int | None, str | None]:
+        full_result_data = getattr(self.result, "full_result_data", None)
+        if not isinstance(full_result_data, Mapping):
+            return None, None
+        for source, value in (
+            ("text_result", full_result_data.get("text_result")),
+            ("cleaned_result", full_result_data.get("cleaned_result")),
+            ("parsed_result", full_result_data.get("parsed_result")),
+            ("original_done", full_result_data.get("original_done")),
+        ):
+            if value in (None, "", {}, []):
+                continue
+            length = self._safe_payload_length(value)
+            if length is not None:
+                return length, source
+        return None, None
+
+    def _attach_status_estimated_lengths(self, payload: dict[str, Any]) -> None:
+        run_meta = getattr(self.model_run_context, "meta", None)
+        if isinstance(run_meta, Mapping) and payload.get("estimated_input_chars") is None:
+            input_chars = run_meta.get(_MODEL_REQUEST_ESTIMATED_INPUT_CHARS_META)
+            if isinstance(input_chars, int):
+                payload["estimated_input_chars"] = input_chars
+                payload["estimated_input_source"] = str(
+                    run_meta.get(_MODEL_REQUEST_ESTIMATED_INPUT_SOURCE_META) or "request_text"
+                )
+        if str(payload.get("status") or "") == "completed" and payload.get("estimated_output_chars") is None:
+            output_chars, output_source = self._response_output_length()
+            if output_chars is not None:
+                payload["estimated_output_chars"] = output_chars
+                payload["estimated_output_source"] = output_source or "model_result"
 
     def get_meta(self):
         return self.result.get_meta()
@@ -633,6 +680,10 @@ class ModelRequestRunner:
                 model_requester = ModelRequester(self.prompt, self.settings)
                 request_data = model_requester.generate_request_data()
                 request_payload = self._build_request_payload(request_data)
+                request_text = request_payload.get("request_text")
+                if isinstance(request_text, str):
+                    self.model_run_context.meta[_MODEL_REQUEST_ESTIMATED_INPUT_CHARS_META] = len(request_text)
+                    self.model_run_context.meta[_MODEL_REQUEST_ESTIMATED_INPUT_SOURCE_META] = "request_text"
                 model_requesting_payload = {
                     "agent_name": self.agent_name,
                     "response_id": self.id,

@@ -161,30 +161,51 @@ def _first_text_length(payload: Mapping[str, Any], candidates: tuple[tuple[str, 
     return None, None
 
 
+def _explicit_estimated_length(payload: Mapping[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, number)
+
+
 def _estimate_usage_lengths(payload: Mapping[str, Any]) -> dict[str, int | str | None]:
     request = _extract_request(payload)
-    input_chars, input_source = _first_text_length(
-        payload,
-        (
-            ("prompt_text", payload.get("prompt_text")),
-            ("prompt", payload.get("prompt")),
-            ("request", request or None),
-            ("input", payload.get("input")),
-            ("request_data", payload.get("request_data")),
-        ),
+    input_chars = _explicit_estimated_length(payload, "estimated_input_chars")
+    input_source = str(payload.get("estimated_input_source") or "estimated_input_chars") if input_chars is not None else None
+    if input_chars is None:
+        input_chars, input_source = _first_text_length(
+            payload,
+            (
+                ("prompt_text", payload.get("prompt_text")),
+                ("prompt", payload.get("prompt")),
+                ("request", request or None),
+                ("input", payload.get("input")),
+                ("request_data", payload.get("request_data")),
+            ),
+        )
+    output_chars = _explicit_estimated_length(payload, "estimated_output_chars")
+    output_source = (
+        str(payload.get("estimated_output_source") or "estimated_output_chars")
+        if output_chars is not None
+        else None
     )
-    output_chars, output_source = _first_text_length(
-        payload,
-        (
-            ("raw_text", payload.get("raw_text")),
-            ("streamed_text", payload.get("streamed_text")),
-            ("cleaned_text", payload.get("cleaned_text")),
-            ("result", payload.get("result")),
-            ("parsed_data", payload.get("parsed_data")),
-            ("output", payload.get("output")),
-            ("data", payload.get("data")),
-        ),
-    )
+    if output_chars is None:
+        output_chars, output_source = _first_text_length(
+            payload,
+            (
+                ("raw_text", payload.get("raw_text")),
+                ("streamed_text", payload.get("streamed_text")),
+                ("cleaned_text", payload.get("cleaned_text")),
+                ("result", payload.get("result")),
+                ("parsed_data", payload.get("parsed_data")),
+                ("output", payload.get("output")),
+                ("data", payload.get("data")),
+            ),
+        )
     return {
         "input_chars": input_chars,
         "input_source": input_source,
