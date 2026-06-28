@@ -326,6 +326,10 @@ that compact intent into an action-capable evidence card that can download,
 snapshot, or otherwise materialize the target before the continuation card
 runs. URLs mentioned only inside `gaps` prose are diagnostics; they are not
 parsed as executable targets.
+When a control card instead returns `next_board_action="patch"` with a Workspace
+text patch proposal, AgentTask applies the patch to the bound Workspace file,
+writes it back, and returns trusted `file_refs` after readback. This is a
+materialization step only: final completion still belongs to the verifier.
 For completed and sufficient control outputs, non-fatal `gaps` do not prevent
 Workspace artifact materialization; `remaining_work`, blocked status, repair,
 or readback still do. Writing the artifact only creates evidence for later

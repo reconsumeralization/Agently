@@ -1299,7 +1299,11 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "evidence": ([str], "Evidence used by this control card", False),
             "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
             "diagnostics": ([dict], "Optional control-card diagnostics", False),
-            "patch_proposal": (dict, "Optional TaskBoardPatch proposal when next_board_action is patch", False),
+            "patch_proposal": (
+                dict,
+                "Optional TaskBoardPatch or Workspace text patch proposal when next_board_action is patch",
+                False,
+            ),
         }
         work_unit = WorkUnitIntent(
             id=f"taskboard:{context.card.id}:control",
@@ -1449,6 +1453,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 context_pack=context_pack,
                 card_context=context,
             )
+        if isinstance(card_output, Mapping):
+            card_output = await self._materialize_taskboard_workspace_patch(context, card_output)
         diagnostics = []
         if isinstance(card_output, Mapping):
             raw_diagnostics = card_output.get("diagnostics")
@@ -1550,6 +1556,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
     ) -> dict[str, Any] | None:
         raw_patch = card_output.get("patch_proposal")
         if isinstance(raw_patch, Mapping):
+            if cls._taskboard_patch_proposal_is_workspace_patch(raw_patch):
+                return None
             try:
                 patch = TaskBoardPatch.from_value(raw_patch)
                 revision = getattr(context, "revision", None)
@@ -1586,6 +1594,285 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             card_output,
             target_refs=cls._taskboard_control_output_target_refs(card_output),
         )
+
+    async def _materialize_taskboard_workspace_patch(
+        self,
+        context: Any,
+        card_output: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raw_patch = card_output.get("patch_proposal")
+        if not isinstance(raw_patch, Mapping) or not self._taskboard_patch_proposal_is_workspace_patch(raw_patch):
+            return card_output
+        patched_output = dict(card_output)
+        patched_output["workspace_patch_proposal"] = DataFormatter.sanitize(raw_patch)
+        patched_output.pop("patch_proposal", None)
+        card_id = str(getattr(getattr(context, "card", None), "id", "") or "")
+        delivery = await self._apply_taskboard_workspace_patch(raw_patch, card_id=card_id)
+        patched_output["workspace_patch_delivery"] = DataFormatter.sanitize(delivery)
+        diagnostics = [dict(item) for item in self._taskboard_mapping_sequence(patched_output.get("diagnostics"))]
+        if delivery.get("status") == "completed":
+            diagnostics.append(
+                {
+                    "code": "taskboard.control.workspace_patch_applied",
+                    "card_id": card_id,
+                    "path": delivery.get("path"),
+                    "operation_count": delivery.get("operation_count", 0),
+                    "replacement_count": delivery.get("replacement_count", 0),
+                    "source": "agent_task.taskboard.workspace_patch",
+                }
+            )
+            file_refs = [dict(item) for item in self._taskboard_mapping_sequence(patched_output.get("file_refs"))]
+            file_refs.extend(dict(item) for item in self._taskboard_mapping_sequence(delivery.get("file_refs")))
+            patched_output["file_refs"] = DataFormatter.sanitize(self._dedupe_ref_records(file_refs))
+            status = str(patched_output.get("status") or "").strip().lower()
+            if status not in {"completed", "skipped"}:
+                patched_output["status"] = "completed"
+            if not patched_output.get("sufficient"):
+                patched_output["sufficient"] = True
+        else:
+            diagnostics.append(
+                {
+                    "code": "taskboard.control.workspace_patch_failed",
+                    "card_id": card_id,
+                    "path": delivery.get("path"),
+                    "reason": delivery.get("reason") or delivery.get("error"),
+                    "source": "agent_task.taskboard.workspace_patch",
+                }
+            )
+            patched_output["status"] = "blocked"
+            patched_output["sufficient"] = False
+            remaining_work = self._normalize_string_list(patched_output.get("remaining_work"))
+            reason = str(delivery.get("reason") or "Workspace patch could not be applied.").strip()
+            if reason:
+                remaining_work.append(reason)
+            patched_output["remaining_work"] = remaining_work
+        patched_output["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        self.diagnostics.setdefault("taskboard_workspace_patch_delivery", []).append(
+            DataFormatter.sanitize(delivery)
+        )
+        return DataFormatter.sanitize(patched_output)
+
+    @staticmethod
+    def _taskboard_patch_proposal_is_workspace_patch(patch_proposal: Mapping[str, Any]) -> bool:
+        if not isinstance(patch_proposal, Mapping):
+            return False
+        if any(str(patch_proposal.get(key) or "").strip() for key in ("file", "path", "target_file", "target_path")):
+            return True
+        raw_operations = patch_proposal.get("operations") or patch_proposal.get("edits")
+        if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes | bytearray):
+            return False
+        workspace_ops = {"replace", "insert", "delete", "append", "write"}
+        taskboard_ops = {
+            "add_card",
+            "update_card",
+            "remove_card",
+            "record_card_result",
+            "append_diagnostic",
+            "set_board_status",
+            "update_metadata",
+            "add_dependency",
+            "remove_dependency",
+        }
+        has_workspace_op = False
+        for operation in raw_operations:
+            if not isinstance(operation, Mapping):
+                continue
+            op = str(operation.get("type") or operation.get("op") or operation.get("operation") or "").strip()
+            if op in taskboard_ops:
+                return False
+            if op in workspace_ops:
+                has_workspace_op = True
+        return has_workspace_op
+
+    @classmethod
+    def _taskboard_workspace_patch_path(
+        cls,
+        patch_proposal: Mapping[str, Any],
+        operation: Mapping[str, Any] | None = None,
+    ) -> str:
+        for source in (operation or {}, patch_proposal):
+            for key in ("file", "path", "target_file", "target_path", "workspace_path"):
+                value = str(source.get(key) or "").strip()
+                if value:
+                    return value
+        return ""
+
+    async def _apply_taskboard_workspace_patch(
+        self,
+        patch_proposal: Mapping[str, Any],
+        *,
+        card_id: str,
+    ) -> dict[str, Any]:
+        raw_operations = patch_proposal.get("operations") or patch_proposal.get("edits")
+        if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes | bytearray):
+            return {
+                "status": "failed",
+                "card_id": card_id,
+                "reason": "Workspace patch requires an operations list.",
+            }
+        operations = [dict(item) for item in raw_operations if isinstance(item, Mapping)]
+        if not operations:
+            return {
+                "status": "failed",
+                "card_id": card_id,
+                "reason": "Workspace patch has no valid operations.",
+            }
+        path = self._taskboard_workspace_patch_path(patch_proposal, operations[0])
+        if not path:
+            return {
+                "status": "failed",
+                "card_id": card_id,
+                "reason": "Workspace patch requires file/path.",
+            }
+        try:
+            content = await self._read_workspace_patch_text(path)
+            operation_records: list[dict[str, Any]] = []
+            replacement_count = 0
+            for index, operation in enumerate(operations):
+                operation_path = self._taskboard_workspace_patch_path(patch_proposal, operation)
+                if operation_path != path:
+                    raise ValueError("Workspace patch operations must target one file per patch proposal.")
+                content, record = self._apply_taskboard_workspace_patch_operation(
+                    content,
+                    operation,
+                    index=index,
+                )
+                replacement_count += int(record.get("replacement_count") or 0)
+                operation_records.append(record)
+            write_result = await self.workspace.write_file(path, content, append=False)
+            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+        except Exception as error:
+            return {
+                "status": "failed",
+                "card_id": card_id,
+                "path": path,
+                "reason": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                "error": {"type": error.__class__.__name__},
+            }
+        ref = {
+            "path": str(read_result.get("path") or path),
+            "bytes": int(read_result.get("bytes") or write_result.get("bytes") or 0),
+            "sha256": str(read_result.get("sha256") or write_result.get("sha256") or ""),
+            "media_type": read_result.get("media_type"),
+            "content_kind": read_result.get("content_kind", "text"),
+            "encoding": read_result.get("encoding"),
+            "handler_id": read_result.get("handler_id"),
+            "role": "workspace_artifact",
+            "source": "agent_task.workspace_artifact.taskboard_patch",
+            "card_id": card_id,
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "truncated": bool(read_result.get("truncated")),
+            "preview": self._truncate_prompt_text(str(read_result.get("content") or ""), _WORKSPACE_ARTIFACT_PREVIEW_BYTES),
+        }
+        return {
+            "status": "completed",
+            "card_id": card_id,
+            "path": path,
+            "operation_count": len(operation_records),
+            "replacement_count": replacement_count,
+            "operations": operation_records,
+            "write": {
+                "path": str(write_result.get("path") or path),
+                "bytes": int(write_result.get("bytes") or 0),
+                "sha256": str(write_result.get("sha256") or ""),
+            },
+            "readback": {
+                "path": ref["path"],
+                "bytes": ref["bytes"],
+                "sha256": ref["sha256"],
+                "read_bytes": ref["read_bytes"],
+                "truncated": ref["truncated"],
+                "handler_id": ref["handler_id"],
+            },
+            "file_refs": [ref],
+        }
+
+    async def _read_workspace_patch_text(self, path: str) -> str:
+        target = self.workspace.resolve_file_path(path)
+        max_bytes = max(int(target.stat().st_size) + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+        read_result = await self.workspace.read_file(path, max_bytes=max_bytes)
+        if not bool(read_result.get("ok")):
+            raise ValueError(f"Workspace file could not be read for patch: { path }")
+        if bool(read_result.get("truncated")):
+            raise ValueError(f"Workspace patch requires complete readback before editing: { path }")
+        content = read_result.get("content")
+        if not isinstance(content, str):
+            raise ValueError(f"Workspace patch requires text content: { path }")
+        return content
+
+    @classmethod
+    def _apply_taskboard_workspace_patch_operation(
+        cls,
+        content: str,
+        operation: Mapping[str, Any],
+        *,
+        index: int,
+    ) -> tuple[str, dict[str, Any]]:
+        op = str(operation.get("type") or operation.get("op") or operation.get("operation") or "").strip().lower()
+        if op != "replace":
+            raise ValueError(f"Unsupported Workspace patch operation '{ op or '<empty>' }'.")
+        old = str(operation.get("old") or operation.get("from") or operation.get("search") or "")
+        if not old:
+            raise ValueError("Workspace replace patch requires non-empty old/from/search text.")
+        if "new" in operation:
+            new = str(operation.get("new") or "")
+        elif "to" in operation:
+            new = str(operation.get("to") or "")
+        else:
+            new = str(operation.get("replacement") or "")
+        match_count = content.count(old)
+        if match_count <= 0:
+            raise ValueError("Workspace replace patch old text was not found.")
+        replace_all = cls._normalize_bool(operation.get("replace_all"), default=False)
+        occurrence = cls._coerce_positive_int(operation.get("occurrence"))
+        if occurrence is not None:
+            if occurrence > match_count:
+                raise ValueError("Workspace replace patch occurrence is greater than match count.")
+            patched = cls._replace_nth(content, old, new, occurrence)
+            replacement_count = 1
+        elif replace_all:
+            patched = content.replace(old, new)
+            replacement_count = match_count
+        elif match_count == 1:
+            patched = content.replace(old, new, 1)
+            replacement_count = 1
+        else:
+            raise ValueError(
+                "Workspace replace patch matched multiple locations; set occurrence or replace_all explicitly."
+            )
+        return patched, {
+            "index": index,
+            "type": "replace",
+            "match_count": match_count,
+            "replacement_count": replacement_count,
+        }
+
+    @staticmethod
+    def _replace_nth(content: str, old: str, new: str, occurrence: int) -> str:
+        start = -1
+        search_from = 0
+        for _ in range(occurrence):
+            start = content.find(old, search_from)
+            if start < 0:
+                return content
+            search_from = start + len(old)
+        return content[:start] + new + content[start + len(old) :]
+
+    @staticmethod
+    def _taskboard_mapping_sequence(value: Any) -> list[Mapping[str, Any]]:
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+            return []
+        return [item for item in value if isinstance(item, Mapping)]
+
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            coerced = int(value)
+        except (TypeError, ValueError):
+            return None
+        return coerced if coerced > 0 else None
 
     @staticmethod
     def _taskboard_patch_proposal_requests_readback(patch_proposal: Mapping[str, Any]) -> bool:

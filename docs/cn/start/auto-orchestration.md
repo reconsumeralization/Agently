@@ -286,6 +286,9 @@ diagnostics 保持 blocked。
 应返回 `next_board_action="readback"` 加结构化 `target_refs`。AgentTask 会把这个紧凑意图
 转成可执行 action 的 evidence card，由它负责下载、保存快照或物化目标，再运行 continuation
 card。只写在 `gaps` 自然语言里的 URL 属于 diagnostics，不会被解析成可执行目标。
+如果 control card 返回的是 `next_board_action="patch"` 加 Workspace 文本 patch
+proposal，AgentTask 会把补丁应用到绑定的 Workspace 文件，写回后再读回并返回可信
+`file_refs`。这只负责物化修补事实；最终是否完成仍由 verifier 判断。
 对于 `completed` 且 `sufficient=True` 的 control 输出，非致命 `gaps` 不会阻止 Workspace
 artifact 物化；`remaining_work`、blocked 状态、repair 或 readback 仍会阻止写入。写入
 artifact 只是为后续 readback 和 verification 创建证据，不代表最终任务已经被接受。

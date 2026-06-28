@@ -151,7 +151,10 @@ def resolve_task_board_planning_policy(
         control_card_guidance=(
             "Use allowed_execution_shape='control' for synthesis, verification, finalization, or board-continuation decisions that do not need tools.",
             "Use allowed_execution_shape='readback' when the card's only work is bounded cold artifact readback from existing dependency refs.",
-            "A control card returns the deliverable or card-local synthesis plus sufficient, gaps, next_board_action, diagnostics, and optional patch_proposal in one structured payload.",
+            "A control card returns the deliverable or card-local synthesis plus sufficient, gaps, "
+            "next_board_action, diagnostics, and optional patch_proposal in one structured payload. "
+            "patch_proposal may be a TaskBoardPatch for board-state changes or a Workspace text patch "
+            "for precise artifact repair.",
             "After evidence fan-in, prefer one terminal control card that combines synthesis, verification, and next-step decision instead of a serial chain of synthesis -> risk -> finalization -> review control cards.",
             "Create multiple dependent control cards only when each one produces a distinct user-visible artifact, waits for different upstream evidence, or represents a materially separate decision that cannot be verified in the same request.",
             "Do not use a downstream control card only to review, summarize, or repackage the immediately previous control card; put that review or finalization into the earlier control card fields.",
