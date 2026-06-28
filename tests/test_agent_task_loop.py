@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import json
 import asyncio
+import json
+import os
+import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,6 +101,41 @@ def test_agent_task_defaults_do_not_apply_resource_caps(tmp_path):
     assert task.limits == {}
     assert task._taskboard_max_ticks() is None
     assert task._taskboard_max_ticks_source() == "unbounded_default"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="local timezone switching requires time.tzset")
+def test_task_context_contract_includes_utc_and_local_time_when_timezone_known(tmp_path):
+    previous_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Shanghai"
+    time.tzset()
+    try:
+        agent = _create_agent("agent-task-context-local-time").use_workspace(tmp_path / "workspace")
+        task = AgentTask(
+            agent,
+            task_id="context-local-time",
+            goal="Complete the task.",
+            success_criteria=["The task is complete."],
+        )
+        task.created_at = 0
+        task.started_at = None
+
+        contract = task._task_context_contract()
+
+        current_time = contract["current_time"]
+        assert current_time["utc"] == "1970-01-01T00:00:00Z"
+        assert current_time["local"] == "1970-01-01T08:00:00+08:00"
+        assert current_time["timezone"] == "Asia/Shanghai"
+        assert "run_date_utc" not in contract
+        assert "run_time_utc" not in contract
+        assert "run_date_local" not in contract
+        assert "run_time_local" not in contract
+        assert "model decisions broadly" in contract["temporal_policy"]["general_decision_context"]
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
 
 
 def test_agent_task_explicit_resource_caps_remain_effective(tmp_path):

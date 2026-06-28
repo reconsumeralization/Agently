@@ -1021,7 +1021,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         request.instruct(
             "Plan the next bounded AgentExecution step for this AgentTask. "
             "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
-            "Use task_context_contract for run-date facts, current/latest/as-of source boundaries, and ref-backed "
+            "Use task_context_contract.current_time for current-time facts and current/latest/as-of source boundaries, "
+            "and use task_context_contract for ref-backed "
             "intermediate-resource handling. It is not a resource cap. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
             "When repair_context is present, use it as verification feedback: understand why prior work was incomplete, "
@@ -1196,7 +1197,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     f"The AgentTask requested execution_strategy is {self.execution_strategy}; "
                     f"the effective execution_strategy is {self.effective_execution_strategy or self.execution_strategy}. "
                     "Respect the caller-provided execution_prompt context and output contract when present. "
-                    "Use task_context_contract.run_date_utc when the task asks for current/latest/as-of evidence, and "
+                    "Use task_context_contract.current_time when the task asks for current/latest/as-of evidence, and "
                     "keep downloads, web snapshots, notes, generated code, and large extracted text as refs until scoped "
                     "readback is needed. "
                     "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "

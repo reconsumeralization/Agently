@@ -269,7 +269,8 @@ def test_task_context_contract_is_ref_backed_and_cap_free(tmp_path):
     )
 
     assert contract["schema_version"] == "agent_task_context_contract/v1"
-    assert contract["run_date_utc"]
+    assert contract["current_time"]["utc"]
+    assert "run_date_utc" not in contract
     intermediate_policy = contract["intermediate_resource_policy"]
     assert set(intermediate_policy["cold_resource_kinds"]) == {
         "download",

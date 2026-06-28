@@ -309,11 +309,12 @@ is visible. A verifier or repair planner can reuse exact paths as retrieval
 targets, but not as proof of file contents.
 
 Flat and TaskBoard work units also receive a task context contract with
-`run_date_utc`, `run_time_utc`, current/latest/as-of source-boundary guidance,
-and the same intermediate-resource ref/readback policy. For current, latest,
-recent, or as-of tasks, use that date boundary unless the caller supplied a more
-specific date. The contract is context for planning and evidence selection; it
-does not set model-call, tool-call, node-count, iteration, or wall-clock caps.
+compact `current_time` facts: `utc`, plus `local` and `timezone` when the local
+timezone is recognizable. For current, latest, recent, or as-of
+tasks, use that time context unless the caller supplied a more specific date.
+The contract is context for model decisions, planning, evidence selection, and
+source-boundary handling; it does not set model-call, tool-call, node-count,
+iteration, or wall-clock caps.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 Workspace file refs with bounded cold readback previews. Framework-generated

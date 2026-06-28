@@ -274,10 +274,11 @@ artifact readback 或有界 content preview 出现前都是 `ref_only`。verifie
 planner 可以复用这些精确路径作为检索目标，但不能把它们当成文件内容事实的证明。
 
 Flat 和 TaskBoard 的 work unit 也会收到同一份 task context contract，其中包含
-`run_date_utc`、`run_time_utc`、current/latest/as-of source boundary 指引，以及同一套
-中间资源 ref/readback policy。对于 current、latest、recent 或 as-of 任务，除非调用方
-明确给了更具体日期，否则应使用这个日期边界。该 contract 只是 planning 和 evidence
-selection 的上下文，不会设置模型调用、工具调用、节点数、迭代数或 wall-clock 硬上限。
+紧凑的 `current_time` 事实：`utc`，以及本地时区可识别时的 `local` 和
+`timezone`。对于 current、latest、recent 或 as-of 任务，除非调用方明确给了更具体
+日期，否则应使用这些时间上下文。该 contract 只是 model decision、planning、evidence
+selection 和 source-boundary handling 的上下文，不会设置模型调用、工具调用、节点数、
+迭代数或 wall-clock 硬上限。
 
 TaskBoard readback card 可以用有界冷读回读取 Action artifact refs 和可信的
 Workspace file refs。框架生成的 readback card 会把 evidence scope 扩展到直接依赖和

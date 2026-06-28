@@ -148,6 +148,13 @@ _AGENT_TASK_HOT_PATH_REQUEST_PAYLOAD_KEYS = {
 _AGENT_TASK_DEFAULT_MAX_ITERATIONS: int | None = None
 
 
+def _format_agent_task_utc_offset(value: str) -> str:
+    offset = str(value or "").strip()
+    if len(offset) == 5 and offset[0] in {"+", "-"} and offset[1:].isdigit():
+        return f"{offset[:3]}:{offset[3:]}"
+    return offset
+
+
 def _normalize_agent_task_max_iterations(value: Any) -> int | None:
     if value is None:
         return _AGENT_TASK_DEFAULT_MAX_ITERATIONS
@@ -170,29 +177,51 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
         raise AttributeError(name)
 
     def _task_context_contract(self) -> dict[str, Any]:
-        run_epoch = getattr(self, "started_at", None) or getattr(self, "created_at", None) or time.time()
+        run_epoch = getattr(self, "started_at", None)
+        if run_epoch is None:
+            run_epoch = getattr(self, "created_at", None)
+        if run_epoch is None:
+            run_epoch = time.time()
         try:
             run_epoch_float = float(run_epoch)
         except (TypeError, ValueError):
             run_epoch_float = time.time()
-        run_date_utc = time.strftime("%Y-%m-%d", time.gmtime(run_epoch_float))
-        run_time_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(run_epoch_float))
+        current_time: dict[str, Any] = {
+            "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(run_epoch_float)),
+        }
+        try:
+            local_struct = time.localtime(run_epoch_float)
+            local_timezone = str(os.environ.get("TZ") or "").strip() or time.strftime("%Z", local_struct).strip()
+            local_utc_offset = _format_agent_task_utc_offset(time.strftime("%z", local_struct))
+            if local_timezone or local_utc_offset:
+                run_time_local = time.strftime("%Y-%m-%dT%H:%M:%S", local_struct)
+                if local_utc_offset:
+                    run_time_local = f"{run_time_local}{local_utc_offset}"
+                current_time["local"] = run_time_local
+                if local_timezone:
+                    current_time["timezone"] = local_timezone
+        except (OSError, OverflowError, ValueError):
+            pass
         return {
             "schema_version": "agent_task_context_contract/v1",
-            "run_date_utc": run_date_utc,
-            "run_time_utc": run_time_utc,
+            "current_time": current_time,
             "temporal_policy": {
                 "currentness_reference": (
                     "When the task asks for current, latest, recent, or as-of information without an explicit "
-                    "date, treat run_date_utc as the reference date and expose any source-date limitation."
+                    "date, treat current_time.utc and any local current_time facts as the reference time context "
+                    "and expose any source-date limitation. The date is derivable from the ISO timestamp."
                 ),
                 "dated_evidence": (
                     "Dated evidence may be useful, but older or historical material must be labeled with its "
                     "time boundary instead of being presented as current by implication."
                 ),
+                "general_decision_context": (
+                    "UTC and recognizable local time facts are available to model decisions broadly, not only to "
+                    "search or retrieval planning."
+                ),
                 "query_planning": (
                     "For external search or browse planning, include the caller's explicit as-of date when present; "
-                    "otherwise use run_date_utc/current year as a grounding fact, not an execution cap."
+                    "otherwise use the task time facts/current year as grounding facts, not execution caps."
                 ),
             },
             "intermediate_resource_policy": {

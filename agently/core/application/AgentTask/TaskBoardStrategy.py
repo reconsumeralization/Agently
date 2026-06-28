@@ -936,7 +936,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             }
             card_instruction = (
                 "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
-                "Use task_context_contract.run_date_utc when the card needs current/latest/as-of evidence; label older "
+                "Use task_context_contract.current_time when the card needs current/latest/as-of evidence; label older "
                 "or historical source material with its time boundary. "
                 "Use TaskBoard evidence view as the hot summary; request full content only through available "
                 "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
@@ -1232,7 +1232,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         control_instruction = (
             "Execute one TaskBoard control card with a single structured model request. "
             "This card is for synthesis, verification, finalization, or deciding the next board action; "
-            "Use task_context_contract.run_date_utc when current/latest/as-of evidence matters, and label older "
+            "Use task_context_contract.current_time when current/latest/as-of evidence matters, and label older "
             "or historical source material with its time boundary. "
             "do not plan or call tools from this request. Use TaskBoardEvidenceView as the hot evidence summary "
             "and preserve cold refs as pointers. dependency_readbacks contains framework-prefetched bounded "
