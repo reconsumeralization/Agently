@@ -209,10 +209,17 @@ def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_pa
     assert "verdict" not in summary
     assert "failure_classification" not in summary
     assert summary["runner_responsibility"]["runner_classifies_failures"] is False
+    assert summary["minimum_quality_gate"] == {
+        "minimum_quality": "acceptable",
+        "requires_judge_accepted": True,
+        "historical_reference_quality_is_not_a_merge_gate": True,
+    }
     assert summary["selected_scope"] == ["flat/stock_risk_outlook"]
     assert len(summary["records"]) == 1
     assert [item["record_present"] for item in summary["full_effect_records"]].count(True) == 1
     facts = summary["records"][0]
+    assert facts["quality_gate"]["passed"] is True
+    assert facts["reference_quality"] == "strong"
     assert facts["observed_origins"] == ["flat_step"]
     carrier = facts["carriers"][0]
     action_observations = facts["action_observations"]
@@ -229,6 +236,7 @@ def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_pa
     assert carrier["block_evidence"]["execution_block_result_kinds"] == ["agent_step"]
     report = (run_dir / "REPORT.md").read_text(encoding="utf-8")
     assert "BlockCarrier Facts" in report
+    assert "Reference quality" in report
     assert "Action Observation Facts" in report
     assert "grep_workspace" in report
     assert report.count("## BlockCarrier Facts") == 1
