@@ -4483,6 +4483,7 @@ async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp
         options={"agent_task": {"taskboard_card_max_attempts": 1}},
     ).use_actions(["probe_action"])
 
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -4498,6 +4499,17 @@ async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp
     assert evidence_summaries
     assert evidence_summaries[0]["action_ids"] == ["probe_action"]
     assert evidence_summaries[0]["action_statuses"]["probe_action"] in {"success", "succeeded"}
+    action_events = [item for item in stream_items if item.path.startswith("agent_task.action.")]
+    assert {item.path for item in action_events} >= {
+        "agent_task.action.started",
+        "agent_task.action.completed",
+    }
+    completed = next(item for item in action_events if item.path == "agent_task.action.completed")
+    assert completed.value["action_id"] == "probe_action"
+    assert completed.value["origin"] == "taskboard_card"
+    assert completed.value["card_id"] == "partial"
+    assert (completed.meta or {})["stream_kind"] == "action_observation"
+    assert (completed.meta or {})["card_id"] == "partial"
 
 
 @pytest.mark.asyncio

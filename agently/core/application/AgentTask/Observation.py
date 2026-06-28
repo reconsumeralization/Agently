@@ -932,14 +932,16 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
 
     async def _emit_action_observation_events(
         self,
-        iteration_index: int,
+        iteration_index: int | None,
         *,
         execution_meta: Mapping[str, Any],
+        owner_context: Mapping[str, Any] | None = None,
     ) -> None:
         records = self._collect_execution_action_records(execution_meta)
         if not records:
             return
-        owner_context = self._action_event_owner_context(iteration_index, execution_meta)
+        if owner_context is None:
+            owner_context = self._action_event_owner_context(iteration_index, execution_meta)
         for record in records:
             action_id = str(record.get("id") or record.get("name") or "").strip()
             if not action_id:
@@ -966,7 +968,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 )
 
     @staticmethod
-    def _action_event_owner_context(iteration_index: int, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+    def _action_event_owner_context(iteration_index: int | None, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
         block_carrier = execution_meta.get("block_carrier")
         work_unit: Mapping[str, Any] = {}
         if isinstance(block_carrier, Mapping):
@@ -1052,6 +1054,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 "iteration": owner_context.get("iteration"),
                 "origin": owner_context.get("origin"),
                 "work_unit_id": owner_context.get("work_unit_id"),
+                "strategy": owner_context.get("strategy"),
+                "card_id": owner_context.get("card_id"),
                 "projection_source": "execution_meta.action_logs",
             },
         )

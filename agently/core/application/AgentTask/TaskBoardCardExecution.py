@@ -397,6 +397,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     retry_diagnostic["evidence_summary"] = DataFormatter.sanitize(
                         self._execution_log_summary(cast(dict[str, Any], dict(child_meta)))
                     )
+                    await self._emit_action_observation_events(
+                        None,
+                        execution_meta=child_meta,
+                        owner_context=self._taskboard_card_action_event_owner_context(
+                            context.card.id,
+                            child_meta,
+                        ),
+                    )
                 previous_errors.append(retry_diagnostic)
                 if attempt_index < max_attempts and self._taskboard_card_error_retryable(error):
                     self.diagnostics.setdefault("taskboard_card_retries", []).append(retry_diagnostic)
@@ -425,6 +433,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 card_context=context,
             )
             summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
+            await self._emit_action_observation_events(
+                None,
+                execution_meta=execution_meta,
+                owner_context=self._taskboard_card_action_event_owner_context(
+                    context.card.id,
+                    execution_meta,
+                ),
+            )
             card_status = self._taskboard_card_status(card_output, execution_meta)
             diagnostics = []
             if isinstance(card_output, Mapping):
@@ -881,6 +897,17 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "child_execution_id": str(getattr(execution, "id", "") or ""),
                 }
             )
+
+    def _taskboard_card_action_event_owner_context(
+        self,
+        card_id: str,
+        execution_meta: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        owner_context = self._action_event_owner_context(None, execution_meta)
+        owner_context["origin"] = owner_context.get("origin") or "taskboard_card"
+        owner_context["strategy"] = owner_context.get("strategy") or self.execution_strategy
+        owner_context["card_id"] = owner_context.get("card_id") or card_id
+        return owner_context
 
     async def _emit_taskboard_card_execution_stream_item(
         self,
