@@ -332,7 +332,9 @@ Workspace 文件搜索，以及 `search` / `read_bounded` 操作返回 refs/path
 `agent_step` 消费。query group 可以把 `search_surface` 设为 `workspace_index`、
 `workspace_files` 或 `workspace_index_and_files`，并携带结构化过滤
 （`collection`、`kind`、`id`、`path`、`scope` 或 `meta`），让大型 retained records
-和文件在有界 search/readback 真正需要前不进入热 prompt。
+和文件在有界 search/readback 真正需要前不进入热 prompt。对于 `workspace_files`，
+`query` 是要搜索的内容文本，`path` 是目录或文件 scope，`pattern` 是 `*.md` 或 `*`
+这类文件 glob，不是另一个内容关键词。
 
 `materialize_file(...)` 用于框架或应用拥有的受控 bytes 物化，例如 Browse action
 把远程 PDF 下载到 Workspace 的 `downloads/` 后，再由后续 `read_file(...)` 通过

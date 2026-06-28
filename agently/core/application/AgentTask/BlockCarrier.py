@@ -37,7 +37,7 @@ def scoped_retrieval_policy() -> dict[str, Any]:
         },
         "search_surfaces": {
             "workspace_index": "Workspace SQLite/FTS records",
-            "workspace_files": "Workspace files under an explicit path/pattern scope",
+            "workspace_files": "Workspace files under an explicit path plus file-glob pattern; query searches file content",
             "workspace_index_and_files": "Use both bounded surfaces and record the facts separately",
         },
         "rules": [

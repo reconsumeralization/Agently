@@ -361,6 +361,8 @@ may set `search_surface` to `workspace_index`, `workspace_files`, or
 `workspace_index_and_files`, and may carry structural filters (`collection`,
 `kind`, `id`, `path`, `scope`, or `meta`) so large retained records and files
 can stay out of the hot context until a bounded search or readback needs them.
+For `workspace_files`, `query` is the content text to search, `path` is the
+directory or file scope, and `pattern` is a file glob such as `*.md` or `*`.
 
 `materialize_file(...)` is for framework-owned or application-owned byte
 materialization, such as a Browse action downloading a remote PDF into
