@@ -359,6 +359,13 @@ dependency evidence decides whether it is enough for its own objective.
 Independent verifier requests are for final acceptance, fan-in/control
 acceptance, evidence/artifact boundary audit, contradictions, or high-risk
 review.
+When a terminal verifier returns an incomplete result, its compact
+`repair_context` is carried into the next Flat work unit and into the dedicated
+Workspace artifact draft request when the next deliverable body is file-backed.
+This keeps exact `acceptance_delta`, repair constraints, next-step
+requirements, and available evidence anchors visible to the consumer that
+actually rewrites or reads the artifact, without putting cold integrity metadata
+back into the model-hot path.
 
 AgentTask observation also publishes normalized action facts on the structured
 stream as `agent_task.action.started`, `agent_task.action.completed`, and

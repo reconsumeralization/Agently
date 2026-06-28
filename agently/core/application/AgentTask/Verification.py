@@ -145,6 +145,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             repair_context["available_evidence_anchors"] = cumulative_anchors
         return repair_context
 
+    def _active_repair_context(self) -> dict[str, Any]:
+        """Latest verifier feedback for the next consumer work unit.
+
+        Planner prompts already receive this shape. Execution and artifact
+        carrier prompts need the same compact contract so a repair pass does not
+        depend on the planner restating every verifier finding in prose.
+        """
+
+        return self._planner_repair_context(self._iteration_prompt_summaries())
+
     @classmethod
     def _planner_evidence_anchors_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
         """Compact exact refs and previews that later planning can safely reuse.

@@ -153,6 +153,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             source=f"agent_task.iteration.{iteration_index}.workspace_artifact",
             context_pack=context_pack,
             iteration_index=iteration_index,
+            repair_context=self._active_repair_context(),
             allow_stream_draft=not execution_failed,
         )
         await self._emit_snapshot(
@@ -1402,6 +1403,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         scoped_retrieval_results: Sequence[Mapping[str, Any]] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         plan = self._normalize_step_plan(plan)
+        repair_context = self._active_repair_context()
         execution = self._create_bounded_child_execution(
             lineage={
                 "task_id": self.id,
@@ -1412,27 +1414,30 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         step_execution = self._configure_step_execution(execution, plan)
         language_policy = self._language_policy()
+        input_payload = {
+            "task_id": self.id,
+            "goal": self.goal,
+            "success_criteria": self.success_criteria,
+            "task_context_contract": self._task_context_contract(),
+            "iteration": iteration_index,
+            "plan": DataFormatter.sanitize(plan),
+            "step_execution": step_execution,
+            "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
+            "context_pack": DataFormatter.sanitize(context_pack),
+            "execution_prompt": self._execution_prompt_context(),
+            "retrieval_policy": scoped_retrieval_policy(),
+            "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+            "scoped_retrieval_results": DataFormatter.sanitize(list(scoped_retrieval_results or ())),
+            "language_policy": language_policy,
+        }
+        if repair_context:
+            input_payload["repair_context"] = DataFormatter.sanitize(repair_context)
         try:
             result, meta = await self._run_bounded_child_execution(
                 execution=execution,
                 language_policy=language_policy,
-                input_payload={
-                    "task_id": self.id,
-                    "goal": self.goal,
-                    "success_criteria": self.success_criteria,
-                    "task_context_contract": self._task_context_contract(),
-                    "iteration": iteration_index,
-                    "plan": DataFormatter.sanitize(plan),
-                    "step_execution": step_execution,
-                    "execution_strategy": self.execution_strategy,
-                    "effective_execution_strategy": self.effective_execution_strategy,
-                    "context_pack": DataFormatter.sanitize(context_pack),
-                    "execution_prompt": self._execution_prompt_context(),
-                    "retrieval_policy": scoped_retrieval_policy(),
-                    "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-                    "scoped_retrieval_results": DataFormatter.sanitize(list(scoped_retrieval_results or ())),
-                    "language_policy": language_policy,
-                },
+                input_payload=input_payload,
                 instruction=(
                     "Execute exactly one bounded step for the AgentTask. "
                     f"Use the selected execution shape: {step_execution.get('effective_shape', 'direct')}. "
@@ -1461,6 +1466,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "for later bounded readback. If scoped_retrieval_results is present, those are already executed "
                     "Blocks/Workspace search facts for the current step; inspect them before choosing broader reads. "
                     "Do not treat a local search hit as semantic acceptance by itself. "
+                    "When repair_context contains fields, it is the active verification feedback for this work unit. "
+                    "Use its acceptance_delta, advisory_repair_constraints, advisory_next_step_requirements, and "
+                    "available_evidence_anchors as the correction contract; do not rely on the planner restating every "
+                    "repair fact in step_instruction. "
                     "Do not claim final completion unless evidence supports it. "
                     "Use remaining_work for task-level work that the next Flat iteration should consume or perform. "
                     "Non-empty remaining_work defaults to intermediate and skips terminal verification for this work "

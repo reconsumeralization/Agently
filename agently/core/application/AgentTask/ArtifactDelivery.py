@@ -318,6 +318,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         context_pack: "WorkspaceContextPackage | None" = None,
         iteration_index: int | None = None,
         card_context: Any | None = None,
+        repair_context: Mapping[str, Any] | None = None,
         allow_stream_draft: bool = True,
     ) -> Any:
         if not isinstance(execution_result, Mapping):
@@ -379,6 +380,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 context_pack=context_pack,
                 iteration_index=iteration_index,
                 card_context=card_context,
+                repair_context=repair_context,
             )
             if stream_delivery is not None:
                 trusted_refs = stream_delivery["file_refs"]
@@ -735,6 +737,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         context_pack: "WorkspaceContextPackage | None" = None,
         iteration_index: int | None = None,
         card_context: Any | None = None,
+        repair_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         draft_execution = self.agent.create_execution(
             lineage={
@@ -758,38 +761,42 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         draft_execution.language(language_policy.get("language", "auto"))
         cumulative_execution_evidence_summary = self._cumulative_execution_evidence_summary(dict(execution_meta or {}))
         cumulative_evidence_anchors = self._planner_evidence_anchors_from_summary(cumulative_execution_evidence_summary)
-        draft_execution.input(
-            {
-                "task_id": self.id,
-                "goal": self.goal,
-                "success_criteria": self.success_criteria,
-                "execution_strategy": self.execution_strategy,
-                "artifact_path": path,
-                "plan": DataFormatter.sanitize(plan or {}),
-                "execution_result": DataFormatter.sanitize(execution_result),
-                "execution_meta_summary": self._execution_log_summary(dict(execution_meta or {})),
-                "cumulative_evidence_anchors": DataFormatter.sanitize(cumulative_evidence_anchors),
-                "context_pack": DataFormatter.sanitize(context_pack or {}),
-                "card": DataFormatter.sanitize(
-                    card_context.card.to_dict()
-                    if card_context is not None
-                    and getattr(card_context, "card", None) is not None
-                    and hasattr(card_context.card, "to_dict")
-                    else {}
-                ),
-                "dependency_results": (
-                    DataFormatter.sanitize(
-                        {
-                            key: value.to_dict() if hasattr(value, "to_dict") else value
-                            for key, value in dict(getattr(card_context, "dependency_results", {}) or {}).items()
-                        }
-                    )
-                    if card_context is not None
-                    else {}
-                ),
-                "language_policy": language_policy,
-            }
+        active_repair_context = (
+            dict(repair_context) if isinstance(repair_context, Mapping) else self._active_repair_context()
         )
+        draft_input = {
+            "task_id": self.id,
+            "goal": self.goal,
+            "success_criteria": self.success_criteria,
+            "execution_strategy": self.execution_strategy,
+            "artifact_path": path,
+            "plan": DataFormatter.sanitize(plan or {}),
+            "execution_result": DataFormatter.sanitize(execution_result),
+            "execution_meta_summary": self._execution_log_summary(dict(execution_meta or {})),
+            "cumulative_evidence_anchors": DataFormatter.sanitize(cumulative_evidence_anchors),
+            "context_pack": DataFormatter.sanitize(context_pack or {}),
+            "card": DataFormatter.sanitize(
+                card_context.card.to_dict()
+                if card_context is not None
+                and getattr(card_context, "card", None) is not None
+                and hasattr(card_context.card, "to_dict")
+                else {}
+            ),
+            "dependency_results": (
+                DataFormatter.sanitize(
+                    {
+                        key: value.to_dict() if hasattr(value, "to_dict") else value
+                        for key, value in dict(getattr(card_context, "dependency_results", {}) or {}).items()
+                    }
+                )
+                if card_context is not None
+                else {}
+            ),
+            "language_policy": language_policy,
+        }
+        if active_repair_context:
+            draft_input["repair_context"] = DataFormatter.sanitize(active_repair_context)
+        draft_execution.input(draft_input)
         draft_execution.instruct(
             (
                 "Write only the final Markdown artifact body for the AgentTask. "
@@ -797,6 +804,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "Use only the provided task context, execution result, dependency results, and evidence summaries. "
                 "For source-grounded artifacts, cite exact URLs, file paths, or refs from cumulative_evidence_anchors; "
                 "do not shorten URLs, use ellipses, infer paths from titles, or cite sources that are not visible there. "
+                "When repair_context contains fields, this artifact draft is a repair pass: use its acceptance_delta, "
+                "advisory_repair_constraints, advisory_next_step_requirements, and available_evidence_anchors as the "
+                "active correction contract for the Markdown body. Rewrite affected artifact sections instead of only "
+                "stating that they were fixed. "
                 "If the source evidence is incomplete, write a clear source-boundary section instead of fabricating facts. "
                 "The framework will stream your Markdown into the Workspace artifact path and read it back."
             )

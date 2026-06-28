@@ -31,25 +31,36 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         if not isinstance(step_scope, Mapping):
             step_scope = {}
         scoped_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
+        repair_context = self._active_repair_context()
+        input_payload = {
+            "task_id": self.id,
+            "iteration": iteration_index,
+            "goal": self.goal,
+            "success_criteria": self.success_criteria,
+            "task_context_contract": self._task_context_contract(),
+            "plan": DataFormatter.sanitize(plan),
+            "execution_prompt": self._execution_prompt_context(),
+            "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+            "retrieval_policy": scoped_retrieval_policy(),
+            "context_summary": {
+                "item_count": len(context_pack.get("items", [])),
+                "profile": context_pack.get("profile"),
+            },
+        }
+        delivery_contract = {
+            "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
+            "deliverable_mode": plan.get("deliverable_mode"),
+            "task_context_contract": self._task_context_contract(),
+            "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+        }
+        if repair_context:
+            input_payload["repair_context"] = DataFormatter.sanitize(repair_context)
+            delivery_contract["repair_context"] = DataFormatter.sanitize(repair_context)
         return WorkUnitIntent(
             id=f"iter-{iteration_index}:flat-step",
             origin="flat_step",
             objective=str(plan.get("step_instruction") or ""),
-            input_payload={
-                "task_id": self.id,
-                "iteration": iteration_index,
-                "goal": self.goal,
-                "success_criteria": self.success_criteria,
-                "task_context_contract": self._task_context_contract(),
-                "plan": DataFormatter.sanitize(plan),
-                "execution_prompt": self._execution_prompt_context(),
-                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-                "retrieval_policy": scoped_retrieval_policy(),
-                "context_summary": {
-                    "item_count": len(context_pack.get("items", [])),
-                    "profile": context_pack.get("profile"),
-                },
-            },
+            input_payload=input_payload,
             evidence_requirements=tuple(
                 {"capability_id": capability_id, "source": "step_scope"} for capability_id in scoped_ids
             ),
@@ -61,12 +72,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 }
                 for capability_id in scoped_ids
             ),
-            delivery_contract={
-                "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
-                "deliverable_mode": plan.get("deliverable_mode"),
-                "task_context_contract": self._task_context_contract(),
-                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-            },
+            delivery_contract=delivery_contract,
             runtime_preferences={
                 "handler": "agent_task_bounded_step",
                 "deliverable_mode": plan.get("deliverable_mode"),

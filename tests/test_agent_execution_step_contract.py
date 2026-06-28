@@ -527,6 +527,7 @@ class MockFlatRepairConstraintRequester(MockAgentExecutionRequester):
     plan_calls = 0
     verify_calls = 0
     second_plan_prompt = ""
+    second_execution_prompt = ""
     latest_step_instruction = ""
 
     @staticmethod
@@ -535,6 +536,7 @@ class MockFlatRepairConstraintRequester(MockAgentExecutionRequester):
         MockFlatRepairConstraintRequester.plan_calls = 0
         MockFlatRepairConstraintRequester.verify_calls = 0
         MockFlatRepairConstraintRequester.second_plan_prompt = ""
+        MockFlatRepairConstraintRequester.second_execution_prompt = ""
         MockFlatRepairConstraintRequester.latest_step_instruction = ""
 
     async def request_model(self, request_data: AgentlyRequestData):
@@ -567,6 +569,7 @@ class MockFlatRepairConstraintRequester(MockAgentExecutionRequester):
             MockFlatRepairConstraintRequester.latest_step_instruction = step_instruction
         elif "Execute exactly one bounded step" in text:
             if "Revise the candidate report to contain 5-8 news items" in text:
+                MockFlatRepairConstraintRequester.second_execution_prompt = text
                 payload = {
                     "step_result": "Repaired report produced.",
                     "candidate_final_result": "# Weekly\n\n" + "\n".join(f"- Item {index}" for index in range(1, 7)),
@@ -3325,6 +3328,7 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
     first_verification = task_meta["iterations"][0]["verification"]
     second_plan = task_meta["iterations"][1]["plan"]
     second_plan_prompt = MockFlatRepairConstraintRequester.second_plan_prompt
+    second_execution_prompt = MockFlatRepairConstraintRequester.second_execution_prompt
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
@@ -3345,6 +3349,9 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
     assert "acceptance_delta" in second_plan_prompt
     assert "Reduce the report to 5-8 news items." in second_plan_prompt
     assert "Revise the candidate report; do not restart evidence gathering." in second_plan_prompt
+    assert "repair_context" in second_execution_prompt
+    assert "active verification feedback for this work unit" in second_execution_prompt
+    assert "Reduce the report to 5-8 news items." in second_execution_prompt
 
 
 @pytest.mark.asyncio

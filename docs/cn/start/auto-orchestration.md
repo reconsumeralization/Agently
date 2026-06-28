@@ -309,6 +309,11 @@ Flat 和 TaskBoard 都不需要在每个中间 work unit 后额外调用独立 v
 终局、阻塞或风险 verification 时，才显式设置 `ready_for_final_verification=true`。TaskBoard 中真正消费 dependency evidence 的下游
 card 判断这些信息是否足够完成自己的目标。独立 verifier 应保留给终局验收、fan-in/control
 合流验收、证据/artifact 边界审计、矛盾或高风险复核。
+当终局 verifier 返回未完成结果时，紧凑的 `repair_context` 会进入下一轮 Flat work
+unit；如果下一轮交付正文走 Workspace artifact draft，也会进入专门写文件正文的 draft
+请求。这样真正重写或读取 artifact 的 consumer 能看到精确的 `acceptance_delta`、
+repair constraints、next-step requirements 和可用 evidence anchors，同时不把冷侧完整性
+metadata 重新塞回模型热路径。
 
 AgentTask observation 也会在结构化 stream 上发布归一化 action 事实：
 `agent_task.action.started`、`agent_task.action.completed` 和

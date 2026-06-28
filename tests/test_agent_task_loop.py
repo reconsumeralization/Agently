@@ -2047,6 +2047,99 @@ async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anch
     assert "https://example.test/exact-source" in readback["content"]
 
 
+@pytest.mark.asyncio
+async def test_workspace_artifact_stream_draft_receives_active_repair_context(tmp_path):
+    class WorkspaceArtifactDraftRepairRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactDraftRepairRequester"
+        draft_text = ""
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Write only the final Markdown artifact body for the AgentTask" in text:
+                self.__class__.draft_text = text
+                assert "repair_context" in text
+                assert "Replace the unsupported legacy claim." in text
+                assert "https://example.test/exact-source" in text
+                yield "message", "# Repaired Draft\n\nSource: https://example.test/exact-source\n\nNo unsupported claim remains.\n"
+                return
+            yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-draft-repair-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="agent-task-workspace-artifact-draft-repair-plugins",
+    )
+    plugin_manager.register("ModelRequester", WorkspaceArtifactDraftRepairRequester, activate=True)
+    agent = Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="agent-task-workspace-artifact-draft-repair",
+    )
+    task = AgentTask(
+        agent,
+        task_id="workspace-artifact-draft-repair",
+        goal="Repair a source-grounded Workspace artifact.",
+        success_criteria=["The final artifact removes unsupported claims."],
+        workspace=tmp_path / "task-workspace",
+    )
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "plan": {"step_instruction": "Draft the first artifact.", "execution_shape": "direct"},
+            "execution_meta": {
+                "status": "completed",
+                "logs": {
+                    "action_logs": [
+                        {
+                            "action_id": "browse",
+                            "status": "success",
+                            "action_call_id": "call-source",
+                            "model_digest": {
+                                "result_preview": {
+                                    "selected_url": "https://example.test/exact-source",
+                                    "content": "Exact source says the corrected claim.",
+                                },
+                                "result_preview_meta": {"truncated": False},
+                            },
+                        }
+                    ],
+                    "route_logs": {},
+                },
+            },
+            "verification": {
+                "is_complete": False,
+                "reason": "Unsupported claim remains.",
+                "failure_analysis": "The draft kept a claim that the source does not support.",
+                "acceptance_delta": ["Replace the unsupported legacy claim."],
+                "missing_criteria": ["Unsupported claim remains."],
+                "repair_constraints": ["Use exact source URLs from available evidence."],
+                "next_step_requirements": ["Rewrite the affected artifact section."],
+                "replan_instruction": "Repair the artifact using verifier feedback.",
+            },
+        }
+    )
+
+    delivery = await task._stream_workspace_artifact_draft(
+        path="final.md",
+        plan={
+            "deliverable_mode": "workspace_artifact",
+            "step_instruction": "Repair the artifact.",
+        },
+        execution_result={"artifact_manifest": {"path": "final.md"}},
+        execution_meta={"status": "completed", "logs": {"action_logs": [], "route_logs": {}}},
+        source="test.workspace_artifact_draft.repair",
+        context_pack=None,
+        iteration_index=2,
+    )
+
+    assert delivery is not None
+    assert delivery["status"] == "delivered"
+    assert "active correction contract" in WorkspaceArtifactDraftRepairRequester.draft_text
+    readback = await task.workspace.read_file("final.md")
+    assert "No unsupported claim remains." in readback["content"]
+
+
 def test_agent_language_policy_normalizes_and_reaches_execution_prompt():
     agent = _create_agent("agent-language-policy")
 
