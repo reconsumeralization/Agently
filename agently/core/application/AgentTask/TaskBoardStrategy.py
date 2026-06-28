@@ -655,6 +655,10 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             if isinstance(metadata, Mapping) and "block_carrier" in metadata:
                 metadata = dict(metadata)
                 metadata["block_carrier"] = cls._compact_block_carrier_for_taskboard_meta(metadata.get("block_carrier"))
+            workspace_operations = cls._taskboard_card_workspace_operations_for_prompt(
+                diagnostics=diagnostics,
+                metadata=metadata,
+            )
             artifact_refs_source = cls._prompt_sequence(card.get("artifact_refs"))
             file_refs_source = cls._prompt_sequence(card.get("file_refs"))
             source_refs_value = card.get("source_refs")
@@ -685,6 +689,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "file_refs_omitted": max(0, len(file_refs_source) - 8),
                     "source_refs": source_refs_source,
                     "source_refs_omitted": max(0, len(source_refs_sequence) - 8),
+                    "workspace_operations": workspace_operations,
                     "diagnostics": cls._compact_verifier_prompt_value(
                         diagnostics,
                         max_chars=800,
@@ -818,6 +823,19 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         block_carrier: Mapping[str, Any],
         blocks: Any,
     ) -> list[dict[str, Any]]:
+        if isinstance(blocks, Mapping):
+            evidence = blocks.get("evidence")
+            if isinstance(evidence, Mapping):
+                execution_results = [
+                    item for item in evidence.get("execution_block_results", []) if isinstance(item, Mapping)
+                ]
+                operations = [
+                    cls._compact_taskboard_workspace_operation(item)
+                    for item in execution_results
+                    if str(item.get("kind") or "") == "workspace_operation"
+                ][:8]
+                if operations:
+                    return operations
         direct_operations = block_carrier.get("workspace_operations")
         if isinstance(direct_operations, Sequence) and not isinstance(direct_operations, (str, bytes, bytearray)):
             return [
@@ -825,19 +843,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 for item in list(direct_operations)[:8]
                 if isinstance(item, Mapping)
             ]
-        if not isinstance(blocks, Mapping):
-            return []
-        evidence = blocks.get("evidence")
-        if not isinstance(evidence, Mapping):
-            return []
-        execution_results = [
-            item for item in evidence.get("execution_block_results", []) if isinstance(item, Mapping)
-        ]
-        return [
-            cls._compact_taskboard_workspace_operation(item)
-            for item in execution_results
-            if str(item.get("kind") or "") == "workspace_operation"
-        ][:8]
+        return []
 
     @classmethod
     def _compact_taskboard_workspace_operation(cls, item: Mapping[str, Any]) -> dict[str, Any]:
@@ -862,15 +868,19 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 ("first_locator_ref", "locator_refs"),
                 ("first_evidence_snippet", "evidence_snippets"),
             ):
+                max_chars = 1800 if output_key == "first_evidence_snippet" else 900
                 if output_key in output:
-                    output_summary[output_key] = cls._compact_verifier_prompt_value(
+                    output_summary[output_key] = cls._compact_taskboard_workspace_ref_or_snippet(
                         output.get(output_key),
-                        max_chars=700,
+                        max_chars=max_chars,
                     )
                     continue
                 source = output.get(source_key)
                 if isinstance(source, Sequence) and not isinstance(source, (str, bytes, bytearray)) and source:
-                    output_summary[output_key] = cls._compact_verifier_prompt_value(source[0], max_chars=700)
+                    output_summary[output_key] = cls._compact_taskboard_workspace_ref_or_snippet(
+                        source[0],
+                        max_chars=max_chars,
+                    )
         return {
             key: item.get(key)
             for key in (
@@ -883,6 +893,61 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             )
             if key in item
         } | ({"output": output_summary} if output_summary else {})
+
+    @classmethod
+    def _compact_taskboard_workspace_ref_or_snippet(cls, value: Any, *, max_chars: int) -> Any:
+        if not isinstance(value, Mapping):
+            return cls._compact_verifier_prompt_value(value, max_chars=max_chars)
+        compact: dict[str, Any] = {}
+        for key in (
+            "path",
+            "line",
+            "line_start",
+            "line_end",
+            "role",
+            "content_state",
+            "source",
+            "query",
+            "search_engine",
+            "grep_tool",
+            "bytes",
+            "sha256",
+        ):
+            if key in value:
+                compact[key] = value.get(key)
+        content = value.get("content")
+        if not isinstance(content, str):
+            content = value.get("snippet")
+        if not isinstance(content, str):
+            content = value.get("text")
+        if isinstance(content, str):
+            compact["content"] = cls._truncate_prompt_text(content, max_chars)
+        return cls._compact_verifier_prompt_value(compact or value, max_chars=max_chars)
+
+    @classmethod
+    def _taskboard_card_workspace_operations_for_prompt(
+        cls,
+        *,
+        diagnostics: Sequence[Any],
+        metadata: Any,
+    ) -> list[dict[str, Any]]:
+        operations: list[dict[str, Any]] = []
+        for container in (*diagnostics, metadata):
+            if not isinstance(container, Mapping):
+                continue
+            block_carrier = container.get("block_carrier")
+            if not isinstance(block_carrier, Mapping):
+                continue
+            raw_operations = block_carrier.get("workspace_operations")
+            if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, (str, bytes, bytearray)):
+                continue
+            for operation in raw_operations:
+                if not isinstance(operation, Mapping):
+                    continue
+                operations.append(cls._compact_taskboard_workspace_operation(operation))
+                if len(operations) >= 4:
+                    return operations
+        return operations
 
     @staticmethod
     def _compact_taskboard_blocks_for_carrier_meta(blocks: Any) -> dict[str, Any]:

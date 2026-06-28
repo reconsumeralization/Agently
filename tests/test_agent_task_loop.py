@@ -531,6 +531,19 @@ async def test_taskboard_card_scoped_retrieval_uses_block_carrier(tmp_path):
     )
     assert taskboard_compact["workspace_operations"][0]["kind"] == "workspace_operation"
     assert taskboard_compact["workspace_operations"][0]["output"]["bounded"]["returned_results"] == 1
+    prompt_view = task._compact_taskboard_evidence_view_for_prompt(
+        {
+            "cards": [
+                {
+                    "card_id": "collect",
+                    "status": "completed",
+                    "diagnostics": [{"block_carrier": taskboard_compact}],
+                }
+            ]
+        }
+    )
+    prompt_operation = prompt_view["cards"][0]["workspace_operations"][0]
+    assert "Project Atlas owner is Priya Shah." in prompt_operation["output"]["first_evidence_snippet"]["content"]
 
 
 def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():

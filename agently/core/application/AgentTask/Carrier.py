@@ -856,7 +856,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         if isinstance(locator_refs, (list, tuple)):
                             output_summary["locator_ref_count"] = len(locator_refs)
                             if locator_refs:
-                                output_summary["first_locator_ref"] = cls._compact_value_for_meta(
+                                output_summary["first_locator_ref"] = cls._compact_workspace_ref_or_snippet_for_meta(
                                     locator_refs[0],
                                     max_chars=1000,
                                 )
@@ -864,9 +864,9 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         if isinstance(evidence_snippets, (list, tuple)):
                             output_summary["evidence_snippet_count"] = len(evidence_snippets)
                             if evidence_snippets:
-                                output_summary["first_evidence_snippet"] = cls._compact_value_for_meta(
+                                output_summary["first_evidence_snippet"] = cls._compact_workspace_ref_or_snippet_for_meta(
                                     evidence_snippets[0],
-                                    max_chars=1000,
+                                    max_chars=1800,
                                 )
                     execution_meta = output.get("execution_meta")
                     if isinstance(execution_meta, Mapping):
@@ -928,7 +928,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             if isinstance(locator_refs, (list, tuple)):
                 output_summary["locator_ref_count"] = len(locator_refs)
                 if locator_refs:
-                    output_summary["first_locator_ref"] = cls._compact_value_for_meta(
+                    output_summary["first_locator_ref"] = cls._compact_workspace_ref_or_snippet_for_meta(
                         locator_refs[0],
                         max_chars=1000,
                     )
@@ -936,9 +936,9 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             if isinstance(evidence_snippets, (list, tuple)):
                 output_summary["evidence_snippet_count"] = len(evidence_snippets)
                 if evidence_snippets:
-                    output_summary["first_evidence_snippet"] = cls._compact_value_for_meta(
+                    output_summary["first_evidence_snippet"] = cls._compact_workspace_ref_or_snippet_for_meta(
                         evidence_snippets[0],
-                        max_chars=1000,
+                        max_chars=1800,
                     )
             operations.append(
                 {
@@ -956,6 +956,36 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 | ({"output": output_summary} if output_summary else {})
             )
         return operations
+
+    @classmethod
+    def _compact_workspace_ref_or_snippet_for_meta(cls, value: Any, *, max_chars: int) -> Any:
+        if not isinstance(value, Mapping):
+            return cls._compact_value_for_meta(value, max_chars=max_chars)
+        compact: dict[str, Any] = {}
+        for key in (
+            "path",
+            "line",
+            "line_start",
+            "line_end",
+            "role",
+            "content_state",
+            "source",
+            "query",
+            "search_engine",
+            "grep_tool",
+            "bytes",
+            "sha256",
+        ):
+            if key in value:
+                compact[key] = value.get(key)
+        content = value.get("content")
+        if not isinstance(content, str):
+            content = value.get("snippet")
+        if not isinstance(content, str):
+            content = value.get("text")
+        if isinstance(content, str):
+            compact["content"] = cls._compact_value_for_meta(content, max_chars=max_chars)
+        return cls._compact_value_for_meta(compact or value, max_chars=max_chars)
 
     @staticmethod
     def _attach_blocks_evidence(
