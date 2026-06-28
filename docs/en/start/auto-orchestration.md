@@ -334,18 +334,24 @@ parsed as executable targets.
 When a control card instead returns `next_board_action="patch"` with a Workspace
 text patch proposal, AgentTask applies the patch to the bound Workspace file,
 writes it back, and returns trusted `file_refs` after readback. This is a
-materialization step only: final completion still belongs to the verifier.
+materialization step only: final completion still belongs to terminal
+acceptance and host guards.
 For completed and sufficient control outputs, non-fatal `gaps` do not prevent
 Workspace artifact materialization; `remaining_work`, blocked status, repair,
 or readback still do. Writing the artifact only creates evidence for later
 readback and verification. It does not mean the final task has been accepted.
+TaskBoard does not need an independent verifier after every intermediate card:
+the downstream card that consumes evidence decides whether it is enough for its
+own objective. Independent verifier requests are for final acceptance,
+evidence/artifact boundary audit, contradictions, or high-risk review.
 
 AgentTask observation also publishes normalized action facts on the structured
 stream as `agent_task.action.started`, `agent_task.action.completed`, and
 `agent_task.action.failed`. These events summarize existing Action records with
 safe input summaries, result previews, refs, timing, diagnostics, and work-unit
 ownership. They are observation facts for DevTools, UI, and experiment logs; the
-verifier and strategy still own usefulness, quality, and completion judgment.
+downstream consumer, terminal verifier, and strategy still own usefulness,
+quality, and completion judgment.
 
 When the write succeeds and readback is trusted, verifier input includes the
 readback fields and `capability_evidence.artifacts.readback`; with
