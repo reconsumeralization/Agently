@@ -372,6 +372,12 @@ facts, line/range facts, and actionable locator handles stay visible, while
 reconstructable provenance such as `sha256`, byte counts, handler/media details,
 backend/search-engine facts, execution block ids, and full file refs remains in
 the raw Workspace/Blocks evidence for programmatic audit and readback.
+TaskBoard applies the same split to readback continuations: external
+`target_refs` such as HTTP/HTTPS URLs become Action evidence work, while
+Workspace/content paths and retained-note refs become bounded Workspace readback
+cards. Intermediate readback previews keep content, path, range, and truncation
+facts hot; SHA, byte counts, media/handler details, and backend facts stay in
+cold evidence or final artifact readback metadata.
 For `workspace_files`, `query` is the content text to search, `path` is the
 directory or file scope, and `pattern` is a file glob such as `*.md`, `*`, or
 `**` for recursive file search. Local Workspace file search uses `rg` as a

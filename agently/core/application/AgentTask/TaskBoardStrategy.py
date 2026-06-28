@@ -854,7 +854,6 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "operation",
                 "query",
                 "filters",
-                "bounded",
                 "locator_ref_count",
                 "evidence_snippet_count",
                 "diagnostics",
@@ -864,6 +863,9 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                         output.get(output_key),
                         max_chars=700,
                     )
+            bounded = output.get("bounded")
+            if isinstance(bounded, Mapping):
+                output_summary["bounded"] = cls._compact_taskboard_workspace_operation_bounded(bounded)
             for output_key, source_key in (
                 ("first_locator_ref", "locator_refs"),
                 ("first_evidence_snippet", "evidence_snippets"),
@@ -895,6 +897,35 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         } | ({"output": output_summary} if output_summary else {})
 
     @classmethod
+    def _compact_taskboard_workspace_operation_bounded(cls, bounded: Mapping[str, Any]) -> dict[str, Any]:
+        keep_keys = (
+            "operation",
+            "query",
+            "filters",
+            "path",
+            "pattern",
+            "search_surface",
+            "returned_results",
+            "file_returned_results",
+            "index_returned_results",
+            "index_total_matches",
+            "locator_ref_count",
+            "evidence_snippet_count",
+            "snippet_limit",
+            "max_results",
+            "context_lines",
+            "offset",
+            "limit",
+            "eof",
+            "truncated",
+        )
+        compact = {key: bounded.get(key) for key in keep_keys if key in bounded}
+        diagnostics = bounded.get("diagnostics")
+        if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
+            compact["diagnostics"] = cls._compact_verifier_prompt_value(list(diagnostics)[:4], max_chars=700)
+        return DataFormatter.sanitize(compact)
+
+    @classmethod
     def _compact_taskboard_workspace_ref_or_snippet(cls, value: Any, *, max_chars: int) -> Any:
         if not isinstance(value, Mapping):
             return cls._compact_verifier_prompt_value(value, max_chars=max_chars)
@@ -908,10 +939,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "content_state",
             "source",
             "query",
-            "search_engine",
-            "grep_tool",
-            "bytes",
-            "sha256",
+            "record_id",
+            "collection",
         ):
             if key in value:
                 compact[key] = value.get(key)
@@ -2079,6 +2108,62 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             refs.append(text)
         return refs[:8]
 
+    @staticmethod
+    def _taskboard_target_ref_requires_action(ref: str) -> bool:
+        text = str(ref or "").strip().lower()
+        if not text:
+            return False
+        if text.startswith(("http://", "https://")):
+            return True
+        if "://" not in text:
+            return False
+        scheme = text.split("://", 1)[0].strip()
+        return scheme not in {"workspace", "content"}
+
+    @classmethod
+    def _split_taskboard_target_refs(cls, refs: Sequence[str]) -> tuple[list[str], list[str]]:
+        workspace_refs: list[str] = []
+        action_refs: list[str] = []
+        for ref in refs:
+            text = str(ref or "").strip()
+            if not text:
+                continue
+            if cls._taskboard_target_ref_requires_action(text):
+                action_refs.append(text)
+            else:
+                workspace_refs.append(text)
+        return workspace_refs, action_refs
+
+    @staticmethod
+    def _taskboard_workspace_target_ref_path(ref: str) -> str:
+        text = str(ref or "").strip()
+        lowered = text.lower()
+        for prefix in ("workspace://", "content://"):
+            if lowered.startswith(prefix):
+                return text[len(prefix) :].lstrip("/")
+        return text
+
+    @classmethod
+    def _taskboard_workspace_target_ref_file_refs(cls, refs: Sequence[str]) -> list[dict[str, Any]]:
+        file_refs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for ref in refs:
+            if cls._taskboard_target_ref_requires_action(str(ref or "")):
+                continue
+            path = cls._taskboard_workspace_target_ref_path(str(ref or ""))
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            file_refs.append(
+                {
+                    "path": path,
+                    "source": "taskboard_target_ref",
+                    "content_state": "ref_only",
+                    "readback_mode": "workspace_content",
+                }
+            )
+        return file_refs
+
     def _taskboard_scoped_retrieval_continuation_patch(
         self,
         context: Any,
@@ -2205,6 +2290,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         current_id = str(getattr(card, "id", "") or "").strip()
         if not current_id:
             return None
+        workspace_target_refs, action_target_refs = cls._split_taskboard_target_refs(target_ref_list)
+        support_card_requires_action = bool(scoped_retrieval_plan or action_target_refs)
 
         def safe_id(raw: str) -> str:
             text = "".join(ch if ch.isalnum() or ch in {"_", ".", "-"} else "-" for ch in raw.strip())
@@ -2246,7 +2333,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         )
         evidence_card_id = (
             unique_id(f"{current_id}.evidence")
-            if target_ref_list or scoped_retrieval_plan
+            if support_card_requires_action
             else unique_id(f"{current_id}.readback")
         )
         current_metadata.update(
@@ -2272,10 +2359,15 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 readback_objective = (
                     f"{readback_objective} Also collect explicit target refs: {'; '.join(target_ref_list)}"
                 )
-        elif target_ref_list:
+        elif action_target_refs:
             readback_objective = (
-                "Collect scoped evidence from the explicit target refs required before continuing the blocked "
-                f"control card. Target refs: {'; '.join(target_ref_list)}"
+                "Collect scoped evidence from the explicit external target refs required before continuing the "
+                f"blocked control card. Target refs: {'; '.join(action_target_refs)}"
+            )
+        elif workspace_target_refs:
+            readback_objective = (
+                "Read bounded Workspace target refs required before continuing the blocked control card. "
+                f"Target refs: {'; '.join(workspace_target_refs)}"
             )
         else:
             readback_objective = "Read scoped cold evidence required before continuing the blocked control card."
@@ -2299,6 +2391,10 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         }
         if target_ref_list:
             evidence_metadata["target_refs"] = target_ref_list
+        if workspace_target_refs:
+            evidence_metadata["workspace_target_refs"] = workspace_target_refs
+        if action_target_refs:
+            evidence_metadata["external_target_refs"] = action_target_refs
         if scoped_retrieval_plan:
             evidence_metadata["scoped_retrieval"] = DataFormatter.sanitize(scoped_retrieval_plan)
             evidence_metadata["retrieval_policy"] = scoped_retrieval_policy()
@@ -2306,7 +2402,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "generated_by": patch_source,
             "continues_card_id": current_id,
             "readback_card_id": evidence_card_id,
-            "evidence_card_id": evidence_card_id if target_ref_list or scoped_retrieval_plan else "",
+            "evidence_card_id": evidence_card_id if support_card_requires_action else "",
         }
         if final_workspace_deliverables:
             continuation_metadata["final_workspace_deliverables"] = final_workspace_deliverables
@@ -2318,11 +2414,14 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 ["Expanded bounded scoped retrieval evidence or diagnostics explaining why it remains insufficient."]
                 if scoped_retrieval_plan
                 else
-                ["Evidence gathered from target refs or diagnostics explaining inaccessible refs."]
-                if target_ref_list
+                ["Evidence gathered from external target refs or diagnostics explaining inaccessible refs."]
+                if action_target_refs
+                else
+                ["Bounded Workspace target-ref readback previews or diagnostics explaining inaccessible refs."]
+                if workspace_target_refs
                 else ["Bounded readback previews for verifier-visible cold evidence."]
             ),
-            "allowed_execution_shape": "actions" if target_ref_list or scoped_retrieval_plan else "readback",
+            "allowed_execution_shape": "actions" if support_card_requires_action else "readback",
             "failure_policy": "required",
             "metadata": evidence_metadata,
         }
@@ -2356,6 +2455,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                         "readback_card_id": evidence_card_id,
                         "continuation_card_id": continuation_id,
                         "target_ref_count": len(target_ref_list),
+                        "workspace_target_ref_count": len(workspace_target_refs),
+                        "external_target_ref_count": len(action_target_refs),
                         "scoped_retrieval": bool(scoped_retrieval_plan),
                     },
                 },
@@ -2367,6 +2468,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "readback_card_id": evidence_card_id,
                     "continuation_card_id": continuation_id,
                     "target_ref_count": len(target_ref_list),
+                    "workspace_target_ref_count": len(workspace_target_refs),
+                    "external_target_ref_count": len(action_target_refs),
                     "scoped_retrieval": bool(scoped_retrieval_plan),
                 }
             ],
@@ -2537,6 +2640,15 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
         refs = self._taskboard_readback_artifact_refs(evidence_view)
         file_refs = self._taskboard_readback_file_refs(evidence_view)
+        card_metadata = getattr(context.card, "metadata", {})
+        if isinstance(card_metadata, Mapping):
+            target_refs = self._normalize_taskboard_target_refs(
+                card_metadata.get("workspace_target_refs") or card_metadata.get("target_refs")
+            )
+            self._merge_taskboard_file_refs(
+                file_refs,
+                self._taskboard_workspace_target_ref_file_refs(target_refs),
+            )
         work_unit = WorkUnitIntent(
             id=f"taskboard:{context.card.id}:readback",
             origin="taskboard_card",
@@ -2721,14 +2833,35 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                             "file_ref_count": len(added_file_refs),
                         }
                     )
-                for ref in effective_file_refs:
+
+                async def read_workspace_ref(ref: Mapping[str, Any]) -> Mapping[str, Any]:
                     path = str(ref.get("path") or "").strip()
+                    mode = str(ref.get("readback_mode") or "").strip()
+                    if mode == "workspace_content":
+                        segment = await self._await_taskboard_card_execution(
+                            self.workspace.read_bounded(path, limit=_TASKBOARD_READBACK_PREVIEW_CHARS),
+                            card_id=context.card.id,
+                            stage="workspace_content_readback",
+                        )
+                        return self._taskboard_workspace_content_segment_readback(segment, ref)
                     try:
-                        raw_file_readback = await self._await_taskboard_card_execution(
+                        return await self._await_taskboard_card_execution(
                             self.workspace.read_file(path, max_bytes=_TASKBOARD_READBACK_PREVIEW_CHARS),
                             card_id=context.card.id,
                             stage="workspace_file_readback",
                         )
+                    except FileNotFoundError:
+                        segment = await self._await_taskboard_card_execution(
+                            self.workspace.read_bounded(path, limit=_TASKBOARD_READBACK_PREVIEW_CHARS),
+                            card_id=context.card.id,
+                            stage="workspace_content_readback",
+                        )
+                        return self._taskboard_workspace_content_segment_readback(segment, ref)
+
+                for ref in effective_file_refs:
+                    path = str(ref.get("path") or "").strip()
+                    try:
+                        raw_file_readback = await read_workspace_ref(ref)
                     except Exception as error:
                         raw_file_readback = {
                             "ok": False,
@@ -4128,15 +4261,10 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "ok": ok,
             "status": str(readback.get("status") or ("completed" if ok else "error")),
             "path": path,
-            "media_type": str(readback.get("media_type") or ref.get("media_type") or ""),
-            "bytes": readback.get("bytes", ref.get("bytes", ref.get("size"))),
             "read_bytes": readback.get("read_bytes"),
-            "sha256": str(readback.get("sha256") or ref.get("sha256") or ""),
+            "offset": readback.get("offset"),
             "truncated": bool(readback.get("truncated")),
-            "handler_id": str(readback.get("handler_id") or ""),
-            "content_kind": str(readback.get("content_kind") or ""),
-            "extraction_method": str(readback.get("extraction_method") or ""),
-            "ref": cls._compact_artifact_ref_for_verifier(ref),
+            "ref": cls._compact_taskboard_workspace_ref_for_prompt(ref),
             "content_preview": preview,
             "content_preview_meta": {
                 "truncated": preview_chars < original_chars or bool(readback.get("truncated")),
@@ -4152,6 +4280,56 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
             compact["diagnostics"] = cls._compact_verifier_prompt_value(list(diagnostics), max_chars=1200)
         return compact
+
+    @classmethod
+    def _taskboard_workspace_content_segment_readback(
+        cls,
+        segment: Any,
+        ref: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(segment, Mapping):
+            return {
+                "ok": False,
+                "readable": False,
+                "status": "invalid_result",
+                "path": str(ref.get("path") or ""),
+                "error": f"Workspace bounded reader returned { type(segment).__name__ }.",
+            }
+        envelope = segment.get("ref")
+        if not isinstance(envelope, Mapping):
+            envelope = {}
+        offset = cls._positive_int(segment.get("offset"), default=0)
+        read_bytes = cls._positive_int(segment.get("size"), default=0)
+        total_size = cls._positive_int(segment.get("total_size"), default=read_bytes)
+        eof = bool(segment.get("eof", True))
+        return {
+            "ok": True,
+            "readable": True,
+            "status": "completed",
+            "path": str(envelope.get("content_ref") or ref.get("path") or ""),
+            "content": segment.get("content", ""),
+            "media_type": str(segment.get("content_type") or ""),
+            "bytes": total_size,
+            "read_bytes": read_bytes,
+            "sha256": str(segment.get("digest") or envelope.get("digest") or ""),
+            "offset": offset,
+            "truncated": (not eof) or offset > 0 or read_bytes < total_size,
+        }
+
+    @staticmethod
+    def _compact_taskboard_workspace_ref_for_prompt(ref: Mapping[str, Any]) -> dict[str, Any]:
+        keep_keys = (
+            "path",
+            "role",
+            "label",
+            "source",
+            "record_id",
+            "collection",
+            "kind",
+            "content_state",
+            "readback_mode",
+        )
+        return {key: ref.get(key) for key in keep_keys if key in ref and ref.get(key) not in (None, "")}
 
     @staticmethod
     def _serialized_prompt_chars(value: Any) -> int:

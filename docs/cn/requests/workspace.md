@@ -344,6 +344,11 @@ record collection 应放在 `filters.collection`；只有明确知道精确 reco
 `sha256`、字节数、handler/media 细节、backend/search-engine 事实、execution block id
 和完整 file ref 等可由程序回溯的 provenance 会留在原始 Workspace/Blocks 证据里，
 用于审计、manifest 和后续 readback。
+TaskBoard 的 readback continuation 也遵循同一拆分：HTTP/HTTPS 这类外部
+`target_refs` 会变成 Action evidence 工作；Workspace/content 路径和 retained-note
+ref 会变成有界 Workspace readback card。中间 readback preview 只把正文、path、
+范围和截断事实放进热输入；SHA、字节数、media/handler 细节和 backend 事实留在
+冷侧证据或最终 artifact readback metadata。
 
 `materialize_file(...)` 用于框架或应用拥有的受控 bytes 物化，例如 Browse action
 把远程 PDF 下载到 Workspace 的 `downloads/` 后，再由后续 `read_file(...)` 通过

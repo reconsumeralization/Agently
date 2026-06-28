@@ -2128,6 +2128,59 @@ def test_taskboard_control_direct_target_refs_become_action_evidence_patch():
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
 
 
+def test_taskboard_control_workspace_target_refs_become_readback_patch():
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="workspace-target-refs",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "workspace-target-refs-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect retained Workspace refs."},
+                    {
+                        "id": "final",
+                        "objective": "Write final answer after retained notes are read.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "control",
+                        "required_outputs": ["final.md"],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": {"card_id": "collect", "status": "completed"}}],
+        },
+    )
+    card = revision.graph.card_by_id()["final"]
+    diagnostics: list[dict[str, Any]] = []
+    patch = AgentTask._taskboard_control_patch_proposal(
+        SimpleNamespace(revision=revision, card=card),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "target_refs": ["retained-notes/rec_abc-operations-note.txt"],
+            "gaps": ["Need the retained note body before synthesis."],
+            "remaining_work": ["Read the retained note, then continue final synthesis."],
+        },
+        diagnostics,
+    )
+
+    assert patch is not None
+    next_revision = validator.apply_patch(revision, patch)
+    cards = next_revision.graph.card_by_id()
+    assert cards["final.readback"].allowed_execution_shape == "readback"
+    assert cards["final.readback"].metadata["target_refs"] == ["retained-notes/rec_abc-operations-note.txt"]
+    assert cards["final.readback"].metadata["workspace_target_refs"] == ["retained-notes/rec_abc-operations-note.txt"]
+    assert "external_target_refs" not in cards["final.readback"].metadata
+    assert cards["final.continue"].depends_on == ("collect", "final.readback")
+    assert cards["final.continue"].metadata["readback_card_id"] == "final.readback"
+    assert cards["final.continue"].metadata["evidence_card_id"] == ""
+
+
 def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readback():
     discovered_refs = AgentTask._collect_taskboard_source_refs(
         {
@@ -2309,6 +2362,61 @@ def test_scoped_retrieval_results_expose_model_hot_view_without_provenance_noise
     assert '"execution_block_id"' not in hot_text
     assert '"source_plan_block_id"' not in hot_text
     assert block_context["state"]["execution_block_results"][0]["output"]["locator_refs"][0]["sha256"]
+
+
+def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provenance_noise():
+    compact = AgentTask._compact_taskboard_workspace_operation(
+        {
+            "id": "op-1",
+            "kind": "workspace_operation",
+            "status": "completed",
+            "output": {
+                "bounded": {
+                    "returned_results": 1,
+                    "locator_refs": [
+                        {
+                            "path": "retained/source.md",
+                            "record_id": "record-1",
+                            "bytes": 4096,
+                            "sha256": "1" * 64,
+                            "media_type": "text/markdown",
+                            "search_engine": "workspace_file_grep",
+                            "grep_tool": "rg",
+                            "content_state": "ref_only",
+                        }
+                    ],
+                    "evidence_snippets": [
+                        {
+                            "path": "retained/source.md",
+                            "content": "bounded source detail",
+                            "bytes": 4096,
+                            "sha256": "1" * 64,
+                            "search_engine": "workspace_file_grep",
+                            "grep_tool": "rg",
+                        }
+                    ],
+                },
+                "evidence_snippets": [
+                    {
+                        "path": "retained/source.md",
+                        "content": "bounded source detail",
+                        "bytes": 4096,
+                        "sha256": "1" * 64,
+                        "search_engine": "workspace_file_grep",
+                        "grep_tool": "rg",
+                    }
+                ],
+            },
+        }
+    )
+
+    prompt_text = json.dumps(compact, ensure_ascii=False)
+    assert "bounded source detail" in prompt_text
+    assert '"sha256"' not in prompt_text
+    assert '"bytes"' not in prompt_text
+    assert '"media_type"' not in prompt_text
+    assert '"search_engine"' not in prompt_text
+    assert '"grep_tool"' not in prompt_text
 
 
 def test_taskboard_control_readback_required_patch_type_becomes_readback_patch():
@@ -2577,6 +2685,78 @@ async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     assert payload["file_readbacks"][0]["path"] == "sources/source.md"
     assert "Workspace-only detail" in payload["file_readbacks"][0]["content_preview"]
     assert result.metadata["execution_kind"] == "taskboard_artifact_readback"
+    assert result.metadata["file_ref_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_taskboard_readback_card_reads_workspace_target_refs_from_content_store(tmp_path):
+    agent = _create_agent("execution-taskboard-content-target-readback").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Read retained Workspace content before synthesis.",
+        success_criteria=["The readback card reads retained Workspace content refs."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    retained_ref = await task.workspace.put(
+        "The only active blocker is the data processing addendum waiting on legal review.",
+        collection="retained-notes",
+        kind="operations_note",
+        summary="Operations note with blocker.",
+    )
+    revision = TaskBoardRevision.create(
+        board_id="workspace-target-ref-readback",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "workspace-target-ref-readback-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect retained note refs."},
+                    {
+                        "id": "readback",
+                        "objective": "Read the retained operations note.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "readback",
+                        "required_outputs": ["Workspace content readback preview."],
+                        "metadata": {"target_refs": [retained_ref["path"]]},
+                    },
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "preview": "retained note path collected",
+                    },
+                }
+            ],
+        },
+    )
+    card = revision.graph.card_by_id()["readback"]
+    result = await task._run_taskboard_readback_card(
+        SimpleNamespace(
+            card=card,
+            revision=revision,
+        ),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    payload = result.preview
+    assert payload["file_readbacks"][0]["ok"] is True
+    assert payload["file_readbacks"][0]["path"] == retained_ref["path"]
+    assert "data processing addendum waiting on legal review" in payload["file_readbacks"][0]["content_preview"]
+    hot_text = json.dumps(payload["file_readbacks"][0], ensure_ascii=False)
+    assert '"sha256"' not in hot_text
+    assert '"bytes"' not in hot_text
+    assert '"media_type"' not in hot_text
     assert result.metadata["file_ref_count"] == 1
 
 
