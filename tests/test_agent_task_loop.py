@@ -187,7 +187,9 @@ def test_taskboard_source_ref_policy_reuses_scoped_retrieval_policy():
     assert "locator_ref" in policy["scoped_retrieval_policy"]["roles"]
     assert "evidence_snippet" in policy["scoped_retrieval_policy"]["roles"]
     assert any("filters.collection" in rule for rule in policy["scoped_retrieval_policy"]["rules"])
+    assert any("never infer a generic kind" in rule for rule in policy["scoped_retrieval_policy"]["rules"])
     assert any("filters.collection" in rule for rule in policy["rules"])
+    assert any("never infer a generic kind" in rule for rule in policy["rules"])
 
 
 def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
