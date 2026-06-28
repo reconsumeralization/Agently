@@ -801,7 +801,8 @@ async def test_workspace_search_files_returns_bounded_retrieval_roles(tmp_path):
     assert results[0]["locator_ref"]["role"] == "locator_ref"
     assert results[0]["locator_ref"]["content_state"] == "ref_only"
     assert results[0]["locator_ref"]["path"] == "notes/todo.txt"
-    assert results[0]["search_engine"] == "workspace_file_scan"
+    assert results[0]["search_engine"] in {"workspace_file_grep", "workspace_file_scan"}
+    assert results[0]["scope"]["search_engine"] == results[0]["search_engine"]
     assert not {"useful", "accepted", "semantically_relevant"}.intersection(results[0])
 
 

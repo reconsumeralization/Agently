@@ -200,6 +200,11 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                     "required, optional, or degradable. Required failure blocks dependents. Optional/degradable failure may unblock dependents with diagnostics when enough core evidence exists.",
                     False,
                 ),
+                "scoped_retrieval": (
+                    dict,
+                    "Optional bounded retrieval plan: {query_groups: [{query, expected_role, search_surface?, path?, pattern?, filters?, max_results?, snippet_limit?}]}. query is content text or an exact phrase to search, not a list/read/search command. For workspace_files, path is the directory/file scope and pattern is one file glob such as *.md, * or **. Use filters.content_contains only for explicit content keyword lists. The executor returns factual locator_ref/evidence_snippet records only.",
+                    False,
+                ),
             }
         ],
         "reflection_points": ([str], "Review, correction, or decision points judged necessary by the model.", False),
@@ -356,6 +361,21 @@ def _card_from_planning_item(value: Any) -> TaskBoardCard:
     action_block = str(value.get("action_block") or "").strip()
     done_when = str(value.get("done_when") or "").strip()
     failure_policy = _failure_policy(value.get("failure_policy"))
+    scoped_retrieval = value.get("scoped_retrieval")
+    metadata: dict[str, Any] = {
+        "action_block": action_block,
+        "done_when": done_when,
+        "failure_policy": failure_policy,
+    }
+    evidence_contract: dict[str, Any] = {
+        "action_block": action_block,
+        "evidence_to_use": evidence_to_use,
+        "done_when": done_when,
+        "failure_policy": failure_policy,
+    }
+    if isinstance(scoped_retrieval, Mapping):
+        evidence_contract["scoped_retrieval"] = dict(scoped_retrieval)
+        metadata["scoped_retrieval"] = dict(scoped_retrieval)
     return TaskBoardCard(
         id=card_id,
         objective=objective,
@@ -363,18 +383,9 @@ def _card_from_planning_item(value: Any) -> TaskBoardCard:
         input_refs=tuple(evidence_to_use),
         required_outputs=(done_when,) if done_when else (),
         allowed_execution_shape=str(value.get("allowed_execution_shape") or "auto"),
-        evidence_contract={
-            "action_block": action_block,
-            "evidence_to_use": evidence_to_use,
-            "done_when": done_when,
-            "failure_policy": failure_policy,
-        },
+        evidence_contract=evidence_contract,
         failure_policy=failure_policy,
-        metadata={
-            "action_block": action_block,
-            "done_when": done_when,
-            "failure_policy": failure_policy,
-        },
+        metadata=metadata,
     )
 
 

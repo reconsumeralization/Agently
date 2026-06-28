@@ -451,6 +451,44 @@ def test_task_board_planning_result_builds_valid_revision():
     assert result.planning_policy.effort_profile.name == "medium"
 
 
+def test_task_board_planning_preserves_scoped_retrieval_plan():
+    result = coerce_task_board_planning_result(
+        {
+            "board_goal": "Answer from retained notes.",
+            "cards": [
+                {
+                    "id": "collect",
+                    "action_block": "Search retained Workspace records.",
+                    "objective": "Find the Atlas renewal evidence without broad reads.",
+                    "depends_on": [],
+                    "done_when": "Atlas evidence snippet is available.",
+                    "allowed_execution_shape": "actions",
+                    "scoped_retrieval": {
+                        "query_groups": [
+                            {
+                                "query": "Atlas",
+                                "expected_role": "evidence_snippet",
+                                "search_surface": "workspace_index",
+                                "filters": {"collection": "retained-notes"},
+                                "max_results": 3,
+                            }
+                        ]
+                    },
+                }
+            ],
+            "completion_gate": "Atlas evidence is found.",
+            "why_this_effort_shape": "Single evidence card.",
+        },
+        board_id="scoped-retrieval-board",
+    )
+
+    card = result.revision.graph.card_by_id()["collect"]
+    assert card.metadata["scoped_retrieval"]["query_groups"][0]["query"] == "Atlas"
+    assert card.evidence_contract["scoped_retrieval"]["query_groups"][0]["filters"] == {
+        "collection": "retained-notes",
+    }
+
+
 def test_task_board_planning_result_rejects_effort_as_hard_control_keys():
     with pytest.raises(ValueError, match="forbidden effort-control key: max_cards"):
         coerce_task_board_planning_result(

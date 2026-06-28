@@ -704,6 +704,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             "work_unit_result": cls._compact_work_unit_result_for_meta(work_unit_result),
             "output_policy": output_policy.to_dict(),
             "block_result": cls._compact_block_result_for_meta(block_result),
+            "workspace_operations": cls._compact_workspace_operations_for_meta(snapshot),
             "snapshot_status": snapshot.get("status") if isinstance(snapshot, Mapping) else None,
         }
 
@@ -903,6 +904,58 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 )
             compact[key] = compact_results
         return compact
+
+    @classmethod
+    def _compact_workspace_operations_for_meta(cls, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+        blocks_state = snapshot.get("blocks", {}) if isinstance(snapshot, Mapping) else {}
+        results = blocks_state.get("execution_block_results") if isinstance(blocks_state, Mapping) else None
+        if not isinstance(results, Sequence) or isinstance(results, (str, bytes, bytearray)):
+            return []
+        operations: list[dict[str, Any]] = []
+        for item in results:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("kind") or "") != "workspace_operation":
+                continue
+            output = item.get("output")
+            if not isinstance(output, Mapping):
+                continue
+            output_summary: dict[str, Any] = {}
+            for output_key in ("operation", "query", "filters", "bounded", "diagnostics"):
+                if output_key in output:
+                    output_summary[output_key] = cls._compact_value_for_meta(output.get(output_key), max_chars=1000)
+            locator_refs = output.get("locator_refs")
+            if isinstance(locator_refs, (list, tuple)):
+                output_summary["locator_ref_count"] = len(locator_refs)
+                if locator_refs:
+                    output_summary["first_locator_ref"] = cls._compact_value_for_meta(
+                        locator_refs[0],
+                        max_chars=1000,
+                    )
+            evidence_snippets = output.get("evidence_snippets")
+            if isinstance(evidence_snippets, (list, tuple)):
+                output_summary["evidence_snippet_count"] = len(evidence_snippets)
+                if evidence_snippets:
+                    output_summary["first_evidence_snippet"] = cls._compact_value_for_meta(
+                        evidence_snippets[0],
+                        max_chars=1000,
+                    )
+            operations.append(
+                {
+                    result_key: item.get(result_key)
+                    for result_key in (
+                        "id",
+                        "plan_block_id",
+                        "source_plan_block_id",
+                        "execution_block_id",
+                        "kind",
+                        "status",
+                    )
+                    if result_key in item
+                }
+                | ({"output": output_summary} if output_summary else {})
+            )
+        return operations
 
     @staticmethod
     def _attach_blocks_evidence(

@@ -1134,8 +1134,15 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
         search_engines = []
         if search_index:
             search_engines.append("workspace_sqlite_fts")
+        file_search_engines = sorted(
+            {
+                str(item.get("search_engine") or "workspace_file_search")
+                for item in file_results
+                if isinstance(item, Mapping)
+            }
+        )
         if search_files:
-            search_engines.append("workspace_file_scan")
+            search_engines.extend(file_search_engines or ["workspace_file_search"])
         return {
             "operation": "search",
             "query": query,

@@ -674,7 +674,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 for key in ("path", "pattern", "collection", "kind"):
                     value = str(item.get(key) or "").strip()
                     if value:
-                        candidate[key] = value
+                        candidate[key] = cls._normalize_scoped_retrieval_pattern(value) if key == "pattern" else value
                 surface = str(item.get("search_surface") or item.get("surface") or "").strip()
                 if surface in {"workspace_index", "workspace_files", "workspace_index_and_files", "files"}:
                     candidate["search_surface"] = "workspace_files" if surface == "files" else surface
@@ -687,13 +687,34 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 filters = item.get("filters")
                 if isinstance(filters, Mapping):
                     candidate["filters"] = DataFormatter.sanitize(dict(filters))
+                content_queries = cls._scoped_retrieval_content_queries(candidate.get("filters"))
             else:
                 query = str(item or "").strip()
                 candidate = {"query": query, "expected_role": ""}
-            if not query:
+                content_queries = []
+            if not query and not content_queries:
                 continue
             if not candidate.get("expected_role"):
                 candidate.pop("expected_role", None)
+            if content_queries:
+                template = dict(candidate)
+                filters = template.get("filters")
+                if isinstance(filters, Mapping):
+                    filtered = dict(filters)
+                    filtered.pop("content_contains", None)
+                    if filtered:
+                        template["filters"] = filtered
+                    else:
+                        template.pop("filters", None)
+                for content_query in content_queries:
+                    expanded = dict(template)
+                    expanded["query"] = content_query
+                    query_groups.append(expanded)
+                    if len(query_groups) >= 8:
+                        break
+                if len(query_groups) >= 8:
+                    break
+                continue
             query_groups.append(candidate)
             if len(query_groups) >= 8:
                 break
@@ -717,6 +738,31 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         if fallback_order:
             normalized["fallback_order"] = fallback_order[:8]
         return normalized
+
+    @staticmethod
+    def _normalize_scoped_retrieval_pattern(value: str) -> str:
+        text = str(value or "").strip()
+        if "," in text:
+            return "**"
+        return text
+
+    @staticmethod
+    def _scoped_retrieval_content_queries(filters: Any) -> list[str]:
+        if not isinstance(filters, Mapping):
+            return []
+        raw_terms = filters.get("content_contains")
+        if isinstance(raw_terms, str):
+            values = [raw_terms]
+        elif isinstance(raw_terms, Sequence) and not isinstance(raw_terms, (bytes, bytearray)):
+            values = list(raw_terms)
+        else:
+            values = []
+        queries: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in queries:
+                queries.append(text)
+        return queries[:8]
 
     def _normalize_step_deliverable_mode(self, plan: dict[str, Any]) -> None:
         raw_mode = str(plan.get("deliverable_mode") or "").strip().lower().replace("-", "_")

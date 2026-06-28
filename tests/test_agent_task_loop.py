@@ -144,6 +144,42 @@ def test_flat_step_plan_preserves_scoped_retrieval_query_groups(tmp_path):
     }
 
 
+def test_scoped_retrieval_normalizes_structured_content_contains_and_globs(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-structured-fields").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-structured-fields",
+        goal="Use structured retrieval fields.",
+        success_criteria=["Evidence is grounded."],
+    )
+
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Find Atlas evidence.",
+            "expected_evidence": "Atlas evidence",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "read all retained files that mention Atlas or owner",
+                        "expected_role": "content retrieval for source facts",
+                        "search_surface": "workspace_files",
+                        "path": "retained/",
+                        "pattern": "*.txt,*.md,*.json",
+                        "filters": {"content_contains": ["Atlas", "owner"]},
+                    }
+                ]
+            },
+        }
+    )
+
+    query_groups = plan["scoped_retrieval"]["query_groups"]
+    assert [group["query"] for group in query_groups] == ["Atlas", "owner"]
+    assert all(group["pattern"] == "**" for group in query_groups)
+    assert all("content_contains" not in group.get("filters", {}) for group in query_groups)
+    assert query_groups[0]["search_surface"] == "workspace_files"
+
+
 def test_taskboard_source_ref_policy_reuses_scoped_retrieval_policy():
     policy = AgentTask._taskboard_source_ref_policy()
 
@@ -376,7 +412,7 @@ async def test_block_carrier_executes_file_scoped_retrieval_and_injects_results(
 
     scoped_results = seen["scoped_results"]
     assert scoped_results[0]["bounded"]["search_surface"] == "workspace_files"
-    assert scoped_results[0]["bounded"]["search_engines"] == ["workspace_file_scan"]
+    assert scoped_results[0]["bounded"]["search_engines"] in (["workspace_file_grep"], ["workspace_file_scan"])
     assert scoped_results[0]["bounded"]["file_returned_results"] == 1
     assert scoped_results[0]["bounded"]["context_lines"] == 3
     assert scoped_results[0]["evidence_snippets"][0]["content"] == "alpha\nrelease deadline is 2026-07-01"
@@ -386,6 +422,109 @@ async def test_block_carrier_executes_file_scoped_retrieval_and_injects_results(
     assert compact_search_output["operation"] == "search"
     assert compact_search_output["bounded"]["search_surface"] == "workspace_files"
     assert compact_search_output["evidence_snippet_count"] == 1
+    compact_operations = execution_meta["block_carrier"]["workspace_operations"]
+    assert compact_operations[0]["kind"] == "workspace_operation"
+    assert compact_operations[0]["output"]["operation"] == "search"
+    assert compact_operations[0]["output"]["bounded"]["returned_results"] == 1
+
+
+@pytest.mark.asyncio
+async def test_taskboard_card_scoped_retrieval_uses_block_carrier(tmp_path):
+    agent = _create_agent("agent-task-taskboard-scoped-retrieval").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-scoped-retrieval-block-exec",
+        goal="Use scoped retrieval inside a TaskBoard card.",
+        success_criteria=["Evidence is grounded."],
+    )
+    await task.workspace.write_file("retained/ops-note.md", "Project Atlas owner is Priya Shah.\n")
+    card = TaskBoardCard(
+        id="collect",
+        objective="Find the Atlas owner evidence.",
+        allowed_execution_shape="actions",
+        metadata={
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "Priya Shah",
+                        "expected_role": "evidence_snippet",
+                        "search_surface": "workspace_files",
+                        "path": "retained",
+                        "pattern": "**",
+                        "max_results": 2,
+                    }
+                ]
+            }
+        },
+    )
+    plan = task._taskboard_card_carrier_plan(card)
+    work_unit = WorkUnitIntent(
+        id="taskboard:collect:attempt:1",
+        origin="taskboard_card",
+        objective=card.objective,
+        input_payload={
+            "card": card.to_dict(),
+            "scoped_retrieval": task._taskboard_card_scoped_retrieval(card),
+            "retrieval_policy": scoped_retrieval_policy(),
+        },
+        delivery_contract={"card": card.to_dict()},
+        runtime_preferences={
+            "handler": "agent_task_bounded_step",
+            "preferred_execution_shape": "taskboard_card",
+            "strategy": "taskboard",
+        },
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    seen: dict[str, Any] = {}
+
+    async def handler(block_context: Mapping[str, Any]) -> dict[str, Any]:
+        payload = task._taskboard_card_payload_with_scoped_retrieval_results(
+            work_unit.input_payload,
+            block_context,
+        )
+        seen["payload"] = payload
+        return {
+            "execution_result": {
+                "answer": "TaskBoard card used scoped retrieval.",
+                "scoped_retrieval_results": payload.get("scoped_retrieval_results", []),
+            },
+            "execution_meta": {
+                "execution_id": "taskboard-scoped-retrieval-child",
+                "status": "completed",
+                "route": {"selected_route": "test", "status": "completed"},
+                "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+            },
+        }
+
+    execution_result, execution_meta, _work_unit_result = await task._run_work_unit_through_blocks(
+        work_unit=work_unit,
+        plan=plan,
+        context_pack=cast(Any, context_pack),
+        execution_id="taskboard-scoped-retrieval-block-exec-run",
+        handler=handler,
+        start_payload={"test": True},
+    )
+
+    assert plan["scoped_retrieval"]["query_groups"][0]["pattern"] == "**"
+    scoped_results = seen["payload"]["scoped_retrieval_results"]
+    assert scoped_results[0]["bounded"]["search_surface"] == "workspace_files"
+    assert scoped_results[0]["bounded"]["returned_results"] == 1
+    assert scoped_results[0]["evidence_snippets"][0]["content"] == "Project Atlas owner is Priya Shah."
+    assert execution_result["scoped_retrieval_results"][0]["bounded"]["returned_results"] == 1
+    block_kinds = [
+        block["kind"]
+        for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]
+    ]
+    assert block_kinds == ["workspace_operation", "agent_step"]
+    compact_operations = execution_meta["block_carrier"]["workspace_operations"]
+    assert compact_operations[0]["kind"] == "workspace_operation"
+    assert compact_operations[0]["output"]["bounded"]["returned_results"] == 1
 
 
 def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():

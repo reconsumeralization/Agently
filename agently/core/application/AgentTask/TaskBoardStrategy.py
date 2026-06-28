@@ -925,6 +925,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "dependency_readbacks": dependency_readbacks,
                 "available_readback": self._taskboard_available_readback(evidence_view),
                 "source_ref_policy": self._taskboard_source_ref_policy(),
+                "scoped_retrieval": self._taskboard_card_scoped_retrieval(context.card),
+                "retrieval_policy": scoped_retrieval_policy(),
                 "workspace_delivery_policy": self._taskboard_workspace_delivery_policy(context),
                 "source_refs": source_refs,
                 "previous_attempt_errors": previous_errors,
@@ -947,7 +949,9 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "structurally truncated or marked full_value_available; inspect those before declaring dependency "
                 "evidence missing. If available_readback lists Action artifact refs and the prefetched previews are "
                 "still insufficient, call read_action_artifact with the artifact_id and action_call_id before blocking "
-                "on missing evidence. Return card-local evidence "
+                "on missing evidence. If scoped_retrieval_results is present, those are already executed bounded "
+                "Workspace search facts; use visible evidence_snippet content only within the excerpt, and treat "
+                "locator_ref records as targets for later readback/search rather than source-content proof. Return card-local evidence "
                 "and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
                 "is available, return status completed with diagnostics that explain the degraded source boundary. "
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
@@ -1018,6 +1022,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "card": DataFormatter.sanitize(context.card.to_dict()),
                     "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
                     "task_context_contract": self._task_context_contract(),
+                    "scoped_retrieval": DataFormatter.sanitize(self._taskboard_card_scoped_retrieval(context.card)),
                 },
                 quality_gates=(
                     {
@@ -1034,21 +1039,18 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "max_attempts": max_attempts,
                 },
             )
-            carrier_plan = {
-                "execution_shape": "taskboard_card",
-                "effective_execution_shape": "taskboard_card",
-                "step_instruction": str(getattr(context.card, "objective", "") or ""),
-                "expected_evidence": list(getattr(context.card, "required_outputs", ()) or ()),
-                "rationale": "Execute one TaskBoard card through the shared Block carrier.",
-                "step_scope": {},
-            }
+            carrier_plan = self._taskboard_card_carrier_plan(context.card)
 
             async def run_card_work_unit(_context: Mapping[str, Any]) -> Mapping[str, Any]:
                 carrier_output_policy = self._carrier_output_policy_from_block_context(_context)
+                effective_card_input_payload = self._taskboard_card_payload_with_scoped_retrieval_results(
+                    card_input_payload,
+                    _context,
+                )
                 card_result, card_meta = await self._run_bounded_child_execution(
                     execution=execution,
                     language_policy=language_policy,
-                    input_payload=card_input_payload,
+                    input_payload=effective_card_input_payload,
                     instruction=card_instruction,
                     output_schema=card_output_schema,
                     output_format=self._carrier_control_output_format(carrier_output_policy),
@@ -3913,6 +3915,43 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             ),
         }
 
+    def _taskboard_card_scoped_retrieval(self, card: Any) -> dict[str, Any]:
+        for container in (
+            getattr(card, "metadata", None),
+            getattr(card, "evidence_contract", None),
+        ):
+            if not isinstance(container, Mapping):
+                continue
+            normalized = self._normalize_scoped_retrieval_plan(container.get("scoped_retrieval"))
+            if normalized:
+                return normalized
+        return {}
+
+    def _taskboard_card_carrier_plan(self, card: Any) -> dict[str, Any]:
+        plan = {
+            "execution_shape": "taskboard_card",
+            "effective_execution_shape": "taskboard_card",
+            "step_instruction": str(getattr(card, "objective", "") or ""),
+            "expected_evidence": list(getattr(card, "required_outputs", ()) or ()),
+            "rationale": "Execute one TaskBoard card through the shared Block carrier.",
+            "step_scope": {},
+        }
+        scoped_retrieval = self._taskboard_card_scoped_retrieval(card)
+        if scoped_retrieval:
+            plan["scoped_retrieval"] = scoped_retrieval
+        return plan
+
+    def _taskboard_card_payload_with_scoped_retrieval_results(
+        self,
+        card_input_payload: Mapping[str, Any],
+        block_context: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = dict(card_input_payload)
+        scoped_results = self._scoped_retrieval_results_from_block_context(block_context)
+        if scoped_results:
+            payload["scoped_retrieval_results"] = DataFormatter.sanitize(scoped_results)
+        return payload
+
     @classmethod
     def _taskboard_source_ref_policy(cls) -> dict[str, Any]:
         return {
@@ -3932,7 +3971,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "a later block needs scoped content.",
                 "Do not claim source contents from ref_only records.",
                 "Use scoped retrieval query groups for Workspace/repository/file evidence before broad reads when it can reduce prompt input.",
-                "Use search_surface='workspace_index' for Workspace SQLite/FTS records, 'workspace_files' for bounded file search, or 'workspace_index_and_files' when both bounded surfaces are justified; for workspace_files, query is content text, path is the directory/file scope, and pattern is a file glob.",
+                "Use search_surface='workspace_index' for Workspace SQLite/FTS records, 'workspace_files' for bounded file search, or 'workspace_index_and_files' when both bounded surfaces are justified; for workspace_files, query is content text or an exact phrase, path is the directory/file scope, and pattern is one file glob such as *.md, * or **. Do not put list/read/search commands in query.",
                 "Treat local search results as bounded facts, not as semantic acceptance.",
                 "When unread source content is required, return next_board_action=readback with concrete "
                 "target_refs or use an available readback action.",

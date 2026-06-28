@@ -14,7 +14,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
+import shutil
+import subprocess
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
@@ -644,6 +648,40 @@ class Workspace:
         safe_context_lines = max(0, min(int(context_lines), 20))
         safe_max_snippet_bytes = max(1, min(int(max_snippet_bytes), 12000))
         base = self.resolve_file_path(path)
+        results: list[WorkspaceFileSearchResult] = []
+        rg_matches = await asyncio.to_thread(
+            self._search_file_matches_with_rg,
+            query_text,
+            base,
+            requested_pattern,
+            effective_pattern,
+            safe_max_results,
+            include_hidden,
+        )
+        if rg_matches is not None:
+            for candidate, relative, line_no in rg_matches:
+                if len(results) >= safe_max_results:
+                    break
+                result = await self._build_file_search_result(
+                    candidate=candidate,
+                    relative=relative,
+                    line_no=line_no,
+                    query_text=query_text,
+                    path=path,
+                    requested_pattern=requested_pattern,
+                    effective_pattern=effective_pattern,
+                    include_hidden=include_hidden,
+                    max_results=safe_max_results,
+                    max_file_bytes=safe_max_file_bytes,
+                    context_lines=safe_context_lines,
+                    max_snippet_bytes=safe_max_snippet_bytes,
+                    search_engine="workspace_file_grep",
+                    grep_tool="rg",
+                )
+                if result is not None:
+                    results.append(result)
+            return results
+
         if base.is_file():
             candidates = [base]
         elif base.exists():
@@ -651,7 +689,6 @@ class Workspace:
         else:
             candidates = []
 
-        results: list[WorkspaceFileSearchResult] = []
         for candidate in candidates:
             if len(results) >= safe_max_results:
                 break
@@ -669,82 +706,222 @@ class Workspace:
             read_result = await self.read_file(relative, max_bytes=safe_max_file_bytes)
             if not read_result.get("readable") or read_result.get("content_kind") != "text":
                 continue
-            text = str(read_result.get("content", ""))
-            lines = text.splitlines()
-            for line_no, line in enumerate(lines, start=1):
-                if query_text not in line:
-                    continue
-                line_index = line_no - 1
-                snippet_start = max(0, line_index - safe_context_lines)
-                snippet_end = min(len(lines), line_index + safe_context_lines + 1)
-                snippet = "\n".join(lines[snippet_start:snippet_end])
-                snippet_raw = snippet.encode("utf-8")
-                if len(snippet_raw) > safe_max_snippet_bytes:
-                    snippet = snippet_raw[:safe_max_snippet_bytes].decode("utf-8", errors="ignore")
-                    snippet_raw = snippet.encode("utf-8")
-                search_scope = {
-                    "path": str(path),
-                    "pattern": requested_pattern,
-                    "effective_pattern": effective_pattern,
-                    "include_hidden": include_hidden,
-                    "max_results": safe_max_results,
-                    "max_file_bytes": safe_max_file_bytes,
-                    "context_lines": safe_context_lines,
-                    "max_snippet_bytes": safe_max_snippet_bytes,
-                }
-                file_ref = cast(
-                    WorkspaceFileRef,
-                    {
-                        "path": relative,
-                        "bytes": int(read_result.get("bytes", file_size)),
-                        "sha256": str(read_result.get("sha256", "")),
-                        "media_type": read_result.get("media_type"),
-                        "content_kind": str(read_result.get("content_kind", "unknown")),
-                        "role": "source",
-                    },
-                )
-                locator_ref = {
-                    "role": "locator_ref",
-                    "content_state": "ref_only",
-                    "source": "workspace.search_files",
-                    "query": query_text,
-                    "scope": search_scope,
-                    "path": relative,
-                    "bytes": file_ref["bytes"],
-                    "sha256": file_ref["sha256"],
-                    "media_type": file_ref["media_type"],
-                    "content_kind": file_ref["content_kind"],
-                    "search_engine": "workspace_file_scan",
-                }
-                results.append(
-                    cast(
-                        WorkspaceFileSearchResult,
-                        {
-                            "path": relative,
-                            "line": line_no,
-                            "text": line,
-                            "role": "evidence_snippet",
-                            "content_state": "bounded_readback_available",
-                            "source": "workspace.search_files",
-                            "query": query_text,
-                            "scope": search_scope,
-                        "locator_ref": locator_ref,
-                        "snippet": snippet,
-                        "snippet_chars": len(snippet),
-                        "snippet_bytes": len(snippet_raw),
-                        "line_start": snippet_start + 1,
-                        "line_end": snippet_end,
-                            "bytes": file_ref["bytes"],
-                            "sha256": file_ref["sha256"],
-                            "media_type": file_ref["media_type"],
-                            "content_kind": file_ref["content_kind"],
-                            "search_engine": "workspace_file_scan",
-                            "file_ref": file_ref,
-                        },
-                    )
-                )
-                break
+            line_no = self._first_matching_line(str(read_result.get("content", "")).splitlines(), query_text)
+            if line_no <= 0:
+                continue
+            result = await self._build_file_search_result(
+                candidate=candidate,
+                relative=relative,
+                line_no=line_no,
+                query_text=query_text,
+                path=path,
+                requested_pattern=requested_pattern,
+                effective_pattern=effective_pattern,
+                include_hidden=include_hidden,
+                max_results=safe_max_results,
+                max_file_bytes=safe_max_file_bytes,
+                context_lines=safe_context_lines,
+                max_snippet_bytes=safe_max_snippet_bytes,
+                search_engine="workspace_file_scan",
+                grep_tool=None,
+            )
+            if result is not None:
+                results.append(result)
         return results
+
+    def _search_file_matches_with_rg(
+        self,
+        query_text: str,
+        base: Path,
+        requested_pattern: str,
+        effective_pattern: str,
+        max_results: int,
+        include_hidden: bool,
+    ) -> list[tuple[Path, str, int]] | None:
+        rg_path = shutil.which("rg")
+        if rg_path is None:
+            return None
+        if not base.exists():
+            return []
+        command = [
+            rg_path,
+            "--json",
+            "--fixed-strings",
+            "--line-number",
+            "--no-heading",
+            "--no-ignore",
+            "--max-count",
+            "1",
+            "--glob",
+            effective_pattern,
+            query_text,
+        ]
+        if include_hidden:
+            command.insert(1, "--hidden")
+        search_root = base if base.is_dir() else base.parent
+        command.append(str(base.name if base.is_file() else "."))
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(search_root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+        except Exception:
+            return None
+        if completed.returncode == 1:
+            return []
+        if completed.returncode != 0:
+            return None
+
+        matches: list[tuple[Path, str, int]] = []
+        seen_paths: set[str] = set()
+        for raw_line in completed.stdout.splitlines():
+            if len(matches) >= max_results:
+                break
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "match":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            path_info = data.get("path")
+            if not isinstance(path_info, dict):
+                continue
+            raw_candidate_path = path_info.get("text")
+            if not isinstance(raw_candidate_path, str):
+                continue
+            candidate = (search_root / raw_candidate_path).resolve()
+            try:
+                relative = str(candidate.relative_to(self.files_root))
+            except ValueError:
+                continue
+            if relative in seen_paths:
+                continue
+            if not include_hidden and any(part.startswith(".") for part in Path(relative).parts):
+                continue
+            line_no = int(data.get("line_number") or 0)
+            matches.append((candidate, relative, line_no))
+            seen_paths.add(relative)
+        return matches
+
+    async def _build_file_search_result(
+        self,
+        *,
+        candidate: Path,
+        relative: str,
+        line_no: int,
+        query_text: str,
+        path: str | Path,
+        requested_pattern: str,
+        effective_pattern: str,
+        include_hidden: bool,
+        max_results: int,
+        max_file_bytes: int,
+        context_lines: int,
+        max_snippet_bytes: int,
+        search_engine: str,
+        grep_tool: str | None,
+    ) -> WorkspaceFileSearchResult | None:
+        if not candidate.is_file():
+            return None
+        file_size = candidate.stat().st_size
+        if file_size > max_file_bytes:
+            return None
+        read_result = await self.read_file(relative, max_bytes=max_file_bytes)
+        if not read_result.get("readable") or read_result.get("content_kind") != "text":
+            return None
+        text = str(read_result.get("content", ""))
+        lines = text.splitlines()
+        if line_no <= 0 or line_no > len(lines):
+            line_no = self._first_matching_line(lines, query_text)
+        if line_no <= 0:
+            return None
+        line_index = line_no - 1
+        snippet_start = max(0, line_index - context_lines)
+        snippet_end = min(len(lines), line_index + context_lines + 1)
+        snippet = "\n".join(lines[snippet_start:snippet_end])
+        snippet_raw = snippet.encode("utf-8")
+        if len(snippet_raw) > max_snippet_bytes:
+            snippet = snippet_raw[:max_snippet_bytes].decode("utf-8", errors="ignore")
+            snippet_raw = snippet.encode("utf-8")
+        search_scope = {
+            "path": str(path),
+            "pattern": requested_pattern,
+            "effective_pattern": effective_pattern,
+            "include_hidden": include_hidden,
+            "max_results": max_results,
+            "max_file_bytes": max_file_bytes,
+            "context_lines": context_lines,
+            "max_snippet_bytes": max_snippet_bytes,
+            "search_engine": search_engine,
+            "grep_tool": grep_tool,
+        }
+        file_ref = cast(
+            WorkspaceFileRef,
+            {
+                "path": relative,
+                "bytes": int(read_result.get("bytes", file_size)),
+                "sha256": str(read_result.get("sha256", "")),
+                "media_type": read_result.get("media_type"),
+                "content_kind": str(read_result.get("content_kind", "unknown")),
+                "role": "source",
+            },
+        )
+        locator_ref = {
+            "role": "locator_ref",
+            "content_state": "ref_only",
+            "source": "workspace.search_files",
+            "query": query_text,
+            "scope": search_scope,
+            "path": relative,
+            "bytes": file_ref["bytes"],
+            "sha256": file_ref["sha256"],
+            "media_type": file_ref["media_type"],
+            "content_kind": file_ref["content_kind"],
+            "search_engine": search_engine,
+            "grep_tool": grep_tool,
+        }
+        return cast(
+            WorkspaceFileSearchResult,
+            {
+                "path": relative,
+                "line": line_no,
+                "text": lines[line_index],
+                "role": "evidence_snippet",
+                "content_state": "bounded_readback_available",
+                "source": "workspace.search_files",
+                "query": query_text,
+                "scope": search_scope,
+                "locator_ref": locator_ref,
+                "snippet": snippet,
+                "snippet_chars": len(snippet),
+                "snippet_bytes": len(snippet_raw),
+                "line_start": snippet_start + 1,
+                "line_end": snippet_end,
+                "bytes": file_ref["bytes"],
+                "sha256": file_ref["sha256"],
+                "media_type": file_ref["media_type"],
+                "content_kind": file_ref["content_kind"],
+                "search_engine": search_engine,
+                "grep_tool": grep_tool,
+                "file_ref": file_ref,
+            },
+        )
+
+    @staticmethod
+    def _first_matching_line(lines: list[str], query_text: str) -> int:
+        for line_no, line in enumerate(lines, start=1):
+            if query_text in line:
+                return line_no
+        return 0
 
     async def write_file(
         self,

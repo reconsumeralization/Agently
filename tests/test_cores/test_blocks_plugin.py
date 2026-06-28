@@ -570,7 +570,7 @@ async def test_blocks_workspace_operation_search_can_use_workspace_files_surface
     output = evidence.execution_block_results[0]["output"]
     assert output["operation"] == "search"
     assert output["bounded"]["search_surface"] == "workspace_files"
-    assert output["bounded"]["search_engines"] == ["workspace_file_scan"]
+    assert output["bounded"]["search_engines"] in (["workspace_file_grep"], ["workspace_file_scan"])
     assert output["bounded"]["index_total_matches"] == 0
     assert output["bounded"]["file_returned_results"] == 1
     assert output["bounded"]["returned_results"] == 1
