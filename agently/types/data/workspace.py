@@ -142,6 +142,7 @@ class WorkspaceFileSearchResult(TypedDict):
     snippet: str
     snippet_chars: int
     snippet_bytes: int
+    truncated: bool
     line_start: int
     line_end: int
     bytes: int

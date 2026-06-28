@@ -803,7 +803,27 @@ async def test_workspace_search_files_returns_bounded_retrieval_roles(tmp_path):
     assert results[0]["locator_ref"]["path"] == "notes/todo.txt"
     assert results[0]["search_engine"] in {"workspace_file_grep", "workspace_file_scan"}
     assert results[0]["scope"]["search_engine"] == results[0]["search_engine"]
+    assert results[0]["truncated"] is False
     assert not {"useful", "accepted", "semantically_relevant"}.intersection(results[0])
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_files_marks_truncated_snippets(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-search-files-truncated")
+    await workspace.write_file("notes/todo.txt", "alpha deadline " + ("details " * 20) + "\n")
+
+    results = await workspace.search_files(
+        "deadline",
+        path="notes",
+        pattern="*.txt",
+        max_results=5,
+        max_snippet_bytes=24,
+    )
+
+    assert results[0]["path"] == "notes/todo.txt"
+    assert results[0]["snippet_bytes"] <= 24
+    assert results[0]["truncated"] is True
+    assert results[0]["locator_ref"]["content_state"] == "ref_only"
 
 
 @pytest.mark.asyncio

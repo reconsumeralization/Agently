@@ -324,6 +324,12 @@ earlier evidence-gathering cards. If a generated continuation card still
 reports that the same readback is insufficient, the framework does not
 recursively synthesize another readback/continuation chain; the card must
 propose different executable work or remain blocked with diagnostics.
+For scoped Workspace retrieval, `evidence_snippet` records include whether the
+bounded snippet was `truncated`. If a TaskBoard card with scoped retrieval
+returns blocked/insufficient output without an explicit next action, AgentTask
+turns that local insufficiency into an action-capable evidence card with an
+expanded bounded retrieval plan plus a continuation card. The search result is
+still only factual context; the continuation card decides whether it is enough.
 When the missing evidence is a new concrete URL, path, or ref rather than an
 existing Action/Workspace ref, the control card should return
 `next_board_action="readback"` plus structured `target_refs`. AgentTask turns

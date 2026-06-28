@@ -526,6 +526,7 @@ async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(
     assert output["evidence_snippets"][0]["content_state"] == "bounded_readback_available"
     assert output["evidence_snippets"][0]["locator_ref"]["ref"]["id"] == expected_ref["id"]
     assert output["evidence_snippets"][0]["snippet_chars"] <= 24
+    assert output["evidence_snippets"][0]["truncated"] is True
     assert evidence.workspace_refs == (expected_ref["id"],)
     assert not {"useful", "accepted", "semantically_relevant"}.intersection(output)
 
@@ -580,6 +581,7 @@ async def test_blocks_workspace_operation_search_can_use_workspace_files_surface
     assert output["locator_refs"][0]["path"] == "notes/todo.md"
     assert output["evidence_snippets"][0]["role"] == "evidence_snippet"
     assert output["evidence_snippets"][0]["content"] == "alpha\nrelease deadline is 2026-07-01"
+    assert output["evidence_snippets"][0]["truncated"] is False
     assert output["evidence_snippets"][0]["line_start"] == 1
     assert output["evidence_snippets"][0]["line_end"] == 2
     assert output["evidence_snippets"][0]["locator_ref"]["path"] == "notes/todo.md"

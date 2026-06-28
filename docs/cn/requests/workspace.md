@@ -320,7 +320,7 @@ export_result = await agent.workspace.export_file(
 未知 binary 文件会返回 `readable=False` 和结构化 diagnostics，不会用 replacement
 character 伪造文本。`search_files` 也只搜索通过同一 handler registry 判定为 readable
 text 的文件。搜索结果保留原有 `path`、`line`、`text` 字段，同时会带
-`role="evidence_snippet"`、有界片段计数，以及嵌套的 `locator_ref`
+`role="evidence_snippet"`、有界片段计数、`truncated` 标记，以及嵌套的 `locator_ref`
 （`content_state="ref_only"`）。可见片段只能作为该片段范围内的证据；locator
 只表示后续可以用 `read_file(...)` 或 Blocks `workspace_operation` 做有界读回的目标。
 

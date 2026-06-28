@@ -1307,6 +1307,7 @@ def _workspace_evidence_snippet(
         "snippet": content,
         "snippet_chars": len(content),
         "snippet_bytes": len(content.encode("utf-8")),
+        "truncated": not bool(segment.get("eof", True)),
         "offset": segment.get("offset"),
         "size": segment.get("size"),
         "total_size": segment.get("total_size"),

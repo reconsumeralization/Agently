@@ -286,6 +286,11 @@ Workspace file refs。框架生成的 readback card 会把 evidence scope 扩展
 产出的 Action refs。若框架生成的 continuation card 仍报告同一批 readback 不足，框架不会
 继续递归合成新的 readback/continuation 链；该 card 必须提出其他可执行工作，或者带
 diagnostics 保持 blocked。
+对于 scoped Workspace retrieval，`evidence_snippet` 会明确标记有界片段是否
+`truncated`。如果带 scoped retrieval 的 TaskBoard card 返回 blocked/insufficient，
+且没有给出显式 next action，AgentTask 会把这个局部不足转成 action-capable evidence
+card：使用放宽后的有界检索计划补证据，再接一个 continuation card。检索结果仍只是事实
+上下文；是否足够继续由 continuation card 判断。
 当缺失证据是新的具体 URL、路径或 ref，而不是已有 Action / Workspace ref 时，control card
 应返回 `next_board_action="readback"` 加结构化 `target_refs`。AgentTask 会把这个紧凑意图
 转成可执行 action 的 evidence card，由它负责下载、保存快照或物化目标，再运行 continuation

@@ -1778,6 +1778,94 @@ def _create_taskboard_control_dependency_readback_agent(
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def test_taskboard_blocked_scoped_retrieval_card_adds_continuation_patch(tmp_path):
+    agent = _create_agent("taskboard-scoped-retrieval-continuation").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-scoped-retrieval-continuation",
+        goal="Use scoped retrieval evidence before final synthesis.",
+        success_criteria=["The downstream card continues when bounded evidence is insufficient."],
+    )
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="scoped-retrieval-continuation",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "scoped-retrieval-continuation-graph",
+                "cards": [
+                    {
+                        "id": "review",
+                        "objective": "Review scoped retrieval evidence and request more if the snippet is incomplete.",
+                        "allowed_execution_shape": "actions",
+                        "metadata": {
+                            "scoped_retrieval": {
+                                "query_groups": [
+                                    {
+                                        "query": "Project Atlas blocker",
+                                        "expected_role": "evidence_snippet",
+                                        "search_surface": "workspace_index",
+                                        "filters": {"collection": "retained-notes"},
+                                        "snippet_limit": 200,
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ],
+            }
+        ),
+    )
+    card = revision.graph.card_by_id()["review"]
+    diagnostics: list[dict[str, Any]] = []
+    patch = task._taskboard_scoped_retrieval_continuation_patch(
+        SimpleNamespace(revision=revision, card=card),
+        {
+            "status": "blocked",
+            "sufficient": False,
+            "gaps": ["The bounded snippet ended before the blocker sentence was complete."],
+            "remaining_work": ["Rerun scoped retrieval with enough bounded context before synthesis."],
+        },
+        diagnostics,
+    )
+
+    assert patch is not None
+    assert diagnostics[0]["code"] == "taskboard.scoped_retrieval.auto_continuation_patch"
+    next_revision = validator.apply_patch(revision, patch)
+    cards = next_revision.graph.card_by_id()
+    assert cards["review"].failure_policy == "degradable"
+    assert "review.evidence" in cards
+    assert "review.continue" in cards
+    assert cards["review.evidence"].allowed_execution_shape == "actions"
+    scoped_plan = cards["review.evidence"].metadata["scoped_retrieval"]
+    assert scoped_plan["query_groups"][0]["snippet_limit"] == 1200
+    assert cards["review.evidence"].metadata["generated_by"] == "agent_task.taskboard.scoped_retrieval_continuation"
+    assert cards["review.continue"].depends_on == ("review.evidence",)
+
+    repeated_patch = task._taskboard_scoped_retrieval_continuation_patch(
+        SimpleNamespace(revision=next_revision, card=cards["review.continue"]),
+        {
+            "status": "blocked",
+            "sufficient": False,
+            "remaining_work": ["The expanded scoped retrieval evidence is still insufficient."],
+        },
+        [],
+    )
+
+    assert repeated_patch is None
+
+    nonfatal_gap_patch = task._taskboard_scoped_retrieval_continuation_patch(
+        SimpleNamespace(revision=revision, card=card),
+        {
+            "status": "completed",
+            "sufficient": True,
+            "gaps": ["Optional caveat that does not block this card."],
+        },
+        [],
+    )
+
+    assert nonfatal_gap_patch is None
+
+
 def test_taskboard_control_readback_action_auto_patch_adds_continuation():
     validator = TaskBoardValidator()
     revision = TaskBoardRevision.create(

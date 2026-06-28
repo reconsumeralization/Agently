@@ -1305,6 +1305,11 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "previous_attempt_errors": previous_errors,
                 }
             )
+            patch_proposal = (
+                self._taskboard_scoped_retrieval_continuation_patch(context, card_output, diagnostics)
+                if isinstance(card_output, Mapping)
+                else None
+            )
             return TaskBoardCardResult(
                 card_id=context.card.id,
                 status=card_status,
@@ -1317,6 +1322,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 ),
                 file_refs=tuple(ref for ref in output_file_refs if isinstance(ref, Mapping)),
                 diagnostics=tuple(diagnostics),
+                patch_proposal=patch_proposal,
                 metadata={
                     "execution_id": execution_meta.get("execution_id"),
                     "execution_strategy": self.execution_strategy,
@@ -1648,6 +1654,12 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                         "card_id": context.card.id,
                     }
                 )
+        if patch_proposal is None and isinstance(card_output, Mapping):
+            patch_proposal = self._taskboard_scoped_retrieval_continuation_patch(
+                context,
+                card_output,
+                diagnostics,
+            )
         output_file_refs: list[Any] = []
         if isinstance(card_output, Mapping):
             raw_file_refs = card_output.get("file_refs")
@@ -2067,6 +2079,104 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             refs.append(text)
         return refs[:8]
 
+    def _taskboard_scoped_retrieval_continuation_patch(
+        self,
+        context: Any,
+        card_output: Mapping[str, Any],
+        diagnostics: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
+        if next_action:
+            return None
+        status = str(card_output.get("status") or "").strip().lower()
+        structurally_insufficient = (
+            status == "blocked"
+            or card_output.get("sufficient") is False
+            or self._has_remaining_work(card_output.get("remaining_work"))
+        )
+        if not structurally_insufficient:
+            return None
+        scoped_retrieval = self._taskboard_card_scoped_retrieval(getattr(context, "card", None))
+        if not scoped_retrieval:
+            return None
+        expanded_scoped_retrieval = self._taskboard_expand_scoped_retrieval_for_continuation(scoped_retrieval)
+        if not expanded_scoped_retrieval:
+            return None
+        patch_input = dict(card_output)
+        patch_input["next_board_action"] = "readback"
+        patch = self._taskboard_control_auto_patch(
+            context,
+            patch_input,
+            scoped_retrieval=expanded_scoped_retrieval,
+            source="agent_task.taskboard.scoped_retrieval_continuation",
+            diagnostic_code="taskboard.scoped_retrieval.auto_continuation_patch",
+            auto_patch_reason="blocked_scoped_retrieval_consumer_continuation",
+        )
+        if patch is None:
+            return None
+        diagnostics.append(
+            {
+                "code": "taskboard.scoped_retrieval.auto_continuation_patch",
+                "message": (
+                    "Converted a structurally insufficient TaskBoard scoped-retrieval card into "
+                    "an evidence card plus continuation."
+                ),
+                "card_id": str(getattr(getattr(context, "card", None), "id", "") or ""),
+                "query_group_count": len(expanded_scoped_retrieval.get("query_groups", [])),
+            }
+        )
+        return patch
+
+    @classmethod
+    def _taskboard_expand_scoped_retrieval_for_continuation(
+        cls,
+        scoped_retrieval: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized = cls._normalize_scoped_retrieval_plan(scoped_retrieval)
+        raw_groups = normalized.get("query_groups")
+        if not isinstance(raw_groups, Sequence) or isinstance(raw_groups, str | bytes | bytearray):
+            return {}
+        bounded_defaults = scoped_retrieval_policy().get("bounded_defaults", {})
+        default_snippet_limit = cls._positive_int(
+            bounded_defaults.get("snippet_limit") if isinstance(bounded_defaults, Mapping) else None,
+            default=1200,
+        )
+        expanded_groups: list[dict[str, Any]] = []
+        for item in raw_groups:
+            if not isinstance(item, Mapping):
+                continue
+            group = dict(item)
+            current_limit = cls._positive_int(group.get("snippet_limit"), default=0)
+            if current_limit <= 0:
+                next_limit = default_snippet_limit
+            elif current_limit < default_snippet_limit:
+                next_limit = default_snippet_limit
+            else:
+                next_limit = min(current_limit * 2, 12000)
+            group["snippet_limit"] = next_limit
+            surface = str(group.get("search_surface") or "").strip()
+            if surface in {"workspace_files", "workspace_index_and_files"} or group.get("path") or group.get("pattern"):
+                current_context_lines = cls._positive_int(group.get("context_lines"), default=0)
+                group["context_lines"] = max(current_context_lines, 3)
+            expanded_groups.append(DataFormatter.sanitize(group))
+            if len(expanded_groups) >= 8:
+                break
+        if not expanded_groups:
+            return {}
+        expanded = {"query_groups": expanded_groups}
+        fallback_order = normalized.get("fallback_order")
+        if isinstance(fallback_order, Sequence) and not isinstance(fallback_order, str | bytes | bytearray):
+            expanded["fallback_order"] = DataFormatter.sanitize(list(fallback_order))
+        return expanded
+
+    @staticmethod
+    def _positive_int(value: Any, *, default: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0, number)
+
     @classmethod
     def _taskboard_control_auto_patch(
         cls,
@@ -2074,9 +2184,14 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         card_output: Mapping[str, Any],
         *,
         target_refs: Sequence[str] | None = None,
+        scoped_retrieval: Mapping[str, Any] | None = None,
+        source: str | None = None,
+        diagnostic_code: str = "taskboard.control.auto_readback_patch",
+        auto_patch_reason: str = "next_board_action=readback",
     ) -> dict[str, Any] | None:
         next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
-        if next_action not in {"readback", "needs_readback"}:
+        scoped_retrieval_plan = cls._normalize_scoped_retrieval_plan(scoped_retrieval)
+        if next_action not in {"readback", "needs_readback"} and not scoped_retrieval_plan:
             return None
         target_ref_list = [str(ref).strip() for ref in list(target_refs or ()) if str(ref).strip()]
         revision = getattr(context, "revision", None)
@@ -2116,6 +2231,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             in {
                 "agent_task.taskboard.control_auto_readback",
                 "agent_task.taskboard.control_auto_target_refs",
+                "agent_task.taskboard.scoped_retrieval_continuation",
             }
             and (
                 str(current_metadata.get("readback_card_id") or "").strip()
@@ -2123,18 +2239,20 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             )
         ):
             return None
-        source = (
+        patch_source = source or (
             "agent_task.taskboard.control_auto_target_refs"
             if target_ref_list
             else "agent_task.taskboard.control_auto_readback"
         )
         evidence_card_id = (
-            unique_id(f"{current_id}.evidence") if target_ref_list else unique_id(f"{current_id}.readback")
+            unique_id(f"{current_id}.evidence")
+            if target_ref_list or scoped_retrieval_plan
+            else unique_id(f"{current_id}.readback")
         )
         current_metadata.update(
             {
                 "superseded_by": continuation_id,
-                "auto_patch_reason": "next_board_action=readback",
+                "auto_patch_reason": auto_patch_reason,
             }
         )
         current_card.update(
@@ -2148,7 +2266,13 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         readback_dependencies = cls._taskboard_auto_readback_scope(card, graph)
         gaps = cls._normalize_string_list(card_output.get("gaps"))
         remaining_work = cls._normalize_string_list(card_output.get("remaining_work"))
-        if target_ref_list:
+        if scoped_retrieval_plan:
+            readback_objective = "Run expanded bounded scoped retrieval before continuing the blocked card."
+            if target_ref_list:
+                readback_objective = (
+                    f"{readback_objective} Also collect explicit target refs: {'; '.join(target_ref_list)}"
+                )
+        elif target_ref_list:
             readback_objective = (
                 "Collect scoped evidence from the explicit target refs required before continuing the blocked "
                 f"control card. Target refs: {'; '.join(target_ref_list)}"
@@ -2170,16 +2294,19 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             )
         evidence_metadata = {
             "evidence_scope": readback_dependencies,
-            "generated_by": source,
+            "generated_by": patch_source,
             "source_card_id": current_id,
         }
         if target_ref_list:
             evidence_metadata["target_refs"] = target_ref_list
+        if scoped_retrieval_plan:
+            evidence_metadata["scoped_retrieval"] = DataFormatter.sanitize(scoped_retrieval_plan)
+            evidence_metadata["retrieval_policy"] = scoped_retrieval_policy()
         continuation_metadata = {
-            "generated_by": source,
+            "generated_by": patch_source,
             "continues_card_id": current_id,
             "readback_card_id": evidence_card_id,
-            "evidence_card_id": evidence_card_id if target_ref_list else "",
+            "evidence_card_id": evidence_card_id if target_ref_list or scoped_retrieval_plan else "",
         }
         if final_workspace_deliverables:
             continuation_metadata["final_workspace_deliverables"] = final_workspace_deliverables
@@ -2188,17 +2315,20 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "objective": readback_objective,
             "depends_on": readback_dependencies,
             "required_outputs": (
+                ["Expanded bounded scoped retrieval evidence or diagnostics explaining why it remains insufficient."]
+                if scoped_retrieval_plan
+                else
                 ["Evidence gathered from target refs or diagnostics explaining inaccessible refs."]
                 if target_ref_list
                 else ["Bounded readback previews for verifier-visible cold evidence."]
             ),
-            "allowed_execution_shape": "actions" if target_ref_list else "readback",
+            "allowed_execution_shape": "actions" if target_ref_list or scoped_retrieval_plan else "readback",
             "failure_policy": "required",
             "metadata": evidence_metadata,
         }
         patch = {
             "base_revision": str(getattr(revision, "revision_id", "") or ""),
-            "source": source,
+            "source": patch_source,
             "operations": [
                 {"op": "update_card", "card": current_card},
                 {
@@ -2221,20 +2351,23 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "op": "append_diagnostic",
                     "diagnostic": {
                         "code": "taskboard.control.auto_readback_patch",
+                        "source_code": diagnostic_code,
                         "card_id": current_id,
                         "readback_card_id": evidence_card_id,
                         "continuation_card_id": continuation_id,
                         "target_ref_count": len(target_ref_list),
+                        "scoped_retrieval": bool(scoped_retrieval_plan),
                     },
                 },
             ],
             "diagnostics": [
                 {
-                    "code": "taskboard.control.auto_readback_patch",
+                    "code": diagnostic_code,
                     "card_id": current_id,
                     "readback_card_id": evidence_card_id,
                     "continuation_card_id": continuation_id,
                     "target_ref_count": len(target_ref_list),
+                    "scoped_retrieval": bool(scoped_retrieval_plan),
                 }
             ],
         }
@@ -4113,6 +4246,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "Do not claim source contents from ref_only records.",
                 "Use scoped retrieval query groups for Workspace/repository/file evidence before broad reads when it can reduce prompt input.",
                 "Use search_surface='workspace_index' for Workspace SQLite/FTS records, 'workspace_files' for bounded file search, or 'workspace_index_and_files' when both bounded surfaces are justified; for workspace_index records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For workspace_files, query is content text or an exact phrase, path is the directory/file scope, and pattern is one file glob such as *.md, * or **. Do not put list/read/search commands in query.",
+                "Treat truncated evidence snippets as partial facts; downstream consumers decide whether to request wider scoped retrieval, readback, or continuation.",
                 "Treat local search results as bounded facts, not as semantic acceptance.",
                 "When unread source content is required, return next_board_action=readback with concrete "
                 "target_refs or use an available readback action.",

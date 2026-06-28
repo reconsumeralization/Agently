@@ -43,6 +43,7 @@ def scoped_retrieval_policy() -> dict[str, Any]:
         "rules": [
             "Use scoped search before full file/resource reads when it can reduce input volume.",
             "Treat locator_ref as discovery only until a bounded readback/snippet is available.",
+            "Treat truncated evidence snippets as factual partial context; downstream consumers decide whether to request wider scoped retrieval or readback.",
             "Do not let local search hits decide semantic usefulness or task acceptance.",
             "For workspace_index records, put record collection in filters.collection; path is only for file search or exact record paths; use filters.kind only when the exact record kind is provided, never infer a generic kind such as note.",
         ],

@@ -346,9 +346,10 @@ returns bounded content with `bytes`, `sha256`, `offset`, `read_bytes`,
 `search_files` only searches files that are readable text through the same
 handler registry. Search results keep the original `path`, `line`, and `text`
 fields, and also include `role="evidence_snippet"`, bounded snippet counts, and
-a nested `locator_ref` with `content_state="ref_only"`. Use the visible snippet
-as evidence only within that excerpt; use the locator as a target for a later
-bounded `read_file(...)` or Blocks `workspace_operation` readback.
+a `truncated` flag plus a nested `locator_ref` with `content_state="ref_only"`.
+Use the visible snippet as evidence only within that excerpt; use the locator
+as a target for a later bounded `read_file(...)` or Blocks
+`workspace_operation` readback.
 
 Blocks `workspace_operation` can also run scoped Workspace searches through the
 Workspace SQLite/FTS index, bounded Workspace file search, and bounded ref/path

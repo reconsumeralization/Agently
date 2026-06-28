@@ -849,9 +849,11 @@ class Workspace:
         snippet_end = min(len(lines), line_index + context_lines + 1)
         snippet = "\n".join(lines[snippet_start:snippet_end])
         snippet_raw = snippet.encode("utf-8")
+        snippet_truncated = False
         if len(snippet_raw) > max_snippet_bytes:
             snippet = snippet_raw[:max_snippet_bytes].decode("utf-8", errors="ignore")
             snippet_raw = snippet.encode("utf-8")
+            snippet_truncated = True
         search_scope = {
             "path": str(path),
             "pattern": requested_pattern,
@@ -904,6 +906,7 @@ class Workspace:
                 "snippet": snippet,
                 "snippet_chars": len(snippet),
                 "snippet_bytes": len(snippet_raw),
+                "truncated": snippet_truncated,
                 "line_start": snippet_start + 1,
                 "line_end": snippet_end,
                 "bytes": file_ref["bytes"],
