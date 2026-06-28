@@ -1030,6 +1030,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "acceptance facts and deterministic guards. When repair_context.available_evidence_anchors is present, "
             "use its exact source_refs values and action_result_previews as the bounded evidence anchor set for repair; "
             "do not shorten, infer, or reconstruct URLs, file paths, or source refs from source titles or prose feedback. "
+            "source_refs with content_state='ref_only' prove only discovery or materialization; read the referenced "
+            "file/ref before using its content for repository, document, or source-grounded claims. "
             "For web discovery tasks, if the task context already names an official domain, homepage, or URL and "
             "search results are empty, unstable, or inconclusive, plan a Browse step for that known entry point and "
             "follow same-site navigation links before concluding that the required source is unavailable. Search "
@@ -1209,6 +1211,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "For web-source steps, treat Search results as discovery hints only. Browse official pages and follow "
                     "same-site index/list/download/navigation links before relying on a broad announcement page as the "
                     "source boundary. "
+                    "For repository or file-source steps, a clone/list manifest path is ref_only; read the specific "
+                    "file or artifact before making claims about its content. "
                     "Do not claim final completion unless evidence supports it."
                     + self._bounded_step_carrier_instruction(carrier_output_policy)
                 ),

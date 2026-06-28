@@ -303,6 +303,10 @@ keeps the declared final path for the final synthesis or finalization card.
 Framework-generated final repair or continuation cards that are marked with the
 required final deliverable path are authorized to write that path, so repair
 does not loop by repeatedly producing only working evidence files.
+Flat source refs carry the same boundary: repository clone/list manifest paths
+are `ref_only` until a file read, artifact readback, or bounded content preview
+is visible. A verifier or repair planner can reuse exact paths as retrieval
+targets, but not as proof of file contents.
 
 Flat and TaskBoard work units also receive a task context contract with
 `run_date_utc`, `run_time_utc`, current/latest/as-of source-boundary guidance,

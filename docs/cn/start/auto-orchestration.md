@@ -269,6 +269,9 @@ required final path，AgentTask 会把该中间 artifact 重定位到
 `working/taskboard/<card-id>/...`，并把声明的最终路径留给最终 synthesis/finalization card。
 由框架生成且显式标记了 required final deliverable path 的 final repair / continuation
 card 可以写入该最终路径，避免 repair 只反复产出 working evidence 文件而无法满足 host guard。
+Flat source refs 也遵守同一边界：repository clone/list manifest 中发现的文件路径在文件读取、
+artifact readback 或有界 content preview 出现前都是 `ref_only`。verifier 或 repair
+planner 可以复用这些精确路径作为检索目标，但不能把它们当成文件内容事实的证明。
 
 Flat 和 TaskBoard 的 work unit 也会收到同一份 task context contract，其中包含
 `run_date_utc`、`run_time_utc`、current/latest/as-of source boundary 指引，以及同一套

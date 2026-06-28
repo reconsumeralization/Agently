@@ -4293,6 +4293,87 @@ def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(t
         ref["field"] == "path" and ref["value"] == "configs/_base_/default.yaml"
         for ref in verifier_summary["source_refs"]
     )
+    assert any(
+        ref["field"] == "path"
+        and ref["value"] == "configs/_base_/default.yaml"
+        and ref["content_state"] == "bounded_readback_available"
+        for ref in verifier_summary["source_refs"]
+    )
+
+
+def test_flat_source_refs_distinguish_ref_only_repo_manifest_paths(tmp_path):
+    agent = _create_agent("agent-task-ref-only-repo-manifest").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Create a source-grounded repository report.",
+        success_criteria=["The report grounds claims in files that were read."],
+        execution="flat",
+    )
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "execution_meta": {
+                "status": "completed",
+                "logs": {
+                    "action_logs": [
+                        {
+                            "action_id": "clone_repo",
+                            "status": "success",
+                            "action_call_id": "call-clone",
+                            "model_digest": {
+                                "result_preview": {
+                                    "repo": "example/repo",
+                                    "files": [
+                                        {"path": "README.md"},
+                                        {"path": "docs/guide.md"},
+                                    ],
+                                },
+                                "result_preview_meta": {"truncated": False},
+                            },
+                        },
+                        {
+                            "action_id": "read_repo_file",
+                            "status": "success",
+                            "action_call_id": "call-read",
+                            "model_digest": {
+                                "result_preview": {
+                                    "path": "README.md",
+                                    "content": "# SkillOpt\n\nThe README content was actually read.",
+                                    "sha256": "read-sha",
+                                    "truncated": False,
+                                },
+                                "result_preview_meta": {"truncated": False},
+                            },
+                        },
+                    ],
+                    "route_logs": {},
+                },
+            },
+        }
+    )
+
+    cumulative = task._cumulative_execution_evidence_summary(
+        {"status": "completed", "logs": {"action_logs": [], "route_logs": {}}}
+    )
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(cumulative)
+    planner_anchors = task._iteration_prompt_summaries()[0]["evidence_anchors"]
+
+    ref_states = {
+        (ref["action_call_id"], ref["value"]): ref["content_state"]
+        for ref in verifier_summary["source_refs"]
+        if ref["field"] == "path"
+    }
+    assert ref_states[("call-clone", "README.md")] == "ref_only"
+    assert ref_states[("call-clone", "docs/guide.md")] == "ref_only"
+    assert ref_states[("call-read", "README.md")] == "bounded_readback_available"
+    assert any(
+        ref["value"] == "README.md" and ref["content_state"] == "bounded_readback_available"
+        for ref in planner_anchors["source_refs"]
+    )
+    assert any(
+        ref["value"] == "docs/guide.md" and ref["content_state"] == "ref_only"
+        for ref in planner_anchors["source_refs"]
+    )
 
 
 def test_planner_repair_context_keeps_previous_exact_evidence_anchors(tmp_path):

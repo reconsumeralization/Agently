@@ -242,6 +242,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "action_call_id": action_call_id,
                 "path": str(ref.get("path") or ""),
             }
+            content_state = str(ref.get("content_state") or "").strip()
+            if content_state:
+                compact_ref["content_state"] = content_state
+            evidence_boundary = str(ref.get("evidence_boundary") or "").strip()
+            if evidence_boundary:
+                compact_ref["evidence_boundary"] = evidence_boundary
             compact.append(compact_ref)
             if len(compact) >= max_refs:
                 break
@@ -406,7 +412,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "For source-grounded tasks, compare the candidate's factual claims, named sections, coverage mappings, "
             "quoted source titles, URLs, and artifact statements against verifier-visible evidence and bounded Action "
             "result previews. A citation, source URL, or file ref alone does not ground a mismatched claim; the claim "
-            "must be supported by the referenced evidence content. When multiple same-site official sources are "
+            "must be supported by the referenced evidence content. source_refs with content_state='ref_only' prove "
+            "only discovery/materialization and cannot support repository, document, or source-content claims until "
+            "a bounded readback/content preview is verifier-visible. When multiple same-site official sources are "
             "available, prefer the most specific source that directly matches the task over broader announcement or "
             "summary pages. Reject candidates that ignore a more specific verifier-visible source and ground the "
             "deliverable only in a weaker source. Reject candidates that introduce unsupported source facts, syllabus "

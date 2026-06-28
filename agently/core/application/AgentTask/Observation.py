@@ -964,6 +964,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                         if key_text in {"source_url", "selected_url", "requested_url", "url", "href", "path", "sha256"}:
                             ref_value = str(item or "").strip()
                             if ref_value:
+                                content_state = cls._source_ref_content_state(value, field=key_text)
                                 refs.append(
                                     {
                                         "source": "action_result",
@@ -972,6 +973,12 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                                         "value": ref_value,
                                         "action_id": action_id,
                                         "action_call_id": action_call_id,
+                                        "content_state": content_state,
+                                        "evidence_boundary": (
+                                            "content_preview_available"
+                                            if content_state == "bounded_readback_available"
+                                            else "discovery_or_materialization_only"
+                                        ),
                                     }
                                 )
                         collect(item, path=next_path)
@@ -984,6 +991,25 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             collect(record.get("artifact_refs"))
             collect(record.get("file_refs"))
         return cast(list[dict[str, Any]], cls._dedupe_ref_records(refs))[:32]
+
+    @staticmethod
+    def _source_ref_content_state(container: Any, *, field: str) -> str:
+        if field == "sha256":
+            return "metadata_only"
+        if not isinstance(container, Mapping):
+            return "ref_only"
+        for key in ("content", "content_preview", "text"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return "bounded_readback_available"
+        preview = container.get("preview")
+        if isinstance(preview, str) and preview.strip() and any(
+            key in container for key in ("bytes", "read_bytes", "sha256", "handler_id", "role", "source")
+        ):
+            return "bounded_readback_available"
+        if bool(container.get("full_value_available")) and bool(container.get("artifact_id")):
+            return "bounded_readback_available"
+        return "ref_only"
 
     @staticmethod
     def _dedupe_jsonable_records(records: Sequence[Any]) -> list[Any]:
