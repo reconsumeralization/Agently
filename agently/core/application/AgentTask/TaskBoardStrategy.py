@@ -805,8 +805,84 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 },
             },
             "output_policy": DataFormatter.sanitize(block_carrier.get("output_policy", {})),
+            "workspace_operations": cls._compact_taskboard_workspace_operations_for_carrier_meta(
+                block_carrier,
+                blocks,
+            ),
             "block_graph": cls._compact_taskboard_blocks_for_carrier_meta(blocks),
         }
+
+    @classmethod
+    def _compact_taskboard_workspace_operations_for_carrier_meta(
+        cls,
+        block_carrier: Mapping[str, Any],
+        blocks: Any,
+    ) -> list[dict[str, Any]]:
+        direct_operations = block_carrier.get("workspace_operations")
+        if isinstance(direct_operations, Sequence) and not isinstance(direct_operations, (str, bytes, bytearray)):
+            return [
+                cls._compact_taskboard_workspace_operation(item)
+                for item in list(direct_operations)[:8]
+                if isinstance(item, Mapping)
+            ]
+        if not isinstance(blocks, Mapping):
+            return []
+        evidence = blocks.get("evidence")
+        if not isinstance(evidence, Mapping):
+            return []
+        execution_results = [
+            item for item in evidence.get("execution_block_results", []) if isinstance(item, Mapping)
+        ]
+        return [
+            cls._compact_taskboard_workspace_operation(item)
+            for item in execution_results
+            if str(item.get("kind") or "") == "workspace_operation"
+        ][:8]
+
+    @classmethod
+    def _compact_taskboard_workspace_operation(cls, item: Mapping[str, Any]) -> dict[str, Any]:
+        output = item.get("output")
+        output_summary: dict[str, Any] = {}
+        if isinstance(output, Mapping):
+            for output_key in (
+                "operation",
+                "query",
+                "filters",
+                "bounded",
+                "locator_ref_count",
+                "evidence_snippet_count",
+                "diagnostics",
+            ):
+                if output_key in output:
+                    output_summary[output_key] = cls._compact_verifier_prompt_value(
+                        output.get(output_key),
+                        max_chars=700,
+                    )
+            for output_key, source_key in (
+                ("first_locator_ref", "locator_refs"),
+                ("first_evidence_snippet", "evidence_snippets"),
+            ):
+                if output_key in output:
+                    output_summary[output_key] = cls._compact_verifier_prompt_value(
+                        output.get(output_key),
+                        max_chars=700,
+                    )
+                    continue
+                source = output.get(source_key)
+                if isinstance(source, Sequence) and not isinstance(source, (str, bytes, bytearray)) and source:
+                    output_summary[output_key] = cls._compact_verifier_prompt_value(source[0], max_chars=700)
+        return {
+            key: item.get(key)
+            for key in (
+                "id",
+                "plan_block_id",
+                "source_plan_block_id",
+                "execution_block_id",
+                "kind",
+                "status",
+            )
+            if key in item
+        } | ({"output": output_summary} if output_summary else {})
 
     @staticmethod
     def _compact_taskboard_blocks_for_carrier_meta(blocks: Any) -> dict[str, Any]:

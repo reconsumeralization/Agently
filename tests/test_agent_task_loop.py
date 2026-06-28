@@ -525,6 +525,12 @@ async def test_taskboard_card_scoped_retrieval_uses_block_carrier(tmp_path):
     compact_operations = execution_meta["block_carrier"]["workspace_operations"]
     assert compact_operations[0]["kind"] == "workspace_operation"
     assert compact_operations[0]["output"]["bounded"]["returned_results"] == 1
+    taskboard_compact = task._compact_block_carrier_for_taskboard_meta(
+        execution_meta["block_carrier"],
+        blocks=execution_meta["blocks"],
+    )
+    assert taskboard_compact["workspace_operations"][0]["kind"] == "workspace_operation"
+    assert taskboard_compact["workspace_operations"][0]["output"]["bounded"]["returned_results"] == 1
 
 
 def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():
