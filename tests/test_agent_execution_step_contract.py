@@ -2050,6 +2050,24 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
 
     assert repeated_patch is None
 
+    next_target_patch = AgentTask._taskboard_control_auto_patch(
+        SimpleNamespace(revision=next_revision, card=cards["final.continue"]),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "target_refs": ["workspace://final.md"],
+            "gaps": ["Need exact final artifact wording before patching."],
+            "remaining_work": ["Read final.md, then apply the attribution correction."],
+        },
+    )
+
+    assert next_target_patch is not None
+    continued_revision = validator.apply_patch(next_revision, next_target_patch)
+    continued_cards = continued_revision.graph.card_by_id()
+    assert "final.continue.readback" in continued_cards
+    assert "final.continue.continue" in continued_cards
+    assert continued_cards["final.continue.continue"].metadata["target_refs"] == ["workspace://final.md"]
+
 
 def test_taskboard_control_auto_readback_scope_includes_upstream_evidence_cards():
     validator = TaskBoardValidator()

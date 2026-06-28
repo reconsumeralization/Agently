@@ -585,7 +585,10 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         scoped_retrieval_plan = cls._normalize_scoped_retrieval_plan(scoped_retrieval)
         if next_action not in {"readback", "needs_readback"} and not scoped_retrieval_plan:
             return None
-        target_ref_list = [str(ref).strip() for ref in list(target_refs or ()) if str(ref).strip()]
+        raw_target_refs: Sequence[str] | None = target_refs
+        if raw_target_refs is None:
+            raw_target_refs = cls._taskboard_control_output_target_refs(card_output)
+        target_ref_list = [str(ref).strip() for ref in list(raw_target_refs or ()) if str(ref).strip()]
         revision = getattr(context, "revision", None)
         card = getattr(context, "card", None)
         if revision is None or card is None:
@@ -632,7 +635,13 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 or str(current_metadata.get("evidence_card_id") or "").strip()
             )
         ):
-            return None
+            previous_target_refs = set(
+                cls._normalize_taskboard_target_refs(
+                    current_metadata.get("target_refs") or current_metadata.get("readback_target_refs")
+                )
+            )
+            if not target_ref_list or (previous_target_refs and set(target_ref_list).issubset(previous_target_refs)):
+                return None
         patch_source = source or (
             "agent_task.taskboard.control_auto_target_refs"
             if target_ref_list
@@ -705,12 +714,14 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if scoped_retrieval_plan:
             evidence_metadata["scoped_retrieval"] = DataFormatter.sanitize(scoped_retrieval_plan)
             evidence_metadata["retrieval_policy"] = scoped_retrieval_policy()
-        continuation_metadata = {
+        continuation_metadata: dict[str, Any] = {
             "generated_by": patch_source,
             "continues_card_id": current_id,
             "readback_card_id": evidence_card_id,
             "evidence_card_id": evidence_card_id if support_card_requires_action else "",
         }
+        if target_ref_list:
+            continuation_metadata["target_refs"] = target_ref_list
         if final_workspace_deliverables:
             continuation_metadata["final_workspace_deliverables"] = final_workspace_deliverables
         evidence_card = {
