@@ -485,23 +485,40 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
     @staticmethod
     def _scoped_retrieval_filters(group: Mapping[str, Any]) -> dict[str, Any]:
         raw_filters = group.get("filters")
-        filters = dict(raw_filters) if isinstance(raw_filters, Mapping) else {}
+        filters = {
+            str(key): AgentTaskCarrierMixin._normalize_scoped_retrieval_filter_value(key, value)
+            for key, value in dict(raw_filters).items()
+        } if isinstance(raw_filters, Mapping) else {}
         for key in ("collection", "kind"):
             value = group.get(key)
             if value is not None:
-                filters.setdefault(key, value)
+                filters.setdefault(key, AgentTaskCarrierMixin._normalize_scoped_retrieval_filter_value(key, value))
         scope = group.get("scope")
         if isinstance(scope, Mapping):
             for key, value in scope.items():
-                filters.setdefault(f"scope.{key}", value)
+                filters.setdefault(
+                    f"scope.{key}",
+                    AgentTaskCarrierMixin._normalize_scoped_retrieval_filter_value(f"scope.{key}", value),
+                )
         meta = group.get("meta")
         if isinstance(meta, Mapping):
             for key, value in meta.items():
-                filters.setdefault(f"meta.{key}", value)
+                filters.setdefault(
+                    f"meta.{key}",
+                    AgentTaskCarrierMixin._normalize_scoped_retrieval_filter_value(f"meta.{key}", value),
+                )
         path = group.get("path")
         if path is not None:
-            filters.setdefault("path", path)
+            filters.setdefault("path", AgentTaskCarrierMixin._normalize_scoped_retrieval_filter_value("path", path))
         return filters
+
+    @staticmethod
+    def _normalize_scoped_retrieval_filter_value(key: Any, value: Any) -> Any:
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            items = [item for item in value if item not in (None, "")]
+            if len(items) == 1 and str(key) in {"id", "path", "collection", "kind"}:
+                return items[0]
+        return value
 
     @staticmethod
     def _scoped_retrieval_results_from_block_context(block_context: Mapping[str, Any]) -> list[dict[str, Any]]:

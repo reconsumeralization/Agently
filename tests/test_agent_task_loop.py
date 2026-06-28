@@ -252,6 +252,44 @@ def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
     assert execution_plan.edges[0].binding["target_input"] == "scoped_retrieval_results"
 
 
+def test_block_carrier_normalizes_singleton_record_filters(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-filter-normalization").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-filter-normalization",
+        goal="Use record filters.",
+        success_criteria=["Evidence is grounded."],
+    )
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Search retained notes.",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "Project Atlas",
+                        "expected_role": "evidence_snippet",
+                        "search_surface": "workspace_index",
+                        "filters": {"collection": ["retained-notes"]},
+                    }
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+
+    execution_plan = task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
+
+    assert execution_plan.plan_blocks[0].bound_inputs["filters"]["collection"] == "retained-notes"
+
+
 @pytest.mark.asyncio
 async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_path):
     agent = _create_agent("agent-task-scoped-retrieval-block-exec").use_workspace(tmp_path / "workspace")
