@@ -44,6 +44,7 @@ def scoped_retrieval_policy() -> dict[str, Any]:
             "Use scoped search before full file/resource reads when it can reduce input volume.",
             "Treat locator_ref as discovery only until a bounded readback/snippet is available.",
             "Do not let local search hits decide semantic usefulness or task acceptance.",
+            "For workspace_index records, put record collection in filters.collection; path is only for file search or exact record paths.",
         ],
         "bounded_defaults": {
             "max_results": 8,
