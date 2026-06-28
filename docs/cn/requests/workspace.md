@@ -333,9 +333,9 @@ Workspace 文件搜索，以及 `search` / `read_bounded` 操作返回 refs/path
 `workspace_files` 或 `workspace_index_and_files`，并携带结构化过滤
 （`collection`、`kind`、`id`、`path`、`scope` 或 `meta`），让大型 retained records
 和文件在有界 search/readback 真正需要前不进入热 prompt。对于 `workspace_files`，
-`query` 是要搜索的内容文本，`path` 是目录或文件 scope，`pattern` 是 `*.md` 或 `*`
-这类文件 glob，不是另一个内容关键词。Blocks 默认返回命中附近的小型有界上下文片段，
-让相邻事实可见，但不会读取整份文件。
+`query` 是要搜索的内容文本，`path` 是目录或文件 scope，`pattern` 是 `*.md`、`*`
+或表示递归文件搜索的 `**` 这类文件 glob，不是另一个内容关键词。Blocks 默认返回命中
+附近的小型有界上下文片段，让相邻事实可见，但不会读取整份文件。
 
 `materialize_file(...)` 用于框架或应用拥有的受控 bytes 物化，例如 Browse action
 把远程 PDF 下载到 Workspace 的 `downloads/` 后，再由后续 `read_file(...)` 通过

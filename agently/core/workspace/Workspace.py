@@ -637,6 +637,8 @@ class Workspace:
         query_text = str(query)
         if not query_text:
             return []
+        requested_pattern = str(pattern or "*")
+        effective_pattern = "**/*" if requested_pattern.strip() in {"**", "**/"} else requested_pattern
         safe_max_results = max(1, min(int(max_results), 1000))
         safe_max_file_bytes = max(1, min(int(max_file_bytes), 5_000_000))
         safe_context_lines = max(0, min(int(context_lines), 20))
@@ -645,7 +647,7 @@ class Workspace:
         if base.is_file():
             candidates = [base]
         elif base.exists():
-            candidates = base.rglob(str(pattern or "*"))
+            candidates = base.rglob(effective_pattern)
         else:
             candidates = []
 
@@ -682,7 +684,8 @@ class Workspace:
                     snippet_raw = snippet.encode("utf-8")
                 search_scope = {
                     "path": str(path),
-                    "pattern": str(pattern or "*"),
+                    "pattern": requested_pattern,
+                    "effective_pattern": effective_pattern,
                     "include_hidden": include_hidden,
                     "max_results": safe_max_results,
                     "max_file_bytes": safe_max_file_bytes,

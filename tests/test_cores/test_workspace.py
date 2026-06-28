@@ -806,6 +806,24 @@ async def test_workspace_search_files_returns_bounded_retrieval_roles(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_workspace_search_files_treats_double_star_as_recursive_files(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-search-files-recursive")
+    await workspace.write_file("retained/nested/ops-note.md", "Project Atlas evidence code ATLAS-RENEWAL-77\n")
+
+    results = await workspace.search_files(
+        "Project Atlas",
+        path="retained",
+        pattern="**",
+        max_results=5,
+    )
+
+    assert [item["path"] for item in results] == ["retained/nested/ops-note.md"]
+    assert results[0]["scope"]["pattern"] == "**"
+    assert results[0]["scope"]["effective_pattern"] == "**/*"
+    assert results[0]["locator_ref"]["path"] == "retained/nested/ops-note.md"
+
+
+@pytest.mark.asyncio
 async def test_workspace_search_files_action_returns_retrieval_roles(tmp_path):
     agent = Agently.create_agent("workspace-search-files-roles").use_workspace(tmp_path / "run")
     workspace = agent.workspace

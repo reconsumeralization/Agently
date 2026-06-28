@@ -362,9 +362,10 @@ may set `search_surface` to `workspace_index`, `workspace_files`, or
 `kind`, `id`, `path`, `scope`, or `meta`) so large retained records and files
 can stay out of the hot context until a bounded search or readback needs them.
 For `workspace_files`, `query` is the content text to search, `path` is the
-directory or file scope, and `pattern` is a file glob such as `*.md` or `*`.
-Blocks use a small bounded context around file matches by default so related
-nearby facts can be visible without reading the whole file.
+directory or file scope, and `pattern` is a file glob such as `*.md`, `*`, or
+`**` for recursive file search. Blocks use a small bounded context around file
+matches by default so related nearby facts can be visible without reading the
+whole file.
 
 `materialize_file(...)` is for framework-owned or application-owned byte
 materialization, such as a Browse action downloading a remote PDF into

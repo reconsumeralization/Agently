@@ -181,7 +181,7 @@ await Agently.async_emit_runtime({
 | `request_url` | provider endpoint 或 provider 自有 symbolic URL |
 | `duration_ms` | 可得时从模型请求开始计算的耗时 |
 | `usage` | provider 上报的 usage 元数据 |
-| `usage_summary` | 只用于观察的 usage 摘要，包含归一化 provider token 字段和输入/输出字符长度估算；provider token 缺失时展示为未知，而不是失败 |
+| `usage_summary` | 只用于观察的 usage 摘要，包含归一化 provider token 字段和输入/输出字符长度估算；终态 `model.status` 可携带估算长度而不暴露 raw request payload；provider token 缺失时展示为未知，而不是失败 |
 | `side_channel` | 是否来自 side-channel request 路径 |
 | `error` | failed/requester-error 事件上的规范化错误事实 |
 

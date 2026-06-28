@@ -193,7 +193,7 @@ For model request events, `payload.model_request_telemetry` is an extensible sub
 | `request_url` | provider endpoint or provider-owned symbolic URL when known |
 | `duration_ms` | elapsed time from model request start when available |
 | `usage` | provider-reported usage metadata when available |
-| `usage_summary` | observation-only usage summary with normalized provider token fields and estimated input/output character lengths; missing provider tokens should be displayed as unknown, not as a failure |
+| `usage_summary` | observation-only usage summary with normalized provider token fields and estimated input/output character lengths; terminal `model.status` events may carry estimated lengths without exposing raw request payloads; missing provider tokens should be displayed as unknown, not as a failure |
 | `side_channel` | whether the model event came from a side-channel request path |
 | `error` | normalized error facts for failed/requester-error events |
 
