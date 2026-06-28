@@ -376,7 +376,8 @@ TaskBoard applies the same split to readback continuations: external
 `target_refs` such as HTTP/HTTPS URLs become Action evidence work, while
 Workspace/content paths and retained-note refs become bounded Workspace readback
 cards. Intermediate readback previews keep content, path, range, and truncation
-facts hot. SHA, byte counts, media/handler details, backend facts, execution
+facts hot, and readback work-unit hot payloads use compact refs rather than full
+provenance refs. SHA, byte counts, media/handler details, backend facts, execution
 block ids, and other programmatically traceable provenance stay in cold
 Workspace/Blocks evidence, final artifact audit metadata, DevTools, or runner
 logs. Final verifier hot input uses path/ref handles, bounded content or

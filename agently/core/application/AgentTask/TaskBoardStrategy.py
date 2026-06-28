@@ -1184,6 +1184,8 @@ class AgentTaskTaskBoardStrategyMixin(
                 file_refs,
                 self._taskboard_workspace_target_ref_file_refs(target_refs),
             )
+        hot_artifact_refs = self._compact_taskboard_artifact_refs_for_hot_payload(refs)
+        hot_file_refs = self._compact_taskboard_file_refs_for_hot_payload(file_refs)
         work_unit = WorkUnitIntent(
             id=f"taskboard:{context.card.id}:readback",
             origin="taskboard_card",
@@ -1194,8 +1196,8 @@ class AgentTaskTaskBoardStrategyMixin(
                 "success_criteria": self.success_criteria,
                 "task_context_contract": self._task_context_contract(),
                 "card": context.card.to_dict(),
-                "artifact_refs": DataFormatter.sanitize(refs),
-                "file_refs": DataFormatter.sanitize(file_refs),
+                "artifact_refs": hot_artifact_refs,
+                "file_refs": hot_file_refs,
                 "evidence_scope": evidence_card_ids or "all",
             },
             input_refs=tuple(
@@ -2515,6 +2517,7 @@ class AgentTaskTaskBoardStrategyMixin(
             for ref in self._taskboard_readback_artifact_refs(evidence_view)
             if self._taskboard_dependency_ref_needs_readback(ref)
         ][:_TASKBOARD_DEPENDENCY_READBACK_MAX_REFS]
+        hot_artifact_refs = self._compact_taskboard_artifact_refs_for_hot_payload(refs)
         payload: dict[str, Any] = {
             "schema_version": "agent_task_taskboard_dependency_readbacks/v1",
             "card_id": card_id,
@@ -2538,7 +2541,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 "goal": self.goal,
                 "task_context_contract": self._task_context_contract(),
                 "card_id": card_id,
-                "artifact_refs": DataFormatter.sanitize(refs),
+                "artifact_refs": hot_artifact_refs,
                 "bounded": dict(payload["bounded"]),
             },
             input_refs=tuple(dict(item) for item in refs if isinstance(item, Mapping)),
@@ -2763,6 +2766,18 @@ class AgentTaskTaskBoardStrategyMixin(
         if error:
             compact["error"] = cls._truncate_prompt_text(error, 1200)
         return compact
+
+    @classmethod
+    def _compact_taskboard_artifact_refs_for_hot_payload(cls, refs: Sequence[Any]) -> list[Any]:
+        return [cls._compact_artifact_ref_for_verifier(ref) for ref in refs if isinstance(ref, Mapping)]
+
+    @classmethod
+    def _compact_taskboard_file_refs_for_hot_payload(cls, refs: Sequence[Any]) -> list[dict[str, Any]]:
+        return [
+            cls._compact_taskboard_workspace_ref_for_prompt(ref)
+            for ref in refs
+            if isinstance(ref, Mapping)
+        ]
 
     @classmethod
     def _compact_taskboard_action_artifact_value_preview(

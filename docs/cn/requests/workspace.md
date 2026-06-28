@@ -347,7 +347,8 @@ record collection 应放在 `filters.collection`；只有明确知道精确 reco
 TaskBoard 的 readback continuation 也遵循同一拆分：HTTP/HTTPS 这类外部
 `target_refs` 会变成 Action evidence 工作；Workspace/content 路径和 retained-note
 ref 会变成有界 Workspace readback card。中间 readback preview 只把正文、path、
-范围和截断事实放进热输入；SHA、字节数、media/handler 细节、backend 事实、
+范围和截断事实放进热输入，readback work unit 的热 payload 也使用紧凑 refs 而不是
+完整 provenance refs；SHA、字节数、media/handler 细节、backend 事实、
 execution block id 以及其他可由程序溯源的 provenance 留在冷侧 Workspace/Blocks
 证据、最终 artifact 审计 metadata、DevTools 或 runner 日志中。终局 verifier 的热
 输入使用 path/ref handle、有界内容或 preview、截断状态；为了判断任务充分性不需要

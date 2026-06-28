@@ -289,8 +289,10 @@ download a file, save a webpage snapshot, write generated code, keep search
 notes or memory-like task notes, or persist large extracted text as Workspace or Action artifact refs.
 Hot prompts should carry compact refs and bounded previews; later blocks can
 open scoped snippets with `read_file(max_bytes=..., offset=...)` or artifact
-readback when they need the content. These intermediate refs are execution
-evidence, not final deliverable proof. A discovered URL, path, download, or
+readback when they need the content. Readback work-unit hot payloads use the
+same compact refs; complete refs remain in cold Workspace/Blocks evidence for
+programmatic readback and audit. These intermediate refs are execution evidence,
+not final deliverable proof. A discovered URL, path, download, or
 snapshot ref is also not evidence that the content has been read; it remains
 `ref_only` until a bounded readback or content preview is visible.
 Source-grounded deliverables should either request structured `target_refs`

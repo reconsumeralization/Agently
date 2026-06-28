@@ -1118,10 +1118,6 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             "content_state",
             "source",
             "query",
-            "search_engine",
-            "grep_tool",
-            "bytes",
-            "sha256",
         ):
             if key in value:
                 compact[key] = value.get(key)

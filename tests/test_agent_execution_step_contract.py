@@ -2432,6 +2432,35 @@ def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provena
     assert '"execution_block_id"' not in prompt_text
 
 
+def test_block_carrier_workspace_ref_meta_omits_reconstructable_provenance_noise():
+    compact = AgentTask._compact_workspace_ref_or_snippet_for_meta(
+        {
+            "path": "retained/source.md",
+            "line_start": 7,
+            "line_end": 9,
+            "content_state": "bounded_readback_available",
+            "source": "workspace.search_files",
+            "query": "needle",
+            "content": "needle evidence",
+            "bytes": 4096,
+            "sha256": "1" * 64,
+            "media_type": "text/markdown",
+            "search_engine": "workspace_file_grep",
+            "grep_tool": "rg",
+        },
+        max_chars=1000,
+    )
+
+    prompt_text = json.dumps(compact, ensure_ascii=False)
+    assert compact["path"] == "retained/source.md"
+    assert compact["content"] == "needle evidence"
+    assert '"sha256"' not in prompt_text
+    assert '"bytes"' not in prompt_text
+    assert '"media_type"' not in prompt_text
+    assert '"search_engine"' not in prompt_text
+    assert '"grep_tool"' not in prompt_text
+
+
 def test_model_hot_artifact_refs_omit_programmatic_provenance_noise():
     compact = AgentTask._compact_artifact_ref_for_verifier(
         {
@@ -2521,6 +2550,178 @@ def test_taskboard_available_readback_omits_programmatic_provenance_noise():
     assert '"bytes"' not in hot_text
     assert '"media_type"' not in hot_text
     assert '"full_value_available"' not in hot_text
+
+
+@pytest.mark.asyncio
+async def test_taskboard_readback_work_unit_hot_payload_omits_programmatic_provenance_noise(tmp_path):
+    agent = _create_agent("execution-taskboard-readback-hot-provenance").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Read dependency evidence without hot-loading provenance fields.",
+        success_criteria=["Readback work units keep cold refs separate from model-hot payloads."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    revision = TaskBoardRevision.create(
+        board_id="readback-hot-provenance",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "readback-hot-provenance-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect cold refs."},
+                    {
+                        "id": "readback",
+                        "objective": "Read the collected cold refs.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "readback",
+                    },
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "artifact_refs": [
+                            {
+                                "artifact_id": "artifact-1",
+                                "action_call_id": "call-1",
+                                "label": "cold action output",
+                                "media_type": "text/markdown",
+                                "bytes": 4096,
+                                "sha256": "1" * 64,
+                                "full_value_available": True,
+                            }
+                        ],
+                        "file_refs": [
+                            {
+                                "path": "sources/source.md",
+                                "role": "evidence",
+                                "media_type": "text/markdown",
+                                "bytes": 2048,
+                                "sha256": "2" * 64,
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    captured_work_units: list[dict[str, Any]] = []
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
+        work_unit = cast(Any, kwargs["work_unit"])
+        work_unit_dict = work_unit.to_dict()
+        captured_work_units.append(work_unit_dict)
+        file_refs = [
+            ref
+            for ref in work_unit_dict["input_refs"]
+            if isinstance(ref, dict) and str(ref.get("path") or "").strip()
+        ]
+        return (
+            {
+                "status": "completed",
+                "answer": "readback captured",
+                "readbacks": [{"ok": True, "artifact_id": "artifact-1", "action_call_id": "call-1"}],
+                "file_readbacks": [{"ok": True, "path": "sources/source.md"}],
+                "file_refs": file_refs,
+                "remaining_work": [],
+                "diagnostics": [],
+            },
+            {"execution_id": "readback-hot-provenance", "status": "completed", "logs": {}},
+            WorkUnitResult(id=str(work_unit.id), status="completed"),
+        )
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    card = revision.graph.card_by_id()["readback"]
+
+    result = await task._run_taskboard_readback_card(
+        SimpleNamespace(card=card, revision=revision),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    work_unit = captured_work_units[0]
+    hot_text = json.dumps(work_unit["input_payload"], ensure_ascii=False)
+    cold_text = json.dumps(work_unit["input_refs"], ensure_ascii=False)
+    assert work_unit["input_payload"]["artifact_refs"][0]["artifact_id"] == "artifact-1"
+    assert work_unit["input_payload"]["file_refs"][0]["path"] == "sources/source.md"
+    assert '"sha256"' not in hot_text
+    assert '"bytes"' not in hot_text
+    assert '"media_type"' not in hot_text
+    assert '"full_value_available"' not in hot_text
+    assert '"sha256"' in cold_text
+    assert '"bytes"' in cold_text
+    assert '"media_type"' in cold_text
+
+
+@pytest.mark.asyncio
+async def test_taskboard_dependency_readback_work_unit_hot_payload_omits_programmatic_provenance_noise(tmp_path):
+    agent = _create_agent("execution-taskboard-dependency-readback-hot-provenance").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Prefetch dependency artifact evidence without hot provenance noise.",
+        success_criteria=["Dependency readback keeps full provenance out of model-hot payloads."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    captured_work_units: list[dict[str, Any]] = []
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
+        work_unit = cast(Any, kwargs["work_unit"])
+        captured_work_units.append(work_unit.to_dict())
+        return (
+            {
+                "schema_version": "agent_task_taskboard_dependency_readbacks/v1",
+                "card_id": "synthesize",
+                "ref_count": 1,
+                "readbacks": [{"ok": True, "artifact_id": "artifact-1", "action_call_id": "call-1"}],
+                "diagnostics": [],
+            },
+            {"execution_id": "dependency-readback-hot-provenance", "status": "completed", "logs": {}},
+            WorkUnitResult(id=str(work_unit.id), status="completed"),
+        )
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    output = await task._taskboard_dependency_action_artifact_readbacks(
+        {
+            "artifact_refs": [
+                {
+                    "artifact_id": "artifact-1",
+                    "action_call_id": "call-1",
+                    "label": "large dependency output",
+                    "media_type": "text/markdown",
+                    "bytes": 999999,
+                    "sha256": "1" * 64,
+                    "full_value_available": True,
+                }
+            ]
+        },
+        card_id="synthesize",
+        context_pack={"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert output["readbacks"][0]["artifact_id"] == "artifact-1"
+    work_unit = captured_work_units[0]
+    hot_text = json.dumps(work_unit["input_payload"], ensure_ascii=False)
+    cold_text = json.dumps(work_unit["input_refs"], ensure_ascii=False)
+    assert work_unit["input_payload"]["artifact_refs"][0]["artifact_id"] == "artifact-1"
+    assert '"sha256"' not in hot_text
+    assert '"bytes"' not in hot_text
+    assert '"media_type"' not in hot_text
+    assert '"full_value_available"' not in hot_text
+    assert '"sha256"' in cold_text
+    assert '"bytes"' in cold_text
+    assert '"media_type"' in cold_text
 
 
 def test_taskboard_action_artifact_readback_preview_omits_ref_provenance_noise():
