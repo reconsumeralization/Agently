@@ -1841,6 +1841,7 @@ async def test_agent_task_workspace_artifact_refs_survive_incomplete_verificatio
                     "file_refs": [{"path": "model-claimed.md", "sha256": "fake"}],
                     "evidence": ["draft content is ready for framework delivery"],
                     "remaining_work": ["stronger cited evidence"],
+                    "ready_for_final_verification": True,
                 }
             else:
                 payload = {"answer": "ok"}
@@ -3357,6 +3358,62 @@ async def test_flat_intermediate_work_unit_skips_independent_verifier(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_flat_remaining_work_without_ready_flag_skips_independent_verifier(tmp_path):
+    agent = _create_agent("agent-task-flat-remaining-work-consumer").use_workspace(tmp_path / "workspace")
+    task = agent.create_task(
+        task_id="flat-remaining-work-consumer",
+        goal="Gather evidence before writing the final answer.",
+        success_criteria=["The final answer uses gathered evidence."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    async def request_plan(_iteration_index, _context_pack):
+        return {
+            "execution_shape": "direct",
+            "step_instruction": "Gather intermediate evidence.",
+            "expected_evidence": "Intermediate evidence for a later answer.",
+            "rationale": "The next step should consume this evidence.",
+        }
+
+    async def execute_step(_iteration_index, _plan, _context_pack):
+        return (
+            {
+                "step_result": "Evidence note was captured.",
+                "evidence": ["source note"],
+                "remaining_work": ["Use the evidence to write the final answer."],
+            },
+            {
+                "execution_id": "exec-remaining-work",
+                "status": "completed",
+                "route": {"selected_route": "model_request"},
+                "logs": {},
+            },
+        )
+
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("non-empty remaining_work should defer independent verifier")
+
+    cast(Any, task)._agent_task_step_overrides = {
+        "_request_plan": request_plan,
+        "_execute_step": execute_step,
+    }
+    cast(Any, task)._request_verification = fail_if_called
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+    iteration = meta["iterations"][0]
+
+    assert result["status"] == "max_iterations"
+    assert iteration["verification_source"] == "consumer_driven_continuation"
+    assert iteration["verification"]["consumer_driven_sufficiency"]["decision"]["reason"] == (
+        "work_unit_reports_remaining_work"
+    )
+    assert "Use the evidence" in " ".join(iteration["verification"]["next_step_requirements"])
+    assert len(meta["workspace_refs"]["verification"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_agent_task_loop_stops_at_max_iterations(tmp_path):
     class NeverCompleteRequester(MockAgentTaskRequester):
         name = "NeverCompleteRequester"
@@ -3434,6 +3491,7 @@ async def test_agent_task_loop_blocks_when_verifier_requires_block(tmp_path):
                     "step_result": "approval is still pending",
                     "evidence": ["approval_required"],
                     "remaining_work": ["wait for approval"],
+                    "ready_for_final_verification": True,
                 }
             yield "message", json.dumps(payload, ensure_ascii=False)
 

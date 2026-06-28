@@ -450,10 +450,23 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             return True, {"reason": "execution_status_requires_verification", "status": status}
         if not isinstance(execution_result, Mapping):
             return True, {"reason": "non_mapping_execution_result"}
-        if self._normalize_bool(execution_result.get("ready_for_final_verification"), default=True) is False:
-            remaining_work = self._normalize_string_list(execution_result.get("remaining_work"))
+        remaining_work = self._normalize_string_list(execution_result.get("remaining_work"))
+        ready_for_final_verification = execution_result.get("ready_for_final_verification")
+        ready_is_explicit = "ready_for_final_verification" in execution_result
+        ready_is_true = self._normalize_bool(ready_for_final_verification, default=True) is True
+        if ready_is_explicit and not ready_is_true:
             return False, {
                 "reason": "work_unit_not_ready_for_final_verification",
+                "remaining_work": remaining_work,
+            }
+        if remaining_work:
+            if ready_is_explicit and ready_is_true:
+                return True, {
+                    "reason": "explicit_ready_for_final_verification",
+                    "remaining_work": remaining_work,
+                }
+            return False, {
+                "reason": "work_unit_reports_remaining_work",
                 "remaining_work": remaining_work,
             }
         return True, {"reason": "ready_for_final_verification"}
@@ -1450,8 +1463,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "Do not treat a local search hit as semantic acceptance by itself. "
                     "Do not claim final completion unless evidence supports it. "
                     "Use remaining_work for task-level work that the next Flat iteration should consume or perform. "
-                    "Set ready_for_final_verification=false when this work unit produced useful intermediate evidence "
-                    "but should not trigger terminal verification yet."
+                    "Non-empty remaining_work defaults to intermediate and skips terminal verification for this work "
+                    "unit. Set ready_for_final_verification=false to make that explicit, or true only when this work "
+                    "unit intentionally needs terminal, blocking, or risk verification now."
                     + self._bounded_step_carrier_instruction(carrier_output_policy)
                 ),
                 output_schema=self._bounded_step_output_schema(carrier_output_policy),
@@ -1510,11 +1524,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "evidence": ([str], "Evidence produced by the step", True),
                 "remaining_work": (
                     [str],
-                    "Task-level remaining work for the next Flat iteration; pair with ready_for_final_verification=false for intermediate evidence that should skip terminal verification",
+                    "Task-level remaining work for the next Flat iteration; non-empty values skip terminal verification unless ready_for_final_verification is explicitly true",
                 ),
                 "ready_for_final_verification": (
                     bool,
-                    "False when the next Flat iteration should consume this output before terminal verification",
+                    "False when the next Flat iteration should consume this output before terminal verification; true only for terminal, blocking, or risk verification now",
                     False,
                 ),
             }
@@ -1543,11 +1557,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "evidence": ([str], "Evidence produced by the step", True),
             "remaining_work": (
                 [str],
-                "Task-level remaining work for the next Flat iteration; pair with ready_for_final_verification=false for intermediate evidence that should skip terminal verification",
+                "Task-level remaining work for the next Flat iteration; non-empty values skip terminal verification unless ready_for_final_verification is explicitly true",
             ),
             "ready_for_final_verification": (
                 bool,
-                "False when the next Flat iteration should consume this output before terminal verification",
+                "False when the next Flat iteration should consume this output before terminal verification; true only for terminal, blocking, or risk verification now",
                 False,
             ),
         }

@@ -303,8 +303,10 @@ proposal，AgentTask 会把补丁应用到绑定的 Workspace 文件，写回后
 artifact 物化；`remaining_work`、blocked 状态、repair 或 readback 仍会阻止写入。写入
 artifact 只是为后续 readback 和 verification 创建证据，不代表最终任务已经被接受。
 Flat 和 TaskBoard 都不需要在每个中间 work unit 后额外调用独立 verifier。Flat step
-可以返回 `ready_for_final_verification=false` 并携带 `remaining_work`；下一轮 iteration
-消费这些新事实并决定下一步行动。TaskBoard 中真正消费 dependency evidence 的下游
+返回非空 `remaining_work` 时，默认表示当前 step 仍是中间工作；下一轮 iteration
+会消费这些新事实并决定下一步行动。step 也可以返回
+`ready_for_final_verification=false` 来显式表达这一点。只有当前结果需要立即进入
+终局、阻塞或风险 verification 时，才显式设置 `ready_for_final_verification=true`。TaskBoard 中真正消费 dependency evidence 的下游
 card 判断这些信息是否足够完成自己的目标。独立 verifier 应保留给终局验收、fan-in/control
 合流验收、证据/artifact 边界审计、矛盾或高风险复核。
 

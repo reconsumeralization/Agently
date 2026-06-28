@@ -349,9 +349,12 @@ Workspace artifact materialization; `remaining_work`, blocked status, repair,
 or readback still do. Writing the artifact only creates evidence for later
 readback and verification. It does not mean the final task has been accepted.
 Flat and TaskBoard do not need an independent verifier after every intermediate
-work unit. In Flat, a step can return
-`ready_for_final_verification=false` with `remaining_work`; the next iteration
-consumes the new facts and decides the next action. In TaskBoard, the downstream card that consumes
+work unit. In Flat, non-empty `remaining_work` defaults the current step to an
+intermediate result, so the next iteration consumes the new facts and decides
+the next action; a step may also return `ready_for_final_verification=false` to
+make that explicit. Set `ready_for_final_verification=true` only when the
+current result intentionally needs terminal, blocking, or risk verification
+now. In TaskBoard, the downstream card that consumes
 dependency evidence decides whether it is enough for its own objective.
 Independent verifier requests are for final acceptance, fan-in/control
 acceptance, evidence/artifact boundary audit, contradictions, or high-risk
