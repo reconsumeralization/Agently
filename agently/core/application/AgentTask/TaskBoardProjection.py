@@ -266,5 +266,313 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "source_refs_omitted": max(0, len(source_refs_sequence) - 16),
         }
 
+    @classmethod
+    def _compact_block_carrier_for_taskboard_meta(
+        cls,
+        block_carrier: Any,
+        *,
+        blocks: Any = None,
+    ) -> dict[str, Any]:
+        if not isinstance(block_carrier, Mapping):
+            return {}
+        raw_work_unit = block_carrier.get("work_unit")
+        work_unit: Mapping[str, Any] = raw_work_unit if isinstance(raw_work_unit, Mapping) else {}
+        raw_runtime_preferences = work_unit.get("runtime_preferences")
+        runtime_preferences: Mapping[str, Any] = (
+            raw_runtime_preferences if isinstance(raw_runtime_preferences, Mapping) else {}
+        )
+        raw_work_unit_result = block_carrier.get("work_unit_result")
+        work_unit_result: Mapping[str, Any] = raw_work_unit_result if isinstance(raw_work_unit_result, Mapping) else {}
+        raw_carrier_meta = work_unit_result.get("carrier_meta")
+        carrier_meta: Mapping[str, Any] = raw_carrier_meta if isinstance(raw_carrier_meta, Mapping) else {}
+        return {
+            "work_unit": {
+                "id": work_unit.get("id"),
+                "origin": work_unit.get("origin"),
+                "objective": cls._truncate_prompt_text(str(work_unit.get("objective") or ""), 700),
+                "input_refs": cls._compact_verifier_prompt_value(
+                    list(cls._prompt_sequence(work_unit.get("input_refs")))[:8],
+                    max_chars=700,
+                ),
+                "expected_deliverable": cls._compact_verifier_prompt_value(
+                    work_unit.get("expected_deliverable", {}),
+                    max_chars=700,
+                ),
+                "evidence_requirements": cls._compact_verifier_prompt_value(
+                    list(cls._prompt_sequence(work_unit.get("evidence_requirements")))[:8],
+                    max_chars=700,
+                ),
+                "runtime_preferences": {
+                    key: runtime_preferences.get(key)
+                    for key in (
+                        "handler",
+                        "plan_block_kind",
+                        "preferred_execution_shape",
+                        "strategy",
+                        "card_id",
+                        "attempt_index",
+                        "max_attempts",
+                    )
+                    if key in runtime_preferences
+                },
+            },
+            "work_unit_result": {
+                "id": work_unit_result.get("id"),
+                "status": work_unit_result.get("status"),
+                "summary": cls._compact_verifier_prompt_value(work_unit_result.get("summary"), max_chars=700),
+                "candidate_final_result": cls._compact_verifier_prompt_value(
+                    work_unit_result.get("candidate_final_result"),
+                    max_chars=700,
+                ),
+                "artifact_manifest": cls._compact_verifier_prompt_value(
+                    work_unit_result.get("artifact_manifest", {}),
+                    max_chars=700,
+                ),
+                "evidence": cls._compact_verifier_prompt_value(
+                    list(cls._prompt_sequence(work_unit_result.get("evidence")))[:8],
+                    max_chars=700,
+                ),
+                "diagnostics": cls._compact_verifier_prompt_value(
+                    list(cls._prompt_sequence(work_unit_result.get("diagnostics")))[:4],
+                    max_chars=700,
+                ),
+                "carrier_meta": {
+                    "snapshot_status": carrier_meta.get("snapshot_status"),
+                    "execution_plan": cls._compact_verifier_prompt_value(
+                        carrier_meta.get("execution_plan", {}),
+                        max_chars=700,
+                    ),
+                    "execution_block_graph": cls._compact_verifier_prompt_value(
+                        carrier_meta.get("execution_block_graph", {}),
+                        max_chars=700,
+                    ),
+                },
+            },
+            "output_policy": DataFormatter.sanitize(block_carrier.get("output_policy", {})),
+            "workspace_operations": cls._compact_taskboard_workspace_operations_for_carrier_meta(
+                block_carrier,
+                blocks,
+            ),
+            "block_graph": cls._compact_taskboard_blocks_for_carrier_meta(blocks),
+        }
+
+    @classmethod
+    def _compact_taskboard_workspace_operations_for_carrier_meta(
+        cls,
+        block_carrier: Mapping[str, Any],
+        blocks: Any,
+    ) -> list[dict[str, Any]]:
+        if isinstance(blocks, Mapping):
+            evidence = blocks.get("evidence")
+            if isinstance(evidence, Mapping):
+                execution_results = [
+                    item for item in evidence.get("execution_block_results", []) if isinstance(item, Mapping)
+                ]
+                operations = [
+                    cls._compact_taskboard_workspace_operation(item)
+                    for item in execution_results
+                    if str(item.get("kind") or "") == "workspace_operation"
+                ][:8]
+                if operations:
+                    return operations
+        direct_operations = block_carrier.get("workspace_operations")
+        if isinstance(direct_operations, Sequence) and not isinstance(direct_operations, (str, bytes, bytearray)):
+            return [
+                cls._compact_taskboard_workspace_operation(item)
+                for item in list(direct_operations)[:8]
+                if isinstance(item, Mapping)
+            ]
+        return []
+
+    @classmethod
+    def _compact_taskboard_workspace_operation(cls, item: Mapping[str, Any]) -> dict[str, Any]:
+        output = item.get("output")
+        output_summary: dict[str, Any] = {}
+        if isinstance(output, Mapping):
+            for output_key in (
+                "operation",
+                "query",
+                "filters",
+                "locator_ref_count",
+                "evidence_snippet_count",
+            ):
+                if output_key in output:
+                    output_summary[output_key] = cls._compact_verifier_prompt_value(
+                        output.get(output_key),
+                        max_chars=700,
+                    )
+            diagnostics = output.get("diagnostics")
+            if diagnostics is not None:
+                output_summary["diagnostics"] = cls._model_hot_diagnostics(diagnostics)
+            bounded = output.get("bounded")
+            if isinstance(bounded, Mapping):
+                output_summary["bounded"] = cls._compact_taskboard_workspace_operation_bounded(bounded)
+            for output_key, source_key in (
+                ("first_locator_ref", "locator_refs"),
+                ("first_evidence_snippet", "evidence_snippets"),
+            ):
+                max_chars = 1800 if output_key == "first_evidence_snippet" else 900
+                if output_key in output:
+                    output_summary[output_key] = cls._compact_taskboard_workspace_ref_or_snippet(
+                        output.get(output_key),
+                        max_chars=max_chars,
+                    )
+                    continue
+                source = output.get(source_key)
+                if isinstance(source, Sequence) and not isinstance(source, (str, bytes, bytearray)) and source:
+                    output_summary[output_key] = cls._compact_taskboard_workspace_ref_or_snippet(
+                        source[0],
+                        max_chars=max_chars,
+                    )
+        return {
+            key: item.get(key)
+            for key in (
+                "kind",
+                "status",
+            )
+            if key in item
+        } | ({"output": output_summary} if output_summary else {})
+
+    @classmethod
+    def _compact_taskboard_workspace_operation_bounded(cls, bounded: Mapping[str, Any]) -> dict[str, Any]:
+        keep_keys = (
+            "operation",
+            "query",
+            "filters",
+            "path",
+            "pattern",
+            "search_surface",
+            "returned_results",
+            "file_returned_results",
+            "index_returned_results",
+            "index_total_matches",
+            "locator_ref_count",
+            "evidence_snippet_count",
+            "snippet_limit",
+            "max_results",
+            "context_lines",
+            "offset",
+            "limit",
+            "eof",
+            "truncated",
+        )
+        compact = {key: bounded.get(key) for key in keep_keys if key in bounded}
+        diagnostics = bounded.get("diagnostics")
+        if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
+            compact["diagnostics"] = cls._model_hot_diagnostics(list(diagnostics)[:4])
+        return DataFormatter.sanitize(compact)
+
+    @classmethod
+    def _compact_taskboard_workspace_ref_or_snippet(cls, value: Any, *, max_chars: int) -> Any:
+        if not isinstance(value, Mapping):
+            return cls._compact_verifier_prompt_value(value, max_chars=max_chars)
+        compact: dict[str, Any] = {}
+        for key in (
+            "path",
+            "line",
+            "line_start",
+            "line_end",
+            "role",
+            "content_state",
+            "source",
+            "query",
+            "record_id",
+            "collection",
+        ):
+            if key in value:
+                compact[key] = value.get(key)
+        content = value.get("content")
+        if not isinstance(content, str):
+            content = value.get("snippet")
+        if not isinstance(content, str):
+            content = value.get("text")
+        if isinstance(content, str):
+            compact["content"] = cls._truncate_prompt_text(content, max_chars)
+        return cls._compact_verifier_prompt_value(compact or value, max_chars=max_chars)
+
+    @classmethod
+    def _taskboard_card_workspace_operations_for_prompt(
+        cls,
+        *,
+        diagnostics: Sequence[Any],
+        metadata: Any,
+    ) -> list[dict[str, Any]]:
+        operations: list[dict[str, Any]] = []
+        for container in (*diagnostics, metadata):
+            if not isinstance(container, Mapping):
+                continue
+            block_carrier = container.get("block_carrier")
+            if not isinstance(block_carrier, Mapping):
+                continue
+            raw_operations = block_carrier.get("workspace_operations")
+            if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, (str, bytes, bytearray)):
+                continue
+            for operation in raw_operations:
+                if not isinstance(operation, Mapping):
+                    continue
+                operations.append(cls._compact_taskboard_workspace_operation(operation))
+                if len(operations) >= 4:
+                    return operations
+        return operations
+
+    @staticmethod
+    def _compact_taskboard_blocks_for_carrier_meta(blocks: Any) -> dict[str, Any]:
+        if not isinstance(blocks, Mapping):
+            return {"present": False, "execution_block_count": 0, "execution_block_kinds": []}
+        graph = blocks.get("execution_block_graph")
+        if not isinstance(graph, Mapping):
+            graph = {}
+        execution_blocks = [item for item in graph.get("execution_blocks", []) if isinstance(item, Mapping)]
+        evidence = blocks.get("evidence")
+        if not isinstance(evidence, Mapping):
+            evidence = {}
+        execution_results = [
+            item for item in evidence.get("execution_block_results", []) if isinstance(item, Mapping)
+        ]
+        return {
+            "present": bool(graph),
+            "graph_id": graph.get("graph_id") or graph.get("execution_id") or graph.get("id"),
+            "execution_block_count": len(execution_blocks),
+            "execution_block_kinds": [
+                str(item.get("kind") or "") for item in execution_blocks if str(item.get("kind") or "").strip()
+            ],
+            "execution_block_ids": [
+                str(item.get("id") or "") for item in execution_blocks if str(item.get("id") or "").strip()
+            ],
+            "evidence_present": bool(evidence),
+            "execution_block_result_count": len(execution_results),
+            "execution_block_result_kinds": [
+                str(item.get("kind") or "") for item in execution_results if str(item.get("kind") or "").strip()
+            ],
+        }
+
+    @classmethod
+    def _taskboard_scheduled_stream_payload(
+        cls,
+        *,
+        schedule: Any,
+        evidence_view: Mapping[str, Any],
+        concurrency: int | None,
+    ) -> dict[str, Any]:
+        return {
+            "schedule": DataFormatter.sanitize(schedule.to_dict()),
+            "evidence_view": cls._compact_taskboard_evidence_view_for_stream(evidence_view),
+            "concurrency": concurrency,
+        }
+
+    @classmethod
+    def _taskboard_completed_stream_payload(cls, tick_result: Any) -> dict[str, Any]:
+        evidence_view = build_task_board_evidence_view(tick_result.revision).to_dict()
+        return {
+            "revision": cls._compact_taskboard_revision_for_stream(tick_result.revision),
+            "schedule": DataFormatter.sanitize(tick_result.schedule.to_dict()),
+            "card_results": {
+                str(card_id): cls._compact_taskboard_card_result_for_stream(result)
+                for card_id, result in tick_result.card_results.items()
+            },
+            "evidence_view": cls._compact_taskboard_evidence_view_for_stream(evidence_view),
+            "runtime_topology": DataFormatter.sanitize(tick_result.triggerflow_snapshot.get("runtime_topology", {})),
+        }
+
 
 __all__ = ["AgentTaskTaskBoardProjectionMixin"]
