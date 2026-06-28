@@ -237,31 +237,38 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         return cast(dict[str, Any], meta) if isinstance(meta, Mapping) else None
 
     async def _await_task_request(self, awaitable, *, stage: str):
-        timeout = self._task_request_timeout()
+        timeout_info = self._task_request_wait_timeout()
         task = asyncio.ensure_future(awaitable)
         heartbeat_task = self._start_heartbeat(stage=stage)
         try:
-            if timeout is None:
+            if timeout_info is None:
                 return await task
+            timeout, limit_name = timeout_info
             return await asyncio.wait_for(task, timeout=timeout)
         except (asyncio.TimeoutError, TimeoutError) as error:
             task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await task
-            reason = f"AgentTask {stage} request timed out after {timeout} seconds."
+            if limit_name == "max_no_progress_seconds":
+                reason = (
+                    f"AgentTask {stage} request made no progress before idle deadline: "
+                    f"max_no_progress_seconds={timeout}."
+                )
+            else:
+                reason = f"AgentTask {stage} request timed out after {timeout} seconds."
             raise _AgentTaskDeadlineExceeded(
                 stage,
                 reason=reason,
-                limit_name="request_timeout_seconds",
+                limit_name=limit_name,
                 timeout_seconds=timeout,
             ) from error
         finally:
             await self._stop_heartbeat(heartbeat_task)
 
     async def _await_stream_next(self, stream: Any, *, stage: str) -> Any:
-        timeout = self._task_request_timeout()
-        limit_name = "request_timeout_seconds"
-        timeout_seconds = timeout
+        timeout_info = self._task_request_wait_timeout()
+        limit_name = timeout_info[1] if timeout_info is not None else "max_seconds"
+        timeout_seconds = timeout_info[0] if timeout_info is not None else None
         remaining = self._task_deadline_remaining()
         if remaining is not None and (timeout_seconds is None or remaining < timeout_seconds):
             timeout_seconds = remaining
@@ -276,7 +283,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             raise _AgentTaskDeadlineExceeded(
                 stage,
                 limit_name=limit_name,
-                timeout_seconds=timeout if limit_name == "request_timeout_seconds" else self._task_max_seconds(),
+                timeout_seconds=timeout_seconds if limit_name != "max_seconds" else self._task_max_seconds(),
             )
         heartbeat_task = self._start_heartbeat(stage=stage)
         try:
@@ -287,9 +294,12 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             if limit_name == "max_seconds":
                 reason = f"AgentTask {stage} stream exceeded task max_seconds before the next event."
                 configured_timeout = self._task_max_seconds()
+            elif limit_name == "max_no_progress_seconds":
+                reason = f"AgentTask {stage} stream made no progress for {timeout_seconds} seconds."
+                configured_timeout = timeout_seconds
             else:
                 reason = f"AgentTask {stage} stream produced no event for {timeout_seconds} seconds."
-                configured_timeout = timeout
+                configured_timeout = timeout_seconds
             raise _AgentTaskDeadlineExceeded(
                 stage,
                 reason=reason,
@@ -372,9 +382,9 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             raise
 
     def _task_request_timeout(self) -> float | None:
-        # Per plan/verify request timeout. max_seconds is the task wall-clock
-        # budget (enforced separately in the loop) and must not be reused as a
-        # per-request timeout; the no-progress idle limit is the closest fallback.
+        # Explicit per plan/verify request timeout. max_seconds is enforced
+        # separately as the task wall-clock budget, while max_no_progress_seconds
+        # is reported as an idle guard rather than as a request timeout.
         agent_task_options = self.options.get("agent_task")
         if isinstance(agent_task_options, dict):
             configured = agent_task_options.get("request_timeout_seconds")
@@ -383,10 +393,22 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         configured = self.options.get("request_timeout_seconds")
         if configured is not None:
             return self._normalize_timeout(configured)
-        configured = self.limits.get("max_no_progress_seconds")
-        if configured is not None:
-            return self._normalize_timeout(configured)
         return None
+
+    def _task_no_progress_timeout(self) -> float | None:
+        return self._normalize_timeout(self.limits.get("max_no_progress_seconds"))
+
+    def _task_request_wait_timeout(self) -> tuple[float, str] | None:
+        candidates: list[tuple[float, str]] = []
+        request_timeout = self._task_request_timeout()
+        if request_timeout is not None:
+            candidates.append((request_timeout, "request_timeout_seconds"))
+        no_progress_timeout = self._task_no_progress_timeout()
+        if no_progress_timeout is not None:
+            candidates.append((no_progress_timeout, "max_no_progress_seconds"))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[0])
 
     def _child_execution_limits(self) -> dict[str, Any]:
         return dict(self.limits)

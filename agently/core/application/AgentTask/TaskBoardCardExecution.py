@@ -385,6 +385,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 )
             except Exception as error:
                 execution_id = str(getattr(execution, "id", "") or "") or None
+                child_meta = await self._read_child_execution_meta(execution)
                 retry_diagnostic = self._taskboard_card_retry_diagnostic(
                     card_id=context.card.id,
                     error=error,
@@ -392,6 +393,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     attempt_index=attempt_index,
                     max_attempts=max_attempts,
                 )
+                if isinstance(child_meta, Mapping):
+                    retry_diagnostic["evidence_summary"] = DataFormatter.sanitize(
+                        self._execution_log_summary(cast(dict[str, Any], dict(child_meta)))
+                    )
                 previous_errors.append(retry_diagnostic)
                 if attempt_index < max_attempts and self._taskboard_card_error_retryable(error):
                     self.diagnostics.setdefault("taskboard_card_retries", []).append(retry_diagnostic)
@@ -404,6 +409,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     card_id=context.card.id,
                     error=error,
                     execution_id=execution_id,
+                    child_meta=child_meta,
                 )
             card_output, delivery_plan = self._prepare_taskboard_workspace_artifact_delivery(
                 card_output,
@@ -930,6 +936,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         card_id: str,
         error: Exception,
         execution_id: str | None = None,
+        child_meta: Mapping[str, Any] | None = None,
     ) -> TaskBoardCardResult:
         message = _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
         is_timeout = self._is_timeout_error(error)
@@ -937,6 +944,33 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             message = (
                 f"TaskBoard card '{card_id}' execution timed out after " f"{self._task_request_timeout()} seconds."
             )
+        diagnostics: list[dict[str, Any]] = []
+        artifact_refs: tuple[Any, ...] = ()
+        metadata: dict[str, Any] = {
+            "execution_id": execution_id,
+            "execution_strategy": self.execution_strategy,
+            "status": "failed",
+        }
+        partial_evidence_diagnostic: dict[str, Any] | None = None
+        if isinstance(child_meta, Mapping):
+            child_summary = self._execution_log_summary(cast(dict[str, Any], dict(child_meta)))
+            raw_artifact_refs = child_summary.get("artifact_refs")
+            if isinstance(raw_artifact_refs, Sequence) and not isinstance(
+                raw_artifact_refs, str | bytes | bytearray
+            ):
+                artifact_refs = tuple(DataFormatter.sanitize(ref) for ref in raw_artifact_refs)
+            partial_evidence_diagnostic = {
+                "type": "TaskBoardPartialChildEvidence",
+                "code": "taskboard.card.partial_child_evidence",
+                "status": "captured",
+                "card_id": card_id,
+                "execution_id": execution_id,
+                "execution_strategy": self.execution_strategy,
+                "stage": "taskboard_card",
+                "evidence_summary": DataFormatter.sanitize(child_summary),
+            }
+            metadata["partial_child_evidence"] = True
+            metadata["partial_child_status"] = str(child_meta.get("status") or "")
         diagnostic = {
             "type": error.__class__.__name__,
             "code": "taskboard.card.timeout" if is_timeout else "taskboard.card.execution_error",
@@ -948,16 +982,18 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "timeout_seconds": self._taskboard_card_timeout() if is_timeout else None,
             "status": "failed",
         }
+        diagnostics.append(diagnostic)
+        if partial_evidence_diagnostic is not None:
+            diagnostics.append(partial_evidence_diagnostic)
         self.diagnostics.setdefault("taskboard_card_errors", []).append(diagnostic)
         return TaskBoardCardResult(
             card_id=card_id,
             status="failed",
             preview=f"TaskBoard card execution failed: { error.__class__.__name__}: { message }",
-            diagnostics=(diagnostic,),
+            artifact_refs=artifact_refs,
+            diagnostics=tuple(diagnostics),
             metadata={
-                "execution_id": execution_id,
-                "execution_strategy": self.execution_strategy,
-                "status": "failed",
+                **metadata,
             },
         )
 

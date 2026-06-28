@@ -810,6 +810,41 @@ class MockFlatActionPlanningSlowRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockFlatSlowPlanRequester(MockAgentExecutionRequester):
+    name = "MockFlatSlowPlanRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan the next bounded AgentExecution step" in text:
+            await asyncio.sleep(0.2)
+            payload = {
+                "execution_shape": "direct",
+                "step_instruction": "Return the final answer from known evidence.",
+                "expected_evidence": "final answer",
+                "rationale": "The task is small after planning.",
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "final answer is present",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "slow plan final answer",
+            }
+        else:
+            payload = {
+                "step_result": "slow plan evidence",
+                "evidence": ["slow plan evidence"],
+                "remaining_work": [],
+                "ready_for_final_verification": True,
+                "candidate_final_result": "slow plan final answer",
+            }
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockWorkspaceArtifactDraftStallRequester(MockAgentExecutionRequester):
     name = "MockWorkspaceArtifactDraftStallRequester"
 
@@ -1284,6 +1319,75 @@ class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardActionPostExecutionPlanningStallRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardActionPostExecutionPlanningStallRequester"
+    action_planning_calls = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockTaskBoardActionPostExecutionPlanningStallRequester.action_planning_calls = 0
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Exercise partial evidence preservation after a card stall.",
+                "cards": [
+                    {
+                        "id": "partial",
+                        "action_block": "Run one action, then continue planning.",
+                        "objective": "Collect action evidence before a later planning stall.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "Action evidence is captured.",
+                        "allowed_execution_shape": "actions",
+                    }
+                ],
+                "reflection_points": [],
+                "completion_gate": "Partial evidence is available for analysis.",
+                "why_this_effort_shape": "One action card is enough for this regression.",
+                "risk_notes": [],
+            }
+        elif "next_action" in text and "execution_commands" in text:
+            MockTaskBoardActionPostExecutionPlanningStallRequester.action_planning_calls += 1
+            if MockTaskBoardActionPostExecutionPlanningStallRequester.action_planning_calls == 1:
+                payload = {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "Collect probe evidence before the stall.",
+                            "action_id": "probe_action",
+                            "action_input": {},
+                        }
+                    ],
+                }
+            else:
+                await asyncio.sleep(5)
+                payload = {"next_action": "response", "execution_commands": []}
+        elif "[ACTION RESULTS]" in text:
+            payload = {
+                "status": "completed",
+                "answer": "probe action evidence collected",
+                "evidence": ["probe_action executed"],
+                "remaining_work": [],
+                "diagnostics": [],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": False,
+                "reason": "the card should not finalize after a stall",
+                "final_result": "",
+                "missing_criteria": ["card stalled"],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload("unexpected final")
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardReadbackRequester"
     last_action_id = ""
@@ -1695,6 +1799,13 @@ def _create_flat_action_planning_slow_agent(name: str = "agent-execution-flat-ac
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
+def _create_flat_slow_plan_agent(name: str = "agent-execution-flat-slow-plan"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockFlatSlowPlanRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
 def _create_workspace_artifact_draft_stall_agent(name: str = "agent-execution-artifact-draft-stall"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
@@ -1755,6 +1866,15 @@ def _create_taskboard_retry_card_agent(name: str = "agent-execution-taskboard-re
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockTaskBoardRetryCardRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_action_post_execution_planning_stall_agent(
+    name: str = "agent-execution-taskboard-action-post-execution-planning-stall",
+):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardActionPostExecutionPlanningStallRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -3658,6 +3778,32 @@ async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_flat_plan_no_progress_timeout_is_reported_as_idle_guard(tmp_path):
+    agent = _create_flat_slow_plan_agent("execution-flat-plan-no-progress-timeout").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Answer after a slow plan.",
+        success_criteria=["The final answer is present."],
+        execution="flat",
+        max_iterations=1,
+        limits={"max_no_progress_seconds": 0.05},
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    terminal_phase = task_meta["diagnostics"]["phases"][-1]
+
+    assert result["status"] == "timed_out"
+    assert terminal_phase["phase"] == "terminal"
+    assert terminal_phase["diagnostics"]["stage"] == "plan"
+    assert terminal_phase["diagnostics"]["limit_name"] == "max_no_progress_seconds"
+    assert "no progress" in terminal_phase["diagnostics"]["reason"]
+
+
+@pytest.mark.asyncio
 async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_path):
     agent = _create_flat_action_post_execution_planning_stall_agent(
         "execution-flat-action-post-action-planning-timeout"
@@ -4316,6 +4462,42 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
     assert retry_result["metadata"]["max_attempts"] == 2
     assert task_meta["diagnostics"]["taskboard_card_retries"][0]["code"] == "taskboard.card.timeout"
     assert any(item.path == "agent_task.taskboard.card.retry.execution.retry" for item in stream_items)
+
+
+@pytest.mark.asyncio
+async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp_path):
+    agent = _create_taskboard_action_post_execution_planning_stall_agent(
+        "execution-taskboard-card-partial-evidence-stall"
+    ).use_workspace(tmp_path / "workspace")
+
+    @agent.action_func
+    def probe_action() -> dict[str, str]:
+        return {"status": "ok"}
+
+    execution = agent.create_task(
+        goal="Run a board card that stalls after one action.",
+        success_criteria=["Partial action evidence remains inspectable."],
+        execution="taskboard",
+        max_iterations=1,
+        limits={"max_no_progress_seconds": 0.2},
+        options={"agent_task": {"taskboard_card_max_attempts": 1}},
+    ).use_actions(["probe_action"])
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    taskboard = task_meta["result"]["taskboard"]
+    partial_result = taskboard["revision"]["card_results"]["partial"]
+    diagnostics = partial_result["diagnostics"]
+    evidence_summaries = [
+        item.get("evidence_summary") for item in diagnostics if isinstance(item, dict) and item.get("evidence_summary")
+    ]
+
+    assert result["status"] == "error"
+    assert partial_result["status"] == "failed"
+    assert evidence_summaries
+    assert evidence_summaries[0]["action_ids"] == ["probe_action"]
+    assert evidence_summaries[0]["action_statuses"]["probe_action"] in {"success", "succeeded"}
 
 
 @pytest.mark.asyncio
