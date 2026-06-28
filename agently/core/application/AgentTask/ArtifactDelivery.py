@@ -236,6 +236,109 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             depended_on.update(str(dep_id) for dep_id in getattr(item, "depends_on", ()) or ())
         return card_id not in depended_on
 
+    def _prepare_taskboard_workspace_artifact_delivery(
+        self,
+        card_output: Any,
+        context: Any,
+        *,
+        deliverable_mode: str | None,
+        prefer_stream_draft: bool = False,
+    ) -> tuple[Any, dict[str, Any]]:
+        plan: dict[str, Any] = {"deliverable_mode": str(deliverable_mode or "").strip()}
+        if prefer_stream_draft:
+            plan["prefer_stream_draft"] = True
+        if not plan["deliverable_mode"] or not isinstance(card_output, Mapping):
+            return card_output, plan
+        required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
+        final_card_paths = [
+            path for path in self._taskboard_context_final_workspace_deliverables(context) if path in required_paths
+        ]
+        if final_card_paths:
+            manifest = card_output.get("artifact_manifest")
+            manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
+            requested_path = self._workspace_artifact_manifest_path(manifest_dict)
+            if requested_path in final_card_paths:
+                return card_output, plan
+            manifest_dict["path"] = final_card_paths[0]
+            result = dict(card_output)
+            result["artifact_manifest"] = manifest_dict
+            diagnostics: list[Any] = []
+            raw_diagnostics = result.get("diagnostics")
+            if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+                diagnostics.extend(raw_diagnostics)
+            elif raw_diagnostics:
+                diagnostics.append(raw_diagnostics)
+            diagnostics.append(
+                {
+                    "code": "taskboard.workspace_artifact.final_path_authorized",
+                    "message": "A framework-marked final TaskBoard card is authorized to write the required deliverable path.",
+                    "requested_path": requested_path,
+                    "final_path": final_card_paths[0],
+                }
+            )
+            result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            return result, plan
+        if not required_paths or self._taskboard_context_card_is_leaf(context):
+            return card_output, plan
+
+        manifest = card_output.get("artifact_manifest")
+        manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
+        requested_path = self._workspace_artifact_manifest_path(manifest_dict)
+        if requested_path not in required_paths:
+            return card_output, plan
+
+        card = getattr(context, "card", None)
+        card_id = str(getattr(card, "id", "") or "card").strip() or "card"
+        safe_card_id = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in card_id) or "card"
+        file_name = Path(requested_path).name or "artifact.md"
+        relocated_path = f"working/taskboard/{safe_card_id}/{file_name}"
+        manifest_dict["path"] = relocated_path
+
+        result = dict(card_output)
+        result["artifact_manifest"] = manifest_dict
+        diagnostics: list[Any] = []
+        raw_diagnostics = result.get("diagnostics")
+        if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+            diagnostics.extend(raw_diagnostics)
+        elif raw_diagnostics:
+            diagnostics.append(raw_diagnostics)
+        diagnostics.append(
+            {
+                "code": "taskboard.workspace_artifact.final_path_relocated_for_intermediate_card",
+                "message": "A non-leaf TaskBoard card cannot write a required final deliverable path.",
+                "card_id": card_id,
+                "requested_path": requested_path,
+                "relocated_path": relocated_path,
+            }
+        )
+        result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        return result, plan
+
+    @classmethod
+    def _taskboard_context_final_workspace_deliverables(cls, context: Any) -> list[str]:
+        card = getattr(context, "card", None)
+        metadata = getattr(card, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            return []
+        return cls._normalize_string_list(metadata.get("final_workspace_deliverables"))
+
+    def _taskboard_workspace_delivery_policy(self, context: Any) -> dict[str, Any]:
+        required_paths = self._required_workspace_deliverables()
+        final_card_paths = [
+            path for path in self._taskboard_context_final_workspace_deliverables(context) if path in required_paths
+        ]
+        can_write_required = bool(required_paths and (final_card_paths or self._taskboard_context_card_is_leaf(context)))
+        return {
+            "schema_version": "agent_task_taskboard_workspace_delivery/v1",
+            "required_deliverables": required_paths,
+            "authorized_final_deliverable_paths": final_card_paths or (required_paths if can_write_required else []),
+            "can_write_required_deliverables": can_write_required,
+            "policy": (
+                "Use required deliverable paths for final or framework-marked repair/continuation cards. "
+                "Use working refs for intermediate evidence cards."
+            ),
+        }
+
     @staticmethod
     def _append_workspace_artifact_meta(execution_meta: Mapping[str, Any] | None, refs: list[dict[str, Any]]) -> None:
         if not refs or not isinstance(execution_meta, dict):
