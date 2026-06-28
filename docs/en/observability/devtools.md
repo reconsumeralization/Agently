@@ -76,6 +76,12 @@ The older `bridge = ObservationBridge(...); bridge.register(Agently)` form remai
 
 For TriggerFlow, stream progress through `data.async_put_into_stream(...)`; the wrapper consumes the runtime stream and then shows the close snapshot.
 
+## AgentTask action observations
+
+AgentTask may project `agent_task.action.started`, `agent_task.action.completed`, and `agent_task.action.failed` RuntimeEvent records from bounded execution Action logs. DevTools should consume them as factual action observations in the AgentTask timeline, grouped by task iteration when iteration metadata is present.
+
+These records are for display, logging, and post-run analysis only. Do not use them as route decisions, verifier results, quality scores, semantic relevance judgments, or task-completion acceptance. Unknown fields should be ignored, and large payloads should stay summarized or ref-backed.
+
 ## Compatibility boundary
 
 DevTools consumers should fail open:

@@ -76,6 +76,12 @@ bridge.watch(agent)
 
 TriggerFlow 场景下，用 `data.async_put_into_stream(...)` 推进度；wrapper 消费 runtime stream，最后展示 close snapshot。
 
+## AgentTask action observation
+
+AgentTask 可能会从 bounded execution 的 Action logs 投影 `agent_task.action.started`、`agent_task.action.completed` 和 `agent_task.action.failed` RuntimeEvent。DevTools 应把它们作为 AgentTask timeline 里的事实型 action observation 消费；当事件带有 iteration 元数据时，按任务轮次归组展示。
+
+这些记录只用于展示、日志和运行后分析。不要把它们当作 route 决策、verifier 结果、质量评分、语义相关性判断或任务完成验收依据。未知字段应宽容忽略，大 payload 应保持摘要化或 ref-backed。
+
 ## 兼容边界
 
 DevTools 消费端应 fail open（宽容失败）：
