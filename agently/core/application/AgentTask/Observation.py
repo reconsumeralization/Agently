@@ -101,6 +101,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "agent_task.checkpoint",
             {"iteration": iteration_index, "checkpoint": checkpoint_ref},
         )
+        await self._emit_action_observation_events(iteration_index, execution_meta=execution_meta)
         return record_ref, checkpoint_ref
 
     async def _record_verification(
@@ -929,6 +930,190 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             deduped.append(dict(record))
         return deduped
 
+    async def _emit_action_observation_events(
+        self,
+        iteration_index: int,
+        *,
+        execution_meta: Mapping[str, Any],
+    ) -> None:
+        records = self._collect_execution_action_records(execution_meta)
+        if not records:
+            return
+        owner_context = self._action_event_owner_context(iteration_index, execution_meta)
+        for record in records:
+            action_id = str(record.get("id") or record.get("name") or "").strip()
+            if not action_id:
+                continue
+            await self._emit_normalized_action_event(
+                "started",
+                record,
+                execution_meta=execution_meta,
+                owner_context=owner_context,
+            )
+            if self._action_record_failed(record):
+                await self._emit_normalized_action_event(
+                    "failed",
+                    record,
+                    execution_meta=execution_meta,
+                    owner_context=owner_context,
+                )
+            else:
+                await self._emit_normalized_action_event(
+                    "completed",
+                    record,
+                    execution_meta=execution_meta,
+                    owner_context=owner_context,
+                )
+
+    @staticmethod
+    def _action_event_owner_context(iteration_index: int, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+        block_carrier = execution_meta.get("block_carrier")
+        work_unit: Mapping[str, Any] = {}
+        if isinstance(block_carrier, Mapping):
+            raw_work_unit = block_carrier.get("work_unit")
+            if isinstance(raw_work_unit, Mapping):
+                work_unit = raw_work_unit
+        runtime_preferences = work_unit.get("runtime_preferences")
+        if not isinstance(runtime_preferences, Mapping):
+            runtime_preferences = {}
+        return {
+            "iteration": iteration_index,
+            "origin": work_unit.get("origin"),
+            "work_unit_id": work_unit.get("id"),
+            "strategy": runtime_preferences.get("strategy"),
+            "card_id": runtime_preferences.get("card_id"),
+        }
+
+    async def _emit_normalized_action_event(
+        self,
+        phase: Literal["started", "completed", "failed"],
+        record: Mapping[str, Any],
+        *,
+        execution_meta: Mapping[str, Any],
+        owner_context: Mapping[str, Any],
+    ) -> None:
+        if self._normalized_action_event_already_emitted(phase, record, execution_meta=execution_meta):
+            return
+        action_id = str(record.get("id") or record.get("name") or "").strip()
+        action_call_id = str(record.get("action_call_id") or "").strip()
+        status = str(record.get("status") or "").strip() or ("started" if phase == "started" else phase)
+        payload: dict[str, Any] = {
+            "action_id": action_id,
+            "action_call_id": action_call_id or None,
+            "status": "started" if phase == "started" else status,
+            "action_type": str(record.get("action_type") or "").strip() or None,
+            "kind": str(record.get("kind") or "").strip() or None,
+            "execution_id": execution_meta.get("execution_id"),
+            "route": DataFormatter.sanitize(execution_meta.get("route", {})),
+            "projection_source": "execution_meta.action_logs",
+            "posthoc_projection": True,
+            **{key: value for key, value in owner_context.items() if value is not None},
+        }
+        if "input_preview" in record:
+            payload["input_summary"] = record.get("input_preview")
+        if phase in {"completed", "failed"}:
+            payload["success"] = phase == "completed"
+            if "result_preview" in record:
+                payload["output_summary"] = record.get("result_preview")
+            if "result_preview_meta" in record:
+                payload["result_preview_meta"] = record.get("result_preview_meta")
+            for key in (
+                "artifact_refs",
+                "file_refs",
+                "usage",
+                "estimated_input_chars",
+                "estimated_output_chars",
+                "elapsed_ms",
+                "duration_ms",
+                "warnings",
+            ):
+                if key in record:
+                    payload[key] = record.get(key)
+            source_refs = self._collect_source_refs_from_action_records([record])
+            if source_refs:
+                payload["source_refs"] = source_refs
+        if phase == "failed":
+            error = record.get("error")
+            if error is not None:
+                payload["error"] = self._compact_verifier_prompt_value(error, max_chars=600)
+            if "retryable" in record:
+                payload["retryable"] = bool(record.get("retryable"))
+            payload["failure_category"] = self._action_failure_category(record, status=status)
+        await self._emit(
+            f"agent_task.action.{phase}",
+            {key: value for key, value in payload.items() if value is not None},
+            meta={
+                "task_id": self.id,
+                "status": self.status,
+                "stream_kind": "action_observation",
+                "action_id": action_id,
+                "action_call_id": action_call_id or None,
+                "phase": phase,
+                "iteration": owner_context.get("iteration"),
+                "origin": owner_context.get("origin"),
+                "work_unit_id": owner_context.get("work_unit_id"),
+                "projection_source": "execution_meta.action_logs",
+            },
+        )
+
+    def _normalized_action_event_already_emitted(
+        self,
+        phase: str,
+        record: Mapping[str, Any],
+        *,
+        execution_meta: Mapping[str, Any],
+    ) -> bool:
+        emitted = getattr(self, "_emitted_action_event_keys", None)
+        if not isinstance(emitted, set):
+            emitted = set()
+            setattr(self, "_emitted_action_event_keys", emitted)
+        action_id = str(record.get("id") or record.get("name") or "").strip()
+        action_call_id = str(record.get("action_call_id") or "").strip()
+        preview_key = str(record.get("result_preview_sha256") or "")
+        if not preview_key:
+            try:
+                preview_key = json.dumps(
+                    DataFormatter.sanitize(
+                        {
+                            "input_preview": record.get("input_preview"),
+                            "result_preview": record.get("result_preview"),
+                        }
+                    ),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )[:160]
+            except Exception:
+                preview_key = f"{record.get('input_preview') or ''}|{record.get('result_preview') or ''}"[:160]
+        key = (
+            str(phase),
+            str(execution_meta.get("execution_id") or ""),
+            action_id,
+            action_call_id,
+            preview_key or str(record.get("status") or ""),
+        )
+        if key in emitted:
+            return True
+        emitted.add(key)
+        return False
+
+    @staticmethod
+    def _action_record_failed(record: Mapping[str, Any]) -> bool:
+        status = str(record.get("status") or "").strip().lower()
+        return status in {"failed", "error", "timed_out", "timeout", "blocked"} or record.get("error") is not None
+
+    @classmethod
+    def _action_failure_category(cls, record: Mapping[str, Any], *, status: str) -> str:
+        status_text = str(status or "").strip().lower()
+        error_text = str(record.get("error") or "").strip().lower()
+        combined = f"{status_text}\n{error_text}"
+        if "timeout" in combined or "timed out" in combined or "idle" in combined or "no progress" in combined:
+            return "liveness"
+        if "capability" in combined or "not allowed" in combined or "not permitted" in combined:
+            return "capability"
+        if "connection" in combined or "network" in combined or "provider" in combined or "service" in combined:
+            return "infra"
+        return "execution"
+
     @staticmethod
     def _dedupe_ref_records(records: Sequence[Any]) -> list[Any]:
         deduped: list[Any] = []
@@ -1120,6 +1305,24 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 if len(value) > 8:
                     compact[key].append({"omitted": len(value) - 8, "reason": "prompt_budget"})
             elif key == "file_refs" and value:
+                compact[key] = cls._compact_verifier_prompt_value(value, max_chars=1200)
+
+        for key in (
+            "usage",
+            "estimated_input_chars",
+            "estimated_output_chars",
+            "elapsed_ms",
+            "duration_ms",
+            "retryable",
+            "warnings",
+            "error",
+        ):
+            value = record.get(key)
+            if value is None and isinstance(digest, Mapping):
+                value = digest.get(key)
+            if value is None and raw:
+                value = raw.get(key)
+            if value is not None:
                 compact[key] = cls._compact_verifier_prompt_value(value, max_chars=1200)
 
         preview_meta = compact.get("result_preview_meta")

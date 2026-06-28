@@ -148,6 +148,7 @@ class AgentTask(
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []
         self._background_stream_tasks: set[asyncio.Task[Any]] = set()
+        self._emitted_action_event_keys: set[tuple[str, str, str, str, str]] = set()
         self._last_stream_emit_monotonic = time.monotonic()
         self._flow = self._build_flow()
 

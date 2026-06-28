@@ -297,6 +297,13 @@ proposal，AgentTask 会把补丁应用到绑定的 Workspace 文件，写回后
 artifact 物化；`remaining_work`、blocked 状态、repair 或 readback 仍会阻止写入。写入
 artifact 只是为后续 readback 和 verification 创建证据，不代表最终任务已经被接受。
 
+AgentTask observation 也会在结构化 stream 上发布归一化 action 事实：
+`agent_task.action.started`、`agent_task.action.completed` 和
+`agent_task.action.failed`。这些事件从已有 Action records 汇总安全的 input summary、
+result preview、refs、耗时、diagnostics 和 work-unit 归属。它们只是给 DevTools、UI 和
+实验日志使用的 observation facts；是否有用、质量如何、任务是否完成仍由 verifier 和
+strategy 判断。
+
 写入成功且读回可信时，verifier 输入会包含这些读回字段和
 `capability_evidence.artifacts.readback`；在 `max_iterations=1` 下，真实已写入且可读回的
 artifact 不应只因为 evidence 链缺失而变成 partial。如果读回失败，或缺少可信的

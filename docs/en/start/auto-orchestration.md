@@ -340,6 +340,13 @@ Workspace artifact materialization; `remaining_work`, blocked status, repair,
 or readback still do. Writing the artifact only creates evidence for later
 readback and verification. It does not mean the final task has been accepted.
 
+AgentTask observation also publishes normalized action facts on the structured
+stream as `agent_task.action.started`, `agent_task.action.completed`, and
+`agent_task.action.failed`. These events summarize existing Action records with
+safe input summaries, result previews, refs, timing, diagnostics, and work-unit
+ownership. They are observation facts for DevTools, UI, and experiment logs; the
+verifier and strategy still own usefulness, quality, and completion judgment.
+
 When the write succeeds and readback is trusted, verifier input includes the
 readback fields and `capability_evidence.artifacts.readback`; with
 `max_iterations=1`, a real readable artifact should not become partial only

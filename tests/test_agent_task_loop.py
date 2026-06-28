@@ -138,6 +138,106 @@ def test_task_context_contract_includes_utc_and_local_time_when_timezone_known(t
         time.tzset()
 
 
+@pytest.mark.asyncio
+async def test_record_observation_projects_action_logs_to_normalized_action_events(tmp_path):
+    agent = _create_agent("agent-task-action-observation-events").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="action-observation-events",
+        goal="Inspect Workspace evidence with actions.",
+        success_criteria=["Action facts are observable."],
+    )
+    decision_ref = await task._record_decision(
+        1,
+        {"step_instruction": "Search and read scoped evidence."},
+        {
+            "goal": task.goal,
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+            "profile": "test",
+        },
+    )
+    execution_meta = {
+        "execution_id": "exec-action-events",
+        "status": "completed",
+        "route": {"selected_route": "actions"},
+        "block_carrier": {
+            "work_unit": {
+                "id": "iter-1:flat-step",
+                "origin": "flat_step",
+                "runtime_preferences": {"strategy": "flat"},
+            }
+        },
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "grep_workspace",
+                    "status": "success",
+                    "action_call_id": "call-grep",
+                    "kind": "shell_search",
+                    "raw": {"kwargs": {"query": "deadline", "scope": "workspace"}},
+                    "elapsed_ms": 12,
+                    "model_digest": {
+                        "result_preview": {
+                            "path": "notes.md",
+                            "content": "deadline is 2026-07-01",
+                        },
+                        "result_preview_meta": {"bytes": 24, "truncated": False},
+                        "file_refs": [{"path": "notes.md", "sha256": "abc"}],
+                    },
+                },
+                {
+                    "action_id": "read_file",
+                    "status": "failed",
+                    "action_call_id": "call-read",
+                    "raw": {"kwargs": {"path": "missing.md"}},
+                    "error": "file not found",
+                    "retryable": False,
+                },
+            ],
+            "route_logs": {},
+        },
+    }
+
+    await task._record_observation(
+        1,
+        plan={"step_instruction": "Search and read scoped evidence."},
+        decision_ref=decision_ref,
+        execution_result={"step_result": "searched workspace"},
+        execution_meta=execution_meta,
+    )
+    await task._record_observation(
+        1,
+        plan={"step_instruction": "Search and read scoped evidence."},
+        decision_ref=decision_ref,
+        execution_result={"step_result": "searched workspace"},
+        execution_meta=execution_meta,
+    )
+
+    action_items = [item for item in task._stream_items if item.path.startswith("agent_task.action.")]
+    started_items = [item for item in action_items if item.path == "agent_task.action.started"]
+    completed_items = [item for item in action_items if item.path == "agent_task.action.completed"]
+    failed_items = [item for item in action_items if item.path == "agent_task.action.failed"]
+
+    assert len(started_items) == 2
+    assert len(completed_items) == 1
+    assert len(failed_items) == 1
+    assert all((item.meta or {}).get("stream_kind") == "action_observation" for item in action_items)
+    grep_started = next(item for item in started_items if item.value["action_id"] == "grep_workspace")
+    assert grep_started.value["input_summary"] == {"query": "deadline", "scope": "workspace"}
+    assert grep_started.value["work_unit_id"] == "iter-1:flat-step"
+    grep_completed = completed_items[0]
+    assert grep_completed.value["output_summary"]["path"] == "notes.md"
+    assert grep_completed.value["file_refs"][0]["path"] == "notes.md"
+    assert any(ref["value"] == "notes.md" for ref in grep_completed.value["source_refs"])
+    read_failed = failed_items[0]
+    assert read_failed.value["action_id"] == "read_file"
+    assert read_failed.value["error"] == "file not found"
+    assert read_failed.value["failure_category"] == "execution"
+    assert read_failed.value["retryable"] is False
+
+
 def test_agent_task_explicit_resource_caps_remain_effective(tmp_path):
     agent = _create_agent("agent-task-explicit-resource-caps").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -1409,7 +1509,7 @@ async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anch
         execution_result={"artifact_manifest": {"path": "final.md"}},
         execution_meta={"status": "completed", "logs": {"action_logs": [], "route_logs": {}}},
         source="test.workspace_artifact_draft.evidence",
-        context_pack={},
+        context_pack=None,
         iteration_index=2,
     )
 
