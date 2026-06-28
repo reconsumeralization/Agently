@@ -284,7 +284,7 @@ deliverable for host-side review.
 
 The same ref-backed path is also valid for intermediate work. A step may
 download a file, save a webpage snapshot, write generated code, keep search
-notes, or persist large extracted text as Workspace or Action artifact refs.
+notes or memory-like task notes, or persist large extracted text as Workspace or Action artifact refs.
 Hot prompts should carry compact refs and bounded previews; later blocks can
 open scoped snippets with `read_file(max_bytes=..., offset=...)` or artifact
 readback when they need the content. These intermediate refs are execution

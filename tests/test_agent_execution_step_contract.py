@@ -270,9 +270,21 @@ def test_task_context_contract_is_ref_backed_and_cap_free(tmp_path):
 
     assert contract["schema_version"] == "agent_task_context_contract/v1"
     assert contract["run_date_utc"]
-    assert "webpage_snapshot" in contract["intermediate_resource_policy"]["cold_resource_kinds"]
-    assert "workspace_note" in contract["intermediate_resource_policy"]["cold_resource_kinds"]
-    assert contract["intermediate_resource_policy"]["default_state"] == "ref_only"
+    intermediate_policy = contract["intermediate_resource_policy"]
+    assert set(intermediate_policy["cold_resource_kinds"]) == {
+        "download",
+        "webpage_snapshot",
+        "search_note",
+        "generated_code",
+        "large_extraction",
+        "workspace_note",
+    }
+    assert intermediate_policy["default_state"] == "ref_only"
+    assert "compact refs" in intermediate_policy["hot_path"]
+    assert "Workspace or Action artifacts" in intermediate_policy["hot_path"]
+    assert "max_bytes" in intermediate_policy["readback"]
+    assert "offsets" in intermediate_policy["readback"]
+    assert "discovery or materialization only" in intermediate_policy["evidence_boundary"]
     assert "hard_execution_caps" in contract["resource_policy"]
     assert "max_iterations" not in json.dumps(contract, ensure_ascii=False)
     assert work_unit.input_payload["task_context_contract"]["schema_version"] == contract["schema_version"]
