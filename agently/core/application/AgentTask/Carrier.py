@@ -455,7 +455,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 value = raw_group.get(key)
                 if value is not None:
                     bound_inputs[key] = value
-            for key in ("search_surface", "include_hidden", "max_file_bytes"):
+            for key in ("search_surface", "include_hidden", "max_file_bytes", "context_lines"):
                 value = raw_group.get(key)
                 if value is not None:
                     bound_inputs[key] = value

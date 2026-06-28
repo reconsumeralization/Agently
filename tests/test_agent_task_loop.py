@@ -378,7 +378,8 @@ async def test_block_carrier_executes_file_scoped_retrieval_and_injects_results(
     assert scoped_results[0]["bounded"]["search_surface"] == "workspace_files"
     assert scoped_results[0]["bounded"]["search_engines"] == ["workspace_file_scan"]
     assert scoped_results[0]["bounded"]["file_returned_results"] == 1
-    assert scoped_results[0]["evidence_snippets"][0]["content"] == "release deadline is 2026-07-01"
+    assert scoped_results[0]["bounded"]["context_lines"] == 3
+    assert scoped_results[0]["evidence_snippets"][0]["content"] == "alpha\nrelease deadline is 2026-07-01"
     assert scoped_results[0]["locator_refs"][0]["content_state"] == "ref_only"
     assert execution_result["scoped_retrieval_results"][0]["bounded"]["returned_results"] == 1
     compact_search_output = execution_meta["blocks"]["evidence"]["execution_block_results"][0]["output"]

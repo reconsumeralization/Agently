@@ -579,7 +579,9 @@ async def test_blocks_workspace_operation_search_can_use_workspace_files_surface
     assert output["locator_refs"][0]["content_state"] == "ref_only"
     assert output["locator_refs"][0]["path"] == "notes/todo.md"
     assert output["evidence_snippets"][0]["role"] == "evidence_snippet"
-    assert output["evidence_snippets"][0]["content"] == "release deadline is 2026-07-01"
+    assert output["evidence_snippets"][0]["content"] == "alpha\nrelease deadline is 2026-07-01"
+    assert output["evidence_snippets"][0]["line_start"] == 1
+    assert output["evidence_snippets"][0]["line_end"] == 2
     assert output["evidence_snippets"][0]["locator_ref"]["path"] == "notes/todo.md"
     assert not {"useful", "accepted", "semantically_relevant"}.intersection(output)
 

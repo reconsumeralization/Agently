@@ -631,12 +631,16 @@ class Workspace:
         max_results: int = 50,
         include_hidden: bool = False,
         max_file_bytes: int = 200000,
+        context_lines: int = 0,
+        max_snippet_bytes: int = 1200,
     ) -> list[WorkspaceFileSearchResult]:
         query_text = str(query)
         if not query_text:
             return []
         safe_max_results = max(1, min(int(max_results), 1000))
         safe_max_file_bytes = max(1, min(int(max_file_bytes), 5_000_000))
+        safe_context_lines = max(0, min(int(context_lines), 20))
+        safe_max_snippet_bytes = max(1, min(int(max_snippet_bytes), 12000))
         base = self.resolve_file_path(path)
         if base.is_file():
             candidates = [base]
@@ -664,15 +668,26 @@ class Workspace:
             if not read_result.get("readable") or read_result.get("content_kind") != "text":
                 continue
             text = str(read_result.get("content", ""))
-            for line_no, line in enumerate(text.splitlines(), start=1):
+            lines = text.splitlines()
+            for line_no, line in enumerate(lines, start=1):
                 if query_text not in line:
                     continue
+                line_index = line_no - 1
+                snippet_start = max(0, line_index - safe_context_lines)
+                snippet_end = min(len(lines), line_index + safe_context_lines + 1)
+                snippet = "\n".join(lines[snippet_start:snippet_end])
+                snippet_raw = snippet.encode("utf-8")
+                if len(snippet_raw) > safe_max_snippet_bytes:
+                    snippet = snippet_raw[:safe_max_snippet_bytes].decode("utf-8", errors="ignore")
+                    snippet_raw = snippet.encode("utf-8")
                 search_scope = {
                     "path": str(path),
                     "pattern": str(pattern or "*"),
                     "include_hidden": include_hidden,
                     "max_results": safe_max_results,
                     "max_file_bytes": safe_max_file_bytes,
+                    "context_lines": safe_context_lines,
+                    "max_snippet_bytes": safe_max_snippet_bytes,
                 }
                 file_ref = cast(
                     WorkspaceFileRef,
@@ -710,12 +725,12 @@ class Workspace:
                             "source": "workspace.search_files",
                             "query": query_text,
                             "scope": search_scope,
-                            "locator_ref": locator_ref,
-                            "snippet": line,
-                            "snippet_chars": len(line),
-                            "snippet_bytes": len(line.encode("utf-8")),
-                            "line_start": line_no,
-                            "line_end": line_no,
+                        "locator_ref": locator_ref,
+                        "snippet": snippet,
+                        "snippet_chars": len(snippet),
+                        "snippet_bytes": len(snippet_raw),
+                        "line_start": snippet_start + 1,
+                        "line_end": snippet_end,
                             "bytes": file_ref["bytes"],
                             "sha256": file_ref["sha256"],
                             "media_type": file_ref["media_type"],

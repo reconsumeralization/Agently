@@ -48,6 +48,7 @@ def scoped_retrieval_policy() -> dict[str, Any]:
         "bounded_defaults": {
             "max_results": 8,
             "snippet_limit": 1200,
+            "file_context_lines": 3,
         },
     }
 

@@ -984,6 +984,12 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
         search_files = search_surface in {"workspace_files", "workspace_index_and_files"} or (
             search_surface == "auto" and file_scope_requested
         )
+        context_lines = _bounded_int(
+            bound_inputs.get("context_lines", filters.get("context_lines")),
+            default=3 if search_files else 0,
+            minimum=0,
+            maximum=20,
+        )
         refs = (
             list(await workspace.search(str(query) if query is not None else None, filters=dict(filters)))
             if search_index
@@ -1048,6 +1054,8 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
                         max_results=remaining_file_results,
                         include_hidden=include_hidden,
                         max_file_bytes=max_file_bytes,
+                        context_lines=context_lines,
+                        max_snippet_bytes=snippet_limit,
                     )
                     if inspect.isawaitable(raw_file_results):
                         raw_file_results = await raw_file_results
@@ -1101,7 +1109,7 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
                     "content_state": "bounded_readback_available",
                     "source": "blocks.workspace_operation.search_files",
                     "workspace_source": item.get("source") or "workspace.search_files",
-                    "content": item.get("text") or item.get("snippet") or "",
+                    "content": item.get("snippet") or item.get("text") or "",
                     "locator_ref": locator_ref,
                 }
             )
@@ -1144,11 +1152,12 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
                 "snippet_offset": snippet_offset,
                 "snippet_limit": snippet_limit,
                 "file_path": str(path_scope),
-                "file_pattern": pattern,
-                "max_file_bytes": max_file_bytes,
-                "candidate_bytes": candidate_bytes,
-                "returned_snippet_bytes": returned_snippet_bytes,
-            },
+                    "file_pattern": pattern,
+                    "max_file_bytes": max_file_bytes,
+                    "context_lines": context_lines,
+                    "candidate_bytes": candidate_bytes,
+                    "returned_snippet_bytes": returned_snippet_bytes,
+                },
             "locator_refs": locator_refs,
             "evidence_snippets": evidence_snippets,
             "file_search_results": file_results,

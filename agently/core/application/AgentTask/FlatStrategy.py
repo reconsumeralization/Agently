@@ -678,7 +678,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 surface = str(item.get("search_surface") or item.get("surface") or "").strip()
                 if surface in {"workspace_index", "workspace_files", "workspace_index_and_files", "files"}:
                     candidate["search_surface"] = "workspace_files" if surface == "files" else surface
-                for key in ("max_results", "snippet_limit", "snippet_offset", "max_file_bytes"):
+                for key in ("max_results", "snippet_limit", "snippet_offset", "max_file_bytes", "context_lines"):
                     value = item.get(key)
                     if value is not None:
                         candidate[key] = DataFormatter.sanitize(value)
