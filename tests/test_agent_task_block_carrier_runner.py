@@ -138,6 +138,69 @@ def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_pa
         ),
         encoding="utf-8",
     )
+    (run_dir / "behavior.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event": "framework_stream_event",
+                        "route": "flat",
+                        "case_id": "stock_risk_outlook",
+                        "stream_event_index": 10,
+                        "stream_item": {
+                            "path": "agent_task.action.started",
+                            "meta": {
+                                "stream_kind": "action_observation",
+                                "phase": "started",
+                                "action_id": "grep_workspace",
+                                "work_unit_id": "iter-1:flat-step",
+                            },
+                            "value": {
+                                "action_id": "grep_workspace",
+                                "status": "started",
+                                "work_unit_id": "iter-1:flat-step",
+                                "origin": "flat_step",
+                                "input_summary": {"query": "risk"},
+                                "projection_source": "execution_meta.action_logs",
+                                "posthoc_projection": True,
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "event": "framework_stream_event",
+                        "route": "flat",
+                        "case_id": "stock_risk_outlook",
+                        "stream_event_index": 11,
+                        "stream_item": {
+                            "path": "agent_task.action.completed",
+                            "meta": {
+                                "stream_kind": "action_observation",
+                                "phase": "completed",
+                                "action_id": "grep_workspace",
+                                "work_unit_id": "iter-1:flat-step",
+                            },
+                            "value": {
+                                "action_id": "grep_workspace",
+                                "status": "success",
+                                "work_unit_id": "iter-1:flat-step",
+                                "origin": "flat_step",
+                                "output_summary": {"path": "notes.md", "content": "risk evidence"},
+                                "source_refs": [{"value": "notes.md"}],
+                                "projection_source": "execution_meta.action_logs",
+                                "posthoc_projection": True,
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     summary = runner.write_block_carrier_summary(run_dir, stage="diagnostic_pair")
     runner.write_block_carrier_summary(run_dir, stage="diagnostic_pair")
@@ -149,6 +212,13 @@ def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_pa
     facts = summary["records"][0]
     assert facts["observed_origins"] == ["flat_step"]
     carrier = facts["carriers"][0]
+    action_observations = facts["action_observations"]
+    assert action_observations["event_count"] == 2
+    assert action_observations["counts_by_phase"] == {"completed": 1, "started": 1}
+    assert action_observations["action_ids"] == ["grep_workspace"]
+    assert action_observations["runner_judges_action_usefulness"] is False
+    assert action_observations["samples"][0]["input_summary"] == {"query": "risk"}
+    assert action_observations["samples"][1]["source_ref_count"] == 1
     assert carrier["block_graph"]["present"] is True
     assert carrier["block_graph"]["graph_id"] == "carrier-graph"
     assert carrier["block_graph"]["execution_block_kinds"] == ["agent_step"]
@@ -156,6 +226,8 @@ def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_pa
     assert carrier["block_evidence"]["execution_block_result_kinds"] == ["agent_step"]
     report = (run_dir / "REPORT.md").read_text(encoding="utf-8")
     assert "BlockCarrier Facts" in report
+    assert "Action Observation Facts" in report
+    assert "grep_workspace" in report
     assert report.count("## BlockCarrier Facts") == 1
     assert "agent_step" in report
     assert "## Route Boundary Analysis" not in report
