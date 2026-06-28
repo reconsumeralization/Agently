@@ -691,7 +691,10 @@ async def test_record_observation_projects_action_logs_to_normalized_action_even
                     "status": "success",
                     "action_call_id": "call-grep",
                     "kind": "shell_search",
-                    "raw": {"kwargs": {"query": "deadline", "scope": "workspace"}},
+                    "raw": {
+                        "kwargs": {"query": "deadline", "scope": "workspace"},
+                        "error": "one search backend failed after another backend returned results",
+                    },
                     "elapsed_ms": 12,
                     "model_digest": {
                         "result_preview": {
@@ -745,6 +748,8 @@ async def test_record_observation_projects_action_logs_to_normalized_action_even
     grep_completed = completed_items[0]
     assert grep_completed.value["output_summary"]["path"] == "notes.md"
     assert grep_completed.value["file_refs"][0]["path"] == "notes.md"
+    assert grep_completed.value["success"] is True
+    assert "error" not in grep_completed.value
     assert any(ref["value"] == "notes.md" for ref in grep_completed.value["source_refs"])
     read_failed = failed_items[0]
     assert read_failed.value["action_id"] == "read_file"

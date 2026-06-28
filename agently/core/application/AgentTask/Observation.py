@@ -1099,6 +1099,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     @staticmethod
     def _action_record_failed(record: Mapping[str, Any]) -> bool:
         status = str(record.get("status") or "").strip().lower()
+        if status in {"success", "succeeded", "completed", "complete", "partial_success", "ok"}:
+            return False
         return status in {"failed", "error", "timed_out", "timeout", "blocked"} or record.get("error") is not None
 
     @classmethod

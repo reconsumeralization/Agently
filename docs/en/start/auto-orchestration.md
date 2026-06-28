@@ -353,7 +353,9 @@ AgentTask observation also publishes normalized action facts on the structured
 stream as `agent_task.action.started`, `agent_task.action.completed`, and
 `agent_task.action.failed`. These events summarize existing Action records with
 safe input summaries, result previews, refs, timing, diagnostics, and work-unit
-ownership. They are observation facts for DevTools, UI, and experiment logs; the
+ownership. Recovered `success` or `partial_success` Action records are projected
+as completed observations, while failed events are reserved for actual failed,
+blocked, timed-out, or unrecovered error records. They are observation facts for DevTools, UI, and experiment logs; the
 downstream consumer, terminal verifier/final control, and strategy still own
 usefulness, quality, and completion judgment.
 

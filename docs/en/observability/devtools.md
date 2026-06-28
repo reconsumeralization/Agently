@@ -80,6 +80,8 @@ For TriggerFlow, stream progress through `data.async_put_into_stream(...)`; the 
 
 AgentTask may project `agent_task.action.started`, `agent_task.action.completed`, and `agent_task.action.failed` RuntimeEvent records from bounded execution Action logs. DevTools should consume them as factual action observations in the AgentTask timeline, grouped by task iteration when iteration metadata is present.
 
+Recovered `success` and `partial_success` records are completed observations, even when they carry backend diagnostics. Failed observations are reserved for failed, blocked, timed-out, or unrecovered error records.
+
 These records are for display, logging, and post-run analysis only. Do not use them as route decisions, verifier results, quality scores, semantic relevance judgments, or task-completion acceptance. Unknown fields should be ignored, and large payloads should stay summarized or ref-backed.
 
 ## Model request usage

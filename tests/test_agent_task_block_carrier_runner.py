@@ -52,7 +52,7 @@ def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_pa
     (run_dir / "summary.json").write_text(
         json.dumps(
             {
-                "routes": ["flat"],
+                "routes": ["flat", "taskboard"],
                 "cases": [{"case_id": "stock_risk_outlook"}],
             }
         ),
@@ -209,6 +209,9 @@ def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_pa
     assert "verdict" not in summary
     assert "failure_classification" not in summary
     assert summary["runner_responsibility"]["runner_classifies_failures"] is False
+    assert summary["selected_scope"] == ["flat/stock_risk_outlook"]
+    assert len(summary["records"]) == 1
+    assert [item["record_present"] for item in summary["full_effect_records"]].count(True) == 1
     facts = summary["records"][0]
     assert facts["observed_origins"] == ["flat_step"]
     carrier = facts["carriers"][0]
