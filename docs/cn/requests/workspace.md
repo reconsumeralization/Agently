@@ -314,7 +314,15 @@ export_result = await agent.workspace.export_file(
 `bytes`、`sha256`、`offset`、`read_bytes`、`truncated`、diagnostics 和 file refs。
 未知 binary 文件会返回 `readable=False` 和结构化 diagnostics，不会用 replacement
 character 伪造文本。`search_files` 也只搜索通过同一 handler registry 判定为 readable
-text 的文件。
+text 的文件。搜索结果保留原有 `path`、`line`、`text` 字段，同时会带
+`role="evidence_snippet"`、有界片段计数，以及嵌套的 `locator_ref`
+（`content_state="ref_only"`）。可见片段只能作为该片段范围内的证据；locator
+只表示后续可以用 `read_file(...)` 或 Blocks `workspace_operation` 做有界读回的目标。
+
+Blocks `workspace_operation` 也可以通过 Workspace SQLite/FTS 索引执行 scoped
+Workspace 搜索，并通过 `search` / `read_bounded` 操作返回 refs/paths 的有界读回。
+这些操作只返回 typed `locator_ref` 与 `evidence_snippet` 事实，不判断命中是否语义有用，
+也不判断任务是否完成。
 
 `materialize_file(...)` 用于框架或应用拥有的受控 bytes 物化，例如 Browse action
 把远程 PDF 下载到 Workspace 的 `downloads/` 后，再由后续 `read_file(...)` 通过

@@ -641,7 +641,72 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         normalized["step_scope"] = {"allowed_capability_ids": allowed_capability_ids}
         normalized["allowed_action_ids"] = allowed_capability_ids
+        scoped_retrieval = self._normalize_scoped_retrieval_plan(normalized.get("scoped_retrieval"))
+        if scoped_retrieval:
+            normalized["scoped_retrieval"] = scoped_retrieval
+        else:
+            normalized.pop("scoped_retrieval", None)
         self._normalize_step_deliverable_mode(normalized)
+        return normalized
+
+    @classmethod
+    def _normalize_scoped_retrieval_plan(cls, raw: Any) -> dict[str, Any]:
+        if not isinstance(raw, Mapping):
+            return {}
+        raw_queries = raw.get("query_groups", raw.get("queries", raw.get("query")))
+        if raw_queries is None:
+            query_values: list[Any] = []
+        elif isinstance(raw_queries, str):
+            query_values = [raw_queries]
+        elif isinstance(raw_queries, Sequence) and not isinstance(raw_queries, (bytes, bytearray)):
+            query_values = list(raw_queries)
+        else:
+            query_values = [raw_queries]
+        query_groups: list[dict[str, Any]] = []
+        for item in query_values:
+            if isinstance(item, Mapping):
+                query = str(item.get("query") or item.get("text") or item.get("keyword") or "").strip()
+                expected_role = str(item.get("expected_role") or item.get("role") or "").strip()
+                candidate = {
+                    "query": query,
+                    "expected_role": expected_role if expected_role in {"evidence_snippet", "locator_ref"} else "",
+                }
+                for key in ("path", "pattern", "collection", "kind"):
+                    value = str(item.get(key) or "").strip()
+                    if value:
+                        candidate[key] = value
+                filters = item.get("filters")
+                if isinstance(filters, Mapping):
+                    candidate["filters"] = DataFormatter.sanitize(dict(filters))
+            else:
+                query = str(item or "").strip()
+                candidate = {"query": query, "expected_role": ""}
+            if not query:
+                continue
+            if not candidate.get("expected_role"):
+                candidate.pop("expected_role", None)
+            query_groups.append(candidate)
+            if len(query_groups) >= 8:
+                break
+        if not query_groups:
+            return {}
+        raw_fallback_order = raw.get("fallback_order") or raw.get("fallbacks")
+        if isinstance(raw_fallback_order, str):
+            fallback_values = [raw_fallback_order]
+        elif isinstance(raw_fallback_order, Sequence) and not isinstance(
+            raw_fallback_order, (bytes, bytearray)
+        ):
+            fallback_values = list(raw_fallback_order)
+        else:
+            fallback_values = []
+        fallback_order: list[str] = []
+        for item in fallback_values:
+            text = str(item or "").strip()
+            if text:
+                fallback_order.append(text)
+        normalized: dict[str, Any] = {"query_groups": query_groups}
+        if fallback_order:
+            normalized["fallback_order"] = fallback_order[:8]
         return normalized
 
     def _normalize_step_deliverable_mode(self, plan: dict[str, Any]) -> None:
@@ -996,6 +1061,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "effective_execution_strategy": self.effective_execution_strategy,
                 "task_shape_analysis": DataFormatter.sanitize(self.task_shape_analysis),
                 "planner_capabilities": planner_capabilities,
+                "retrieval_policy": scoped_retrieval_policy(),
                 "language_policy": language_policy,
             }
         )
@@ -1046,6 +1112,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             + capability_note
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
             "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
+            " For Workspace, repository, or file-backed evidence, prefer scoped retrieval before bulk reads when it can "
+            "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
+            "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Search/read executors only "
+            "record bounded facts; the planner/verifier must judge semantic usefulness after seeing snippets or readbacks."
             " For long, sectioned, or prose-heavy deliverables, separate the content-carrier decision from the "
             "control/evidence contract. A single freeform document can be drafted as natural Markdown/plain text. When "
             "field boundaries are required, preserve the caller's declared .output(..., format=...) contract such as "
@@ -1075,6 +1145,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "step_scope": (
                     dict,
                     "Optional structured scope: {allowed_capability_ids: [...]}; empty means no restriction",
+                    False,
+                ),
+                "scoped_retrieval": (
+                    dict,
+                    "Optional retrieval plan: {query_groups: [{query, expected_role, path?, pattern?, filters?}], fallback_order?: [...]}; executors return facts only",
                     False,
                 ),
             },
@@ -1189,6 +1264,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "effective_execution_strategy": self.effective_execution_strategy,
                     "context_pack": DataFormatter.sanitize(context_pack),
                     "execution_prompt": self._execution_prompt_context(),
+                    "retrieval_policy": scoped_retrieval_policy(),
+                    "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
                     "language_policy": language_policy,
                 },
                 instruction=(
@@ -1214,6 +1291,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "source boundary. "
                     "For repository or file-source steps, a clone/list manifest path is ref_only; read the specific "
                     "file or artifact before making claims about its content. "
+                    "When scoped_retrieval.query_groups is present, try the prioritized scoped search before broad "
+                    "reads; use evidence_snippet results as bounded source text and locator_ref results only as targets "
+                    "for later bounded readback. Do not treat a local search hit as semantic acceptance by itself. "
                     "Do not claim final completion unless evidence supports it."
                     + self._bounded_step_carrier_instruction(carrier_output_policy)
                 ),

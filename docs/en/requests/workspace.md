@@ -338,7 +338,17 @@ returns bounded content with `bytes`, `sha256`, `offset`, `read_bytes`,
 `truncated`, diagnostics, and file refs. Unknown binary files return
 `readable=False` with diagnostics instead of replacement-character content.
 `search_files` only searches files that are readable text through the same
-handler registry.
+handler registry. Search results keep the original `path`, `line`, and `text`
+fields, and also include `role="evidence_snippet"`, bounded snippet counts, and
+a nested `locator_ref` with `content_state="ref_only"`. Use the visible snippet
+as evidence only within that excerpt; use the locator as a target for a later
+bounded `read_file(...)` or Blocks `workspace_operation` readback.
+
+Blocks `workspace_operation` can also run scoped Workspace searches through the
+Workspace SQLite/FTS index and bounded ref/path reads through `search` and
+`read_bounded` operations. These operations return typed `locator_ref` and
+`evidence_snippet` facts; they do not decide whether a hit is semantically
+useful or whether a task is complete.
 
 `materialize_file(...)` is for framework-owned or application-owned byte
 materialization, such as a Browse action downloading a remote PDF into

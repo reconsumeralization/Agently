@@ -471,6 +471,111 @@ async def test_blocks_workspace_operation_ingests_through_workspace_resource(tmp
 
 
 @pytest.mark.asyncio
+async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-search")
+    expected_ref = await workspace.ingest(
+        content="Alpha deadline is 2026-07-01. Keep this scoped evidence short.",
+        collection="observations",
+        kind="note",
+        summary="alpha deadline note",
+        scope={"task_id": "alpha"},
+    )
+    await workspace.ingest(
+        content="Beta deadline is unrelated and must stay outside the scoped result.",
+        collection="observations",
+        kind="note",
+        summary="beta deadline note",
+        scope={"task_id": "beta"},
+    )
+    graph = Agently.blocks.compile(
+        {
+            "plan_id": "plan-workspace-search",
+            "plan_blocks": [
+                {
+                    "id": "search",
+                    "plan_block_id": "workspace_operation",
+                    "kind": "workspace_operation",
+                    "bound_inputs": {
+                        "operation": "search",
+                        "query": "deadline",
+                        "filters": {"scope.task_id": "alpha"},
+                        "max_results": 4,
+                        "include_snippets": True,
+                        "snippet_limit": 24,
+                    },
+                }
+            ],
+        }
+    )
+
+    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
+    await execution.async_start({"ignored": True})
+    snapshot = await execution.async_close(timeout=5)
+
+    evidence = Agently.blocks.map_evidence(graph, snapshot)
+    output = evidence.execution_block_results[0]["output"]
+    assert output["operation"] == "search"
+    assert output["query"] == "deadline"
+    assert output["filters"] == {"scope.task_id": "alpha"}
+    assert output["bounded"]["max_results"] == 4
+    assert output["bounded"]["snippet_limit"] == 24
+    assert [item["ref"]["id"] for item in output["locator_refs"]] == [expected_ref["id"]]
+    assert output["locator_refs"][0]["role"] == "locator_ref"
+    assert output["locator_refs"][0]["content_state"] == "ref_only"
+    assert output["evidence_snippets"][0]["role"] == "evidence_snippet"
+    assert output["evidence_snippets"][0]["content_state"] == "bounded_readback_available"
+    assert output["evidence_snippets"][0]["locator_ref"]["ref"]["id"] == expected_ref["id"]
+    assert output["evidence_snippets"][0]["snippet_chars"] <= 24
+    assert evidence.workspace_refs == (expected_ref["id"],)
+    assert not {"useful", "accepted", "semantically_relevant"}.intersection(output)
+
+
+@pytest.mark.asyncio
+async def test_blocks_workspace_operation_read_bounded_returns_evidence_snippet(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-read-bounded")
+    ref = await workspace.put(
+        "abcdefghijklmnopqrstuvwxyz",
+        collection="artifacts",
+        kind="text_artifact",
+        summary="alphabet artifact",
+    )
+    graph = Agently.blocks.compile(
+        {
+            "plan_id": "plan-workspace-read-bounded",
+            "plan_blocks": [
+                {
+                    "id": "read",
+                    "plan_block_id": "workspace_operation",
+                    "kind": "workspace_operation",
+                    "bound_inputs": {
+                        "operation": "read_bounded",
+                        "ref": ref,
+                        "offset": 4,
+                        "limit": 6,
+                    },
+                }
+            ],
+        }
+    )
+
+    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
+    await execution.async_start({"ignored": True})
+    snapshot = await execution.async_close(timeout=5)
+
+    evidence = Agently.blocks.map_evidence(graph, snapshot)
+    output = evidence.execution_block_results[0]["output"]
+    snippet = output["evidence_snippet"]
+    assert output["operation"] == "read_bounded"
+    assert snippet["role"] == "evidence_snippet"
+    assert snippet["content"] == "efghij"
+    assert snippet["offset"] == 4
+    assert snippet["size"] == 6
+    assert snippet["total_size"] == 26
+    assert snippet["locator_ref"]["ref"]["id"] == ref["id"]
+    assert evidence.workspace_refs == (ref["id"],)
+
+
+@pytest.mark.asyncio
 async def test_blocks_approval_wait_uses_policy_approval_gate():
     Agently.configure_policy_approval(handler="auto_approve")
     try:

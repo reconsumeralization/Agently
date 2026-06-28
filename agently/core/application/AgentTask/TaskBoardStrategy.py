@@ -27,6 +27,8 @@ _TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION = (
     "source content has been read. Use it as content support only after a bounded readback/content preview is "
     "available. If the deliverable depends on unread source content, request readback with target_refs or call "
     "the available readback action; otherwise label the ref as discovered-only and do not claim facts from it. "
+    "When target refs point at Workspace/repository/file evidence, prefer scoped search/readback that returns "
+    "locator_ref or evidence_snippet before requesting broad content. "
 )
 
 
@@ -3929,11 +3931,14 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "Keep downloads, webpage snapshots, notes, generated code, and extracted text as cold refs unless "
                 "a later block needs scoped content.",
                 "Do not claim source contents from ref_only records.",
+                "Use scoped retrieval query groups for Workspace/repository/file evidence before broad reads when it can reduce prompt input.",
+                "Treat local search results as bounded facts, not as semantic acceptance.",
                 "When unread source content is required, return next_board_action=readback with concrete "
                 "target_refs or use an available readback action.",
                 "If a ref remains unread but is still useful, label it as discovered-only in the deliverable or "
                 "diagnostics.",
             ],
+            "scoped_retrieval_policy": scoped_retrieval_policy(),
         }
 
     @classmethod

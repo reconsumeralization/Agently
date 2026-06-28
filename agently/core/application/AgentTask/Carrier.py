@@ -43,6 +43,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "task_context_contract": self._task_context_contract(),
                 "plan": DataFormatter.sanitize(plan),
                 "execution_prompt": self._execution_prompt_context(),
+                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+                "retrieval_policy": scoped_retrieval_policy(),
                 "context_summary": {
                     "item_count": len(context_pack.get("items", [])),
                     "profile": context_pack.get("profile"),
@@ -63,6 +65,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
                 "deliverable_mode": plan.get("deliverable_mode"),
                 "task_context_contract": self._task_context_contract(),
+                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
             },
             runtime_preferences={
                 "handler": "agent_task_bounded_step",
@@ -362,6 +365,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         "step_plan": step_plan,
                         "plan": DataFormatter.sanitize(plan),
                         "execution_prompt": self._execution_prompt_context(),
+                        "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+                        "retrieval_policy": dict(work_unit.retrieval_policy),
                         "context_summary": {
                             "item_count": len(context_pack.get("items", [])),
                             "profile": context_pack.get("profile"),

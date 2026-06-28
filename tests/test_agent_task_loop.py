@@ -14,7 +14,12 @@ import pytest
 from agently import Agently
 from agently.core import PluginManager
 from agently.core.orchestration import TaskBoard
-from agently.core.application.AgentTask.BlockCarrier import WorkUnitIntent, WorkUnitResult, select_carrier_output_policy
+from agently.core.application.AgentTask.BlockCarrier import (
+    WorkUnitIntent,
+    WorkUnitResult,
+    scoped_retrieval_policy,
+    select_carrier_output_policy,
+)
 from agently.core.application.AgentTask import AgentTask
 from agently.types.data import AgentlyRequestData, TaskBoardCard, TaskBoardCardResult, TaskBoardGraph, TaskBoardRevision
 from agently.utils import DataFormatter, Settings
@@ -71,6 +76,80 @@ def test_block_carrier_output_policy_selects_schema_and_body_transport():
     assert plain_text_policy.body_transport == "plain_text"
     assert plain_text_policy.body_uses_output is False
     assert plain_text_policy.requires_structured_judge is True
+
+
+def test_block_carrier_exposes_compact_scoped_retrieval_policy():
+    intent = WorkUnitIntent(
+        id="retrieval-policy",
+        origin="flat_step",
+        objective="Find scoped evidence before reading large files.",
+    )
+
+    policy = scoped_retrieval_policy()
+    serialized = intent.to_dict()
+
+    assert serialized["retrieval_policy"] == policy
+    assert policy["schema_version"] == "agent_task_scoped_retrieval/v1"
+    assert policy["roles"]["locator_ref"] == "discovered target; content not read"
+    assert policy["roles"]["evidence_snippet"] == "bounded readable excerpt"
+    assert policy["query_owner"] == "planner_or_control_model"
+    assert policy["executor_owner"] == "Workspace search/read actions or Blocks workspace_operation"
+
+
+def test_flat_step_plan_preserves_scoped_retrieval_query_groups(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-plan").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-plan",
+        goal="Use scoped search before reading large files.",
+        success_criteria=["Evidence is grounded."],
+    )
+
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Search scoped notes.",
+            "scoped_retrieval": {
+                "queries": [
+                    {
+                        "query": "deadline",
+                        "expected_role": "evidence_snippet",
+                        "path": "notes",
+                        "pattern": "*.md",
+                    },
+                    {
+                        "query": "final.md",
+                        "expected_role": "locator_ref",
+                    },
+                ],
+                "fallback_order": ["next_query", "bounded_read"],
+            },
+        }
+    )
+
+    assert plan["scoped_retrieval"] == {
+        "query_groups": [
+            {
+                "query": "deadline",
+                "expected_role": "evidence_snippet",
+                "path": "notes",
+                "pattern": "*.md",
+            },
+            {
+                "query": "final.md",
+                "expected_role": "locator_ref",
+            },
+        ],
+        "fallback_order": ["next_query", "bounded_read"],
+    }
+
+
+def test_taskboard_source_ref_policy_reuses_scoped_retrieval_policy():
+    policy = AgentTask._taskboard_source_ref_policy()
+
+    assert policy["scoped_retrieval_policy"] == scoped_retrieval_policy()
+    assert "locator_ref" in policy["scoped_retrieval_policy"]["roles"]
+    assert "evidence_snippet" in policy["scoped_retrieval_policy"]["roles"]
 
 
 def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():

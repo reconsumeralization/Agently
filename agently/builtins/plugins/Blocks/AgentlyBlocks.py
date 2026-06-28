@@ -943,6 +943,117 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
         if ref_or_path is None:
             raise ValueError(f"ExecutionBlock '{ block.id }' workspace get_data requires ref or path.")
         return {"operation": operation, "data": await workspace.get_data(ref_or_path)}
+    if operation in {"search", "scoped_search"}:
+        query = bound_inputs.get("query")
+        filters = bound_inputs.get("filters")
+        if not isinstance(filters, Mapping):
+            filters = {}
+        max_results = _bounded_int(bound_inputs.get("max_results"), default=8, minimum=1, maximum=50)
+        snippet_limit = _bounded_int(bound_inputs.get("snippet_limit"), default=1200, minimum=1, maximum=12000)
+        snippet_offset = _bounded_int(bound_inputs.get("snippet_offset"), default=0, minimum=0, maximum=10_000_000)
+        include_snippets = bool(bound_inputs.get("include_snippets", False))
+        refs = list(await workspace.search(str(query) if query is not None else None, filters=dict(filters)))
+        selected_refs = refs[:max_results]
+        locator_refs = [
+            _workspace_locator_ref(
+                ref,
+                query=query,
+                filters=filters,
+                index=index,
+                source="blocks.workspace_operation.search",
+            )
+            for index, ref in enumerate(selected_refs)
+            if isinstance(ref, Mapping)
+        ]
+        evidence_snippets: list[dict[str, Any]] = []
+        diagnostics: list[dict[str, Any]] = []
+        if include_snippets:
+            for index, ref in enumerate(selected_refs):
+                if not isinstance(ref, Mapping):
+                    continue
+                locator_ref = locator_refs[index] if index < len(locator_refs) else _workspace_locator_ref(
+                    ref,
+                    query=query,
+                    filters=filters,
+                    index=index,
+                    source="blocks.workspace_operation.search",
+                )
+                try:
+                    segment = await workspace.read_bounded(ref, offset=snippet_offset, limit=snippet_limit)
+                except Exception as error:
+                    diagnostics.append(
+                        {
+                            "code": "blocks.workspace_operation.search_snippet_failed",
+                            "record_id": str(ref.get("id") or ""),
+                            "type": error.__class__.__name__,
+                            "message": str(error),
+                        }
+                    )
+                    continue
+                evidence_snippets.append(
+                    _workspace_evidence_snippet(
+                        segment,
+                        locator_ref=locator_ref,
+                        query=query,
+                        filters=filters,
+                        source="blocks.workspace_operation.search",
+                    )
+                )
+        results = [
+            {
+                **locator_ref,
+                "evidence_snippet": evidence_snippets[index] if index < len(evidence_snippets) else None,
+            }
+            for index, locator_ref in enumerate(locator_refs)
+        ]
+        return {
+            "operation": "search",
+            "query": query,
+            "filters": dict(filters),
+            "bounded": {
+                "max_results": max_results,
+                "total_matches": len(refs),
+                "returned_results": len(selected_refs),
+                "include_snippets": include_snippets,
+                "snippet_offset": snippet_offset,
+                "snippet_limit": snippet_limit,
+            },
+            "locator_refs": locator_refs,
+            "evidence_snippets": evidence_snippets,
+            "results": results,
+            "workspace_refs": selected_refs,
+            "diagnostics": diagnostics,
+        }
+    if operation == "read_bounded":
+        ref_or_path = bound_inputs.get("ref") or bound_inputs.get("path")
+        if ref_or_path is None:
+            raise ValueError(f"ExecutionBlock '{ block.id }' workspace read_bounded requires ref or path.")
+        offset = _bounded_int(bound_inputs.get("offset"), default=0, minimum=0, maximum=10_000_000)
+        limit = _bounded_int(bound_inputs.get("limit"), default=1200, minimum=1, maximum=12000)
+        segment = await workspace.read_bounded(ref_or_path, offset=offset, limit=limit)
+        locator_ref = _workspace_locator_ref_from_segment(
+            segment,
+            ref_or_path=ref_or_path,
+            source="blocks.workspace_operation.read_bounded",
+        )
+        evidence_snippet = _workspace_evidence_snippet(
+            segment,
+            locator_ref=locator_ref,
+            source="blocks.workspace_operation.read_bounded",
+        )
+        workspace_ref = locator_ref.get("ref")
+        workspace_refs = [workspace_ref] if isinstance(workspace_ref, Mapping) else []
+        return {
+            "operation": operation,
+            "bounded": {
+                "offset": offset,
+                "limit": limit,
+            },
+            "locator_ref": locator_ref,
+            "evidence_snippet": evidence_snippet,
+            "evidence_snippets": [evidence_snippet],
+            "workspace_refs": workspace_refs,
+        }
     if operation == "link_evidence":
         source_ref = bound_inputs.get("source_ref")
         target_ref = bound_inputs.get("target_ref")
@@ -958,6 +1069,103 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
         )
         return {"operation": operation, "workspace_refs": [ref], "ref": ref}
     raise ValueError(f"Unsupported workspace_operation '{ operation }'.")
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
+
+
+def _workspace_locator_ref(
+    ref: Mapping[str, Any],
+    *,
+    query: Any = None,
+    filters: Mapping[str, Any] | None = None,
+    index: int = 0,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "role": "locator_ref",
+        "content_state": "ref_only",
+        "source": source,
+        "query": query,
+        "filters": dict(filters or {}),
+        "rank": index + 1,
+        "ref": dict(ref),
+        "record_id": str(ref.get("id") or ""),
+        "path": ref.get("path"),
+        "collection": ref.get("collection"),
+        "kind": ref.get("kind"),
+        "summary": ref.get("summary") or "",
+        "size": ref.get("size"),
+        "sha256": ref.get("sha256"),
+    }
+
+
+def _workspace_locator_ref_from_segment(
+    segment: Mapping[str, Any],
+    *,
+    ref_or_path: Any,
+    source: str,
+) -> dict[str, Any]:
+    envelope = segment.get("ref")
+    if isinstance(ref_or_path, Mapping):
+        ref = dict(ref_or_path)
+    elif isinstance(envelope, Mapping):
+        ref = {
+            "id": str(envelope.get("record_id") or ref_or_path or ""),
+            "path": envelope.get("content_ref"),
+            "collection": envelope.get("collection"),
+            "kind": envelope.get("kind"),
+            "size": envelope.get("size"),
+            "sha256": envelope.get("digest"),
+            "created_at": envelope.get("created_at"),
+            "summary": "",
+            "scope": {},
+            "source": {},
+            "meta": {},
+        }
+    else:
+        ref = {"id": str(ref_or_path or ""), "path": str(ref_or_path or "")}
+    locator = _workspace_locator_ref(ref, source=source)
+    if isinstance(envelope, Mapping):
+        locator["ref"] = ref
+        locator["envelope"] = dict(envelope)
+        locator["record_id"] = str(envelope.get("record_id") or locator.get("record_id") or "")
+        locator["path"] = envelope.get("content_ref") or locator.get("path")
+    return locator
+
+
+def _workspace_evidence_snippet(
+    segment: Mapping[str, Any],
+    *,
+    locator_ref: Mapping[str, Any],
+    query: Any = None,
+    filters: Mapping[str, Any] | None = None,
+    source: str,
+) -> dict[str, Any]:
+    content = str(segment.get("content") or "")
+    return {
+        "role": "evidence_snippet",
+        "content_state": "bounded_readback_available",
+        "source": source,
+        "query": query,
+        "filters": dict(filters or {}),
+        "locator_ref": dict(locator_ref),
+        "content": content,
+        "snippet": content,
+        "snippet_chars": len(content),
+        "snippet_bytes": len(content.encode("utf-8")),
+        "offset": segment.get("offset"),
+        "size": segment.get("size"),
+        "total_size": segment.get("total_size"),
+        "eof": segment.get("eof"),
+        "digest": segment.get("digest"),
+        "content_type": segment.get("content_type"),
+    }
 
 
 async def _execute_approval_wait_block(block: ExecutionBlock, data: TriggerFlowRuntimeData) -> Any:

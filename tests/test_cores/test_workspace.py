@@ -775,6 +775,41 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
 
 
 @pytest.mark.asyncio
+async def test_workspace_search_files_action_returns_retrieval_roles(tmp_path):
+    agent = Agently.create_agent("workspace-search-files-roles").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    await workspace.write_file("notes/todo.txt", "alpha\nrelease deadline is 2026-07-01\n")
+    agent.enable_workspace_file_actions(read=True, write=False, search=True)
+
+    result = await agent.action.async_execute_action(
+        "search_files",
+        {
+            "query": "deadline",
+            "path": "notes",
+            "pattern": "*.txt",
+            "max_results": 5,
+        },
+    )
+
+    assert result.get("status") == "success"
+    data = result.get("data")
+    assert isinstance(data, list)
+    assert data[0]["path"] == "notes/todo.txt"
+    assert data[0]["line"] == 2
+    assert data[0]["text"] == "release deadline is 2026-07-01"
+    assert data[0]["role"] == "evidence_snippet"
+    assert data[0]["content_state"] == "bounded_readback_available"
+    assert data[0]["query"] == "deadline"
+    assert data[0]["scope"]["path"] == "notes"
+    assert data[0]["snippet_chars"] == len(data[0]["text"])
+    assert data[0]["locator_ref"]["role"] == "locator_ref"
+    assert data[0]["locator_ref"]["content_state"] == "ref_only"
+    assert data[0]["locator_ref"]["path"] == "notes/todo.txt"
+    assert not {"useful", "accepted", "semantically_relevant"}.intersection(data[0])
+
+
+@pytest.mark.asyncio
 async def test_workspace_backend_component_protocols_are_wired(tmp_path):
     agent = Agently.create_agent("workspace-components").use_workspace(tmp_path / "run")
     workspace = agent.workspace

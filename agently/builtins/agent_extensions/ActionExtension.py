@@ -704,7 +704,8 @@ class ActionExtension(BaseAgent):
                 for file in files:
                     if len(results) >= max_results:
                         break
-                    if file.stat().st_size > max_search_file_bytes:
+                    file_size = file.stat().st_size
+                    if file_size > max_search_file_bytes:
                         continue
                     result = await manager_read_file(
                         relative_path(file),
@@ -715,11 +716,39 @@ class ActionExtension(BaseAgent):
                     text = str(result.get("content", ""))
                     for line_no, line in enumerate(text.splitlines(), start=1):
                         if query in line:
+                            path_text = relative_path(file)
+                            search_scope = {
+                                "path": path,
+                                "pattern": pattern,
+                                "include_hidden": include_hidden,
+                                "max_results": max_results,
+                            }
+                            locator_ref = {
+                                "role": "locator_ref",
+                                "content_state": "ref_only",
+                                "source": "workspace.search_files",
+                                "query": query,
+                                "scope": search_scope,
+                                "path": path_text,
+                                "bytes": file_size,
+                            }
                             results.append(
                                 {
-                                    "path": relative_path(file),
+                                    "path": path_text,
                                     "line": line_no,
                                     "text": line,
+                                    "role": "evidence_snippet",
+                                    "content_state": "bounded_readback_available",
+                                    "source": "workspace.search_files",
+                                    "query": query,
+                                    "scope": search_scope,
+                                    "locator_ref": locator_ref,
+                                    "snippet": line,
+                                    "snippet_chars": len(line),
+                                    "snippet_bytes": len(line.encode("utf-8")),
+                                    "line_start": line_no,
+                                    "line_end": line_no,
+                                    "bytes": file_size,
                                 }
                             )
                             break

@@ -44,7 +44,13 @@ from agently.utils.LanguagePolicy import (
     resolve_language_policy,
 )
 
-from .BlockCarrier import CarrierOutputPolicy, WorkUnitIntent, WorkUnitResult, select_carrier_output_policy
+from .BlockCarrier import (
+    CarrierOutputPolicy,
+    WorkUnitIntent,
+    WorkUnitResult,
+    scoped_retrieval_policy,
+    select_carrier_output_policy,
+)
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -477,6 +483,7 @@ __all__ = [
     "project_agent_execution_text_delta",
     "resolve_language_policy",
     "resolve_task_board_planning_policy",
+    "scoped_retrieval_policy",
     "select_carrier_output_policy",
     "task_board_card_required",
     "task_board_planning_output_schema",

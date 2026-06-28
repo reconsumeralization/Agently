@@ -23,6 +23,30 @@ WorkUnitOrigin = Literal["flat_step", "taskboard_card"]
 CarrierControlFormat = Literal["json", "hybrid", "xml_field", "flat_markdown", "yaml_literal"]
 
 
+def scoped_retrieval_policy() -> dict[str, Any]:
+    """Compact policy shared by Flat and TaskBoard work-unit carriers."""
+
+    return {
+        "schema_version": "agent_task_scoped_retrieval/v1",
+        "query_owner": "planner_or_control_model",
+        "executor_owner": "Workspace search/read actions or Blocks workspace_operation",
+        "optimization_goal": "reduce hot prompt input by searching scoped refs before bulk reads",
+        "roles": {
+            "locator_ref": "discovered target; content not read",
+            "evidence_snippet": "bounded readable excerpt",
+        },
+        "rules": [
+            "Use scoped search before full file/resource reads when it can reduce input volume.",
+            "Treat locator_ref as discovery only until a bounded readback/snippet is available.",
+            "Do not let local search hits decide semantic usefulness or task acceptance.",
+        ],
+        "bounded_defaults": {
+            "max_results": 8,
+            "snippet_limit": 1200,
+        },
+    }
+
+
 @dataclass(frozen=True)
 class WorkUnitIntent:
     """Internal strategy-to-carrier boundary for one bounded unit of work."""
@@ -38,6 +62,7 @@ class WorkUnitIntent:
     delivery_contract: Mapping[str, Any] = field(default_factory=dict)
     quality_gates: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     runtime_preferences: Mapping[str, Any] = field(default_factory=dict)
+    retrieval_policy: Mapping[str, Any] = field(default_factory=scoped_retrieval_policy)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +77,7 @@ class WorkUnitIntent:
             "delivery_contract": dict(self.delivery_contract),
             "quality_gates": [dict(item) for item in self.quality_gates],
             "runtime_preferences": dict(self.runtime_preferences),
+            "retrieval_policy": dict(self.retrieval_policy),
         }
 
 
