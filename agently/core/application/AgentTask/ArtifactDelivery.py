@@ -302,8 +302,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             if not cls._workspace_artifact_ref_has_trusted_readback(ref):
                 continue
             path = str(ref.get("path") or "").strip()
-            sha256 = str(ref.get("sha256") or "").strip()
-            evidence_id = f"{path}#{sha256[:12]}" if sha256 else path
+            evidence_id = path
             if evidence_id and evidence_id not in evidence_ids:
                 evidence_ids.append(evidence_id)
         return evidence_ids

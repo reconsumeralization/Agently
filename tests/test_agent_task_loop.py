@@ -1627,14 +1627,13 @@ async def test_agent_task_flat_workspace_artifact_delivery_before_verification(t
             if "Verify the task against every success criterion" in text:
                 self.__class__.verify_text = text
                 assert "reports/final.md" in text
-                assert "bytes" in text
-                assert "sha256" in text
                 assert "file_refs" in text
                 assert "artifact_preview" in text
                 assert "Delivered Report" in text
                 assert "capability_evidence" in text
                 assert "artifacts" in text
                 assert "readback" in text
+                assert "sha256" not in text
                 assert "agent_task.workspace_artifact.untrusted_model_file_refs" in text
                 payload = {
                     "is_complete": True,
@@ -1704,7 +1703,23 @@ async def test_agent_task_flat_workspace_artifact_delivery_before_verification(t
     assert delivery["file_refs"][0]["sha256"]
     assert delivery["file_refs"][0]["preview"].startswith("# Delivered Report")
     assert meta["iterations"][0]["verification"]["reason"] == "trusted Workspace readback evidence is present"
-    assert delivery["file_refs"][0]["sha256"][:12] in WorkspaceArtifactRequester.verify_text
+    assert delivery["file_refs"][0]["sha256"][:12] not in WorkspaceArtifactRequester.verify_text
+    assert "reports/final.md#" not in WorkspaceArtifactRequester.verify_text
+
+
+def test_artifact_readback_evidence_ids_omit_sha_from_model_hot_key():
+    readback_ids = AgentTask._artifact_readback_evidence_ids(
+        [
+            {
+                "path": "reports/final.md",
+                "bytes": 120,
+                "sha256": "a" * 64,
+                "role": "workspace_artifact",
+            }
+        ]
+    )
+
+    assert readback_ids == ["reports/final.md"]
 
 
 @pytest.mark.asyncio

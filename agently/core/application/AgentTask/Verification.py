@@ -378,6 +378,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         )
         evidence_summary = self._compact_verifier_evidence_summary(raw_execution_evidence_summary)
         cumulative_evidence_summary = self._compact_verifier_evidence_summary(raw_cumulative_evidence_summary)
+        verifier_execution_result = self._workspace_artifact_execution_result_for_verifier(execution_result)
         candidate_final_result = self._candidate_final_result_from_execution_result(execution_result)
         request = self.agent.create_temp_request()
         language_policy = self._language_policy()
@@ -394,7 +395,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
                 ),
                 "execution_result": self._compact_verifier_prompt_value(
-                    execution_result,
+                    verifier_execution_result,
                     max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
                 ),
                 "execution_meta": self._verification_execution_meta_summary(execution_meta, evidence_summary),
@@ -601,6 +602,90 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if isinstance(preview, str) and preview:
             summary["preview"] = cls._truncate_prompt_text(preview, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
         return DataFormatter.sanitize(summary)
+
+    @classmethod
+    def _workspace_artifact_execution_result_for_verifier(cls, execution_result: Any) -> Any:
+        if not isinstance(execution_result, Mapping):
+            return execution_result
+        if not (
+            isinstance(execution_result.get("artifact_manifest"), Mapping)
+            or isinstance(execution_result.get("workspace_artifact_delivery"), Mapping)
+            or (
+                isinstance(execution_result.get("file_refs"), Sequence)
+                and not isinstance(execution_result.get("file_refs"), str | bytes | bytearray)
+            )
+        ):
+            return execution_result
+        return cls._workspace_artifact_hot_value(execution_result)
+
+    @classmethod
+    def _workspace_artifact_hot_value(cls, value: Any, *, key_context: str = "") -> Any:
+        if isinstance(value, Mapping):
+            if key_context in {"file_refs", "artifact_refs"}:
+                return cls._compact_artifact_ref_for_verifier(value)
+            compact: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text in {"sha256", "bytes", "read_bytes", "size", "media_type", "content_kind", "handler_id"}:
+                    continue
+                if key_text == "artifact_manifest" and isinstance(item, Mapping):
+                    compact[key_text] = cls._workspace_artifact_manifest_for_verifier(item)
+                    continue
+                if key_text == "workspace_artifact_delivery" and isinstance(item, Mapping):
+                    compact[key_text] = cls._workspace_artifact_delivery_for_verifier(item)
+                    continue
+                compact[key_text] = cls._workspace_artifact_hot_value(item, key_context=key_text)
+            return compact
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            return [cls._workspace_artifact_hot_value(item, key_context=key_context) for item in value]
+        return value
+
+    @classmethod
+    def _workspace_artifact_manifest_for_verifier(cls, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        for key, item in manifest.items():
+            key_text = str(key)
+            if key_text in {"sha256", "bytes", "read_bytes", "size", "media_type", "content_kind", "handler_id"}:
+                continue
+            if key_text == "file_refs":
+                compact[key_text] = cls._workspace_artifact_hot_value(item, key_context=key_text)
+                continue
+            compact[key_text] = cls._workspace_artifact_hot_value(item, key_context=key_text)
+        return compact
+
+    @classmethod
+    def _workspace_artifact_delivery_for_verifier(cls, delivery: Mapping[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        for key in ("source", "path", "status", "mode", "content_key"):
+            if key in delivery:
+                compact[key] = delivery.get(key)
+        readback = delivery.get("readback")
+        if isinstance(readback, Mapping):
+            compact["readback"] = {
+                key: readback.get(key)
+                for key in ("path", "truncated")
+                if key in readback
+            }
+        file_refs = delivery.get("file_refs")
+        if isinstance(file_refs, Sequence) and not isinstance(file_refs, str | bytes | bytearray):
+            compact["file_refs"] = [
+                cls._compact_artifact_ref_for_verifier(ref)
+                for ref in list(file_refs)[:8]
+                if isinstance(ref, Mapping)
+            ]
+            if len(file_refs) > 8:
+                compact["file_refs"].append({"omitted": len(file_refs) - 8, "reason": "prompt_budget"})
+        diagnostics = delivery.get("diagnostics")
+        if diagnostics:
+            compact["diagnostics"] = cls._workspace_artifact_hot_value(diagnostics, key_context="diagnostics")
+        draft_meta = delivery.get("draft_meta")
+        if isinstance(draft_meta, Mapping):
+            compact["draft_meta"] = {
+                key: draft_meta.get(key)
+                for key in ("status", "route")
+                if key in draft_meta
+            }
+        return compact
 
     @classmethod
     def _workspace_artifact_final_result_from_refs(cls, refs: Sequence[Mapping[str, Any]]) -> str:
@@ -849,8 +934,34 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
 
     @classmethod
     def _compact_context_pack_for_verifier(cls, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
-        compact = cls._compact_verifier_prompt_value(context_pack, max_chars=_VERIFIER_PROMPT_VALUE_CHARS)
+        compact = cls._compact_verifier_prompt_value(
+            cls._context_pack_for_verifier_hot_path(context_pack),
+            max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
+        )
         return compact if isinstance(compact, dict) else {}
+
+    @classmethod
+    def _context_pack_for_verifier_hot_path(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            compact: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text in {
+                    "sha256",
+                    "digest",
+                    "bytes",
+                    "read_bytes",
+                    "size",
+                    "media_type",
+                    "content_kind",
+                    "handler_id",
+                }:
+                    continue
+                compact[key_text] = cls._context_pack_for_verifier_hot_path(item)
+            return compact
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            return [cls._context_pack_for_verifier_hot_path(item) for item in value]
+        return value
 
     @classmethod
     def _compact_verifier_evidence_summary(cls, summary: Mapping[str, Any]) -> dict[str, Any]:
@@ -867,7 +978,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     compact[key].append({"omitted": len(value) - 24, "reason": "prompt_budget"})
                 continue
             if key == "workspace_refs" and isinstance(value, Mapping):
-                compact[key] = cls._compact_verifier_prompt_value(value, max_chars=2400)
+                compact[key] = cls._compact_verifier_prompt_value(
+                    cls._workspace_artifact_hot_value(value),
+                    max_chars=2400,
+                )
                 continue
             compact[key] = cls._compact_verifier_prompt_value(value, max_chars=_VERIFIER_PROMPT_ITEM_CHARS)
         return compact

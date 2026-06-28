@@ -378,8 +378,8 @@ downstream consumer, terminal verifier/final control, and strategy still own
 usefulness, quality, and completion judgment.
 
 When the write succeeds and readback is trusted, verifier input includes the
-model-hot readback content/preview, refs, and
-`capability_evidence.artifacts.readback`; with
+model-hot readback content/preview, compact refs without checksum fields, and
+`capability_evidence.artifacts.readback` path handles; with
 `max_iterations=1`, a real readable artifact should not become partial only
 because the evidence chain was omitted. If readback fails or lacks trusted
 `path` / `bytes` / `sha256` evidence, diagnostics use

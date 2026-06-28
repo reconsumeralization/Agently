@@ -324,8 +324,9 @@ result preview、refs、耗时、diagnostics 和 work-unit 归属。已恢复的
 实验日志使用的 observation facts；是否有用、质量如何、任务是否完成仍由下游 consumer、
 终局 verifier/final control 和 strategy 判断。
 
-写入成功且读回可信时，verifier 输入会包含这些读回字段和
-模型热 readback 内容/preview、refs 和 `capability_evidence.artifacts.readback`；
+写入成功且读回可信时，verifier 输入会包含模型热 readback 内容/preview、
+不带 checksum 字段的紧凑 refs，以及 `capability_evidence.artifacts.readback`
+路径 handle；
 在 `max_iterations=1` 下，真实已写入且可读回的
 artifact 不应只因为 evidence 链缺失而变成 partial。如果读回失败，或缺少可信的
 `path` / `bytes` / `sha256` 证据，diagnostics 会使用
