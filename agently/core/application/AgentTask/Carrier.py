@@ -40,6 +40,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "iteration": iteration_index,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
+                "task_context_contract": self._task_context_contract(),
                 "plan": DataFormatter.sanitize(plan),
                 "execution_prompt": self._execution_prompt_context(),
                 "context_summary": {
@@ -61,6 +62,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             delivery_contract={
                 "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
                 "deliverable_mode": plan.get("deliverable_mode"),
+                "task_context_contract": self._task_context_contract(),
             },
             runtime_preferences={
                 "handler": "agent_task_bounded_step",
@@ -355,6 +357,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         "work_unit": work_unit.to_dict(),
                         "goal": self.goal,
                         "success_criteria": self.success_criteria,
+                        "task_context_contract": self._task_context_contract(),
                         "preferred_execution_shape": effective_shape,
                         "step_plan": step_plan,
                         "plan": DataFormatter.sanitize(plan),

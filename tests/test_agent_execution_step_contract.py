@@ -15,7 +15,8 @@ from agently import Agently
 from agently.core import PluginManager, TaskBoardGraph, TaskBoardRevision, TaskBoardValidator, build_task_board_evidence_view
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, AgentExecutionResult
 from agently.core.application.AgentTask import AgentTask
-from agently.types.data import AgentlyRequestData
+from agently.core.application.AgentTask.BlockCarrier import WorkUnitResult
+from agently.types.data import AgentlyRequestData, WorkspaceContextPackage
 from agently.types.options import ExecutionOptions, SkillsRouteOptions
 from agently.utils import DataFormatter
 from agently.utils import Settings
@@ -239,6 +240,126 @@ def _create_scoped_action_agent(name: str = "agent-execution-scoped-action-test"
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockScopedActionRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def test_task_context_contract_is_ref_backed_and_cap_free(tmp_path):
+    agent = _create_agent("execution-task-context-contract").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Prepare a current source-grounded report.",
+        success_criteria=["Use current source evidence without hot-loading large resources."],
+        execution="flat",
+        max_iterations=None,
+    )
+
+    contract = task._task_context_contract()
+    work_unit = task._build_flat_work_unit_intent(
+        1,
+        {
+            "step_instruction": "Collect latest evidence as refs and read only scoped snippets.",
+            "deliverable_mode": "workspace_artifact",
+        },
+        {
+            "goal": task.goal,
+            "items": [],
+            "profile": "test",
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert contract["schema_version"] == "agent_task_context_contract/v1"
+    assert contract["run_date_utc"]
+    assert "webpage_snapshot" in contract["intermediate_resource_policy"]["cold_resource_kinds"]
+    assert "workspace_note" in contract["intermediate_resource_policy"]["cold_resource_kinds"]
+    assert contract["intermediate_resource_policy"]["default_state"] == "ref_only"
+    assert "hard_execution_caps" in contract["resource_policy"]
+    assert "max_iterations" not in json.dumps(contract, ensure_ascii=False)
+    assert work_unit.input_payload["task_context_contract"]["schema_version"] == contract["schema_version"]
+    assert work_unit.delivery_contract["task_context_contract"]["schema_version"] == contract["schema_version"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_work_units_receive_task_context_contract(tmp_path):
+    agent = _create_agent("execution-taskboard-context-contract").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Prepare a current source-grounded report.",
+        success_criteria=["Use current source evidence without hot-loading large resources."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    captured_work_units: list[dict[str, Any]] = []
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
+        work_unit = cast(Any, kwargs["work_unit"])
+        captured_work_units.append(work_unit.to_dict())
+        output: dict[str, Any] = {
+            "status": "completed",
+            "answer": "contract captured",
+            "evidence": [],
+            "remaining_work": [],
+        }
+        if str(work_unit.id).endswith(":control"):
+            output["sufficient"] = True
+        return (
+            output,
+            {"status": "completed", "logs": {"action_logs": {}, "route_logs": {}, "errors": []}},
+            WorkUnitResult(id=str(work_unit.id), status="completed"),
+        )
+
+    async def fake_dependency_readbacks(*_args: Any, **_kwargs: Any):
+        return {"schema_version": "agent_task_taskboard_dependency_readbacks/v1", "readbacks": []}
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    cast(Any, task)._taskboard_dependency_action_artifact_readbacks = fake_dependency_readbacks
+    context_pack: WorkspaceContextPackage = {
+        "goal": task.goal,
+        "items": [],
+        "profile": "test",
+        "omitted": [],
+        "diagnostics": {},
+    }
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-context-contract",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "taskboard-context-contract-graph",
+                "cards": [
+                    {
+                        "id": "collect",
+                        "objective": "Collect current source evidence as refs and notes.",
+                        "allowed_execution_shape": "actions",
+                    },
+                    {
+                        "id": "synthesize",
+                        "objective": "Synthesize from bounded readback and source refs.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "control",
+                    },
+                ],
+            }
+        ),
+    )
+    cards = revision.graph.card_by_id()
+
+    await task._run_taskboard_agent_card(
+        SimpleNamespace(revision=revision, card=cards["collect"], dependency_results={}, planning_policy=None),
+        context_pack,
+    )
+    await task._run_taskboard_control_card(
+        SimpleNamespace(revision=revision, card=cards["synthesize"], dependency_results={}, planning_policy=None),
+        context_pack,
+    )
+
+    assert len(captured_work_units) == 2
+    for work_unit in captured_work_units:
+        payload_contract = work_unit["input_payload"]["task_context_contract"]
+        assert payload_contract["schema_version"] == "agent_task_context_contract/v1"
+        assert payload_contract["intermediate_resource_policy"]["default_state"] == "ref_only"
+        assert work_unit["delivery_contract"]["task_context_contract"]["schema_version"] == (
+            "agent_task_context_contract/v1"
+        )
 
 
 def _write_skill(root: Path):

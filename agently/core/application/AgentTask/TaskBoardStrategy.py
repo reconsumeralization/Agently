@@ -300,6 +300,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
+                "task_context_contract": self._task_context_contract(),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "planning_policy": policy.to_prompt_payload(),
@@ -310,6 +311,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         request.instruct(
             "Plan a TaskBoard for this submitted task. "
             "TaskBoard is already selected by the caller; do not decide whether to use TaskBoard. "
+            "Use task_context_contract for run-date facts, current/latest/as-of source boundaries, and ref-backed "
+            "intermediate-resource handling. It is not a resource cap. "
             "Use the planning_policy as vocabulary guidance for orchestration complexity, evidence depth, "
             "reflection density, and repair tendency. Do not create hard budgets, fixed card counts, "
             "or action allowlists from the effort profile. "
@@ -913,6 +916,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
+                "task_context_contract": self._task_context_contract(),
                 "card": context.card.to_dict(),
                 "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
@@ -932,6 +936,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             }
             card_instruction = (
                 "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
+                "Use task_context_contract.run_date_utc when the card needs current/latest/as-of evidence; label older "
+                "or historical source material with its time boundary. "
                 "Use TaskBoard evidence view as the hot summary; request full content only through available "
                 "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
                 "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
@@ -1009,6 +1015,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 delivery_contract={
                     "card": DataFormatter.sanitize(context.card.to_dict()),
                     "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
+                    "task_context_contract": self._task_context_contract(),
                 },
                 quality_gates=(
                     {
@@ -1206,6 +1213,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "task_id": self.id,
             "goal": self.goal,
             "success_criteria": self.success_criteria,
+            "task_context_contract": self._task_context_contract(),
             "card": context.card.to_dict(),
             "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
             "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
@@ -1224,6 +1232,8 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
         control_instruction = (
             "Execute one TaskBoard control card with a single structured model request. "
             "This card is for synthesis, verification, finalization, or deciding the next board action; "
+            "Use task_context_contract.run_date_utc when current/latest/as-of evidence matters, and label older "
+            "or historical source material with its time boundary. "
             "do not plan or call tools from this request. Use TaskBoardEvidenceView as the hot evidence summary "
             "and preserve cold refs as pointers. dependency_readbacks contains framework-prefetched bounded "
             "readback previews for dependency Action artifacts that were structurally truncated or marked "
@@ -1311,6 +1321,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "output": DataFormatter.sanitize(control_output_schema),
                     "output_format": "json",
                 },
+                "task_context_contract": self._task_context_contract(),
             },
             quality_gates=(
                 {
@@ -1969,6 +1980,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
+                "task_context_contract": self._task_context_contract(),
                 "card": context.card.to_dict(),
                 "artifact_refs": DataFormatter.sanitize(refs),
                 "file_refs": DataFormatter.sanitize(file_refs),
@@ -3291,6 +3303,7 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             input_payload={
                 "task_id": self.id,
                 "goal": self.goal,
+                "task_context_contract": self._task_context_contract(),
                 "card_id": card_id,
                 "artifact_refs": DataFormatter.sanitize(refs),
                 "bounded": dict(payload["bounded"]),

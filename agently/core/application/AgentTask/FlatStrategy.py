@@ -985,6 +985,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
+                "task_context_contract": self._task_context_contract(),
                 "iteration": iteration_index,
                 "previous_iterations": previous_iterations,
                 "repair_context": repair_context,
@@ -1020,6 +1021,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         request.instruct(
             "Plan the next bounded AgentExecution step for this AgentTask. "
             "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
+            "Use task_context_contract for run-date facts, current/latest/as-of source boundaries, and ref-backed "
+            "intermediate-resource handling. It is not a resource cap. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
             "When repair_context is present, use it as verification feedback: understand why prior work was incomplete, "
             "compare the acceptance delta, and then choose the next bounded step. The verifier does not choose tools, "
@@ -1175,6 +1178,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "task_id": self.id,
                     "goal": self.goal,
                     "success_criteria": self.success_criteria,
+                    "task_context_contract": self._task_context_contract(),
                     "iteration": iteration_index,
                     "plan": DataFormatter.sanitize(plan),
                     "step_execution": step_execution,
@@ -1190,6 +1194,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     f"The AgentTask requested execution_strategy is {self.execution_strategy}; "
                     f"the effective execution_strategy is {self.effective_execution_strategy or self.execution_strategy}. "
                     "Respect the caller-provided execution_prompt context and output contract when present. "
+                    "Use task_context_contract.run_date_utc when the task asks for current/latest/as-of evidence, and "
+                    "keep downloads, web snapshots, notes, generated code, and large extracted text as refs until scoped "
+                    "readback is needed. "
                     "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
                     "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
                     "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "

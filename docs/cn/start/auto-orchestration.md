@@ -270,6 +270,12 @@ required final path，AgentTask 会把该中间 artifact 重定位到
 由框架生成且显式标记了 required final deliverable path 的 final repair / continuation
 card 可以写入该最终路径，避免 repair 只反复产出 working evidence 文件而无法满足 host guard。
 
+Flat 和 TaskBoard 的 work unit 也会收到同一份 task context contract，其中包含
+`run_date_utc`、`run_time_utc`、current/latest/as-of source boundary 指引，以及同一套
+中间资源 ref/readback policy。对于 current、latest、recent 或 as-of 任务，除非调用方
+明确给了更具体日期，否则应使用这个日期边界。该 contract 只是 planning 和 evidence
+selection 的上下文，不会设置模型调用、工具调用、节点数、迭代数或 wall-clock 硬上限。
+
 TaskBoard readback card 可以用有界冷读回读取 Action artifact refs 和可信的
 Workspace file refs。框架生成的 readback card 会把 evidence scope 扩展到直接依赖和
 上游 evidence card，所以 control-card readback 仍能读取更早 evidence-gathering card

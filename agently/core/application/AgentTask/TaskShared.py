@@ -169,6 +169,61 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
 
+    def _task_context_contract(self) -> dict[str, Any]:
+        run_epoch = getattr(self, "started_at", None) or getattr(self, "created_at", None) or time.time()
+        try:
+            run_epoch_float = float(run_epoch)
+        except (TypeError, ValueError):
+            run_epoch_float = time.time()
+        run_date_utc = time.strftime("%Y-%m-%d", time.gmtime(run_epoch_float))
+        run_time_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(run_epoch_float))
+        return {
+            "schema_version": "agent_task_context_contract/v1",
+            "run_date_utc": run_date_utc,
+            "run_time_utc": run_time_utc,
+            "temporal_policy": {
+                "currentness_reference": (
+                    "When the task asks for current, latest, recent, or as-of information without an explicit "
+                    "date, treat run_date_utc as the reference date and expose any source-date limitation."
+                ),
+                "dated_evidence": (
+                    "Dated evidence may be useful, but older or historical material must be labeled with its "
+                    "time boundary instead of being presented as current by implication."
+                ),
+                "query_planning": (
+                    "For external search or browse planning, include the caller's explicit as-of date when present; "
+                    "otherwise use run_date_utc/current year as a grounding fact, not an execution cap."
+                ),
+            },
+            "intermediate_resource_policy": {
+                "cold_resource_kinds": [
+                    "download",
+                    "webpage_snapshot",
+                    "search_note",
+                    "generated_code",
+                    "large_extraction",
+                    "workspace_note",
+                ],
+                "default_state": "ref_only",
+                "hot_path": (
+                    "Pass compact refs and bounded previews through prompts. Keep large intermediate resources in "
+                    "Workspace or Action artifacts until a later block explicitly needs scoped content."
+                ),
+                "readback": (
+                    "Use bounded readback with concrete refs, max_bytes, offsets, or scoped snippets when content is "
+                    "needed for synthesis, verification, or repair."
+                ),
+                "evidence_boundary": (
+                    "A ref proves discovery or materialization only. It becomes source-content evidence only after "
+                    "bounded readback or content preview is visible to the executing block."
+                ),
+            },
+            "resource_policy": {
+                "hard_execution_caps": "Do not infer model-call, tool-call, node-count, or iteration caps from this contract.",
+                "liveness_timeouts": "Operational idle/no-progress timeouts may still protect against stuck execution.",
+            },
+        }
+
 
 _AgentTaskT = TypeVar("_AgentTaskT", bound=AgentTaskMixinBase)
 
