@@ -60,7 +60,7 @@ effective_shape = meta.get("effective_execution_strategy")
 | 可选依赖加载 | MCP 和 ACP 都使用 `utils.LazyImport`；没有显式 `.use_mcp(...)` 或 `.use_acp(...)` 时不会加载可选包。 | 普通 agent 保持轻依赖；在能力边界显式启用可选 runtime。 | 可选依赖缺失只在相关路径被使用时通过 LazyImport 诊断暴露。 |
 | 强格式过程输出 | 强格式中间模型请求使用 Agently `.output(..., format=...)` 和恰当 parser。声明的非 JSON parser 失败时可切回 JSON，且只接受能解析成 dict 的值，并携带诊断。 | 过程契约使用 `.output(...)`，不要用关键词或本地 scorecard 替代语义判断。 | 兜底是解析恢复路径，不是语义捷径。 |
 | Delta 文本流 | `get_async_generator(type="delta")` 仍是公开文本增量流。复杂 AgentTask / AgentExecution 会把模板 progress、snapshot、heartbeat 状态、phase 状态、retry marker 和任务终态结果投影成段落文本，同时 `instant` 保留结构化载荷。 | 面向用户的流式文本用 `delta`；结构化 UI 状态、诊断或 DevTools 式回放用 `instant`。 | 既有文本增量仍按字符串输出；过程事件投影是增量行为。 |
-| 观测兼容 | AgentExecution 会把 flat 和 TaskBoard 过程 stream item 投影为 `agent_execution.stream` RuntimeEvent；task/TaskBoard/ACP/reflection payload 保持通用、fail-open。`model.status` 和 `model_request_telemetry` 仍是 observation-only。 | 使用 `agently-devtools >=0.1.10,<0.2.0`。 | DevTools 可以 ingest、store、query 和 replay AgentExecution、flat、TaskBoard 过程事件，但不拥有任务策略语义。 |
+| 观测兼容 | AgentExecution 会把 flat 和 TaskBoard 过程 stream item 投影为 `agent_execution.stream` RuntimeEvent；task/TaskBoard/ACP/reflection payload 保持通用、fail-open。`agent_task.action.*`、`model.status` 和 `model_request_telemetry` 仍是 observation-only。 | 使用 `agently-devtools >=0.1.10,<0.2.0`；DevTools 展示 AgentTask action observations，并展示单次 model request usage 与当前选中分支 descendant 聚合 usage，provider token 不可得时显示 `NaN`，输入/输出长度估算只作诊断。 | DevTools 可以 ingest、store、query 和 replay AgentExecution、flat、TaskBoard、action 与 usage observation facts，但不拥有任务策略、预算、retry、质量或完成验收语义。 |
 | 公开类型 | 包内新增 `agently/py.typed`，并为常用公开 facade 方法补齐类型。 | IDE 和 pyright-compatible 工具可以直接读取安装后的 Agently 类型。 | 少数宽类型内部表面仍作为兼容 escape hatch 保留。 |
 
 ## 兼容性

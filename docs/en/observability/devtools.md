@@ -82,6 +82,12 @@ AgentTask may project `agent_task.action.started`, `agent_task.action.completed`
 
 These records are for display, logging, and post-run analysis only. Do not use them as route decisions, verifier results, quality scores, semantic relevance judgments, or task-completion acceptance. Unknown fields should be ignored, and large payloads should stay summarized or ref-backed.
 
+## Model request usage
+
+DevTools should consume model request usage from `payload.model_request_telemetry.usage_summary` when present, with compatible fallbacks to provider `usage` metadata on model meta or terminal events. Display usage at two scopes: the individual model request and the selected run branch with descendant model requests aggregated upward.
+
+When provider token counts are unavailable, show token fields as unknown, for example `NaN`, and show estimated input/output character lengths as diagnostics only. Usage telemetry is observation-only; it must not become a framework budget cap, retry rule, route decision, quality score, verifier result, or task-completion acceptance.
+
 ## Compatibility boundary
 
 DevTools consumers should fail open:
