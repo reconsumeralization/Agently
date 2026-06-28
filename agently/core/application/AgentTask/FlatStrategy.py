@@ -204,29 +204,47 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             },
         )
 
-        await self._emit_progress(
-            iteration_index,
-            "verify",
-            f"Iteration {iteration_index}: verifying the evidence against every success criterion.",
+        should_verify, verification_decision = self._should_request_flat_final_verification(
+            execution_result,
+            execution_meta,
         )
-        try:
-            verification = await self._await_task_deadline(
-                self._request_verification(
-                    iteration_index,
-                    plan=plan,
-                    execution_result=execution_result,
-                    execution_meta=execution_meta,
-                    context_pack=context_pack,
-                ),
-                stage="verify",
-            )
-        except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(
+        if should_verify:
+            await self._emit_progress(
                 iteration_index,
-                stage=error.stage,
-                reason=error.reason,
-                limit_name=error.limit_name,
-                timeout_seconds=error.timeout_seconds,
+                "verify",
+                f"Iteration {iteration_index}: verifying the evidence against every success criterion.",
+            )
+            try:
+                verification = await self._await_task_deadline(
+                    self._request_verification(
+                        iteration_index,
+                        plan=plan,
+                        execution_result=execution_result,
+                        execution_meta=execution_meta,
+                        context_pack=context_pack,
+                    ),
+                    stage="verify",
+                )
+            except _AgentTaskDeadlineExceeded as error:
+                return await self._terminate_timed_out(
+                    iteration_index,
+                    stage=error.stage,
+                    reason=error.reason,
+                    limit_name=error.limit_name,
+                    timeout_seconds=error.timeout_seconds,
+                )
+            verification_source = "independent_verifier"
+        else:
+            verification = self._flat_consumer_continuation_verification(
+                execution_result,
+                execution_meta,
+                decision=verification_decision,
+            )
+            verification_source = "consumer_driven_continuation"
+            await self._emit_progress(
+                iteration_index,
+                "continue",
+                f"Iteration {iteration_index}: bounded step reported remaining work; the next iteration will consume its evidence.",
             )
         if bool(verification.get("is_complete")):
             missing_deliverables = await self._missing_required_workspace_deliverables()
@@ -236,6 +254,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "verified",
             iteration=iteration_index,
             diagnostics={
+                "verification_source": verification_source,
                 "is_complete": verification.get("is_complete"),
                 "requires_block": verification.get("requires_block"),
                 "missing_criteria": verification.get("missing_criteria", []),
@@ -246,6 +265,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "guarded",
             iteration=iteration_index,
             diagnostics={
+                "verification_source": verification_source,
                 "guard_reasons": verification.get("guard_reasons", []),
                 "is_complete": verification.get("is_complete"),
                 "requires_block": verification.get("requires_block"),
@@ -266,6 +286,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             {
                 "is_complete": verification.get("is_complete"),
                 "requires_block": verification.get("requires_block"),
+                "verification_source": verification_source,
                 "reason": verification.get("reason"),
                 "missing_criteria": verification.get("missing_criteria", []),
                 "failure_analysis": verification.get("failure_analysis", ""),
@@ -292,6 +313,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "observation_ref": observation_ref,
             "verification": verification,
             "verification_ref": verification_ref,
+            "verification_source": verification_source,
             "reflection_refs": [ref for ref in (step_reflection_ref, verification_reflection_ref) if ref is not None],
             "context_item_count": len(context_pack.get("items", [])),
         }
@@ -399,12 +421,14 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "repair_constraints": verification.get("repair_constraints", []),
                 "next_step_requirements": verification.get("next_step_requirements", []),
                 "replan_signals": verification.get("replan_signals", []),
+                "verification_source": verification_source,
             },
         )
         await self._record_phase(
             "replanned",
             iteration=iteration_index,
             diagnostics={
+                "verification_source": verification_source,
                 "reason": verification.get("reason"),
                 "failure_analysis": verification.get("failure_analysis", ""),
                 "acceptance_delta": verification.get("acceptance_delta", []),
@@ -415,6 +439,65 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             },
         )
         return {"terminal": False, "status": "continue"}
+
+    def _should_request_flat_final_verification(
+        self,
+        execution_result: Any,
+        execution_meta: Mapping[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
+        status = str(execution_meta.get("status") or "").strip().lower()
+        if status in {"failed", "error", "timed_out", "blocked"}:
+            return True, {"reason": "execution_status_requires_verification", "status": status}
+        if not isinstance(execution_result, Mapping):
+            return True, {"reason": "non_mapping_execution_result"}
+        if self._normalize_bool(execution_result.get("ready_for_final_verification"), default=True) is False:
+            remaining_work = self._normalize_string_list(execution_result.get("remaining_work"))
+            return False, {
+                "reason": "work_unit_not_ready_for_final_verification",
+                "remaining_work": remaining_work,
+            }
+        return True, {"reason": "ready_for_final_verification"}
+
+    def _flat_consumer_continuation_verification(
+        self,
+        execution_result: Any,
+        execution_meta: Mapping[str, Any],
+        *,
+        decision: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        raw_summary = self._cumulative_execution_evidence_summary(dict(execution_meta))
+        remaining_work = []
+        if isinstance(execution_result, Mapping):
+            remaining_work = self._normalize_string_list(execution_result.get("remaining_work"))
+        if not remaining_work:
+            remaining_work = self._normalize_string_list(decision.get("remaining_work"))
+        reason = "Current work unit produced intermediate evidence for the next Flat iteration to consume."
+        if remaining_work:
+            reason = "Current work unit reported remaining work for the next Flat iteration."
+        raw_verification = {
+            "is_complete": False,
+            "requires_block": False,
+            "reason": reason,
+            "failure_analysis": reason,
+            "acceptance_delta": remaining_work or ["A downstream Flat iteration must consume the new evidence."],
+            "missing_criteria": [],
+            "replan_instruction": "Plan the next bounded work unit using the previous observation evidence.",
+            "repair_constraints": [],
+            "next_step_requirements": remaining_work,
+            "final_result_required": False,
+            "final_result": "",
+        }
+        normalized = self._normalize_verification(
+            raw_verification,
+            execution_evidence_summary=raw_summary,
+            candidate_final_result="",
+        )
+        normalized["verification_source"] = "consumer_driven_continuation"
+        normalized["consumer_driven_sufficiency"] = {
+            "consumer": "next_flat_iteration",
+            "decision": DataFormatter.sanitize(dict(decision)),
+        }
+        return normalized
 
     async def _build_context(self) -> "WorkspaceContextPackage":
         try:
@@ -1365,7 +1448,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "for later bounded readback. If scoped_retrieval_results is present, those are already executed "
                     "Blocks/Workspace search facts for the current step; inspect them before choosing broader reads. "
                     "Do not treat a local search hit as semantic acceptance by itself. "
-                    "Do not claim final completion unless evidence supports it."
+                    "Do not claim final completion unless evidence supports it. "
+                    "Use remaining_work for task-level work that the next Flat iteration should consume or perform. "
+                    "Set ready_for_final_verification=false when this work unit produced useful intermediate evidence "
+                    "but should not trigger terminal verification yet."
                     + self._bounded_step_carrier_instruction(carrier_output_policy)
                 ),
                 output_schema=self._bounded_step_output_schema(carrier_output_policy),
@@ -1422,7 +1508,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     False,
                 ),
                 "evidence": ([str], "Evidence produced by the step", True),
-                "remaining_work": ([str], "Known remaining work, empty when none"),
+                "remaining_work": (
+                    [str],
+                    "Task-level remaining work for the next Flat iteration; pair with ready_for_final_verification=false for intermediate evidence that should skip terminal verification",
+                ),
+                "ready_for_final_verification": (
+                    bool,
+                    "False when the next Flat iteration should consume this output before terminal verification",
+                    False,
+                ),
             }
         return {
             "step_result": (str, "Concrete result of this bounded step", True),
@@ -1447,7 +1541,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 False,
             ),
             "evidence": ([str], "Evidence produced by the step", True),
-            "remaining_work": ([str], "Known remaining work, empty when none"),
+            "remaining_work": (
+                [str],
+                "Task-level remaining work for the next Flat iteration; pair with ready_for_final_verification=false for intermediate evidence that should skip terminal verification",
+            ),
+            "ready_for_final_verification": (
+                bool,
+                "False when the next Flat iteration should consume this output before terminal verification",
+                False,
+            ),
         }
 
     @staticmethod

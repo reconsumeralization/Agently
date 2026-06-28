@@ -296,16 +296,18 @@ proposal，AgentTask 会把补丁应用到绑定的 Workspace 文件，写回后
 对于 `completed` 且 `sufficient=True` 的 control 输出，非致命 `gaps` 不会阻止 Workspace
 artifact 物化；`remaining_work`、blocked 状态、repair 或 readback 仍会阻止写入。写入
 artifact 只是为后续 readback 和 verification 创建证据，不代表最终任务已经被接受。
-TaskBoard 不需要在每个中间 card 后都额外调用独立 verifier：真正消费上游证据的下游
-card 负责判断这些信息是否足够完成自己的目标。独立 verifier 应保留给终局验收、
-证据/artifact 边界审计、矛盾或高风险复核。
+Flat 和 TaskBoard 都不需要在每个中间 work unit 后额外调用独立 verifier。Flat step
+可以返回 `ready_for_final_verification=false` 并携带 `remaining_work`；下一轮 iteration
+消费这些新事实并决定下一步行动。TaskBoard 中真正消费 dependency evidence 的下游
+card 判断这些信息是否足够完成自己的目标。独立 verifier 应保留给终局验收、fan-in/control
+合流验收、证据/artifact 边界审计、矛盾或高风险复核。
 
 AgentTask observation 也会在结构化 stream 上发布归一化 action 事实：
 `agent_task.action.started`、`agent_task.action.completed` 和
 `agent_task.action.failed`。这些事件从已有 Action records 汇总安全的 input summary、
 result preview、refs、耗时、diagnostics 和 work-unit 归属。它们只是给 DevTools、UI 和
 实验日志使用的 observation facts；是否有用、质量如何、任务是否完成仍由下游 consumer、
-终局 verifier 和 strategy 判断。
+终局 verifier/final control 和 strategy 判断。
 
 写入成功且读回可信时，verifier 输入会包含这些读回字段和
 `capability_evidence.artifacts.readback`；在 `max_iterations=1` 下，真实已写入且可读回的

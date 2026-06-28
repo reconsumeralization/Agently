@@ -340,18 +340,22 @@ For completed and sufficient control outputs, non-fatal `gaps` do not prevent
 Workspace artifact materialization; `remaining_work`, blocked status, repair,
 or readback still do. Writing the artifact only creates evidence for later
 readback and verification. It does not mean the final task has been accepted.
-TaskBoard does not need an independent verifier after every intermediate card:
-the downstream card that consumes evidence decides whether it is enough for its
-own objective. Independent verifier requests are for final acceptance,
-evidence/artifact boundary audit, contradictions, or high-risk review.
+Flat and TaskBoard do not need an independent verifier after every intermediate
+work unit. In Flat, a step can return
+`ready_for_final_verification=false` with `remaining_work`; the next iteration
+consumes the new facts and decides the next action. In TaskBoard, the downstream card that consumes
+dependency evidence decides whether it is enough for its own objective.
+Independent verifier requests are for final acceptance, fan-in/control
+acceptance, evidence/artifact boundary audit, contradictions, or high-risk
+review.
 
 AgentTask observation also publishes normalized action facts on the structured
 stream as `agent_task.action.started`, `agent_task.action.completed`, and
 `agent_task.action.failed`. These events summarize existing Action records with
 safe input summaries, result previews, refs, timing, diagnostics, and work-unit
 ownership. They are observation facts for DevTools, UI, and experiment logs; the
-downstream consumer, terminal verifier, and strategy still own usefulness,
-quality, and completion judgment.
+downstream consumer, terminal verifier/final control, and strategy still own
+usefulness, quality, and completion judgment.
 
 When the write succeeds and readback is trusted, verifier input includes the
 readback fields and `capability_evidence.artifacts.readback`; with
