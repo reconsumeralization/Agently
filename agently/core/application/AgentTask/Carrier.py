@@ -520,8 +520,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 return items[0]
         return value
 
-    @staticmethod
-    def _scoped_retrieval_results_from_block_context(block_context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    @classmethod
+    def _scoped_retrieval_results_from_block_context(cls, block_context: Mapping[str, Any]) -> list[dict[str, Any]]:
         state = block_context.get("state")
         if not isinstance(state, Mapping):
             return []
@@ -541,17 +541,141 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 continue
             scoped_results.append(
                 {
-                    "execution_block_id": item.get("execution_block_id"),
-                    "source_plan_block_id": item.get("source_plan_block_id"),
                     "query": output.get("query"),
                     "filters": DataFormatter.sanitize(output.get("filters") or {}),
-                    "bounded": DataFormatter.sanitize(output.get("bounded") or {}),
-                    "locator_refs": DataFormatter.sanitize(output.get("locator_refs") or []),
-                    "evidence_snippets": DataFormatter.sanitize(output.get("evidence_snippets") or []),
-                    "diagnostics": DataFormatter.sanitize(output.get("diagnostics") or []),
+                    "bounded": cls._model_hot_scoped_retrieval_bounded(output.get("bounded")),
+                    "locator_refs": cls._model_hot_locator_refs(output.get("locator_refs")),
+                    "evidence_snippets": cls._model_hot_evidence_snippets(output.get("evidence_snippets")),
+                    "diagnostics": cls._model_hot_diagnostics(output.get("diagnostics")),
                 }
             )
         return scoped_results
+
+    @staticmethod
+    def _model_hot_scoped_retrieval_bounded(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {}
+        allowed_keys = (
+            "search_surface",
+            "max_results",
+            "total_matches",
+            "returned_results",
+            "file_returned_results",
+            "include_snippets",
+            "snippet_offset",
+            "snippet_limit",
+            "file_path",
+            "file_pattern",
+            "context_lines",
+        )
+        return DataFormatter.sanitize({key: value.get(key) for key in allowed_keys if key in value})
+
+    @classmethod
+    def _model_hot_locator_refs(cls, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return []
+        refs: list[dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, Mapping):
+                refs.append(cls._model_hot_locator_ref(item))
+        return refs
+
+    @classmethod
+    def _model_hot_evidence_snippets(cls, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return []
+        snippets: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            snippet: dict[str, Any] = {}
+            for key in (
+                "role",
+                "content_state",
+                "source",
+                "workspace_source",
+                "path",
+                "record_id",
+                "collection",
+                "kind",
+                "line",
+                "line_start",
+                "line_end",
+                "offset",
+                "truncated",
+            ):
+                cls._copy_model_hot_field(snippet, item, key)
+            content = item.get("content")
+            if content is None:
+                content = item.get("snippet", item.get("text"))
+            if content is not None:
+                snippet["content"] = str(content)
+            locator_ref = item.get("locator_ref")
+            if isinstance(locator_ref, Mapping):
+                snippet["locator_ref"] = cls._model_hot_locator_ref(locator_ref)
+            snippets.append(DataFormatter.sanitize(snippet))
+        return snippets
+
+    @classmethod
+    def _model_hot_locator_ref(cls, value: Mapping[str, Any]) -> dict[str, Any]:
+        ref: dict[str, Any] = {}
+        for key in (
+            "role",
+            "content_state",
+            "source",
+            "workspace_source",
+            "rank",
+            "index",
+            "path",
+            "record_id",
+            "collection",
+            "kind",
+            "summary",
+            "title",
+            "label",
+            "source_url",
+            "selected_url",
+            "requested_url",
+            "canonical_url",
+            "url",
+            "href",
+            "line",
+            "line_start",
+            "line_end",
+            "truncated",
+        ):
+            cls._copy_model_hot_field(ref, value, key)
+        raw_ref = value.get("ref")
+        if isinstance(raw_ref, Mapping):
+            compact_ref: dict[str, Any] = {}
+            for key in ("id", "path", "collection", "kind", "summary", "title", "label", "role"):
+                cls._copy_model_hot_field(compact_ref, raw_ref, key)
+            if compact_ref:
+                ref["ref"] = compact_ref
+        return DataFormatter.sanitize(ref)
+
+    @staticmethod
+    def _copy_model_hot_field(target: dict[str, Any], source: Mapping[str, Any], key: str) -> None:
+        value = source.get(key)
+        if value in (None, "", [], {}):
+            return
+        if isinstance(value, (str, int, float, bool)):
+            target[key] = value
+
+    @classmethod
+    def _model_hot_diagnostics(cls, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return []
+        diagnostics: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            diagnostic: dict[str, Any] = {}
+            for key in ("code", "message", "type", "record_id", "path"):
+                cls._copy_model_hot_field(diagnostic, item, key)
+            if diagnostic:
+                diagnostics.append(DataFormatter.sanitize(diagnostic))
+        return diagnostics
 
     @staticmethod
     def _extract_work_unit_block_output(

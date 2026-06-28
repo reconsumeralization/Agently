@@ -2134,6 +2134,8 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
             "url": "https://example.test/source.pdf",
             "title": "Discovered source document",
             "media_type": "application/pdf",
+            "sha256": "0" * 64,
+            "bytes": 4096,
         }
     )
     read_refs = AgentTask._collect_taskboard_source_refs(
@@ -2148,6 +2150,9 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
     assert discovered_refs[0]["content_state"] == "ref_only"
     assert read_refs[0]["content_state"] == "bounded_readback_available"
     assert "ref_only" in policy["content_states"]
+    assert "sha256" not in discovered_refs[0]
+    assert "bytes" not in discovered_refs[0]
+    assert "media_type" not in discovered_refs[0]
 
     validator = TaskBoardValidator()
     revision = TaskBoardRevision.create(
@@ -2198,6 +2203,112 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
     assert cards["final.continue"].metadata["final_workspace_deliverables"] == ["final.md"]
     assert "final.md" in cards["final.continue"].objective
+
+
+def test_scoped_retrieval_results_expose_model_hot_view_without_provenance_noise():
+    raw_locator = {
+        "role": "locator_ref",
+        "content_state": "ref_only",
+        "source": "workspace.search_files",
+        "path": "retained/source.md",
+        "record_id": "record-1",
+        "bytes": 4096,
+        "sha256": "1" * 64,
+        "media_type": "text/markdown",
+        "content_kind": "text",
+        "search_engine": "workspace_file_grep",
+        "grep_tool": "rg",
+        "scope": {"max_file_bytes": 200000},
+        "file_ref": {"path": "retained/source.md", "sha256": "1" * 64},
+        "ref": {
+            "id": "record-1",
+            "path": "retained/source.md",
+            "collection": "retained",
+            "kind": "note",
+            "size": 4096,
+            "sha256": "1" * 64,
+            "meta": {"internal": "cold"},
+        },
+    }
+    block_context = {
+        "state": {
+            "execution_block_results": [
+                {
+                    "kind": "workspace_operation",
+                    "execution_block_id": "block-1",
+                    "source_plan_block_id": "plan-block-1",
+                    "output": {
+                        "operation": "search",
+                        "query": "needle",
+                        "filters": {"collection": "retained"},
+                        "bounded": {
+                            "search_surface": "workspace_files",
+                            "search_engines": ["workspace_file_grep"],
+                            "max_results": 8,
+                            "total_matches": 1,
+                            "returned_results": 1,
+                            "candidate_bytes": 4096,
+                            "returned_snippet_bytes": 64,
+                            "include_snippets": True,
+                            "snippet_limit": 300,
+                            "file_path": "retained",
+                            "file_pattern": "**",
+                            "context_lines": 2,
+                        },
+                        "locator_refs": [raw_locator],
+                        "evidence_snippets": [
+                            {
+                                "role": "evidence_snippet",
+                                "content_state": "bounded_readback_available",
+                                "source": "workspace.search_files",
+                                "path": "retained/source.md",
+                                "line_start": 7,
+                                "line_end": 9,
+                                "content": "needle evidence",
+                                "snippet_bytes": 15,
+                                "bytes": 4096,
+                                "sha256": "1" * 64,
+                                "media_type": "text/markdown",
+                                "content_kind": "text",
+                                "search_engine": "workspace_file_grep",
+                                "grep_tool": "rg",
+                                "scope": {"max_file_bytes": 200000},
+                                "file_ref": {"path": "retained/source.md", "sha256": "1" * 64},
+                                "locator_ref": raw_locator,
+                            }
+                        ],
+                        "diagnostics": [
+                            {
+                                "code": "example.diagnostic",
+                                "message": "visible diagnostic",
+                                "sha256": "1" * 64,
+                                "raw": {"bytes": 4096},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+    }
+
+    hot_results = AgentTask._scoped_retrieval_results_from_block_context(block_context)
+    hot_text = json.dumps(hot_results, ensure_ascii=False)
+
+    assert hot_results[0]["locator_refs"][0]["path"] == "retained/source.md"
+    assert hot_results[0]["locator_refs"][0]["ref"]["id"] == "record-1"
+    assert hot_results[0]["evidence_snippets"][0]["content"] == "needle evidence"
+    assert hot_results[0]["bounded"]["snippet_limit"] == 300
+    assert '"sha256"' not in hot_text
+    assert '"bytes"' not in hot_text
+    assert '"media_type"' not in hot_text
+    assert '"content_kind"' not in hot_text
+    assert '"search_engine"' not in hot_text
+    assert '"grep_tool"' not in hot_text
+    assert '"scope"' not in hot_text
+    assert '"file_ref"' not in hot_text
+    assert '"execution_block_id"' not in hot_text
+    assert '"source_plan_block_id"' not in hot_text
+    assert block_context["state"]["execution_block_results"][0]["output"]["locator_refs"][0]["sha256"]
 
 
 def test_taskboard_control_readback_required_patch_type_becomes_readback_patch():

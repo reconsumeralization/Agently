@@ -366,6 +366,12 @@ For `workspace_index`, put record collections in `filters.collection`; use
 `filters.kind` only when the exact record kind is known, and do not use `path`
 for collection names. Singleton filter lists are normalized to scalar values
 before execution.
+When AgentTask injects scoped retrieval results into a later Flat step or
+TaskBoard card, it uses a compact model-hot view: bounded snippets, truncation
+facts, line/range facts, and actionable locator handles stay visible, while
+reconstructable provenance such as `sha256`, byte counts, handler/media details,
+backend/search-engine facts, execution block ids, and full file refs remains in
+the raw Workspace/Blocks evidence for programmatic audit and readback.
 For `workspace_files`, `query` is the content text to search, `path` is the
 directory or file scope, and `pattern` is a file glob such as `*.md`, `*`, or
 `**` for recursive file search. Local Workspace file search uses `rg` as a

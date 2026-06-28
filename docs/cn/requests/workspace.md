@@ -339,6 +339,11 @@ record collection 应放在 `filters.collection`；只有明确知道精确 reco
 `pattern` 是 `*.md`、`*` 或表示递归文件搜索的 `**` 这类文件 glob，不是另一个内容关键词。
 本地 Workspace 文件搜索在可用时使用 `rg` 作为 grep-style 搜索引擎，并在不可用时回退到有界
 文件扫描。Blocks 默认返回命中附近的小型有界上下文片段，让相邻事实可见，但不会读取整份文件。
+当 AgentTask 把 scoped retrieval 结果注入后续 Flat step 或 TaskBoard card 时，会使用
+紧凑的模型热视图：只保留有界片段、截断事实、行/范围事实和可执行 locator 句柄；
+`sha256`、字节数、handler/media 细节、backend/search-engine 事实、execution block id
+和完整 file ref 等可由程序回溯的 provenance 会留在原始 Workspace/Blocks 证据里，
+用于审计、manifest 和后续 readback。
 
 `materialize_file(...)` 用于框架或应用拥有的受控 bytes 物化，例如 Browse action
 把远程 PDF 下载到 Workspace 的 `downloads/` 后，再由后续 `read_file(...)` 通过

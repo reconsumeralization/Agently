@@ -456,7 +456,7 @@ async def test_block_carrier_executes_file_scoped_retrieval_and_injects_results(
 
     scoped_results = seen["scoped_results"]
     assert scoped_results[0]["bounded"]["search_surface"] == "workspace_files"
-    assert scoped_results[0]["bounded"]["search_engines"] in (["workspace_file_grep"], ["workspace_file_scan"])
+    assert "search_engines" not in scoped_results[0]["bounded"]
     assert scoped_results[0]["bounded"]["file_returned_results"] == 1
     assert scoped_results[0]["bounded"]["context_lines"] == 3
     assert scoped_results[0]["evidence_snippets"][0]["content"] == "alpha\nrelease deadline is 2026-07-01"
@@ -470,6 +470,10 @@ async def test_block_carrier_executes_file_scoped_retrieval_and_injects_results(
     assert compact_operations[0]["kind"] == "workspace_operation"
     assert compact_operations[0]["output"]["operation"] == "search"
     assert compact_operations[0]["output"]["bounded"]["returned_results"] == 1
+    assert compact_operations[0]["output"]["bounded"]["search_engines"] in (
+        ["workspace_file_grep"],
+        ["workspace_file_scan"],
+    )
 
 
 @pytest.mark.asyncio

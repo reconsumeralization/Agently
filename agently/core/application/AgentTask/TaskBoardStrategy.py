@@ -4306,13 +4306,11 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
             "href",
         }
         metadata_keys = {
-            "path",
-            "sha256",
-            "bytes",
-            "size",
-            "media_type",
             "role",
             "source",
+            "record_id",
+            "collection",
+            "kind",
             "artifact_id",
             "action_call_id",
             "label",
@@ -4361,7 +4359,9 @@ class AgentTaskTaskBoardStrategyMixin(AgentTaskMixinBase):
                     "url",
                     "href",
                     "path",
-                    "sha256",
+                    "record_id",
+                    "artifact_id",
+                    "action_call_id",
                 )
             )
             if dedupe_key in seen:
