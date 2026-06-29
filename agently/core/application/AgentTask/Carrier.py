@@ -557,6 +557,19 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             )
         return scoped_results
 
+    @classmethod
+    def _evidence_ledger_from_block_context(cls, block_context: Mapping[str, Any]) -> dict[str, Any]:
+        state = block_context.get("state")
+        if not isinstance(state, Mapping):
+            return evidence_ledger_view({"evidence_items": ()}, max_items=64, body_chars=1800)
+        evidence_items = state.get("evidence_items")
+        if isinstance(evidence_items, Sequence) and not isinstance(evidence_items, (str, bytes, bytearray)):
+            return evidence_ledger_view({"evidence_items": evidence_items}, max_items=64, body_chars=1800)
+        results = state.get("execution_block_results")
+        if isinstance(results, Sequence) and not isinstance(results, (str, bytes, bytearray)):
+            return evidence_ledger_view({"execution_block_results": results}, max_items=64, body_chars=1800)
+        return evidence_ledger_view({"evidence_items": ()}, max_items=64, body_chars=1800)
+
     @staticmethod
     def _model_hot_scoped_retrieval_bounded(value: Any) -> dict[str, Any]:
         if not isinstance(value, Mapping):
@@ -984,6 +997,15 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         if not isinstance(evidence_dict, dict):
             return {}
         compact = {key: evidence_dict.get(key) for key in ("status", "diagnostics", "errors") if key in evidence_dict}
+        evidence_items = evidence_dict.get("evidence_items")
+        if isinstance(evidence_items, Sequence) and not isinstance(evidence_items, (str, bytes, bytearray)):
+            compact_items: list[dict[str, Any]] = []
+            for item in evidence_items[:96]:
+                if isinstance(item, Mapping):
+                    compact_items.append(cls._compact_evidence_item_for_meta(item))
+            compact["evidence_items"] = compact_items
+            if len(evidence_items) > len(compact_items):
+                compact["evidence_items_omitted"] = len(evidence_items) - len(compact_items)
         for key in ("execution_block_results", "plan_block_results"):
             compact_results: list[dict[str, Any]] = []
             for item in evidence_dict.get(key) or []:
@@ -1051,6 +1073,42 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 )
             compact[key] = compact_results
         return compact
+
+    @classmethod
+    def _compact_evidence_item_for_meta(cls, item: Mapping[str, Any]) -> dict[str, Any]:
+        compact = {
+            key: item.get(key)
+            for key in (
+                "id",
+                "kind",
+                "status",
+                "raw_status",
+                "body_state",
+                "supports",
+                "provenance",
+                "diagnostics",
+                "path",
+                "record_id",
+                "source_url",
+                "selected_url",
+                "requested_url",
+                "canonical_url",
+                "url",
+                "href",
+                "artifact_id",
+                "action_id",
+                "action_call_id",
+                "content_state",
+                "truncated",
+            )
+            if item.get(key) not in (None, "", [], {})
+        }
+        for key in ("body", "content", "text", "snippet", "preview"):
+            value = item.get(key)
+            if value not in (None, "", [], {}):
+                compact[key if key == "preview" else "body"] = cls._compact_value_for_meta(value, max_chars=1600)
+                break
+        return DataFormatter.sanitize(compact)
 
     @classmethod
     def _compact_workspace_operations_for_meta(cls, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:

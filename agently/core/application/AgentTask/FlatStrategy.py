@@ -156,6 +156,18 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             repair_context=self._active_repair_context(),
             allow_stream_draft=not execution_failed,
         )
+        flat_evidence_guard = validate_evidence_use(
+            collect_evidence_use(execution_result),
+            self._cumulative_evidence_ledger(execution_meta),
+        )
+        if isinstance(execution_result, Mapping):
+            execution_result = value_with_normalized_evidence_use(
+                execution_result,
+                flat_evidence_guard.get("normalized_evidence_use"),
+            )
+        execution_meta.setdefault("diagnostics", {})
+        if isinstance(execution_meta.get("diagnostics"), dict):
+            execution_meta["diagnostics"]["evidence_use_guard"] = DataFormatter.sanitize(flat_evidence_guard)
         await self._emit_snapshot(
             iteration_index,
             "execution",
@@ -1337,17 +1349,20 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
         async def run_agent_step(_context: Mapping[str, Any]) -> Mapping[str, Any]:
             scoped_retrieval_results = self._scoped_retrieval_results_from_block_context(_context)
+            evidence_ledger = self._evidence_ledger_from_block_context(_context)
             execution_result, execution_meta = await self._run_bounded_agent_execution_step(
                 iteration_index,
                 plan,
                 context_pack,
                 carrier_output_policy=self._carrier_output_policy_from_block_context(_context),
                 scoped_retrieval_results=scoped_retrieval_results,
+                evidence_ledger=evidence_ledger,
             )
             return {
                 "execution_result": DataFormatter.sanitize(execution_result),
                 "execution_meta": DataFormatter.sanitize(execution_meta),
                 "scoped_retrieval_results": DataFormatter.sanitize(scoped_retrieval_results),
+                "evidence_ledger": DataFormatter.sanitize(evidence_ledger),
             }
 
         try:
@@ -1401,6 +1416,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         *,
         carrier_output_policy: Mapping[str, Any] | None = None,
         scoped_retrieval_results: Sequence[Mapping[str, Any]] | None = None,
+        evidence_ledger: Mapping[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         plan = self._normalize_step_plan(plan)
         repair_context = self._active_repair_context()
@@ -1428,6 +1444,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "execution_prompt": self._execution_prompt_context(),
             "retrieval_policy": scoped_retrieval_policy(),
             "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+            "evidence_ledger": DataFormatter.sanitize(evidence_ledger or {}),
             "scoped_retrieval_results": DataFormatter.sanitize(list(scoped_retrieval_results or ())),
             "language_policy": language_policy,
         }
@@ -1465,6 +1482,12 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "reads; use evidence_snippet results as bounded source text and locator_ref results only as targets "
                     "for later bounded readback. If scoped_retrieval_results is present, those are already executed "
                     "Blocks/Workspace search facts for the current step; inspect them before choosing broader reads. "
+                    "Treat evidence_ledger as the authoritative grounding ledger. Use its item ids in evidence_use "
+                    "for factual claims. status=failed or status=empty is evidence of unavailability only, not support "
+                    "for positive business facts. body_state=ref_only supports only discovery/ref-pointer claims; "
+                    "read the referenced source before asserting its content. body_state=truncated supports only the "
+                    "visible excerpt, not whole-source or exhaustive claims. scoped_retrieval_results is a compatibility "
+                    "view derived from the same ledger and is not a separate grounding authority. "
                     "Do not treat a local search hit as semantic acceptance by itself. "
                     "When repair_context contains fields, it is the active verification feedback for this work unit. "
                     "Use its acceptance_delta, advisory_repair_constraints, advisory_next_step_requirements, and "
@@ -1540,6 +1563,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "False when the next Flat iteration should consume this output before terminal verification; true only for terminal, blocking, or risk verification now",
                     False,
                 ),
+                "evidence_use": (
+                    [dict],
+                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                    False,
+                ),
             }
         return {
             "step_result": (str, "Concrete result of this bounded step", True),
@@ -1571,6 +1599,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "ready_for_final_verification": (
                 bool,
                 "False when the next Flat iteration should consume this output before terminal verification; true only for terminal, blocking, or risk verification now",
+                False,
+            ),
+            "evidence_use": (
+                [dict],
+                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
                 False,
             ),
         }

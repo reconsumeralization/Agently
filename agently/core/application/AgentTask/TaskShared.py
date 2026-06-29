@@ -51,6 +51,15 @@ from .BlockCarrier import (
     scoped_retrieval_policy,
     select_carrier_output_policy,
 )
+from .EvidenceLedger import (
+    collect_evidence_use,
+    evidence_envelope_from_value,
+    evidence_ledger_view,
+    source_refs_from_ledger,
+    validate_evidence_use,
+    value_with_normalized_evidence_use,
+    workspace_artifacts_from_ledger,
+)
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -349,6 +358,23 @@ def _agent_task_hot_path_key_is_request_payload(key: Any) -> bool:
     return normalized in _AGENT_TASK_HOT_PATH_REQUEST_PAYLOAD_KEYS
 
 
+def _agent_task_hot_path_key_is_integrity_metadata(key: Any) -> bool:
+    normalized = str(key or "").strip().lower()
+    return normalized in {"sha256", "digest", "bytes", "read_bytes", "size", "media_type", "content_kind", "handler_id"}
+
+
+def _drop_agent_task_integrity_metadata_lines(text: str) -> str:
+    omitted_prefixes = ("sha256:", "digest:", "bytes:", "read_bytes:", "size:", "media_type:", "handler_id:")
+    lines = []
+    changed = False
+    for line in text.splitlines():
+        if line.strip().lower().startswith(omitted_prefixes):
+            changed = True
+            continue
+        lines.append(line)
+    return "\n".join(lines) if changed else text
+
+
 def _omit_agent_task_request_payloads_from_hot_path(value: Any, *, depth: int = 0) -> Any:
     """Remove full provider request payloads before planner/verifier hot paths."""
 
@@ -372,7 +398,7 @@ def _omit_agent_task_request_payloads_from_hot_path(value: Any, *, depth: int = 
                     "reason": "provider_request_payload_hot_path",
                     "chars": len(sanitized),
                 }
-        return sanitized
+        return _drop_agent_task_integrity_metadata_lines(sanitized)
     if depth >= 8:
         return sanitized
     if isinstance(sanitized, Mapping):
@@ -381,6 +407,8 @@ def _omit_agent_task_request_payloads_from_hot_path(value: Any, *, depth: int = 
             key_text = str(key)
             if _agent_task_hot_path_key_is_request_payload(key_text):
                 compacted[key_text] = _agent_task_hot_path_request_payload_omission(item)
+            elif _agent_task_hot_path_key_is_integrity_metadata(key_text):
+                continue
             else:
                 compacted[key_text] = _omit_agent_task_request_payloads_from_hot_path(
                     item,
@@ -478,6 +506,9 @@ __all__ = [
     "apply_language_policy_to_prompt",
     "build_task_board_evidence_view",
     "coerce_task_board_planning_result",
+    "collect_evidence_use",
+    "evidence_envelope_from_value",
+    "evidence_ledger_view",
     "language_policy_from_prompt_snapshot",
     "parse_output_contract_dict",
     "project_agent_execution_text_delta",
@@ -485,6 +516,10 @@ __all__ = [
     "resolve_task_board_planning_policy",
     "scoped_retrieval_policy",
     "select_carrier_output_policy",
+    "source_refs_from_ledger",
     "task_board_card_required",
     "task_board_planning_output_schema",
+    "validate_evidence_use",
+    "value_with_normalized_evidence_use",
+    "workspace_artifacts_from_ledger",
 ]

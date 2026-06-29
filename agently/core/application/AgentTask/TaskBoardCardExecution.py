@@ -166,6 +166,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ).to_dict()
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
+        evidence_ledger = evidence_ledger_view(evidence_view, max_items=80, body_chars=1800)
         readback_records = self._taskboard_action_artifact_recall_records(evidence_view)
         dependency_readbacks = await self._taskboard_dependency_action_artifact_readbacks(
             evidence_view,
@@ -210,6 +211,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "card": context.card.to_dict(),
                 "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
+                "evidence_ledger": evidence_ledger,
                 "dependency_readbacks": dependency_readbacks,
                 "available_readback": self._taskboard_available_readback(evidence_view),
                 "source_ref_policy": self._taskboard_source_ref_policy(),
@@ -239,8 +241,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "still insufficient, call read_action_artifact with the artifact_id and action_call_id before blocking "
                 "on missing evidence. If scoped_retrieval_results is present, those are already executed bounded "
                 "Workspace search facts; use visible evidence_snippet content only within the excerpt, and treat "
-                "locator_ref records as targets for later readback/search rather than source-content proof. Return card-local evidence "
-                "and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
+                "locator_ref records as targets for later readback/search rather than source-content proof. "
+                "Treat evidence_ledger as the authoritative grounding ledger for dependency evidence. Use ledger item "
+                "ids in evidence_use for factual claims. failed/empty items support unavailable or missing-data claims "
+                "only; ref_only items support only discovery/ref-pointer claims until readback evidence exists. "
+                "Return card-local evidence and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
                 "is available, return status completed with diagnostics that explain the degraded source boundary. "
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
                 "evidence is truly critical. If this card produces the user-facing deliverable, use candidate_final_result, "
@@ -289,6 +294,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     False,
                 ),
                 "evidence": ([str], "Evidence produced or used by this card", False),
+                "evidence_use": (
+                    [dict],
+                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                    False,
+                ),
                 "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
                 "diagnostics": ([dict], "Optional card diagnostics", False),
             }
@@ -433,6 +443,23 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 card_context=context,
             )
             summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
+            execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
+            card_evidence_ledger = evidence_ledger_view(
+                {
+                    "evidence_items": [
+                        *list(evidence_ledger.get("items", [])),
+                        *list(execution_evidence_ledger.get("items", [])),
+                    ]
+                },
+                max_items=120,
+                body_chars=1800,
+            )
+            evidence_use_guard = validate_evidence_use(collect_evidence_use(card_output), card_evidence_ledger)
+            if isinstance(card_output, Mapping):
+                card_output = value_with_normalized_evidence_use(
+                    card_output,
+                    evidence_use_guard.get("normalized_evidence_use"),
+                )
             await self._emit_action_observation_events(
                 None,
                 execution_meta=execution_meta,
@@ -472,6 +499,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "attempt_index": attempt_index,
                     "max_attempts": max_attempts,
                     "previous_attempt_errors": previous_errors,
+                    "evidence_use_guard": evidence_use_guard,
                 }
             )
             patch_proposal = (
@@ -498,6 +526,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "attempt_index": attempt_index,
                     "max_attempts": max_attempts,
                     "block_carrier": compact_block_carrier,
+                    "evidence_ledger": card_evidence_ledger,
+                    "evidence_use_guard": evidence_use_guard,
                 },
             )
         return self._failed_taskboard_card_result(
@@ -517,6 +547,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ).to_dict()
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
+        evidence_ledger = evidence_ledger_view(evidence_view, max_items=80, body_chars=1800)
         dependency_readbacks = await self._taskboard_dependency_action_artifact_readbacks(
             evidence_view,
             card_id=str(getattr(context.card, "id", "") or ""),
@@ -537,6 +568,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "card": context.card.to_dict(),
             "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
             "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
+            "evidence_ledger": evidence_ledger,
             "dependency_readbacks": dependency_readbacks,
             "available_readback": self._taskboard_available_readback(evidence_view),
             "source_ref_policy": self._taskboard_source_ref_policy(),
@@ -555,7 +587,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "Use task_context_contract.current_time when current/latest/as-of evidence matters, and label older "
             "or historical source material with its time boundary. "
             "do not plan or call tools from this request. Use TaskBoardEvidenceView as the hot evidence summary "
-            "and preserve cold refs as pointers. dependency_readbacks contains framework-prefetched bounded "
+            "and preserve cold refs as pointers. Treat evidence_ledger as the authoritative grounding ledger and "
+            "bind factual claims through evidence_use ids. failed/empty items support unavailability only; ref_only "
+            "items support only discovery/ref-pointer claims until readback evidence exists. dependency_readbacks contains framework-prefetched bounded "
             "readback previews for dependency Action artifacts that were structurally truncated or marked "
             "full_value_available; inspect those before declaring dependency evidence missing. If bounded previews "
             "and dependency_readbacks are insufficient, set next_board_action to 'readback' or 'repair' and explain "
@@ -617,6 +651,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 False,
             ),
             "evidence": ([str], "Evidence used by this control card", False),
+            "evidence_use": (
+                [dict],
+                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                False,
+            ),
             "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
             "diagnostics": ([dict], "Optional control-card diagnostics", False),
             "patch_proposal": (
@@ -775,6 +814,23 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             )
         if isinstance(card_output, Mapping):
             card_output = await self._materialize_taskboard_workspace_patch(context, card_output)
+        execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
+        card_evidence_ledger = evidence_ledger_view(
+            {
+                "evidence_items": [
+                    *list(evidence_ledger.get("items", [])),
+                    *list(execution_evidence_ledger.get("items", [])),
+                ]
+            },
+            max_items=120,
+            body_chars=1800,
+        )
+        evidence_use_guard = validate_evidence_use(collect_evidence_use(card_output), card_evidence_ledger)
+        if isinstance(card_output, Mapping):
+            card_output = value_with_normalized_evidence_use(
+                card_output,
+                evidence_use_guard.get("normalized_evidence_use"),
+            )
         diagnostics = []
         if isinstance(card_output, Mapping):
             raw_diagnostics = card_output.get("diagnostics")
@@ -793,6 +849,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     execution_meta.get("block_carrier", {}),
                     blocks=execution_meta.get("blocks"),
                 ),
+                "evidence_use_guard": evidence_use_guard,
             }
         )
         card_status = self._taskboard_control_card_status(card_output)
@@ -851,6 +908,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     execution_meta.get("block_carrier", {}),
                     blocks=execution_meta.get("blocks"),
                 ),
+                "evidence_ledger": card_evidence_ledger,
+                "evidence_use_guard": evidence_use_guard,
             },
         )
 

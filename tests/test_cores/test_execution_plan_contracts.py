@@ -343,7 +343,42 @@ def test_evidence_envelope_separates_runtime_plan_action_and_skill_evidence():
     assert envelope.action_evidence == ({"action_call_id": "ac-1", "success": True},)
     assert envelope.skill_evidence == ({"skill_id": "webapp-testing", "loaded_guidance": True},)
     assert envelope.artifact_refs == ("ws://artifact/1",)
+    assert {item["kind"] for item in envelope.evidence_items}.issuperset(
+        {"execution_block", "plan_block", "action", "skill_context", "artifact_ref"}
+    )
+    assert all(item["id"] for item in envelope.evidence_items)
+    assert all(item["status"] in {"ok", "failed", "empty"} for item in envelope.evidence_items)
+    assert all(item["body_state"] in {"full", "bounded", "truncated", "ref_only"} for item in envelope.evidence_items)
     assert EvidenceEnvelope.from_value(envelope.to_dict()).to_dict() == envelope.to_dict()
+
+
+def test_evidence_envelope_derives_legacy_buckets_from_canonical_items():
+    envelope = EvidenceEnvelope.from_value(
+        {
+            "evidence_items": [
+                {
+                    "id": "quote.failed",
+                    "kind": "action_evidence",
+                    "status": "failed",
+                    "body_state": "bounded",
+                    "action_id": "quote",
+                    "diagnostics": [{"message": "provider unavailable"}],
+                },
+                {
+                    "id": "repo.path",
+                    "kind": "locator_ref",
+                    "status": "ok",
+                    "body_state": "ref_only",
+                    "path": "src/app.py",
+                },
+            ]
+        }
+    )
+
+    assert envelope.action_evidence[0]["id"] == "quote.failed"
+    assert envelope.action_evidence[0]["status"] == "failed"
+    assert envelope.workspace_refs == ("src/app.py",)
+    assert EvidenceEnvelope.from_value({"diagnostics": [{"message": "boom"}]}).evidence_items[0]["status"] == "failed"
 
 
 @pytest.mark.parametrize("status", sorted(REPLAN_STATUSES))

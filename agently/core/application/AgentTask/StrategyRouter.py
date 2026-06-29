@@ -125,7 +125,10 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
             "Analyze this task's execution shape for AgentTaskLoop strategy resolution. "
             "First write flexible natural-language analysis. Then provide execution_hint as a thin, non-binding "
             "structured hint. Do not decide final execution by keywords. Do not treat the hint as completion evidence. "
-            "recommended_shape must be flat or taskboard. Prefer flat when confidence is low or uncertainty is material."
+            "recommended_shape must be flat or taskboard. Prefer flat when confidence is low or uncertainty is material. "
+            "When recommending taskboard with medium or high confidence and the board is obvious, you may include an "
+            "initial_taskboard_plan using the normal TaskBoard planning result shape so the TaskBoard strategy can reuse "
+            "it instead of making a separate planning request."
         )
         request.output(
             {
@@ -134,6 +137,11 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
                     dict,
                     "Structured hint: recommended_shape, confidence, reasons, linear_evidence, branching_evidence, uncertainty.",
                     True,
+                ),
+                "initial_taskboard_plan": (
+                    dict,
+                    "Optional TaskBoard planning result when recommended_shape is taskboard and the initial board is obvious.",
+                    False,
                 ),
             },
             format="json",
@@ -175,6 +183,9 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
             "analysis": str(source.get("analysis") or "").strip(),
             "execution_hint": normalized_hint,
         }
+        initial_taskboard_plan = source.get("initial_taskboard_plan")
+        if isinstance(initial_taskboard_plan, Mapping) and initial_taskboard_plan:
+            normalized["initial_taskboard_plan"] = DataFormatter.sanitize(dict(initial_taskboard_plan))
         if diagnostics:
             normalized["diagnostics"] = DataFormatter.sanitize(diagnostics)
         return DataFormatter.sanitize(normalized)

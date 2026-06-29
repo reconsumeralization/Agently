@@ -26,6 +26,172 @@ from agently.utils import DataFormatter, Settings
 from examples.agent_task.interview_question_preparation import judge_interview_semantics
 
 
+def test_task_shared_star_export_includes_evidence_ledger_helpers():
+    namespace: dict[str, Any] = {}
+    exec("from agently.core.application.AgentTask.TaskShared import *", namespace)
+
+    for helper_name in (
+        "collect_evidence_use",
+        "evidence_envelope_from_value",
+        "evidence_ledger_view",
+        "source_refs_from_ledger",
+        "validate_evidence_use",
+        "workspace_artifacts_from_ledger",
+    ):
+        assert callable(namespace.get(helper_name))
+
+
+def test_evidence_ledger_guard_rejects_structurally_invalid_support():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {"id": "quote.failed", "kind": "action_evidence", "status": "failed", "body_state": "bounded"},
+            {"id": "repo.path", "kind": "locator_ref", "status": "ok", "body_state": "ref_only", "path": "src/app.py"},
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {"claim": "The quote was 123.45.", "evidence_ids": ["quote.failed"], "support_type": "content"},
+            {"claim": "src/app.py defines Foo.", "evidence_ids": ["repo.path"], "support_type": "content"},
+            {"claim": "Unknown.", "evidence_ids": ["missing"], "support_type": "content"},
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert guard["blocking_count"] == 3
+    assert {
+        diagnostic["code"]
+        for diagnostic in guard["diagnostics"]
+        if diagnostic.get("blocking") is True
+    } == {
+        "evidence_ledger.unavailable_item_used_as_positive_support",
+        "evidence_ledger.ref_only_item_used_as_content_support",
+        "evidence_ledger.invalid_evidence_id",
+    }
+
+
+def test_evidence_ledger_guard_reconciles_visible_aliases_to_canonical_ids():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "ledger.workspace.readme",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "full",
+                "path": "README.md",
+                "record_id": "record-readme",
+                "source_url": "https://example.test/readme",
+                "body": "README content",
+                "provenance": {"action_id": "repo_read", "action_call_id": "call-1"},
+            },
+            {
+                "id": "ledger.workspace.init",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "skillopt/__init__.py",
+                "body": "__version__ = '1.0'",
+            },
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {"claim": "The README content was read.", "evidence_ids": ["README.md"], "support_type": "content"},
+            {
+                "claim": "The readme record is the selected source.",
+                "evidence_ids": ["record-readme"],
+                "support_type": "content",
+            },
+            {
+                "claim": "The readme URL is available.",
+                "evidence_ids": ["https://example.test/readme"],
+                "support_type": "content",
+            },
+            {
+                "claim": "The repository read action produced this result.",
+                "evidence_ids": ["action_result_repo_read"],
+                "support_type": "content",
+            },
+            {
+                "claim": "The package initializer was read.",
+                "evidence_ids": ["skillopt/__init__.py"],
+                "support_type": "content",
+            },
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["blocking_count"] == 0
+    assert [entry["evidence_ids"] for entry in guard["normalized_evidence_use"]] == [
+        ["ledger.workspace.readme"],
+        ["ledger.workspace.readme"],
+        ["ledger.workspace.readme"],
+        ["ledger.workspace.readme"],
+        ["ledger.workspace.init"],
+    ]
+    assert any(item["code"] == "evidence_ledger.alias_resolved" for item in guard["diagnostics"])
+    assert "available_evidence_refs" in guard
+
+
+def test_evidence_ledger_guard_blocks_ambiguous_basename_aliases():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {"id": "docs.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "docs/README.md"},
+            {"id": "pkg.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "packages/README.md"},
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [{"claim": "The README explains the package.", "evidence_ids": ["README.md"], "support_type": "content"}],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert guard["blocking_count"] == 1
+    diagnostic = next(item for item in guard["diagnostics"] if item.get("blocking") is True)
+    assert diagnostic["code"] == "evidence_ledger.ambiguous_evidence_alias"
+    assert set(diagnostic["candidates"]) == {"docs.readme", "pkg.readme"}
+
+
+def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "quote.failed",
+                "kind": "action_evidence",
+                "status": "failed",
+                "body_state": "ref_only",
+                "action_id": "quote_lookup",
+            }
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [{"claim": "The quote was 123.45.", "evidence_ids": ["action_result_quote_lookup"], "support_type": "content"}],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["quote.failed"]
+    assert any(item["code"] == "evidence_ledger.alias_resolved" for item in guard["diagnostics"])
+    assert any(
+        item["code"] == "evidence_ledger.unavailable_item_used_as_positive_support"
+        and item.get("blocking") is True
+        for item in guard["diagnostics"]
+    )
+
+
 def test_block_carrier_output_policy_selects_schema_and_body_transport():
     flat_text = WorkUnitIntent(
         id="flat-text",
@@ -344,11 +510,20 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
 
     async def handler(block_context: Mapping[str, Any]) -> dict[str, Any]:
         scoped_results = task._scoped_retrieval_results_from_block_context(block_context)
+        evidence_ledger = task._evidence_ledger_from_block_context(block_context)
         seen["scoped_results"] = scoped_results
+        seen["evidence_ledger"] = evidence_ledger
         return {
             "execution_result": {
                 "candidate_final_result": "Alpha deadline found.",
                 "scoped_retrieval_results": scoped_results,
+                "evidence_use": [
+                    {
+                        "claim": "Alpha deadline found.",
+                        "evidence_ids": [evidence_ledger["items"][2]["id"]],
+                        "support_type": "content",
+                    }
+                ],
             },
             "execution_meta": {
                 "execution_id": "scoped-retrieval-child",
@@ -368,9 +543,17 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
     )
 
     scoped_results = seen["scoped_results"]
+    evidence_ledger = seen["evidence_ledger"]
     assert len(scoped_results) == 1
     assert scoped_results[0]["query"] == "deadline"
     assert scoped_results[0]["bounded"]["returned_results"] == 1
+    assert [item["kind"] for item in evidence_ledger["items"][:3]] == [
+        "workspace_operation.search",
+        "locator_ref",
+        "evidence_snippet",
+    ]
+    assert evidence_ledger["items"][1]["body_state"] == "ref_only"
+    assert evidence_ledger["items"][2]["body_state"] in {"bounded", "truncated"}
     snippet = scoped_results[0]["evidence_snippets"][0]
     assert snippet["role"] == "evidence_snippet"
     assert snippet["content"].startswith("Alpha deadline")
@@ -383,6 +566,8 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
         for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]
     ]
     assert block_kinds == ["workspace_operation", "agent_step"]
+    block_evidence_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    assert evidence_ledger["items"][2]["id"] in {item["id"] for item in block_evidence_items}
     compact_search_output = execution_meta["blocks"]["evidence"]["execution_block_results"][0]["output"]
     assert compact_search_output["operation"] == "search"
     assert compact_search_output["query"] == "deadline"
@@ -1323,6 +1508,11 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
     assert delivered["workspace_artifact_content_omitted"][0]["field"] == "artifact_markdown"
     assert execution_meta["logs"]["artifact_refs"][0]["path"] == "reports/final.md"
     assert execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"] == "reports/final.md"
+    ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    artifact_item = next(item for item in ledger_items if item["kind"] == "workspace_artifact.readback")
+    assert artifact_item["status"] == "ok"
+    assert artifact_item["path"] == "reports/final.md"
+    assert artifact_item["body"].startswith("# Actual Report")
 
 
 @pytest.mark.asyncio
@@ -1372,6 +1562,22 @@ async def test_verifier_workspace_artifact_readback_targets_required_sections(tm
     targeted = artifacts[0]["targeted_readbacks"]
     assert any(item["kind"] == "section_search" and item["query"] == "source list" for item in targeted)
     assert any("https://example.test/source-a" in item.get("content", "") for item in targeted)
+
+    execution_meta = {
+        "blocks": {
+            "evidence": {
+                "evidence_items": [task._workspace_artifact_readback_evidence_item(ref)],
+            }
+        }
+    }
+    await task._ensure_workspace_artifact_targeted_readback_evidence(
+        execution_meta,
+        task._cumulative_evidence_ledger(execution_meta),
+    )
+    ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    targeted_items = [item for item in ledger_items if item["kind"] == "workspace_artifact.targeted_readback"]
+    assert targeted_items
+    assert any("https://example.test/source-a" in item.get("body", "") for item in targeted_items)
 
     small_body = "# Small Artifact\n\n## Source List\n\n- https://example.test/source-a\n"
     small_write_result = await task.workspace.write_file("small.md", small_body)
@@ -1943,7 +2149,8 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
                 assert "trusted_workspace_artifacts" in text
                 assert "source-grounded Workspace artifacts" in text
                 assert "trusted_workspace_artifacts.readback.content" in text
-                assert self.__class__.tail_marker in text
+                assert "evidence_ledger" in text
+                assert "reports/final.md" in text
                 assert "https://example.test/source" in text
                 payload = {
                     "is_complete": True,
@@ -2012,7 +2219,7 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
     assert verification["is_complete"] is True
     assert verification["final_result_via_workspace_artifact"] is True
     assert "final_result_missing" not in verification.get("guard_reasons", [])
-    assert WorkspaceArtifactPointerRequester.tail_marker in WorkspaceArtifactPointerRequester.verify_text
+    assert WorkspaceArtifactPointerRequester.tail_marker not in WorkspaceArtifactPointerRequester.verify_text
 
 
 @pytest.mark.asyncio
@@ -3045,6 +3252,157 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     schedule = TaskBoard(repaired, handler=lambda _context: None).schedule()
     assert schedule.runnable_card_ids == (repair.id,)
     assert task.diagnostics["taskboard_final_repair_patches"][0]["repair_card_id"] == repair.id
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_promotes_single_terminal_candidate_without_finalizer(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-promotion").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-promotion",
+        goal="Return the final report.",
+        success_criteria=["The completed card result is returned."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the final report.",
+            "required_outputs": ["Final report"],
+        }
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "taskboard-final-promotion",
+            "revision_id": "rev-1",
+            "graph": {"graph_id": "taskboard-final-promotion-graph", "cards": [card.to_dict()]},
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "final_result": "Final report body from the completed terminal card.",
+                        "remaining_work": [],
+                    },
+                ).to_dict()
+            },
+        }
+    )
+    calls = {"finalizer": 0, "verifier": 0}
+
+    async def fail_finalizer(*_args, **_kwargs):
+        calls["finalizer"] += 1
+        raise AssertionError("TaskBoard finalizer should be skipped for promotable terminal candidate.")
+
+    async def complete_verifier(*_args, **kwargs):
+        calls["verifier"] += 1
+        execution_result = kwargs["execution_result"]
+        assert execution_result["final_result"] == "Final report body from the completed terminal card."
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "complete",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": execution_result["final_result"],
+        }
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", complete_verifier)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert result == {"terminal": True, "status": "completed"}
+    assert calls == {"finalizer": 0, "verifier": 1}
+    assert task.result["taskboard"]["finalization_source"] == "candidate_promotion"
+
+
+def test_taskboard_auto_reuses_initial_plan_and_falls_back_for_small_linear_board(tmp_path):
+    agent = _create_agent("agent-taskboard-auto-plan-reuse").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-auto-plan-reuse",
+        goal="Answer a simple question.",
+        success_criteria=["Return the answer."],
+        execution="auto",
+    )
+    task.task_shape_analysis = task._normalize_task_shape_analysis(
+        {
+            "analysis": "A tiny board would be enough.",
+            "execution_hint": {"recommended_shape": "taskboard", "confidence": "medium"},
+            "initial_taskboard_plan": {
+                "board_goal": "Answer a simple question.",
+                "cards": [
+                    {
+                        "id": "answer",
+                        "action_block": "Answer directly.",
+                        "objective": "Return the answer.",
+                        "depends_on": [],
+                        "done_when": "Answer is returned.",
+                        "allowed_execution_shape": "auto",
+                    }
+                ],
+                "reflection_points": [],
+                "completion_gate": "The answer is returned.",
+                "why_this_effort_shape": "Single card.",
+            },
+        }
+    )
+
+    planning_result = task._initial_taskboard_plan_from_shape_analysis()
+
+    assert planning_result is not None
+    assert [card.id for card in planning_result.revision.graph.cards] == ["answer"]
+    assert task._taskboard_should_fallback_to_flat(planning_result.revision) is True
+
+    readback_revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "readback-board",
+            "revision_id": "rev-readback",
+            "graph": {
+                "graph_id": "readback-graph",
+                "cards": [
+                    TaskBoardCard.from_value(
+                        {
+                            "id": "readback",
+                            "objective": "Read a required artifact.",
+                            "allowed_execution_shape": "readback",
+                        }
+                    ).to_dict()
+                ],
+            },
+        }
+    )
+    assert task._taskboard_should_fallback_to_flat(readback_revision) is False
+
+    explicit_task = AgentTask(
+        agent,
+        task_id="taskboard-explicit-no-fallback",
+        goal="Answer a simple question.",
+        success_criteria=["Return the answer."],
+        execution="taskboard",
+    )
+    assert explicit_task._taskboard_should_fallback_to_flat(planning_result.revision) is False
 
 
 def test_output_contract_guards_invalid_final_result_after_json_fallback(tmp_path):

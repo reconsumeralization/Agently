@@ -34,7 +34,7 @@ AgentTaskLoop remains the lifecycle owner.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
@@ -93,6 +93,12 @@ REPLAN_STATUSES: frozenset[str] = frozenset(
 )
 
 
+EvidenceItemStatus: TypeAlias = Literal["ok", "failed", "empty"]
+EVIDENCE_ITEM_STATUSES: frozenset[str] = frozenset({"ok", "failed", "empty"})
+EvidenceBodyState: TypeAlias = Literal["full", "bounded", "truncated", "ref_only"]
+EVIDENCE_BODY_STATES: frozenset[str] = frozenset({"full", "bounded", "truncated", "ref_only"})
+
+
 def _str_tuple(value: Any) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -125,6 +131,196 @@ def _optional_str(value: Any) -> str | None:
         return None
     stripped = str(value).strip()
     return stripped or None
+
+
+def _evidence_item_status(value: Any) -> EvidenceItemStatus:
+    text = str(value or "").strip().lower()
+    if text in {"ok", "success", "succeeded", "completed", "complete", "partial_success", "read"}:
+        return "ok"
+    if text in {"empty", "not_found", "no_results", "missing", "unavailable"}:
+        return "empty"
+    if text in {"failed", "failure", "error", "timed_out", "timeout", "blocked", "denied"}:
+        return "failed"
+    if isinstance(value, bool):
+        return "ok" if value else "failed"
+    return "ok"
+
+
+def _evidence_body_state(value: Any) -> EvidenceBodyState:
+    text = str(value or "").strip().lower()
+    if text in {"full", "complete", "read"}:
+        return "full"
+    if text in {"bounded", "bounded_readback_available", "bounded_preview_available", "content_read"}:
+        return "bounded"
+    if text in {"truncated", "partial"}:
+        return "truncated"
+    return "ref_only"
+
+
+def _evidence_item_id(prefix: str, index: int, *parts: Any) -> str:
+    tokens = [str(part or "").strip() for part in parts if str(part or "").strip()]
+    if not tokens:
+        tokens = [str(index)]
+    raw = ":".join([prefix, *tokens])
+    return "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in raw)[:240]
+
+
+def _normalize_evidence_item(value: Any, *, index: int = 0, default_kind: str = "evidence") -> dict[str, Any]:
+    item = dict(value) if isinstance(value, Mapping) else {"body": value}
+    kind = str(item.get("kind") or item.get("block_kind") or item.get("role") or default_kind).strip() or default_kind
+    output = item.get("output")
+    operation = item.get("operation")
+    if operation is None and isinstance(output, Mapping):
+        operation = output.get("operation")
+    if kind == "workspace_operation" and operation not in (None, ""):
+        kind = f"workspace_operation.{ str(operation).strip() }"
+    raw_status = item.get("raw_status", item.get("status", item.get("success")))
+    if raw_status is None and any(token in kind for token in ("diagnostic", "error", "failure", "failed")):
+        raw_status = "failed"
+    status = _evidence_item_status(item.get("status", raw_status))
+    body_state = _evidence_body_state(
+        item.get("body_state")
+        or item.get("content_state")
+        or item.get("readback_state")
+        or ("truncated" if item.get("truncated") is True else None)
+        or ("bounded" if any(key in item for key in ("body", "content", "preview", "text", "snippet")) else "ref_only")
+    )
+    evidence_id = str(item.get("id") or item.get("evidence_id") or "").strip()
+    if not evidence_id:
+        evidence_id = _evidence_item_id(
+            kind,
+            index,
+            item.get("execution_block_id"),
+            item.get("source_plan_block_id"),
+            item.get("action_call_id"),
+            item.get("record_id"),
+            item.get("path"),
+            item.get("artifact_id"),
+        )
+    provenance = item.get("provenance")
+    if not isinstance(provenance, Mapping):
+        provenance = {
+            key: item.get(key)
+            for key in (
+                "execution_block_id",
+                "source_plan_block_id",
+                "source_task_dag_node_id",
+                "action_call_id",
+                "record_id",
+                "path",
+                "source",
+            )
+            if item.get(key) not in (None, "")
+        }
+    supports = item.get("supports")
+    if not isinstance(supports, Mapping):
+        supports = {
+            "content": status == "ok" and body_state in {"full", "bounded", "truncated"},
+            "unavailability": status in {"failed", "empty"},
+            "ref_pointer": status == "ok" and body_state == "ref_only",
+        }
+    diagnostics = item.get("diagnostics")
+    if diagnostics is None and item.get("error") is not None:
+        diagnostics = ({"error": item.get("error")},)
+    normalized = dict(item)
+    normalized.update(
+        {
+            "id": evidence_id,
+            "kind": kind,
+            "status": status,
+            "raw_status": raw_status if raw_status is not None else status,
+            "body_state": body_state,
+            "provenance": dict(provenance),
+            "supports": dict(supports),
+            "diagnostics": [dict(entry) if isinstance(entry, Mapping) else {"value": entry} for entry in _mapping_tuple(diagnostics)],
+        }
+    )
+    return normalized
+
+
+def _legacy_evidence_items(value: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    items: list[dict[str, Any]] = []
+    for key, default_kind in (
+        ("execution_block_results", "execution_block"),
+        ("plan_block_results", "plan_block"),
+        ("action_evidence", "action"),
+        ("skill_evidence", "skill_context"),
+        ("capability_evidence", "capability"),
+        ("validation_results", "validation"),
+        ("diagnostics", "diagnostic"),
+    ):
+        for entry in _mapping_tuple(value.get(key)):
+            items.append(_normalize_evidence_item(entry, index=len(items), default_kind=default_kind))
+    for key, default_kind in (("workspace_refs", "workspace_ref"), ("artifact_refs", "artifact_ref"), ("runtime_event_refs", "runtime_event_ref")):
+        raw_refs = value.get(key)
+        if raw_refs is None:
+            continue
+        refs = raw_refs if isinstance(raw_refs, Sequence) and not isinstance(raw_refs, str | bytes | bytearray) else (raw_refs,)
+        for ref in refs:
+            if isinstance(ref, Mapping):
+                entry = dict(ref)
+            else:
+                entry = {"ref": ref}
+            entry.setdefault("body_state", "ref_only")
+            items.append(_normalize_evidence_item(entry, index=len(items), default_kind=default_kind))
+    return tuple(items)
+
+
+def _derive_legacy_buckets_from_evidence_items(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    buckets: dict[str, Any] = {
+        "execution_block_results": [],
+        "plan_block_results": [],
+        "action_evidence": [],
+        "skill_evidence": [],
+        "capability_evidence": [],
+        "workspace_refs": [],
+        "artifact_refs": [],
+        "runtime_event_refs": [],
+        "validation_results": [],
+        "diagnostics": [],
+    }
+    for item in items:
+        kind = str(item.get("kind") or "").strip()
+        if "plan_block" in kind:
+            buckets["plan_block_results"].append(dict(item))
+        elif "action" in kind:
+            buckets["action_evidence"].append(dict(item))
+        elif "skill" in kind:
+            buckets["skill_evidence"].append(dict(item))
+        elif "capability" in kind:
+            buckets["capability_evidence"].append(dict(item))
+        elif "validation" in kind:
+            buckets["validation_results"].append(dict(item))
+        elif "artifact" in kind:
+            buckets["artifact_refs"].append(_legacy_ref_from_evidence_item(item))
+        elif "workspace" in kind or "locator" in kind or "readback" in kind or "source_ref" in kind:
+            buckets["workspace_refs"].append(_legacy_ref_from_evidence_item(item))
+        elif "runtime_event" in kind:
+            buckets["runtime_event_refs"].append(_legacy_ref_from_evidence_item(item))
+        elif any(token in kind for token in ("diagnostic", "error", "failure", "failed")):
+            buckets["diagnostics"].append(dict(item))
+        else:
+            buckets["execution_block_results"].append(dict(item))
+    return buckets
+
+
+def _legacy_ref_from_evidence_item(item: Mapping[str, Any]) -> str:
+    for key in ("ref", "path", "record_id", "artifact_id", "url", "href", "id"):
+        value = item.get(key)
+        if value not in (None, "", [], {}):
+            if isinstance(value, Mapping):
+                for nested_key in ("id", "path", "url", "href"):
+                    nested = value.get(nested_key)
+                    if nested not in (None, "", [], {}):
+                        return str(nested)
+            return str(value)
+    return str(item)
+
+
+def _value_or_derived(value: Mapping[str, Any], key: str, derived: Mapping[str, Any]) -> Any:
+    if key in value:
+        return value.get(key)
+    return derived.get(key)
 
 
 @dataclass(frozen=True)
@@ -485,6 +681,7 @@ class EvidenceEnvelope:
 
     task_frame_id: str | None = None
     plan_id: str | None = None
+    evidence_items: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     execution_block_results: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     plan_block_results: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     semantic_outputs: Mapping[str, Any] = field(default_factory=dict)
@@ -504,22 +701,34 @@ class EvidenceEnvelope:
             return value
         if not isinstance(value, Mapping):
             raise TypeError(f"EvidenceEnvelope must be a mapping or EvidenceEnvelope, got: { type(value) }.")
+        evidence_items = _mapping_tuple(value.get("evidence_items"))
+        if not evidence_items:
+            evidence_items = _legacy_evidence_items(value)
+        normalized_evidence_items = tuple(
+            _normalize_evidence_item(item, index=index)
+            for index, item in enumerate(evidence_items)
+        )
+        derived = _derive_legacy_buckets_from_evidence_items(normalized_evidence_items)
         return cls(
             task_frame_id=_optional_str(value.get("task_frame_id")),
             plan_id=_optional_str(value.get("plan_id")),
+            evidence_items=normalized_evidence_items,
             execution_block_results=_mapping_tuple(
-                value.get("execution_block_results", value.get("block_results"))
+                value.get(
+                    "execution_block_results",
+                    value.get("block_results", derived.get("execution_block_results")),
+                )
             ),
-            plan_block_results=_mapping_tuple(value.get("plan_block_results")),
+            plan_block_results=_mapping_tuple(_value_or_derived(value, "plan_block_results", derived)),
             semantic_outputs=_mapping(value.get("semantic_outputs")),
-            action_evidence=_mapping_tuple(value.get("action_evidence")),
-            skill_evidence=_mapping_tuple(value.get("skill_evidence")),
-            capability_evidence=_mapping_tuple(value.get("capability_evidence")),
-            workspace_refs=_str_tuple(value.get("workspace_refs")),
-            artifact_refs=_str_tuple(value.get("artifact_refs")),
-            runtime_event_refs=_str_tuple(value.get("runtime_event_refs")),
-            validation_results=_mapping_tuple(value.get("validation_results")),
-            diagnostics=_mapping_tuple(value.get("diagnostics")),
+            action_evidence=_mapping_tuple(_value_or_derived(value, "action_evidence", derived)),
+            skill_evidence=_mapping_tuple(_value_or_derived(value, "skill_evidence", derived)),
+            capability_evidence=_mapping_tuple(_value_or_derived(value, "capability_evidence", derived)),
+            workspace_refs=_str_tuple(_value_or_derived(value, "workspace_refs", derived)),
+            artifact_refs=_str_tuple(_value_or_derived(value, "artifact_refs", derived)),
+            runtime_event_refs=_str_tuple(_value_or_derived(value, "runtime_event_refs", derived)),
+            validation_results=_mapping_tuple(_value_or_derived(value, "validation_results", derived)),
+            diagnostics=_mapping_tuple(_value_or_derived(value, "diagnostics", derived)),
             schema_version=str(value.get("schema_version") or EXECUTION_PLAN_SCHEMA_VERSION),
         )
 
@@ -527,6 +736,7 @@ class EvidenceEnvelope:
         return {
             "task_frame_id": self.task_frame_id,
             "plan_id": self.plan_id,
+            "evidence_items": [dict(item) for item in self.evidence_items],
             "execution_block_results": [dict(item) for item in self.execution_block_results],
             "plan_block_results": [dict(item) for item in self.plan_block_results],
             "semantic_outputs": dict(self.semantic_outputs),

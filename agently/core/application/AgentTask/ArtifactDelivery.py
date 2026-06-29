@@ -582,6 +582,105 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             execution_meta["workspace_refs"] = workspace_refs
         workspace_refs.setdefault("agent_task_artifacts", []).extend(DataFormatter.sanitize(refs))
         logs["workspace_refs"] = workspace_refs
+        evidence_items = [
+            AgentTaskArtifactMixin._workspace_artifact_readback_evidence_item(ref)
+            for ref in refs
+            if isinstance(ref, Mapping)
+        ]
+        AgentTaskArtifactMixin._append_execution_meta_evidence_items(execution_meta, evidence_items)
+
+    @staticmethod
+    def _append_execution_meta_evidence_items(
+        execution_meta: Mapping[str, Any] | None,
+        evidence_items: Sequence[Mapping[str, Any]],
+    ) -> None:
+        if not evidence_items or not isinstance(execution_meta, dict):
+            return
+        blocks = execution_meta.setdefault("blocks", {})
+        if not isinstance(blocks, dict):
+            blocks = {}
+            execution_meta["blocks"] = blocks
+        evidence = blocks.setdefault("evidence", {})
+        if not isinstance(evidence, dict):
+            evidence = {}
+            blocks["evidence"] = evidence
+        ledger_items = evidence.setdefault("evidence_items", [])
+        if not isinstance(ledger_items, list):
+            ledger_items = []
+            evidence["evidence_items"] = ledger_items
+        seen = {str(item.get("id") or "") for item in ledger_items if isinstance(item, Mapping)}
+        for item in evidence_items:
+            evidence_id = str(item.get("id") or "").strip()
+            if evidence_id and evidence_id in seen:
+                continue
+            if evidence_id:
+                seen.add(evidence_id)
+            ledger_items.append(DataFormatter.sanitize(dict(item)))
+
+    @classmethod
+    def _workspace_artifact_readback_evidence_item(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
+        path = str(ref.get("path") or "").strip()
+        source = str(ref.get("source") or "agent_task.workspace_artifact").strip()
+        truncated = bool(ref.get("truncated"))
+        preview = str(ref.get("preview") or "")
+        evidence_id = cls._workspace_artifact_evidence_id("workspace_artifact_readback", path, source)
+        item: dict[str, Any] = {
+            "id": evidence_id,
+            "kind": "workspace_artifact.readback",
+            "status": "ok",
+            "raw_status": "read",
+            "body_state": "truncated" if truncated else "full",
+            "path": path,
+            "sha256": str(ref.get("sha256") or ""),
+            "bytes": ref.get("bytes"),
+            "read_bytes": ref.get("read_bytes"),
+            "media_type": ref.get("media_type"),
+            "content_kind": ref.get("content_kind"),
+            "source": source,
+            "provenance": {
+                "source": source,
+                "path": path,
+                "sha256": str(ref.get("sha256") or ""),
+                "handler_id": ref.get("handler_id"),
+            },
+            "supports": {
+                "content": True,
+                "unavailability": False,
+                "ref_pointer": False,
+            },
+        }
+        if preview:
+            item["body"] = preview
+        return DataFormatter.sanitize(item)
+
+    @classmethod
+    def _workspace_artifact_failure_evidence_item(
+        cls,
+        *,
+        path: str,
+        source: str,
+        code: str,
+        message: str,
+        readback: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {
+            "id": cls._workspace_artifact_evidence_id("workspace_artifact_readback_failed", path, code or source),
+            "kind": "workspace_artifact.readback",
+            "status": "failed",
+            "raw_status": code or "failed",
+            "body_state": "ref_only",
+            "path": path,
+            "source": source,
+            "provenance": {"source": source, "path": path},
+            "supports": {"content": False, "unavailability": True, "ref_pointer": False},
+            "diagnostics": [{"code": code, "message": message, "readback": DataFormatter.sanitize(readback or {})}],
+        }
+        return DataFormatter.sanitize(item)
+
+    @staticmethod
+    def _workspace_artifact_evidence_id(prefix: str, path: str, source: str) -> str:
+        raw = f"{ prefix }:{ source }:{ path }"
+        return "".join(ch if ch.isalnum() or ch in "._:-/" else "_" for ch in raw)[:240]
 
     @staticmethod
     def _workspace_artifact_readback_missing_diagnostic(
@@ -862,6 +961,17 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
             )
+            self._append_execution_meta_evidence_items(
+                execution_meta,
+                [
+                    self._workspace_artifact_failure_evidence_item(
+                        path=path,
+                        source=source,
+                        code="agent_task.workspace_artifact.write_failed",
+                        message=message,
+                    )
+                ],
+            )
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
             return DataFormatter.sanitize(result)
@@ -888,6 +998,17 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
+            )
+            self._append_execution_meta_evidence_items(
+                execution_meta,
+                [
+                    self._workspace_artifact_failure_evidence_item(
+                        path=path,
+                        source=source,
+                        code="agent_task.workspace_artifact.readback_failed",
+                        message="Workspace artifact readback failed after write; trusted file_refs were not produced.",
+                    )
+                ],
             )
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
@@ -935,6 +1056,21 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
+            )
+            self._append_execution_meta_evidence_items(
+                execution_meta,
+                [
+                    self._workspace_artifact_failure_evidence_item(
+                        path=path,
+                        source=source,
+                        code="agent_task.workspace_artifact.readback_insufficient",
+                        message=(
+                            "Workspace artifact readback was missing or insufficient; "
+                            "trusted file_refs were not produced."
+                        ),
+                        readback=read_result,
+                    )
+                ],
             )
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
@@ -1317,6 +1453,17 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
             )
+            self._append_execution_meta_evidence_items(
+                execution_meta,
+                [
+                    self._workspace_artifact_failure_evidence_item(
+                        path=path,
+                        source=source,
+                        code="agent_task.workspace_artifact.draft_failed",
+                        message=message,
+                    )
+                ],
+            )
             return None
         finally:
             aclose = getattr(draft_stream, "aclose", None)
@@ -1336,6 +1483,17 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
+            )
+            self._append_execution_meta_evidence_items(
+                execution_meta,
+                [
+                    self._workspace_artifact_failure_evidence_item(
+                        path=path,
+                        source=source,
+                        code="agent_task.workspace_artifact.draft_empty",
+                        message="Workspace artifact draft stream produced no content.",
+                    )
+                ],
             )
             return None
 
@@ -1362,6 +1520,17 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
+            )
+            self._append_execution_meta_evidence_items(
+                execution_meta,
+                [
+                    self._workspace_artifact_failure_evidence_item(
+                        path=path,
+                        source=source,
+                        code="agent_task.workspace_artifact.readback_failed",
+                        message="Workspace artifact draft readback failed after write; trusted file_refs were not produced.",
+                    )
+                ],
             )
             return None
 
@@ -1413,6 +1582,18 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
             )
+            self._append_execution_meta_evidence_items(
+                execution_meta,
+                [
+                    self._workspace_artifact_failure_evidence_item(
+                        path=path,
+                        source=source,
+                        code="agent_task.workspace_artifact.structured_wrapper_draft",
+                        message="Workspace artifact draft returned a structured wrapper instead of a body.",
+                        readback=read_result,
+                    )
+                ],
+            )
             return None
         if not self._workspace_artifact_ref_has_trusted_readback(ref):
             diagnostic = self._workspace_artifact_readback_missing_diagnostic(
@@ -1442,6 +1623,21 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
+            )
+            self._append_execution_meta_evidence_items(
+                execution_meta,
+                [
+                    self._workspace_artifact_failure_evidence_item(
+                        path=path,
+                        source=source,
+                        code="agent_task.workspace_artifact.readback_insufficient",
+                        message=(
+                            "Workspace artifact draft readback was missing or insufficient; "
+                            "trusted file_refs were not produced."
+                        ),
+                        readback=read_result,
+                    )
+                ],
             )
             return None
 

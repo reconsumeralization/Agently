@@ -238,6 +238,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             )
         artifact_refs_source = cls._prompt_sequence(evidence_view.get("artifact_refs"))
         file_refs_source = cls._prompt_sequence(evidence_view.get("file_refs"))
+        evidence_items_source = cls._prompt_sequence(evidence_view.get("evidence_items"))
         source_refs_value = evidence_view.get("source_refs")
         source_refs_sequence = cls._prompt_sequence(source_refs_value)
         source_refs_source = cls._collect_taskboard_source_refs(source_refs_value, max_refs=16)
@@ -262,9 +263,53 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "artifact_refs_omitted": max(0, len(artifact_refs_source) - 16),
             "file_refs": file_refs,
             "file_refs_omitted": max(0, len(file_refs_source) - 16),
+            "evidence_items": cls._compact_taskboard_evidence_items_for_prompt(evidence_items_source, max_items=32),
+            "evidence_items_omitted": max(0, len(evidence_items_source) - 32),
             "source_refs": source_refs_source,
             "source_refs_omitted": max(0, len(source_refs_sequence) - 16),
         }
+
+    @classmethod
+    def _compact_taskboard_evidence_items_for_prompt(
+        cls,
+        evidence_items: Sequence[Any],
+        *,
+        max_items: int,
+    ) -> list[dict[str, Any]]:
+        compact_items: list[dict[str, Any]] = []
+        for item in list(evidence_items)[:max_items]:
+            if not isinstance(item, Mapping):
+                continue
+            compact: dict[str, Any] = {
+                key: item.get(key)
+                for key in (
+                    "id",
+                    "kind",
+                    "status",
+                    "raw_status",
+                    "body_state",
+                    "provenance",
+                    "path",
+                    "record_id",
+                    "source_url",
+                    "selected_url",
+                    "requested_url",
+                    "canonical_url",
+                    "url",
+                    "href",
+                    "content_state",
+                    "truncated",
+                )
+                if item.get(key) not in (None, "", [], {})
+            }
+            body = item.get("body")
+            if isinstance(body, str) and body.strip():
+                compact["body"] = cls._truncate_prompt_text(body, 900)
+            diagnostics = item.get("diagnostics")
+            if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
+                compact["diagnostics"] = cls._compact_verifier_prompt_value(list(diagnostics)[:4], max_chars=600)
+            compact_items.append(DataFormatter.sanitize(compact))
+        return compact_items
 
     @classmethod
     def _compact_block_carrier_for_taskboard_meta(

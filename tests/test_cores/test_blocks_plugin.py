@@ -528,7 +528,45 @@ async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(
     assert output["evidence_snippets"][0]["snippet_chars"] <= 24
     assert output["evidence_snippets"][0]["truncated"] is True
     assert evidence.workspace_refs == (expected_ref["id"],)
+    ledger_items = {item["kind"]: item for item in evidence.evidence_items}
+    assert ledger_items["workspace_operation.search"]["status"] == "ok"
+    assert ledger_items["locator_ref"]["body_state"] == "ref_only"
+    assert ledger_items["evidence_snippet"]["body_state"] == "truncated"
+    assert ledger_items["evidence_snippet"]["status"] == "ok"
+    assert ledger_items["evidence_snippet"]["id"]
     assert not {"useful", "accepted", "semantically_relevant"}.intersection(output)
+
+
+@pytest.mark.asyncio
+async def test_blocks_workspace_operation_search_empty_result_enters_ledger(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-empty-search")
+    graph = Agently.blocks.compile(
+        {
+            "plan_id": "plan-empty-search",
+            "plan_blocks": [
+                {
+                    "id": "search",
+                    "plan_block_id": "workspace_operation",
+                    "kind": "workspace_operation",
+                    "bound_inputs": {
+                        "operation": "search",
+                        "query": "definitely-not-present",
+                        "max_results": 2,
+                        "include_snippets": True,
+                    },
+                }
+            ],
+        }
+    )
+
+    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
+    await execution.async_start({"ignored": True})
+    snapshot = await execution.async_close(timeout=5)
+
+    evidence = Agently.blocks.map_evidence(graph, snapshot)
+    search_item = next(item for item in evidence.evidence_items if item["kind"] == "workspace_operation.search")
+    assert search_item["status"] == "empty"
+    assert search_item["supports"]["unavailability"] is True
 
 
 @pytest.mark.asyncio
