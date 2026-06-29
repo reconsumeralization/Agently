@@ -1122,6 +1122,42 @@ class MockTaskBoardControlRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardConsumerDrivenRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardConsumerDrivenRequester"
+    seen_dependency_evidence = False
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockTaskBoardConsumerDrivenRequester.seen_dependency_evidence = False
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Verify the task against every success criterion" in text:
+            raise AssertionError("TaskBoard intermediate consumer should not call terminal verifier")
+        if "Synthesize the final result for this TaskBoard task" in text:
+            raise AssertionError("TaskBoard intermediate consumer should not call terminal synthesis")
+        if "Execute one TaskBoard control card with a single structured model request" in text:
+            MockTaskBoardConsumerDrivenRequester.seen_dependency_evidence = (
+                "collect" in text and "sources/source.md" in text and "ref_only" in text
+            )
+            payload = {
+                "status": "blocked",
+                "answer": "Dependency evidence is only a ref; request bounded readback before continuing.",
+                "sufficient": False,
+                "next_board_action": "readback",
+                "target_refs": ["sources/source.md"],
+                "gaps": ["Need bounded Workspace readback for sources/source.md."],
+                "evidence": ["collect card produced a ref-only source pointer"],
+                "remaining_work": ["Continue the control card after readback."],
+                "diagnostics": [{"kind": "consumer_driven_sufficiency"}],
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardSectionedArtifactRequester"
     tail_marker = "SECTIONED-ARTIFACT-END-MARKER"
@@ -1876,6 +1912,13 @@ def _create_taskboard_control_agent(name: str = "agent-execution-taskboard-contr
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockTaskBoardControlRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_consumer_driven_agent(name: str = "agent-execution-taskboard-consumer-driven"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardConsumerDrivenRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -4387,6 +4430,103 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
     assert planning_requests
     assert "serial chain of control-only cards" in planning_requests[-1]
     assert "control_card_guidance" in planning_requests[-1]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_consumer_requests_readback_without_intermediate_verifier(tmp_path):
+    agent = _create_taskboard_consumer_driven_agent("execution-taskboard-consumer-driven").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Use downstream control-card consumption to decide whether upstream evidence is enough.",
+        success_criteria=["The control card requests readback when dependency evidence is only a ref."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    revision = TaskBoardRevision.create(
+        board_id="consumer-driven-sufficiency",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "consumer-driven-sufficiency-graph",
+                "cards": [
+                    {
+                        "id": "collect",
+                        "objective": "Collect a source pointer.",
+                        "allowed_execution_shape": "model",
+                    },
+                    {
+                        "id": "review",
+                        "objective": "Use dependency evidence and decide whether it is enough.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "control",
+                    },
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "preview": {
+                            "answer": "Collected a source ref only; no bounded readback yet.",
+                            "source_refs": [
+                                {
+                                    "path": "sources/source.md",
+                                    "field": "path",
+                                    "content_state": "ref_only",
+                                }
+                            ],
+                        },
+                        "file_refs": [
+                            {
+                                "path": "sources/source.md",
+                                "role": "evidence",
+                                "content_state": "ref_only",
+                            }
+                        ],
+                        "diagnostics": [{"code": "test.collect.ref_only"}],
+                    },
+                }
+            ],
+        },
+    )
+
+    result = await task._run_taskboard_control_card(
+        SimpleNamespace(
+            card=revision.graph.card_by_id()["review"],
+            revision=revision,
+            dependency_results=revision.card_results,
+            planning_policy=None,
+        ),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    request_text = "\n".join(MockAgentExecutionRequester.requests)
+    assert MockTaskBoardConsumerDrivenRequester.seen_dependency_evidence is True
+    assert "Verify the task against every success criterion" not in request_text
+    assert "Synthesize the final result for this TaskBoard task" not in request_text
+    assert result.status == "blocked"
+    assert result.patch_proposal is not None
+    assert result.metadata["next_board_action"] == "readback"
+    assert result.preview["sufficient"] is False
+    assert result.preview["next_board_action"] == "readback"
+
+    next_revision = TaskBoardValidator().apply_patch(revision, result.patch_proposal)
+    cards = next_revision.graph.card_by_id()
+    assert cards["review.readback"].allowed_execution_shape == "readback"
+    assert cards["review.readback"].depends_on == ("collect",)
+    assert cards["review.continue"].allowed_execution_shape == "control"
+    assert cards["review.continue"].depends_on == ("collect", "review.readback")
+    assert cards["review"].status == "blocked"
+    assert cards["review"].metadata["superseded_by"] == "review.continue"
 
 
 @pytest.mark.asyncio
