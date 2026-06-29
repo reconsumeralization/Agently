@@ -1754,6 +1754,76 @@ async def test_agent_task_workspace_artifact_outline_sections_trigger_stream_dra
 
 
 @pytest.mark.asyncio
+async def test_workspace_artifact_outline_with_remaining_verification_still_drafts(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-outline-remaining")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-outline-remaining"
+    task.goal = "Write a file-backed report."
+    task.success_criteria = ["The final artifact is written and read back."]
+    task.execution_strategy = "flat"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    body = "# Final Report\n\nThe body was drafted from the section outline.\n"
+
+    async def fake_stream_workspace_artifact_draft(**kwargs: Any) -> dict[str, Any]:
+        path = kwargs["path"]
+        await workspace.write_file(path, body, append=False)
+        readback = await workspace.read_file(path)
+        return {
+            "source": kwargs.get("source"),
+            "path": path,
+            "status": "delivered",
+            "mode": "streamed_workspace_artifact",
+            "file_refs": [
+                {
+                    "path": readback["path"],
+                    "bytes": readback["bytes"],
+                    "sha256": readback["sha256"],
+                    "media_type": readback.get("media_type"),
+                    "content_kind": readback.get("content_kind", "text"),
+                    "role": "workspace_artifact",
+                    "source": kwargs.get("source"),
+                    "preview": readback["content"],
+                    "truncated": False,
+                    "read_bytes": readback["bytes"],
+                    "handler_id": readback.get("handler_id"),
+                }
+            ],
+        }
+
+    task._stream_workspace_artifact_draft = fake_stream_workspace_artifact_draft
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {
+                "path": "final.md",
+                "sections": [
+                    "data boundary",
+                    "ticker snapshot",
+                    "source list",
+                ],
+            },
+            "evidence": ["The required evidence has already been collected."],
+            "remaining_work": ["Verify final.md content via readback."],
+            "ready_for_final_verification": False,
+        },
+        plan={"deliverable_mode": "sectioned_workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact.outline_remaining",
+    )
+
+    written = (workspace.files_root / "final.md").read_text(encoding="utf-8")
+    assert written == body
+    assert delivered["workspace_artifact_delivery"]["mode"] == "streamed_workspace_artifact"
+    assert delivered["workspace_artifact_delivery"]["remaining_work_handoff"]["status"] == (
+        "handed_to_terminal_verification"
+    )
+    assert delivered["remaining_work"] == []
+    assert delivered["ready_for_final_verification"] is True
+
+
+@pytest.mark.asyncio
 async def test_agent_task_flat_workspace_artifact_delivery_before_verification(tmp_path):
     class WorkspaceArtifactRequester(MockAgentTaskRequester):
         name = "WorkspaceArtifactRequester"

@@ -98,6 +98,23 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         return False
 
     @staticmethod
+    def _workspace_artifact_manifest_has_draftable_outline(manifest: Mapping[str, Any] | None) -> bool:
+        if not isinstance(manifest, Mapping):
+            return False
+        sections = manifest.get("sections")
+        if not isinstance(sections, Sequence) or isinstance(sections, str | bytes | bytearray):
+            return False
+        for section in sections:
+            if isinstance(section, str) and section.strip():
+                return True
+            if isinstance(section, Mapping):
+                for key in ("title", "summary", "intent", "description", "outline"):
+                    value = section.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return True
+        return False
+
+    @staticmethod
     def _workspace_artifact_retry_boundary_from_status(path: str, value: Any) -> dict[str, Any] | None:
         if not (
             (path == "$status" or path.endswith(".$status"))
@@ -664,6 +681,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         )
         prefer_stream_draft = bool((plan or {}).get("prefer_stream_draft"))
         manifest_needs_body = self._workspace_artifact_manifest_needs_body(manifest_dict)
+        has_draftable_outline = self._workspace_artifact_manifest_has_draftable_outline(manifest_dict)
         if deliverable_mode == "sectioned_workspace_artifact" and manifest_needs_body:
             prefer_stream_draft = True
         if (
@@ -681,7 +699,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             not content
             and allow_stream_draft
             and deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}
-            and not self._has_remaining_work(result.get("remaining_work"))
+            and has_draftable_outline
         ):
             stream_delivery = await self._stream_workspace_artifact_draft(
                 path=path,
@@ -712,6 +730,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     content="",
                     trusted_refs=trusted_refs,
                 )
+                handoff = self._handoff_workspace_artifact_remaining_work_to_verifier(
+                    result,
+                    diagnostics=diagnostics,
+                    path=trusted_refs[0]["path"],
+                    source=source,
+                    content_key="streamed_workspace_artifact",
+                )
+                if handoff is not None:
+                    stream_delivery["remaining_work_handoff"] = DataFormatter.sanitize(handoff)
                 result["artifact_manifest"] = self._compact_workspace_artifact_manifest_for_hot_path(
                     manifest_dict,
                     trusted_refs=trusted_refs,
