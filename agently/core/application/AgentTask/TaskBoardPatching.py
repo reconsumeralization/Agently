@@ -198,11 +198,20 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
     ) -> dict[str, Any]:
         raw_operations = patch_proposal.get("operations") or patch_proposal.get("edits")
         if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes | bytearray):
-            return {
-                "status": "failed",
-                "card_id": card_id,
-                "reason": "Workspace patch requires an operations list.",
-            }
+            write_content = self._taskboard_workspace_patch_content(patch_proposal)
+            if not write_content:
+                return {
+                    "status": "failed",
+                    "card_id": card_id,
+                    "reason": "Workspace patch requires an operations list.",
+                }
+            raw_operations = [
+                {
+                    "type": "write",
+                    "path": self._taskboard_workspace_patch_path(patch_proposal),
+                    "content": write_content,
+                }
+            ]
         operations = [dict(item) for item in raw_operations if isinstance(item, Mapping)]
         if not operations:
             return {
@@ -218,7 +227,10 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 "reason": "Workspace patch requires file/path.",
             }
         try:
-            content = await self._read_workspace_patch_text(path)
+            first_op = str(
+                operations[0].get("type") or operations[0].get("op") or operations[0].get("operation") or ""
+            ).strip().lower()
+            content = "" if first_op in {"write", "overwrite", "replace_file"} else await self._read_workspace_patch_text(path)
             operation_records: list[dict[str, Any]] = []
             replacement_count = 0
             for index, operation in enumerate(operations):
@@ -280,6 +292,14 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "file_refs": [ref],
         }
 
+    @staticmethod
+    def _taskboard_workspace_patch_content(patch_proposal: Mapping[str, Any]) -> str:
+        for key in ("content", "markdown", "body", "text", "new", "replacement"):
+            value = patch_proposal.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
     async def _read_workspace_patch_text(self, path: str) -> str:
         target = self.workspace.resolve_file_path(path)
         max_bytes = max(int(target.stat().st_size) + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
@@ -302,6 +322,15 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         index: int,
     ) -> tuple[str, dict[str, Any]]:
         op = str(operation.get("type") or operation.get("op") or operation.get("operation") or "").strip().lower()
+        if op in {"write", "overwrite", "replace_file"}:
+            new_content = cls._taskboard_workspace_patch_content(operation)
+            if not new_content:
+                raise ValueError("Workspace write patch requires non-empty content.")
+            return new_content, {
+                "index": index,
+                "type": "write",
+                "replacement_count": 1 if content != new_content else 0,
+            }
         if op != "replace":
             raise ValueError(f"Unsupported Workspace patch operation '{ op or '<empty>' }'.")
         old = str(operation.get("old") or operation.get("from") or operation.get("search") or "")

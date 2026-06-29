@@ -105,6 +105,15 @@ class AnthropicCompatibleResponseAdapterMixin:
                 yield "error", message
                 continue
             if event == "status":
+                if isinstance(message, dict) and message.get("status") == "failed" and message.get("retry") is True:
+                    meta = {}
+                    content_buffer = ""
+                    reasoning_buffer = ""
+                    message_record = {}
+                    content_blocks = {}
+                    tool_call_states = {}
+                    completed = False
+                    saw_any_event = False
                 yield "status", message
                 continue
 

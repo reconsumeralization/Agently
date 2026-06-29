@@ -287,6 +287,48 @@ def test_broadcast_response_preserves_core_status_record():
     assert events == [("status", {"status": "failed", "attempt_index": 1, "retry": True})]
 
 
+def test_broadcast_response_resets_attempt_text_after_retry_status():
+    plugin = build_plugin({"base_url": "https://api.anthropic.example/v1"}, {"input": "hello"})
+
+    events = collect_events(
+        plugin,
+        [
+            (
+                "content_block_start",
+                json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            ),
+            (
+                "content_block_delta",
+                json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "partial"}}),
+            ),
+            (
+                "status",
+                {
+                    "status": "failed",
+                    "attempt_index": 1,
+                    "retry": True,
+                    "next_attempt_index": 2,
+                    "reason": "server disconnected",
+                },
+            ),
+            (
+                "content_block_start",
+                json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            ),
+            (
+                "content_block_delta",
+                json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "replacement"}}),
+            ),
+            ("content_block_stop", json.dumps({"type": "content_block_stop", "index": 0})),
+            ("message_stop", json.dumps({"type": "message_stop"})),
+        ],
+    )
+
+    assert [payload for event, payload in events if event == "delta"] == ["partial", "replacement"]
+    assert ("done", "replacement") in events
+    assert ("done", "partialreplacement") not in events
+
+
 def test_broadcast_response_maps_tool_use_to_tool_calls():
     plugin = build_plugin({"base_url": "https://api.anthropic.example/v1"}, {"input": "Find docs"})
     events = collect_events(

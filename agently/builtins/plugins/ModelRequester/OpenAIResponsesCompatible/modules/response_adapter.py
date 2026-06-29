@@ -133,6 +133,15 @@ class OpenAIResponsesCompatibleResponseAdapterMixin:
                 yield "error", message
                 continue
             if event == "status":
+                if isinstance(message, dict) and message.get("status") == "failed" and message.get("retry") is True:
+                    meta = {}
+                    content_buffer = ""
+                    reasoning_buffer = ""
+                    response_record = {}
+                    completed_output_items = {}
+                    tool_call_states = {}
+                    completed = False
+                    saw_any_event = False
                 yield "status", message
                 continue
 

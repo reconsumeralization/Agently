@@ -1906,6 +1906,14 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
             if "Write only the final Markdown artifact body for the AgentTask" in text:
+                yield "message", "# Partial attempt that must be discarded\n\n"
+                yield "status", {
+                    "status": "failed",
+                    "attempt_index": 1,
+                    "retry": True,
+                    "next_attempt_index": 2,
+                    "reason": "transient provider disconnect",
+                }
                 yield "message", "# Streamed Report\n\n"
                 yield "message", "This body was written through the framework artifact draft stream.\n"
                 return
@@ -1946,6 +1954,19 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
                 payload = {"answer": "ok"}
             yield "message", json.dumps(payload, ensure_ascii=False)
 
+        async def broadcast_response(
+            self,
+            response_generator: AsyncGenerator[tuple[str, object], None],
+        ):
+            response_text = ""
+            async for event, data in response_generator:
+                if event == "message":
+                    response_text += str(data)
+                    yield "delta", str(data)
+                elif event == "status":
+                    yield "status", data
+            yield "done", response_text
+
     settings = Settings(name="agent-task-workspace-artifact-stream-draft-settings", parent=Agently.settings)
     plugin_manager = PluginManager(
         settings, parent=Agently.plugin_manager, name="agent-task-workspace-artifact-stream-draft-plugins"
@@ -1972,10 +1993,14 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
     )
     readback = await task_scoped_workspace.read_file("final.md")
     assert "Streamed Report" in readback["content"]
+    assert "<$retry>" not in readback["content"]
+    assert "Partial attempt" not in readback["content"]
     assert "STRUCTURED BODY SHOULD NOT BE WRITTEN" not in readback["content"]
     delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
     assert delivery["status"] == "delivered"
     assert delivery["mode"] == "streamed_workspace_artifact"
+    assert delivery["retry_boundaries"][0]["source"] == "delta_replay_marker"
+    assert delivery["retry_boundaries"][0]["reason"] == "transient provider disconnect"
     assert delivery["file_refs"][0]["path"] == "final.md"
     assert meta["iterations"][0]["verification"]["reason"] == "trusted streamed Workspace artifact readback is present"
 

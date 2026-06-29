@@ -75,6 +75,37 @@ class MockAgentExecutionRequester:
         yield "done", response_text
 
 
+class MockAgentExecutionRetryStatusRequester(MockAgentExecutionRequester):
+    name = "MockAgentExecutionRetryStatusRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        MockAgentExecutionRequester.requests.append(
+            json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        )
+        yield "message", "partial attempt"
+        yield "status", {
+            "status": "failed",
+            "attempt_index": 1,
+            "retry": True,
+            "next_attempt_index": 2,
+            "reason": "transient provider disconnect",
+        }
+        yield "message", "replacement"
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, object], None],
+    ):
+        response_text = ""
+        async for event, data in response_generator:
+            if event == "message":
+                response_text += str(data)
+                yield "delta", str(data)
+            elif event == "status":
+                yield "status", data
+        yield "done", response_text
+
+
 class _FakeStreamForGeneratorCancel:
     def __init__(self) -> None:
         self.items: list[Any] = []
@@ -218,6 +249,13 @@ def _create_agent(name: str = "agent-execution-step-test"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockAgentExecutionRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_retry_status_agent(name: str = "agent-execution-retry-status-test"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockAgentExecutionRetryStatusRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -3104,6 +3142,81 @@ async def test_taskboard_control_workspace_patch_materializes_file_without_graph
 
 
 @pytest.mark.asyncio
+async def test_taskboard_control_workspace_text_patch_writes_complete_file(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-text-patch").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Repair a Workspace-backed final deliverable by replacing the file body.",
+        success_criteria=["The corrected Workspace file is available through trusted readback refs."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    await task.workspace.write_file("final.md", "<$retry>transport error</$retry># Old\n\nUnsupported claim.", append=False)
+    corrected = "# Final\n\nCorrected source-grounded deliverable."
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
+        work_unit = cast(Any, kwargs["work_unit"])
+        output = {
+            "status": "completed",
+            "sufficient": True,
+            "answer": "Replace the final Workspace artifact with the corrected body.",
+            "next_board_action": "patch",
+            "remaining_work": [],
+            "gaps": [],
+            "patch_proposal": {
+                "type": "workspace_text_patch",
+                "path": "final.md",
+                "content": corrected,
+            },
+        }
+        return (
+            output,
+            {"status": "completed", "logs": {"action_logs": {}, "route_logs": {}, "errors": []}},
+            WorkUnitResult(id=str(work_unit.id), status="completed"),
+        )
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    context_pack: WorkspaceContextPackage = {
+        "goal": task.goal,
+        "items": [],
+        "profile": "test",
+        "omitted": [],
+        "diagnostics": {},
+    }
+    revision = TaskBoardRevision.create(
+        board_id="workspace-text-patch",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "workspace-text-patch-graph",
+                "cards": [
+                    {
+                        "id": "repair",
+                        "objective": "Apply a complete corrected final.md body.",
+                        "allowed_execution_shape": "control",
+                        "metadata": {"final_workspace_deliverables": ["final.md"]},
+                    }
+                ],
+            }
+        ),
+    )
+    card = revision.graph.card_by_id()["repair"]
+
+    result = await task._run_taskboard_control_card(
+        SimpleNamespace(revision=revision, card=card, dependency_results={}, planning_policy=None),
+        context_pack,
+    )
+    readback = await task.workspace.read_file("final.md", max_bytes=4000)
+
+    assert result.status == "completed"
+    assert result.patch_proposal is None
+    assert result.file_refs
+    assert result.file_refs[0]["path"] == "final.md"
+    assert readback["content"] == corrected
+    assert result.preview["workspace_patch_delivery"]["operation_count"] == 1
+    assert result.preview["workspace_patch_delivery"]["operations"][0]["type"] == "write"
+
+
+@pytest.mark.asyncio
 async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     agent = _create_agent("execution-taskboard-workspace-file-readback").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -4352,6 +4465,29 @@ async def test_taskboard_final_preserves_complete_candidate_from_terminal_card(t
     assert len(result["final_result"]) > len(MockTaskBoardFinalCandidateRequester.full_report[:120])
 
 
+def test_taskboard_final_refs_prioritize_required_workspace_deliverable(tmp_path):
+    agent = _create_agent("execution-taskboard-final-ref-priority").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Write a final Workspace report.",
+        success_criteria=["final.md is the trusted final deliverable."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    refs = [
+        {"path": "working/taskboard/clone_and_read_evidence/final.md", "role": "workspace_artifact"},
+        {"path": "configs/_base_/default.yaml", "source": "taskboard_target_ref", "content_state": "ref_only"},
+        {"path": "final.md", "role": "workspace_artifact", "bytes": 12000},
+        {"artifact_id": "act_art_123", "role": "output"},
+    ]
+
+    ordered = task._prioritize_taskboard_final_refs(refs)
+
+    assert ordered[0]["path"] == "final.md"
+    assert ordered[1]["path"] == "working/taskboard/clone_and_read_evidence/final.md"
+    assert ordered[-1]["artifact_id"] == "act_art_123"
+
+
 @pytest.mark.asyncio
 async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path):
     agent = _create_taskboard_readback_agent("execution-taskboard-readback").use_workspace(tmp_path / "workspace")
@@ -5252,6 +5388,24 @@ async def test_agent_execution_plain_text_model_request_streams_model_delta():
 
     default_chunks = [chunk async for chunk in execution.get_async_generator()]
     assert default_chunks == delta_chunks
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_delta_generator_projects_retry_status_boundary():
+    agent = _create_retry_status_agent("plain-text-retry-status-stream")
+    execution = agent.input("plain text route with transient retry").create_execution()
+
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
+    delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
+
+    status_items = [item for item in stream_items if item.path == "$status"]
+    assert status_items
+    assert status_items[0].value["retry"] is True
+    assert status_items[0].value["attempt_index"] == 1
+    assert "partial attempt" in delta_text
+    assert "<$retry>transient provider disconnect</$retry>" in delta_text
+    assert delta_text.index("partial attempt") < delta_text.index("<$retry>")
+    assert delta_text.index("<$retry>") < delta_text.index("replacement")
 
 
 @pytest.mark.asyncio

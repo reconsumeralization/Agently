@@ -331,6 +331,29 @@ async def test_broadcast_response_preserves_core_status_record():
 
 
 @pytest.mark.asyncio
+async def test_broadcast_response_resets_attempt_text_after_retry_status():
+    plugin = build_plugin({"base_url": "https://api.example.com/v1", "model": "m1"}, {"input": "hello"})
+
+    async def response_generator():
+        yield "message", '{"choices":[{"delta":{"content":"partial"}}]}'
+        yield "status", {
+            "status": "failed",
+            "attempt_index": 1,
+            "retry": True,
+            "next_attempt_index": 2,
+            "reason": "server disconnected",
+        }
+        yield "message", '{"choices":[{"delta":{"content":"replacement"}}]}'
+        yield "message", "[DONE]"
+
+    events = [item async for item in plugin.broadcast_response(response_generator())]
+
+    assert [payload for event, payload in events if event == "delta"] == ["partial", "replacement"]
+    assert ("done", "replacement") in events
+    assert ("done", "partialreplacement") not in events
+
+
+@pytest.mark.asyncio
 async def test_broadcast_response_handles_usage_only_final_chunk_without_choices():
     # Regression for #287: some OpenAI-compatible gateways (YuDing, MiMo) send a
     # usage-only final chunk with an empty "choices" array before [DONE]. The done

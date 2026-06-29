@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import html
+
 from .TaskShared import *
 
 
@@ -90,6 +92,52 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         if isinstance(deliverables, Sequence) and not isinstance(deliverables, str | bytes | bytearray):
             return bool(deliverables)
         return False
+
+    @staticmethod
+    def _workspace_artifact_retry_boundary_from_status(path: str, value: Any) -> dict[str, Any] | None:
+        if not (
+            (path == "$status" or path.endswith(".$status"))
+            and isinstance(value, Mapping)
+            and value.get("status") == "failed"
+            and value.get("retry") is True
+        ):
+            return None
+        return {
+            "status": "retrying",
+            "attempt_index": value.get("attempt_index"),
+            "next_attempt_index": value.get("next_attempt_index"),
+            "reason": str(value.get("reason") or "").strip(),
+            "source": "structured_status",
+        }
+
+    @staticmethod
+    def _workspace_artifact_retry_boundary_from_delta(chunk: str) -> tuple[dict[str, Any] | None, str]:
+        text = str(chunk or "")
+        stripped = text.lstrip()
+        if not stripped.lower().startswith("<$retry"):
+            return None, text
+        tag_end = stripped.find(">")
+        if tag_end <= 2:
+            return None, text
+        tag_body = stripped[2:tag_end].strip()
+        tag_body_lower = tag_body.lower()
+        if tag_body_lower != "retry" and not tag_body_lower.startswith("retry:"):
+            return None, text
+        close_tag = "</$retry>"
+        close_index = stripped.lower().find(close_tag, tag_end + 1)
+        if close_index < 0:
+            return None, text
+        inline_reason = ""
+        if tag_body_lower.startswith("retry:"):
+            inline_reason = tag_body.split(":", 1)[1].strip()
+        inner_reason = stripped[tag_end + 1 : close_index].strip()
+        reason = html.unescape(inner_reason or inline_reason)
+        remainder = stripped[close_index + len(close_tag) :]
+        return {
+            "status": "retrying",
+            "reason": reason,
+            "source": "delta_replay_marker",
+        }, remainder
 
     @staticmethod
     def _workspace_artifact_untrusted_refs(result: Mapping[str, Any], manifest: Mapping[str, Any] | None) -> list[Any]:
@@ -526,7 +574,6 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             if diagnostics:
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return DataFormatter.sanitize(result)
-
         delivery_record: dict[str, Any] = {
             "source": source,
             "path": path,
@@ -925,16 +972,54 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         wrote_any = False
         bytes_written = 0
         draft_stream = draft_execution.get_async_generator(type="delta")
+        retry_boundaries: list[dict[str, Any]] = []
         try:
             while True:
                 try:
-                    delta = await self._await_stream_next(
+                    stream_item = await self._await_stream_next(
                         draft_stream,
                         stage="workspace_artifact_draft",
                     )
                 except StopAsyncIteration:
                     break
-                chunk = str(delta or "")
+                retry_boundary: dict[str, Any] | None = None
+                if isinstance(stream_item, str):
+                    retry_boundary, chunk = self._workspace_artifact_retry_boundary_from_delta(stream_item)
+                else:
+                    item_path = str(getattr(stream_item, "path", "") or "")
+                    retry_boundary = self._workspace_artifact_retry_boundary_from_status(
+                        item_path,
+                        getattr(stream_item, "value", None),
+                    )
+                    if retry_boundary is None and getattr(stream_item, "event_type", None) == "delta":
+                        chunk = str(getattr(stream_item, "delta", None) or "")
+                        retry_boundary, chunk = self._workspace_artifact_retry_boundary_from_delta(chunk)
+                    else:
+                        chunk = ""
+                if retry_boundary is not None:
+                    retry_boundaries.append(DataFormatter.sanitize(retry_boundary))
+                    delivery_record["retry_boundaries"] = DataFormatter.sanitize(retry_boundaries)
+                    if wrote_any:
+                        await self.workspace.write_file(path, "", append=False)
+                    wrote_any = False
+                    bytes_written = 0
+                    if iteration_index is not None:
+                        await self._emit(
+                            f"agent_task.iteration.{iteration_index}.workspace_artifact_draft.retry",
+                            {"path": path, "retry_boundary": retry_boundary},
+                            meta={
+                                "task_id": self.id,
+                                "iteration": iteration_index,
+                                "stage": "workspace_artifact_draft",
+                                "stream_kind": "workspace_artifact_draft_retry",
+                                "path": path,
+                            },
+                        )
+                    if not chunk:
+                        continue
+                    wrote_any = False
+                elif not isinstance(stream_item, str) and getattr(stream_item, "event_type", None) != "delta":
+                    continue
                 if not chunk:
                     continue
                 await self.workspace.write_file(path, chunk, append=wrote_any)
@@ -1124,7 +1209,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
     async def _taskboard_workspace_candidate_from_refs(self, evidence_view: Mapping[str, Any]) -> str:
         candidates: list[str] = []
         diagnostics: list[dict[str, Any]] = []
-        for ref in self._taskboard_final_refs_from_evidence_view(evidence_view):
+        for ref in self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view)):
             if not self._is_trusted_workspace_artifact_ref(ref):
                 continue
             path = str(ref.get("path") or "").strip()

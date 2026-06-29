@@ -42,6 +42,21 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 collect(card.get("file_refs"))
         return cls._dedupe_ref_records(refs)
 
+    def _prioritize_taskboard_final_refs(self, refs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
+
+        def priority(item: tuple[int, Mapping[str, Any]]) -> tuple[int, int]:
+            index, ref = item
+            path = str(ref.get("path") or "").strip()
+            if path and path in required_paths:
+                return (0, index)
+            if self._is_trusted_workspace_artifact_ref(ref):
+                return (1, index)
+            return (2, index)
+
+        ordered = sorted(enumerate(refs), key=priority)
+        return [dict(DataFormatter.sanitize(ref)) for _, ref in ordered]
+
     async def _finalize_taskboard(self, revision: Any, *, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
         result_status = self._taskboard_terminal_status(revision, schedule)
@@ -78,7 +93,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         final = self._normalize_taskboard_final_result(final, candidate_final_result)
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         final_verification: dict[str, Any] | None = None
-        final_refs = self._taskboard_final_refs_from_evidence_view(evidence_view)
+        final_refs = self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view))
         if accepted:
             final_execution_result = {
                 "status": "completed",

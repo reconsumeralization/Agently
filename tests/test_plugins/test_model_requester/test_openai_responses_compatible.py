@@ -281,6 +281,32 @@ def test_broadcast_response_preserves_core_status_record():
     assert events == [("status", {"status": "failed", "attempt_index": 1, "retry": True})]
 
 
+def test_broadcast_response_resets_attempt_text_after_retry_status():
+    plugin = build_plugin({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
+
+    events = collect_events(
+        plugin,
+        [
+            ("response.output_text.delta", json.dumps({"type": "response.output_text.delta", "delta": "partial"})),
+            (
+                "status",
+                {
+                    "status": "failed",
+                    "attempt_index": 1,
+                    "retry": True,
+                    "next_attempt_index": 2,
+                    "reason": "server disconnected",
+                },
+            ),
+            ("response.output_text.delta", json.dumps({"type": "response.output_text.delta", "delta": "replacement"})),
+        ],
+    )
+
+    assert [payload for event, payload in events if event == "delta"] == ["partial", "replacement"]
+    assert ("done", "replacement") in events
+    assert ("done", "partialreplacement") not in events
+
+
 def test_broadcast_response_synthesizes_tool_call_done_without_completed_event():
     plugin = build_plugin({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
     events = collect_events(
