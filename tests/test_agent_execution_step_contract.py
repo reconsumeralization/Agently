@@ -1006,6 +1006,8 @@ class MockWorkspaceArtifactDraftNaturalTextRequester(MockAgentExecutionRequester
         MockAgentExecutionRequester.requests.append(text)
         if "Write only the final Markdown artifact body for the AgentTask" in text:
             MockWorkspaceArtifactDraftNaturalTextRequester.draft_outputs.append(request_data.data.get("output"))
+            yield "message", "# Partial attempt that must be discarded\n\n"
+            yield "message", "<$retry>transient provider disconnect</$retry>"
             yield "message", "# Final\n\nNatural-text artifact body."
             return
         if "Plan the next bounded AgentExecution step" in text:
@@ -4248,8 +4250,11 @@ async def test_workspace_artifact_draft_writes_natural_text_without_output_contr
     assert result["accepted"] is True
     assert MockWorkspaceArtifactDraftNaturalTextRequester.draft_outputs == [None]
     assert delivered["status"] == "delivered"
+    assert delivered["retry_boundaries"][0]["source"] == "delta_replay_marker"
+    assert delivered["retry_boundaries"][0]["reason"] == "transient provider disconnect"
     assert file_ref["preview"] == "# Final\n\nNatural-text artifact body."
     assert "<$retry>" not in file_ref["preview"]
+    assert "Partial attempt" not in file_ref["preview"]
     assert delivered["readback"]["bytes"] == len("# Final\n\nNatural-text artifact body.".encode("utf-8"))
 
 

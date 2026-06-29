@@ -287,8 +287,8 @@ make a sentinel collision-free, so consumers that must preserve a literal model
 chunk containing `"<$retry>"` should use `instant`, `specific`, or `all`.
 
 An AgentExecution projects the same status as a structured process item and
-adds the originating request/run lineage in `item.meta`. Its stream never emits
-the text-only retry marker:
+adds the originating request/run lineage in `item.meta`. Use `instant` or
+`specific` when the consumer needs those structured retry facts:
 
 ```python
 execution = agent.input("Summarize the incident.")
@@ -299,6 +299,12 @@ async for item in execution.get_async_generator(type="instant"):
         continue
     render_execution_item(item)
 ```
+
+Its public `type="delta"` projection may emit the same `<$retry>...</$retry>`
+replay marker as text. Durable artifact writers and SSE/UI consumers should
+handle that marker at the consumption boundary when they choose a plain-text
+stream; do not force a freeform document body through `.output()` only to obtain
+instant fields.
 
 ## Concurrency
 

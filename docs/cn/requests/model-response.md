@@ -277,7 +277,7 @@ for chunk in result.get_generator(type="delta"):
 包含 `"<$retry>"` 的文本 chunk 时，应改用 `instant`、`specific` 或 `all`。
 
 AgentExecution 会把同一状态投影成结构化 process item，并在 `item.meta` 中加入来源
-request/run lineage。它的 stream 不会发出纯文本 retry marker：
+request/run lineage。消费侧需要结构化 retry 事实时，使用 `instant` 或 `specific`：
 
 ```python
 execution = agent.input("总结这次事故。")
@@ -288,6 +288,10 @@ async for item in execution.get_async_generator(type="instant"):
         continue
     render_execution_item(item)
 ```
+
+它的公开 `type="delta"` 投影可能用文本发出同一个 `<$retry>...</$retry>` replay
+marker。持久化 artifact writer 或 SSE/UI 消费者选择纯文本 stream 时，应在消费边界处理
+这个 marker；不要为了拿到 instant 字段而把自由文档正文强行塞进 `.output()`。
 
 ## 并发
 
