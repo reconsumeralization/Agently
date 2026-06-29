@@ -304,9 +304,10 @@ async for item in execution.get_async_generator(type="instant"):
 
 Its public `type="delta"` projection may emit the same `<$retry>...</$retry>`
 replay marker as text. Durable artifact writers and SSE/UI consumers should
-handle that marker at the consumption boundary when they choose a plain-text
-stream; do not force a freeform document body through `.output()` only to obtain
-instant fields.
+handle that marker as a public replay delimiter when they choose a plain-text
+stream, but structured `$status` is the retry control source and the only source
+for retry metadata such as attempt indexes. Do not force a freeform document
+body through `.output()` only to obtain instant fields.
 
 ## Concurrency
 

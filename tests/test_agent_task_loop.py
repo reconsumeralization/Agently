@@ -2259,8 +2259,9 @@ async def test_workspace_artifact_stream_draft_consumes_public_retry_marker_with
 
     assert delivery is not None
     assert delivery["status"] == "delivered"
-    assert delivery["retry_boundaries"][0]["source"] == "delta_replay_marker"
-    assert delivery["retry_boundaries"][0]["reason"] == "transient provider disconnect"
+    assert delivery.get("retry_boundaries", []) == []
+    assert delivery["public_replay_markers"][0]["source"] == "delta_replay_marker"
+    assert delivery["public_replay_markers"][0]["reason"] == "transient provider disconnect"
     readback = await task.workspace.read_file("final.md")
     assert "Streamed Report" in readback["content"]
     assert "This body was written after the public retry marker." in readback["content"]

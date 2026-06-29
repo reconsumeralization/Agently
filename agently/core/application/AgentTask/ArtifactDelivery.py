@@ -136,16 +136,14 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         }
 
     @staticmethod
-    def _workspace_artifact_retry_boundary_from_public_delta_marker(value: Any) -> dict[str, Any] | None:
+    def _workspace_artifact_public_delta_replay_marker(value: Any) -> dict[str, Any] | None:
         text = str(value or "")
         marker = _PUBLIC_DELTA_RETRY_MARKER_RE.match(text)
         if marker is None:
             return None
         reason = html.unescape(str(marker.group("body") or marker.group("label") or "")).strip()
         return {
-            "status": "retrying",
-            "attempt_index": None,
-            "next_attempt_index": None,
+            "marker": "retry",
             "reason": reason or "Retrying model request.",
             "source": "delta_replay_marker",
         }
@@ -1193,6 +1191,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             specific=["delta", "status", "done"],
         )
         retry_boundaries: list[dict[str, Any]] = []
+        public_replay_markers: list[dict[str, Any]] = []
 
         async def handle_retry_boundary(retry_boundary: Mapping[str, Any]) -> None:
             nonlocal wrote_any, bytes_written
@@ -1215,13 +1214,34 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     },
                 )
 
+        async def handle_public_replay_marker(marker: Mapping[str, Any]) -> None:
+            nonlocal wrote_any, bytes_written
+            public_replay_markers.append(DataFormatter.sanitize(dict(marker)))
+            delivery_record["public_replay_markers"] = DataFormatter.sanitize(public_replay_markers)
+            if wrote_any:
+                await self.workspace.write_file(path, "", append=False)
+            wrote_any = False
+            bytes_written = 0
+            if iteration_index is not None:
+                await self._emit(
+                    f"agent_task.iteration.{iteration_index}.workspace_artifact_draft.public_replay_marker",
+                    {"path": path, "marker": marker},
+                    meta={
+                        "task_id": self.id,
+                        "iteration": iteration_index,
+                        "stage": "workspace_artifact_draft",
+                        "stream_kind": "workspace_artifact_draft_public_replay_marker",
+                        "path": path,
+                    },
+                )
+
         async def write_chunk(chunk: str) -> None:
             nonlocal wrote_any, bytes_written
             if not chunk:
                 return
-            marker_boundary = self._workspace_artifact_retry_boundary_from_public_delta_marker(chunk)
-            if marker_boundary is not None:
-                await handle_retry_boundary(marker_boundary)
+            replay_marker = self._workspace_artifact_public_delta_replay_marker(chunk)
+            if replay_marker is not None:
+                await handle_public_replay_marker(replay_marker)
                 return
             await self.workspace.write_file(path, chunk, append=wrote_any)
             wrote_any = True

@@ -278,8 +278,10 @@ AgentTask's Workspace artifact writer consumes AgentExecution stream facts:
 natural body text comes from raw delta items, and retry boundaries come from
 `$status` when the provider reports it. This natural-text path does not require
 the draft request to use `.output()`. If the public `type="delta"` replay marker
-	`"<$retry>...</$retry>"` reaches the artifact consumer, it is treated as a retry
-	control event and is never written or transported as deliverable text.
+`"<$retry>...</$retry>"` reaches the artifact consumer, it is treated as a
+public replay delimiter and is never written or transported as deliverable text.
+It is not promoted into retry metadata; structured `$status` remains the retry
+control source.
 If a bounded work unit already returned a complete Markdown artifact body in
 structured `evidence`, AgentTask only treats it as a deliverable body when the
 evidence item is explicitly labeled as artifact/body/deliverable/Markdown or

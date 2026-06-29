@@ -93,7 +93,9 @@ disconnect, `OpenAICompatible` retries the same request once by default. This
 does not change the selected model, prompt, or structured output format. The
 default also covers failures after partial output has already streamed, so
 stream consumers must process the reserved `$status` record, handle the
-plain-delta `"<$retry>{reason}</$retry>"` marker, or read only a final result.
+plain-delta `"<$retry>{reason}</$retry>"` replay marker as a public text
+delimiter, or read only a final result. Retry control metadata comes from
+`$status`, not from the plain-delta marker.
 Set `"request_retry": {"max_attempts": 1}` or `"request_retry": False` to
 disable replay. Set `request_retry.after_output=False` only when a consumer
 cannot reset provisional output after a retry boundary:
