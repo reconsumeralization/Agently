@@ -640,6 +640,70 @@ def test_hidden_source_audit_records_fact_without_overriding_judge(tmp_path):
     assert updated["judge"] == record["judge"]
 
 
+def test_real_sample_runner_exposes_structured_action_data_without_artifact_refs_to_judge():
+    runner = _load_real_samples_runner()
+    meta = {
+        "logs": {
+            "route_logs": {
+                "agent_task": {
+                    "iterations": [
+                        {
+                            "execution_meta": {
+                                "logs": {
+                                    "action_logs": [
+                                        {
+                                            "action_id": "market_quotes",
+                                            "action_call_id": "call-quotes",
+                                            "status": "success",
+                                            "artifact_refs": [],
+                                            "model_digest": {},
+                                            "data": {
+                                                "companies": [
+                                                    {
+                                                        "ticker": "NVDA",
+                                                        "last_sale_price": "$192.53",
+                                                        "last_trade_timestamp": "Jun 26, 2026",
+                                                        "source": "nasdaq_quote_api",
+                                                    }
+                                                ],
+                                                "retrieved_at_utc": "2026-06-29T05:42:43Z",
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    readbacks = runner.collect_framework_action_readbacks(meta)
+    assert readbacks[0]["action_id"] == "market_quotes"
+    assert readbacks[0]["action_call_id"] == "call-quotes"
+    assert readbacks[0]["preview"]["companies"][0]["ticker"] == "NVDA"
+    assert readbacks[0]["preview"]["companies"][0]["source"] == "nasdaq_quote_api"
+    assert readbacks[0]["original_size"] > 0
+
+    metrics = runner.Metrics(route="flat", case_id="stock_risk_outlook")
+    candidate = runner.framework_final_candidate(
+        {"final_result": {"answer": "final.md", "artifact_markdown": ""}},
+        {},
+        action_readbacks=readbacks,
+    )
+    normalized = runner.normalized_candidate_for_judge(candidate, metrics)
+    action_items = [
+        item
+        for item in normalized["evidence_items"]
+        if item.get("source") == "framework_action_result_preview"
+    ]
+    assert action_items
+    assert action_items[0]["action_id"] == "market_quotes"
+    assert "sha256" not in action_items[0]
+    assert "last_sale_price" in json.dumps(action_items[0]["preview"], ensure_ascii=False)
+
+
 def test_lmcc_framework_criteria_preserve_source_ref_contract():
     runner = _load_block_carrier_runner()
     legacy = runner._load_legacy_runner()
