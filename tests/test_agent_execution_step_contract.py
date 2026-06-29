@@ -4141,6 +4141,35 @@ async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_agent_task_heartbeat_does_not_reset_progress_clock(tmp_path):
+    agent = _create_agent("execution-heartbeat-progress-clock").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Track progress clock.",
+        success_criteria=["Heartbeat remains observational."],
+        execution="flat",
+    )
+    previous_progress_at = task._last_stream_emit_monotonic - 3.0
+    task._last_stream_emit_monotonic = previous_progress_at
+
+    await task._emit(
+        "agent_task.heartbeat",
+        {"stage": "execute", "status": "running"},
+        meta={"task_id": task.id, "status": task.status, "stream_kind": "heartbeat"},
+    )
+
+    assert task._last_stream_emit_monotonic == previous_progress_at
+
+    await task._emit(
+        "agent_task.progress",
+        {"stage": "execute", "status": "running"},
+        meta={"task_id": task.id, "status": task.status, "stream_kind": "progress"},
+    )
+
+    assert task._last_stream_emit_monotonic > previous_progress_at
+
+
+@pytest.mark.asyncio
 async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(tmp_path):
     agent = _create_workspace_artifact_draft_stall_agent("execution-workspace-artifact-draft-timeout").use_workspace(
         tmp_path / "workspace"

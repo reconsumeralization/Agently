@@ -1531,7 +1531,9 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         completed = event_type == "done"
         if is_complete is not None:
             completed = is_complete
-        self._last_stream_emit_monotonic = time.monotonic()
+        stream_kind = meta.get("stream_kind") if isinstance(meta, dict) else None
+        if stream_kind != "heartbeat":
+            self._last_stream_emit_monotonic = time.monotonic()
         item = AgentExecutionStreamData(
             path=path,
             value=DataFormatter.sanitize(value),
