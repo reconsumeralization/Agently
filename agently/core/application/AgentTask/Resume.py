@@ -83,6 +83,91 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                 }
             )
 
+    async def _write_taskboard_resume_snapshot(
+        self,
+        *,
+        stage: str,
+        tick_index: int,
+        revision: Any,
+        evidence_view: Mapping[str, Any],
+        runtime_topology: Mapping[str, Any],
+        terminal_reason: str | None = None,
+        final_result: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Persist a TaskBoard resumable snapshot keyed by task_id.
+
+        The public resume surface stays AgentExecution/AgentTask-owned; this
+        snapshot gives the TaskBoard coordinator enough cold state to expose a
+        terminal result or continue from a board revision without repeating
+        completed cards.
+        """
+        final_result = final_result if isinstance(final_result, Mapping) else {}
+        status = str(final_result.get("status") or self.status or "").strip().lower()
+        accepted = bool(final_result.get("accepted"))
+        reason = str(final_result.get("reason") or terminal_reason or "")
+        final_result_text = str(final_result.get("final_result") or "")
+        is_complete = accepted and status in {"completed", "success", "accepted"}
+        requires_block = (not is_complete) and status in {
+            "blocked",
+            "failed",
+            "error",
+            "timed_out",
+            "max_iterations",
+            "partial",
+        }
+        try:
+            effective_revision = TaskBoardRevision.from_value(revision)
+            await self.workspace.put_snapshot(
+                self._resume_run_id(self.id),
+                DataFormatter.sanitize(
+                    {
+                        "resume_version": 2,
+                        "task_id": self.id,
+                        "iteration": int(tick_index),
+                        "manifest": self._resume_manifest(),
+                        "iterations_summary": self._iteration_prompt_summaries(),
+                        "reflection_summaries": self._reflection_prompt_summaries(),
+                        "satisfied_required_actions": sorted(self._satisfied_required_actions),
+                        "satisfied_required_skills": sorted(self._satisfied_required_skills),
+                        "satisfied_capabilities": sorted(self._satisfied_capabilities),
+                        "satisfied_succeeded_actions": sorted(self._satisfied_succeeded_actions),
+                        "failed_execution_shapes": sorted(self._failed_execution_shapes),
+                        "taskboard_state": {
+                            "schema_version": "agent_task_taskboard_resume/v1",
+                            "stage": stage,
+                            "tick_index": int(tick_index),
+                            "status": status or self.status,
+                            "terminal_reason": terminal_reason,
+                            "revision": effective_revision.to_dict(),
+                            "evidence_view": evidence_view,
+                            "runtime_topology": dict(runtime_topology),
+                            "workspace_refs": DataFormatter.sanitize(self.workspace_refs),
+                            "final_result": dict(final_result),
+                        },
+                        "last_verification": {
+                            "is_complete": is_complete,
+                            "requires_block": requires_block,
+                            "status": status,
+                            "accepted": accepted,
+                            "artifact_status": final_result.get("artifact_status"),
+                            "reason": reason,
+                            "final_result": final_result_text,
+                        },
+                    }
+                ),
+                step_id=f"taskboard-{stage}-{tick_index}",
+            )
+        except Exception as error:
+            self.diagnostics.setdefault("resume_snapshot_errors", []).append(
+                {
+                    "type": error.__class__.__name__,
+                    "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    "strategy": "taskboard",
+                    "stage": stage,
+                    "tick_index": tick_index,
+                }
+            )
+
     @classmethod
     async def async_resume(
         cls: type[_AgentTaskT],
@@ -139,6 +224,15 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         task_shape_analysis = manifest.get("task_shape_analysis")
         if isinstance(task_shape_analysis, dict):
             task_any.task_shape_analysis = DataFormatter.sanitize(task_shape_analysis)
+        taskboard_state = state.get("taskboard_state")
+        if isinstance(taskboard_state, dict):
+            task_any._resumed_taskboard_state = DataFormatter.sanitize(taskboard_state)
+            try:
+                task_any._resumed_from_iteration = int(
+                    taskboard_state.get("tick_index") or task_any._resumed_from_iteration or 0
+                )
+            except (TypeError, ValueError):
+                pass
         summaries = state.get("iterations_summary")
         task_any._resumed_iteration_summaries = list(summaries) if isinstance(summaries, list) else []
         reflection_summaries = state.get("reflection_summaries")
@@ -155,11 +249,17 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         task_any._failed_execution_shapes = set(cls._normalize_string_list(state.get("failed_execution_shapes")))
         last_verification = state.get("last_verification")
         if isinstance(last_verification, dict):
-            task_any._resumed_prior_result = cls._terminal_result_from_resume(
-                task_id=str(task_id),
-                resumed_from_iteration=task_any._resumed_from_iteration,
-                last_verification=last_verification,
+            taskboard_should_retry = (
+                isinstance(taskboard_state, dict)
+                and manifest.get("effective_execution_strategy") == "taskboard"
+                and bool(last_verification.get("requires_block"))
             )
+            if not taskboard_should_retry:
+                task_any._resumed_prior_result = cls._terminal_result_from_resume(
+                    task_id=str(task_id),
+                    resumed_from_iteration=task_any._resumed_from_iteration,
+                    last_verification=last_verification,
+                )
         return task
 
     def resume(self, *args: Any, **kwargs: Any):
@@ -174,9 +274,9 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
     ) -> dict[str, Any] | None:
         if bool(last_verification.get("is_complete")):
             return {
-                "status": "completed",
-                "accepted": True,
-                "artifact_status": "accepted",
+                "status": str(last_verification.get("status") or "completed") or "completed",
+                "accepted": bool(last_verification.get("accepted", True)),
+                "artifact_status": last_verification.get("artifact_status") or "accepted",
                 "task_id": task_id,
                 "final_result": last_verification.get("final_result") or "",
                 "iterations": resumed_from_iteration,
@@ -184,9 +284,9 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
             }
         if bool(last_verification.get("requires_block")):
             return {
-                "status": "blocked",
+                "status": str(last_verification.get("status") or "blocked") or "blocked",
                 "accepted": False,
-                "artifact_status": "blocked",
+                "artifact_status": last_verification.get("artifact_status") or "blocked",
                 "task_id": task_id,
                 "reason": last_verification.get("reason") or "Verifier blocked the task.",
                 "iterations": resumed_from_iteration,

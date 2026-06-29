@@ -144,6 +144,7 @@ class AgentTask(
         # Durable resume state (populated by AgentTask.async_resume before run).
         self._resumed_from_iteration: int = 0
         self._resumed_iteration_summaries: list[dict[str, Any]] = []
+        self._resumed_taskboard_state: dict[str, Any] | None = None
         self._resumed_prior_result: Any = None
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []

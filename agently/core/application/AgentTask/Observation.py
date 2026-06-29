@@ -104,6 +104,124 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         await self._emit_action_observation_events(iteration_index, execution_meta=execution_meta)
         return record_ref, checkpoint_ref
 
+    async def _record_taskboard_checkpoint(
+        self,
+        *,
+        stage: str,
+        tick_index: int,
+        revision: Any,
+        runtime_topology: Mapping[str, Any] | None = None,
+        terminal_reason: str | None = None,
+        final_result: Mapping[str, Any] | None = None,
+    ) -> tuple["WorkspaceRecordRef | None", "WorkspaceRecordRef | None"]:
+        try:
+            effective_revision = TaskBoardRevision.from_value(revision)
+            revision_dict = effective_revision.to_dict()
+            evidence_view = build_task_board_evidence_view(effective_revision).to_dict()
+            revision_id = str(effective_revision.revision_id)
+            step_id = f"taskboard-{stage}-{tick_index}-{revision_id}"
+            record_ref = await self.workspace.ingest(
+                content={
+                    "schema_version": "agent_task_taskboard_checkpoint/v1",
+                    "task_id": self.id,
+                    "strategy": "taskboard",
+                    "stage": stage,
+                    "tick_index": tick_index,
+                    "status": self.status,
+                    "revision": DataFormatter.sanitize(revision_dict),
+                    "evidence_view": DataFormatter.sanitize(evidence_view),
+                    "runtime_topology": DataFormatter.sanitize(runtime_topology or {}),
+                    "terminal_reason": terminal_reason,
+                    "final_result": DataFormatter.sanitize(final_result or {}),
+                },
+                collection="observations",
+                kind="agent_task_taskboard_checkpoint",
+                summary=f"{self.id} TaskBoard {stage} checkpoint {revision_id}",
+                scope={
+                    "task_id": self.id,
+                    "strategy": "taskboard",
+                    "stage": stage,
+                    "tick_index": tick_index,
+                    "revision_id": revision_id,
+                },
+                source={"type": "agent_task", "phase": "taskboard_checkpoint", "stage": stage},
+                meta={
+                    "task_id": self.id,
+                    "strategy": "taskboard",
+                    "stage": stage,
+                    "tick_index": tick_index,
+                    "revision_id": revision_id,
+                },
+            )
+            checkpoint_ref = await self.workspace.put_checkpoint(
+                self.id,
+                {
+                    "schema_version": "agent_task_taskboard_checkpoint/v1",
+                    "task_id": self.id,
+                    "strategy": "taskboard",
+                    "stage": stage,
+                    "tick_index": tick_index,
+                    "step_id": step_id,
+                    "status": self.status,
+                    "revision_id": revision_id,
+                    "revision_ref": record_ref.get("id"),
+                    "terminal_reason": terminal_reason,
+                    "final_status": (final_result or {}).get("status"),
+                    "accepted": (final_result or {}).get("accepted"),
+                },
+                step_id=step_id,
+            )
+            checkpoint_link = await self.workspace.link_evidence(
+                record_ref,
+                checkpoint_ref,
+                relation="checkpointed_by",
+                checkpoint_id=checkpoint_ref.get("id"),
+                meta={
+                    "owner": "AgentTask",
+                    "task_id": self.id,
+                    "strategy": "taskboard",
+                    "stage": stage,
+                    "tick_index": tick_index,
+                },
+            )
+            self._append_workspace_ref("observations", record_ref)
+            self._append_workspace_ref("checkpoints", checkpoint_ref)
+            self._append_workspace_ref("evidence_links", checkpoint_link)
+            await self._emit(
+                "agent_task.checkpoint",
+                {"iteration": tick_index, "strategy": "taskboard", "checkpoint": checkpoint_ref},
+            )
+            await self._emit(
+                "agent_task.taskboard.checkpoint",
+                {
+                    "stage": stage,
+                    "tick_index": tick_index,
+                    "revision_id": revision_id,
+                    "checkpoint": checkpoint_ref,
+                    "revision_ref": record_ref,
+                },
+            )
+            await self._write_taskboard_resume_snapshot(
+                stage=stage,
+                tick_index=tick_index,
+                revision=effective_revision,
+                evidence_view=evidence_view,
+                runtime_topology=runtime_topology or {},
+                terminal_reason=terminal_reason,
+                final_result=final_result,
+            )
+            return record_ref, checkpoint_ref
+        except Exception as error:
+            self.diagnostics.setdefault("taskboard_checkpoint_errors", []).append(
+                {
+                    "type": error.__class__.__name__,
+                    "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    "stage": stage,
+                    "tick_index": tick_index,
+                }
+            )
+            return None, None
+
     async def _record_verification(
         self,
         iteration_index: int,

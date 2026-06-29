@@ -52,15 +52,34 @@ class AgentTaskTaskBoardStrategyMixin(
             )
             await self._emit("agent_task.taskboard.context", context_pack)
 
-            await self._emit_progress(
-                iteration_index,
-                "taskboard_plan",
-                "TaskBoard: asking the model to plan the initial board.",
+            resumed_taskboard_state = (
+                self._resumed_taskboard_state if isinstance(self._resumed_taskboard_state, Mapping) else None
             )
-            planning_result = await self._await_task_deadline(
-                self._request_taskboard_plan(context_pack),
-                stage="taskboard_plan",
-            )
+            resumed_revision: TaskBoardRevision | None = None
+            if resumed_taskboard_state is not None and isinstance(resumed_taskboard_state.get("revision"), Mapping):
+                resumed_revision = TaskBoardRevision.from_value(resumed_taskboard_state["revision"])
+            if resumed_revision is None:
+                await self._emit_progress(
+                    iteration_index,
+                    "taskboard_plan",
+                    "TaskBoard: asking the model to plan the initial board.",
+                )
+                planning_result = await self._await_task_deadline(
+                    self._request_taskboard_plan(context_pack),
+                    stage="taskboard_plan",
+                )
+                board_revision = planning_result.revision
+                planning_policy = planning_result.planning_policy
+            else:
+                planning_policy = resolve_task_board_planning_policy(
+                    self._taskboard_effort(),
+                    metadata={
+                        "execution_strategy": self.execution_strategy,
+                        "task_id": self.id,
+                        "resume": True,
+                    },
+                )
+                board_revision = resumed_revision
         except _AgentTaskDeadlineExceeded as error:
             return await self._terminate_timed_out(
                 iteration_index,
@@ -71,37 +90,66 @@ class AgentTaskTaskBoardStrategyMixin(
             )
 
         board = TaskBoard(
-            planning_result.revision,
+            board_revision,
             handler=lambda context: self._run_taskboard_card(context, context_pack),
-            planning_policy=planning_result.planning_policy,
+            planning_policy=planning_policy,
         )
-        await self._record_phase(
-            "taskboard_planned",
-            iteration=iteration_index,
-            diagnostics={
-                "board_id": board.revision.board_id,
-                "revision_id": board.revision.revision_id,
-                "card_count": len(board.revision.graph.cards),
-                "execution_strategy": self.execution_strategy,
-            },
-        )
-        await self._emit(
-            "agent_task.taskboard.plan",
-            {
-                "revision": board.revision.to_dict(),
-                "planning_policy": planning_result.planning_policy.to_prompt_payload(),
-            },
-        )
+        if resumed_revision is None:
+            await self._record_phase(
+                "taskboard_planned",
+                iteration=iteration_index,
+                diagnostics={
+                    "board_id": board.revision.board_id,
+                    "revision_id": board.revision.revision_id,
+                    "card_count": len(board.revision.graph.cards),
+                    "execution_strategy": self.execution_strategy,
+                },
+            )
+            await self._emit(
+                "agent_task.taskboard.plan",
+                {
+                    "revision": board.revision.to_dict(),
+                    "planning_policy": planning_policy.to_prompt_payload(),
+                },
+            )
+        else:
+            await self._record_phase(
+                "taskboard_resumed",
+                iteration=iteration_index,
+                diagnostics={
+                    "board_id": board.revision.board_id,
+                    "revision_id": board.revision.revision_id,
+                    "card_count": len(board.revision.graph.cards),
+                    "execution_strategy": self.execution_strategy,
+                    "checkpoint_stage": resumed_taskboard_state.get("stage") if resumed_taskboard_state else None,
+                    "checkpoint_tick_index": resumed_taskboard_state.get("tick_index")
+                    if resumed_taskboard_state
+                    else None,
+                },
+            )
+            await self._emit(
+                "agent_task.taskboard.resumed",
+                {
+                    "revision_id": board.revision.revision_id,
+                    "tick_index": resumed_taskboard_state.get("tick_index") if resumed_taskboard_state else None,
+                },
+            )
         lifecycle_flow = TriggerFlow(name=f"agent-task-taskboard-lifecycle-{ self.id }")
         tick_requested_event = f"agent_task.taskboard.lifecycle.tick.requested.{ self.id }"
         finalize_requested_event = f"agent_task.taskboard.lifecycle.finalize.requested.{ self.id }"
         revision_state_key = "taskboard_revision_json"
+        initial_tick_index = 1
+        if resumed_taskboard_state is not None:
+            try:
+                initial_tick_index = max(int(resumed_taskboard_state.get("tick_index") or 0) + 1, 1)
+            except (TypeError, ValueError):
+                initial_tick_index = 1
 
         def _board_from_revision(revision: TaskBoardRevision | Mapping[str, Any]) -> TaskBoard:
             return TaskBoard(
                 revision,
                 handler=lambda context: self._run_taskboard_card(context, context_pack),
-                planning_policy=planning_result.planning_policy,
+                planning_policy=planning_policy,
             )
 
         def _pack_revision_state(revision: TaskBoardRevision | Mapping[str, Any]) -> str:
@@ -128,7 +176,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 "tick_fanout": "taskboard_runtime_signal_net",
             }
             await data.async_set_state(revision_state_key, _pack_revision_state(board.revision), emit=False)
-            await data.async_set_state("tick_index", 1, emit=False)
+            await data.async_set_state("tick_index", initial_tick_index, emit=False)
             await data.async_set_state("max_ticks", max_ticks, emit=False)
             await data.async_set_state("runtime_topology", topology, emit=False)
             await self._record_phase(
@@ -146,7 +194,7 @@ class AgentTaskTaskBoardStrategyMixin(
                     "runtime_topology": topology,
                 },
             )
-            await data.async_emit_nowait(tick_requested_event, {"tick_index": 1})
+            await data.async_emit_nowait(tick_requested_event, {"tick_index": initial_tick_index})
             return {"runtime_topology": topology}
 
         async def run_lifecycle_tick(data: TriggerFlowRuntimeData[Any, Any, Any]):
@@ -175,6 +223,10 @@ class AgentTaskTaskBoardStrategyMixin(
             schedule = current_board.schedule()
             tick_concurrency = self._taskboard_concurrency()
             evidence_view = build_task_board_evidence_view(current_board.revision).to_dict()
+            runtime_topology = {
+                "driver": "triggerflow_taskboard_lifecycle",
+                "tick": DataFormatter.sanitize(data.get_state("runtime_topology", {}, inherit=False) or {}),
+            }
             await self._emit(
                 f"agent_task.taskboard.tick.{tick_index}.scheduled",
                 self._taskboard_scheduled_stream_payload(
@@ -186,6 +238,13 @@ class AgentTaskTaskBoardStrategyMixin(
             if not schedule.runnable_card_ids:
                 await data.async_set_state(revision_state_key, _pack_revision_state(current_board.revision), emit=False)
                 await data.async_set_state("terminal_reason", "no_runnable_cards", emit=False)
+                await self._record_taskboard_checkpoint(
+                    stage="tick",
+                    tick_index=tick_index,
+                    revision=current_board.revision,
+                    runtime_topology=runtime_topology,
+                    terminal_reason="no_runnable_cards",
+                )
                 await data.async_emit_nowait(finalize_requested_event, {"tick_index": tick_index})
                 return {"terminal": False, "status": "ready_to_finalize"}
 
@@ -221,6 +280,10 @@ class AgentTaskTaskBoardStrategyMixin(
                 f"agent_task.taskboard.tick.{tick_index}.completed",
                 self._taskboard_completed_stream_payload(tick_result),
             )
+            tick_runtime_topology = {
+                "driver": "triggerflow_taskboard_lifecycle",
+                "tick": DataFormatter.sanitize(tick_result.triggerflow_snapshot.get("runtime_topology", {})),
+            }
             await self._record_phase(
                 "taskboard_tick",
                 iteration=tick_index,
@@ -229,11 +292,14 @@ class AgentTaskTaskBoardStrategyMixin(
                     "runnable_card_ids": list(tick_result.schedule.runnable_card_ids),
                     "completed_card_ids": list(tick_result.schedule.completed_card_ids),
                     "concurrency": tick_concurrency,
-                    "runtime_topology": {
-                        "driver": "triggerflow_taskboard_lifecycle",
-                        "tick": DataFormatter.sanitize(tick_result.triggerflow_snapshot.get("runtime_topology", {})),
-                    },
+                    "runtime_topology": tick_runtime_topology,
                 },
+            )
+            await self._record_taskboard_checkpoint(
+                stage="tick",
+                tick_index=tick_index,
+                revision=tick_result.revision,
+                runtime_topology=tick_runtime_topology,
             )
             if self._taskboard_revision_completed(tick_result.revision):
                 await data.async_set_state("terminal_reason", "board_completed", emit=False)
@@ -270,9 +336,28 @@ class AgentTaskTaskBoardStrategyMixin(
                     await data.async_set_state(revision_state_key, _pack_revision_state(repair_revision), emit=False)
                     next_tick_index = int(data.get_state("tick_index", 1, inherit=False) or 1)
                     await data.async_set_state("terminal_reason", "final_verification_repair", emit=False)
+                    await self._record_taskboard_checkpoint(
+                        stage="finalize",
+                        tick_index=max(next_tick_index - 1, 1),
+                        revision=repair_revision,
+                        runtime_topology=DataFormatter.sanitize(
+                            data.get_state("runtime_topology", {}, inherit=False) or {}
+                        ),
+                        terminal_reason="final_verification_repair",
+                        final_result=result,
+                    )
                     await data.async_emit_nowait(tick_requested_event, {"tick_index": next_tick_index})
                 return result
             await data.async_set_state("final_result", result, emit=False)
+            checkpoint_result = self.result if isinstance(self.result, Mapping) else result
+            await self._record_taskboard_checkpoint(
+                stage="finalize",
+                tick_index=max(int(data.get_state("tick_index", 1, inherit=False) or 1) - 1, 1),
+                revision=revision,
+                runtime_topology=DataFormatter.sanitize(data.get_state("runtime_topology", {}, inherit=False) or {}),
+                terminal_reason=str(data.get_state("terminal_reason", "", inherit=False) or "") or None,
+                final_result=checkpoint_result if isinstance(checkpoint_result, Mapping) else None,
+            )
             return result
 
         lifecycle_flow.to(start_lifecycle, name="task_board.lifecycle.start")

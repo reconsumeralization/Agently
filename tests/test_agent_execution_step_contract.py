@@ -4060,6 +4060,174 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_taskboard_persists_checkpoint_and_resume_snapshot(tmp_path):
+    task_id = "taskboard-resume-checkpoint"
+    workspace_dir = tmp_path / "workspace"
+    agent = _create_taskboard_agent("execution-taskboard-checkpoint").use_workspace(workspace_dir)
+
+    execution = agent.create_task(
+        task_id=task_id,
+        goal="Produce a board-managed answer.",
+        success_criteria=["The board final answer is accepted."],
+        execution="taskboard",
+        max_iterations=2,
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+
+    assert result["status"] == "completed"
+    assert task_meta["workspace_refs"]["checkpoints"]
+    checkpoint_history = await agent.workspace.checkpoint_history(task_id)
+    assert checkpoint_history
+    latest_checkpoint = checkpoint_history[0]
+    latest_checkpoint_data = await agent.workspace.get_data(latest_checkpoint)
+    assert latest_checkpoint_data["step_id"].startswith("taskboard-")
+    assert latest_checkpoint_data["strategy"] == "taskboard"
+    assert latest_checkpoint_data["revision_ref"]
+
+    snapshot = await agent.workspace.get_snapshot(f"{task_id}::resume")
+    assert snapshot["manifest"]["effective_execution_strategy"] == "taskboard"
+    assert snapshot["taskboard_state"]["revision"]["revision_id"]
+    assert snapshot["taskboard_state"]["tick_index"] >= 1
+    assert snapshot["taskboard_state"]["stage"] in {"tick", "finalize"}
+    assert snapshot["last_verification"]["is_complete"] is True
+    assert snapshot["last_verification"]["final_result"] == "taskboard accepted result"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_resume_terminal_snapshot_without_reexecuting_cards(tmp_path):
+    task_id = "taskboard-terminal-resume"
+    workspace_dir = tmp_path / "workspace"
+    agent = _create_taskboard_agent("execution-taskboard-terminal-resume-1").use_workspace(workspace_dir)
+
+    execution = agent.create_task(
+        task_id=task_id,
+        goal="Produce a board-managed answer.",
+        success_criteria=["The board final answer is accepted."],
+        execution="taskboard",
+        max_iterations=2,
+    )
+
+    result = await execution.async_get_data()
+    assert result["status"] == "completed"
+    assert result["final_result"] == "taskboard accepted result"
+
+    agent2 = _create_taskboard_agent("execution-taskboard-terminal-resume-2").use_workspace(workspace_dir)
+    MockAgentExecutionRequester.requests = []
+    resumed = await agent2.async_resume(task_id, workspace=workspace_dir)
+    resumed_result = await resumed.async_start()
+    resumed_meta = await resumed.async_get_meta()
+    task_meta = resumed_meta["logs"]["route_logs"]["agent_task"]
+
+    assert resumed.task_refs["resume"] is True
+    assert resumed.task_refs["resumed_from_iteration"] >= 1
+    assert resumed_result["resumed"] is True
+    assert resumed_result["status"] == "completed"
+    assert resumed_result["final_result"] == "taskboard accepted result"
+    assert task_meta["resumed_from_iteration"] >= 1
+    assert MockAgentExecutionRequester.requests == []
+
+
+@pytest.mark.asyncio
+async def test_taskboard_resume_blocked_snapshot_retries_finalization_without_replanning(tmp_path):
+    task_id = "taskboard-blocked-resume"
+    workspace_dir = tmp_path / "workspace"
+    agent = _create_taskboard_agent("execution-taskboard-blocked-resume-seed").use_workspace(workspace_dir)
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task_id,
+            "revision_id": "rev-blocked",
+            "graph": {
+                "graph_id": f"{task_id}.graph",
+                "cards": [
+                    {
+                        "id": "collect",
+                        "objective": "Collect one fact and summarize it.",
+                        "allowed_execution_shape": "model",
+                    }
+                ],
+            },
+            "card_results": {
+                "collect": {
+                    "card_id": "collect",
+                    "status": "completed",
+                    "preview": "taskboard card result",
+                    "metadata": {"note": "completed before resume"},
+                }
+            },
+        }
+    )
+    await agent.workspace.put_snapshot(
+        f"{task_id}::resume",
+        {
+            "resume_version": 2,
+            "task_id": task_id,
+            "iteration": 1,
+            "manifest": {
+                "goal": "Produce a board-managed answer.",
+                "success_criteria": ["The board final answer is accepted."],
+                "execution_strategy": "taskboard",
+                "effective_execution_strategy": "taskboard",
+                "task_shape_analysis": {},
+                "max_iterations": None,
+                "verify": "before_done",
+                "context_profile": "auto",
+                "context_budget": {"chars": 6000},
+                "limits": {},
+                "options": {},
+            },
+            "iterations_summary": [],
+            "reflection_summaries": [],
+            "satisfied_required_actions": [],
+            "satisfied_required_skills": [],
+            "satisfied_capabilities": [],
+            "satisfied_succeeded_actions": [],
+            "failed_execution_shapes": [],
+            "taskboard_state": {
+                "schema_version": "agent_task_taskboard_resume/v1",
+                "stage": "finalize",
+                "tick_index": 1,
+                "status": "blocked",
+                "terminal_reason": "final_verification_failed",
+                "revision": revision.to_dict(),
+                "evidence_view": build_task_board_evidence_view(revision).to_dict(),
+                "runtime_topology": {"driver": "triggerflow_taskboard_lifecycle"},
+                "workspace_refs": {},
+                "final_result": {
+                    "status": "blocked",
+                    "accepted": False,
+                    "artifact_status": "partial",
+                    "reason": "final verification failed",
+                },
+            },
+            "last_verification": {
+                "is_complete": False,
+                "requires_block": True,
+                "status": "blocked",
+                "accepted": False,
+                "artifact_status": "partial",
+                "reason": "final verification failed",
+                "final_result": "",
+            },
+        },
+    )
+
+    agent2 = _create_taskboard_agent("execution-taskboard-blocked-resume").use_workspace(workspace_dir)
+    MockAgentExecutionRequester.requests = []
+    resumed = await agent2.async_resume(task_id, workspace=workspace_dir)
+    resumed_result = await resumed.async_start()
+
+    request_text = "\n".join(MockAgentExecutionRequester.requests)
+    assert resumed_result["status"] == "completed"
+    assert resumed_result.get("resumed") is not True
+    assert "Plan a TaskBoard for this submitted task" not in request_text
+    assert "Execute exactly one TaskBoard card" not in request_text
+    assert "Synthesize the final result for this TaskBoard task" in request_text
+
+
+@pytest.mark.asyncio
 async def test_taskboard_control_card_runs_single_model_request_through_block_carrier(tmp_path):
     agent = _create_taskboard_control_agent("execution-taskboard-control-card").use_workspace(tmp_path / "workspace")
 
