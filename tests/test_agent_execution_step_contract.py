@@ -923,6 +923,121 @@ class MockWorkspaceArtifactDraftStallRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockWorkspaceArtifactDraftRetryRequester(MockAgentExecutionRequester):
+    name = "MockWorkspaceArtifactDraftRetryRequester"
+    draft_calls = 0
+    draft_outputs: list[Any] = []
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockWorkspaceArtifactDraftRetryRequester.draft_calls = 0
+        MockWorkspaceArtifactDraftRetryRequester.draft_outputs = []
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Write only the final Markdown artifact body for the AgentTask" in text:
+            MockWorkspaceArtifactDraftRetryRequester.draft_calls += 1
+            MockWorkspaceArtifactDraftRetryRequester.draft_outputs.append(request_data.data.get("output"))
+            yield "message", "# Partial\n\nThis attempt must be discarded."
+            yield "status", {
+                "status": "failed",
+                "attempt_index": 1,
+                "retry": True,
+                "next_attempt_index": 2,
+                "reason": "transient provider disconnect",
+            }
+            return
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "direct",
+                "step_instruction": "Prepare a Workspace-backed final artifact.",
+                "expected_evidence": "final.md is written and read back.",
+                "rationale": "The task requests a deliverable file.",
+                "deliverable_mode": "workspace_artifact",
+            }
+        elif "Execute exactly one bounded step" in text:
+            payload = {
+                "step_result": "Control result ready; framework should draft the Workspace artifact.",
+                "artifact_manifest": {"path": "final.md", "sections": [{"id": "summary", "title": "Summary"}]},
+                "evidence": ["artifact source evidence"],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "The Workspace artifact was delivered after retry.",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "final.md",
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, object], None],
+    ):
+        response_text = ""
+        async for event, data in response_generator:
+            if event == "message":
+                response_text += str(data)
+                yield "delta", str(data)
+            elif event == "status":
+                yield "status", data
+        yield "done", response_text
+
+
+class MockWorkspaceArtifactDraftNaturalTextRequester(MockAgentExecutionRequester):
+    name = "MockWorkspaceArtifactDraftNaturalTextRequester"
+    draft_outputs: list[Any] = []
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockWorkspaceArtifactDraftNaturalTextRequester.draft_outputs = []
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Write only the final Markdown artifact body for the AgentTask" in text:
+            MockWorkspaceArtifactDraftNaturalTextRequester.draft_outputs.append(request_data.data.get("output"))
+            yield "message", "# Final\n\nNatural-text artifact body."
+            return
+        if "Plan the next bounded AgentExecution step" in text:
+            payload = {
+                "execution_shape": "direct",
+                "step_instruction": "Prepare a Workspace-backed final artifact.",
+                "expected_evidence": "final.md is written and read back.",
+                "rationale": "The task requests a deliverable file.",
+                "deliverable_mode": "workspace_artifact",
+            }
+        elif "Execute exactly one bounded step" in text:
+            payload = {
+                "step_result": "Control result ready; framework should draft the Workspace artifact.",
+                "artifact_manifest": {"path": "final.md", "sections": [{"id": "summary", "title": "Summary"}]},
+                "evidence": ["artifact source evidence"],
+                "remaining_work": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "The Workspace artifact was delivered.",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "final.md",
+            }
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockFlatParallelActionRequester(MockAgentExecutionRequester):
     name = "MockFlatParallelActionRequester"
     action_planning_calls = 0
@@ -1884,6 +1999,20 @@ def _create_workspace_artifact_draft_stall_agent(name: str = "agent-execution-ar
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockWorkspaceArtifactDraftStallRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_workspace_artifact_draft_retry_agent(name: str = "agent-execution-artifact-draft-retry"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockWorkspaceArtifactDraftRetryRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_workspace_artifact_draft_natural_text_agent(name: str = "agent-execution-artifact-draft-natural-text"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockWorkspaceArtifactDraftNaturalTextRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -3194,7 +3323,7 @@ async def test_taskboard_control_workspace_text_patch_writes_complete_file(tmp_p
         execution="taskboard",
         max_iterations=None,
     )
-    await task.workspace.write_file("final.md", "<$retry>transport error</$retry># Old\n\nUnsupported claim.", append=False)
+    await task.workspace.write_file("final.md", "# Old\n\nUnsupported claim.", append=False)
     corrected = "# Final\n\nCorrected source-grounded deliverable."
 
     async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
@@ -4057,6 +4186,71 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
     )
     assert "Still working on workspace_artifact_draft" in delta_text
     assert not (tmp_path / "workspace" / "final.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_draft_retry_status_resets_partial_without_public_delta_marker(tmp_path):
+    agent = _create_workspace_artifact_draft_retry_agent("execution-workspace-artifact-draft-retry").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Produce final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="flat",
+        max_iterations=1,
+    )
+
+    await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
+    failed_delivery = deliveries[-1]
+
+    assert MockWorkspaceArtifactDraftRetryRequester.draft_calls == 1
+    assert MockWorkspaceArtifactDraftRetryRequester.draft_outputs
+    assert all(output is None for output in MockWorkspaceArtifactDraftRetryRequester.draft_outputs)
+    assert failed_delivery["status"] == "failed"
+    assert failed_delivery["error"]["type"] == "EmptyWorkspaceArtifactDraft"
+    assert failed_delivery["bytes_written"] == 0
+    assert failed_delivery["retry_boundaries"] == [
+        {
+            "status": "retrying",
+            "attempt_index": 1,
+            "next_attempt_index": 2,
+            "reason": "transient provider disconnect",
+            "source": "structured_status",
+        }
+    ]
+    assert not (tmp_path / "workspace" / "files" / "final.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_draft_writes_natural_text_without_output_contract(tmp_path):
+    agent = _create_workspace_artifact_draft_natural_text_agent(
+        "execution-workspace-artifact-draft-natural-text"
+    ).use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Produce final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="flat",
+        max_iterations=1,
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
+    delivered = deliveries[-1]
+    file_ref = delivered["file_refs"][0]
+
+    assert result["accepted"] is True
+    assert MockWorkspaceArtifactDraftNaturalTextRequester.draft_outputs == [None]
+    assert delivered["status"] == "delivered"
+    assert file_ref["preview"] == "# Final\n\nNatural-text artifact body."
+    assert "<$retry>" not in file_ref["preview"]
+    assert delivered["readback"]["bytes"] == len("# Final\n\nNatural-text artifact body.".encode("utf-8"))
 
 
 @pytest.mark.asyncio

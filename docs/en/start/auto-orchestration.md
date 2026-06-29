@@ -274,6 +274,9 @@ input uses path/ref handles, bounded content or preview, and truncation status.
 For long, sectioned, or prose-heavy
 deliverables, choose the content carrier deliberately. A single freeform
 document can draft as natural Markdown/plain text with no `.output()` contract.
+AgentTask's Workspace artifact writer consumes structured AgentExecution stream
+items for raw text deltas and `$status` retry facts, so this natural-text path
+does not depend on the public `type="delta"` replay marker.
 When the caller needs separately addressable fields, use Agently
 `.output(..., format=...)` with `xml_field`, `hybrid`, or `yaml_literal` when
 that format fits the payload instead of forcing the long body into compact JSON
@@ -508,7 +511,9 @@ The execution object follows the same consumption style as model responses:
 `get_data`, `get_text`, `get_meta`, `get_generator`, and async equivalents.
 The default stream is `type="delta"` and yields plain text strings, including
 the reserved `"<$retry>{reason}</$retry>"` boundary when a model stream is
-replayed. Use `type="instant"` for structured execution events:
+replayed. The marker is for public text replay consumers only; internal
+artifact writers and structured UIs should consume structured status events
+instead of parsing the marker. Use `type="instant"` for structured execution events:
 `AgentExecutionStreamData` keeps the familiar `path`, `value`, `delta`, and
 `is_complete` fields and adds route metadata for process-level events.
 

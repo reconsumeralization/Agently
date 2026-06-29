@@ -249,8 +249,10 @@ readback。冷证据会记录 `path`、`bytes`、`sha256`、有界 preview 和 `
 分段或重自然语言交付物，应先选择合适的内容载体：单一自由正文可以直接生成自然
 Markdown / plain text，不必为了携带正文而声明 `.output()`；如果调用方需要可独立寻址
 的字段，可在适合目标模型和消费方的情况下使用
-`.output(..., format=...)` 的 `xml_field`、`hybrid` 或 `yaml_literal`；状态、
-证据和校验保持为单独的紧凑 judgment/readback contract。若 AgentTask 必须交付可信文件
+`.output(..., format=...)` 的 `xml_field`、`hybrid` 或 `yaml_literal`；AgentTask 的
+Workspace artifact writer 消费的是结构化 AgentExecution stream item 中的原始文本
+delta 和 `$status` retry 事实，因此这条自然文本路径不依赖 public `type="delta"` replay
+marker。状态、证据和校验保持为单独的紧凑 judgment/readback contract。若 AgentTask 必须交付可信文件
 artifact，再使用 `artifact_manifest.sections` 加 Workspace readback。模型声明的
 `file_refs` 只作为 diagnostics，只有框架完成 Workspace 写入和读回后才是可信证据，
 同时仍保留真实 `final.md` 或其他成品文件供 host 复核。
@@ -429,7 +431,9 @@ meta = await execution.async_get_meta()
 execution 对象沿用模型 response 的消费风格：`get_data`、`get_text`、
 `get_meta`、`get_generator` 以及对应 async 方法。
 默认 stream 是 `type="delta"`，产出纯文本字符串；模型流式请求重放时会产出保留的
-`"<$retry>{reason}</$retry>"` 边界标记。需要结构化执行事件时使用
+`"<$retry>{reason}</$retry>"` 边界标记。该 marker 只服务 public 文本 replay consumer；
+内部 artifact writer 和结构化 UI 应消费结构化 status 事件，而不是解析该 marker。
+需要结构化执行事件时使用
 `type="instant"`：`AgentExecutionStreamData` 保留熟悉的 `path`、`value`、
 `delta`、`is_complete` 字段，并增加过程级事件需要的 route metadata。
 

@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-import html
-
 from .TaskShared import *
 
 
@@ -109,35 +107,6 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             "reason": str(value.get("reason") or "").strip(),
             "source": "structured_status",
         }
-
-    @staticmethod
-    def _workspace_artifact_retry_boundary_from_delta(chunk: str) -> tuple[dict[str, Any] | None, str]:
-        text = str(chunk or "")
-        stripped = text.lstrip()
-        if not stripped.lower().startswith("<$retry"):
-            return None, text
-        tag_end = stripped.find(">")
-        if tag_end <= 2:
-            return None, text
-        tag_body = stripped[2:tag_end].strip()
-        tag_body_lower = tag_body.lower()
-        if tag_body_lower != "retry" and not tag_body_lower.startswith("retry:"):
-            return None, text
-        close_tag = "</$retry>"
-        close_index = stripped.lower().find(close_tag, tag_end + 1)
-        if close_index < 0:
-            return None, text
-        inline_reason = ""
-        if tag_body_lower.startswith("retry:"):
-            inline_reason = tag_body.split(":", 1)[1].strip()
-        inner_reason = stripped[tag_end + 1 : close_index].strip()
-        reason = html.unescape(inner_reason or inline_reason)
-        remainder = stripped[close_index + len(close_tag) :]
-        return {
-            "status": "retrying",
-            "reason": reason,
-            "source": "delta_replay_marker",
-        }, remainder
 
     @staticmethod
     def _workspace_artifact_untrusted_refs(result: Mapping[str, Any], manifest: Mapping[str, Any] | None) -> list[Any]:
@@ -971,7 +940,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         }
         wrote_any = False
         bytes_written = 0
-        draft_stream = draft_execution.get_async_generator(type="delta")
+        draft_stream = draft_execution.get_async_generator(type="instant")
         retry_boundaries: list[dict[str, Any]] = []
         try:
             while True:
@@ -982,20 +951,13 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     )
                 except StopAsyncIteration:
                     break
-                retry_boundary: dict[str, Any] | None = None
                 if isinstance(stream_item, str):
-                    retry_boundary, chunk = self._workspace_artifact_retry_boundary_from_delta(stream_item)
-                else:
-                    item_path = str(getattr(stream_item, "path", "") or "")
-                    retry_boundary = self._workspace_artifact_retry_boundary_from_status(
-                        item_path,
-                        getattr(stream_item, "value", None),
-                    )
-                    if retry_boundary is None and getattr(stream_item, "event_type", None) == "delta":
-                        chunk = str(getattr(stream_item, "delta", None) or "")
-                        retry_boundary, chunk = self._workspace_artifact_retry_boundary_from_delta(chunk)
-                    else:
-                        chunk = ""
+                    continue
+                item_path = str(getattr(stream_item, "path", "") or "")
+                retry_boundary = self._workspace_artifact_retry_boundary_from_status(
+                    item_path,
+                    getattr(stream_item, "value", None),
+                )
                 if retry_boundary is not None:
                     retry_boundaries.append(DataFormatter.sanitize(retry_boundary))
                     delivery_record["retry_boundaries"] = DataFormatter.sanitize(retry_boundaries)
@@ -1015,11 +977,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                                 "path": path,
                             },
                         )
-                    if not chunk:
-                        continue
-                    wrote_any = False
-                elif not isinstance(stream_item, str) and getattr(stream_item, "event_type", None) != "delta":
                     continue
+                if getattr(stream_item, "event_type", None) != "delta":
+                    continue
+                chunk = str(getattr(stream_item, "delta", None) or "")
                 if not chunk:
                     continue
                 await self.workspace.write_file(path, chunk, append=wrote_any)
