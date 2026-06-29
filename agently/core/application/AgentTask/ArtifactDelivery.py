@@ -230,13 +230,22 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     }
                 )
         if content and content_key and content_key not in {item["field"] for item in omitted}:
-            omitted.append(
-                {
-                    "field": content_key,
-                    "chars": len(content),
-                    "reason": "workspace_artifact_hot_path",
-                }
-            )
+            if cls._replace_workspace_artifact_nested_content(result, content_key, replacement):
+                omitted.append(
+                    {
+                        "field": content_key,
+                        "chars": len(content),
+                        "reason": "workspace_artifact_hot_path",
+                    }
+                )
+            else:
+                omitted.append(
+                    {
+                        "field": content_key,
+                        "chars": len(content),
+                        "reason": "workspace_artifact_hot_path",
+                    }
+                )
         if omitted:
             result["workspace_artifact_content_omitted"] = omitted
         preview = str(ref.get("preview") or "")
@@ -244,6 +253,164 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             result["artifact_preview"] = preview
             result["artifact_preview_truncated"] = bool(ref.get("truncated"))
         return result
+
+    @staticmethod
+    def _replace_workspace_artifact_nested_content(result: dict[str, Any], content_key: str, replacement: str) -> bool:
+        marker = re.match(r"\Aevidence\[(?P<index>\d+)\](?:\.(?P<field>[A-Za-z_][A-Za-z0-9_]*))?\Z", content_key)
+        if marker is None:
+            return False
+        evidence = result.get("evidence")
+        if not isinstance(evidence, list):
+            return False
+        index = int(marker.group("index"))
+        if index < 0 or index >= len(evidence):
+            return False
+        field = marker.group("field")
+        if field is None:
+            if not isinstance(evidence[index], str):
+                return False
+            evidence[index] = replacement
+            return True
+        item = evidence[index]
+        if not isinstance(item, dict):
+            return False
+        if not isinstance(item.get(field), str):
+            return False
+        item[field] = replacement
+        return True
+
+    @classmethod
+    def _handoff_workspace_artifact_remaining_work_to_verifier(
+        cls,
+        result: dict[str, Any],
+        *,
+        diagnostics: list[Any],
+        path: str,
+        source: str,
+        content_key: str,
+    ) -> dict[str, Any] | None:
+        remaining_work = cls._normalize_string_list(result.get("remaining_work"))
+        if not remaining_work:
+            return None
+        handoff = {
+            "status": "handed_to_terminal_verification",
+            "path": path,
+            "content_key": content_key,
+            "remaining_work": remaining_work,
+            "reason": (
+                "Trusted Workspace write/readback materialized the candidate artifact; "
+                "terminal verification should judge remaining sufficiency."
+            ),
+        }
+        result["remaining_work"] = []
+        result["ready_for_final_verification"] = True
+        result["workspace_artifact_remaining_work_handoff"] = DataFormatter.sanitize(handoff)
+        diagnostics.append(
+            {
+                "code": "agent_task.workspace_artifact.remaining_work_handed_to_verifier",
+                "message": (
+                    "Workspace artifact content was written and read back while the work unit still reported "
+                    "remaining work; the stale work-unit continuation was handed to terminal verification."
+                ),
+                "path": path,
+                "source": source,
+                "content_key": content_key,
+                "remaining_work": remaining_work,
+            }
+        )
+        return handoff
+
+    @staticmethod
+    def _workspace_artifact_content_is_complete_body(content: str) -> bool:
+        text = content.strip()
+        if not text:
+            return False
+        if text.startswith("#"):
+            return True
+        lowered = text[:128].lower()
+        if lowered.startswith("<!doctype") or lowered.startswith("<html"):
+            return True
+        return bool("\n\n" in text and len(text) > 800)
+
+    @classmethod
+    def _workspace_artifact_evidence_content_candidates(
+        cls,
+        result: Mapping[str, Any],
+        *,
+        manifest_path: str,
+    ) -> list[tuple[str, str]]:
+        evidence = result.get("evidence")
+        if not isinstance(evidence, Sequence) or isinstance(evidence, str | bytes | bytearray):
+            return []
+        candidates: list[tuple[str, str]] = []
+        for index, item in enumerate(evidence):
+            if isinstance(item, str):
+                body = cls._workspace_artifact_body_from_evidence_text(item, manifest_path=manifest_path)
+                if body:
+                    candidates.append((f"evidence[{index}]", body))
+                continue
+            if not isinstance(item, Mapping):
+                continue
+            item_path = str(item.get("path") or item.get("artifact_path") or item.get("output_path") or "").strip()
+            item_kind = str(item.get("kind") or item.get("type") or item.get("role") or "").strip().lower()
+            item_declares_artifact = bool(
+                item_path == manifest_path
+                or "artifact" in item_kind
+                or "deliverable" in item_kind
+                or item.get("is_artifact_body") is True
+            )
+            for key in (*_WORKSPACE_ARTIFACT_RESULT_BODY_KEYS, *_WORKSPACE_ARTIFACT_CONTENT_KEYS):
+                value = item.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                key_declares_artifact = key.startswith("artifact_") or key in {
+                    "candidate_final_result",
+                    "final_result",
+                }
+                body = cls._workspace_artifact_body_from_evidence_text(
+                    value,
+                    manifest_path=manifest_path,
+                    allow_bare_markdown=item_declares_artifact or key_declares_artifact,
+                )
+                if body:
+                    candidates.append((f"evidence[{index}].{key}", body))
+        return candidates
+
+    @staticmethod
+    def _workspace_artifact_body_from_evidence_text(
+        value: str,
+        *,
+        manifest_path: str,
+        allow_bare_markdown: bool = False,
+    ) -> str:
+        text = value.strip()
+        if not text:
+            return ""
+        if allow_bare_markdown and text.startswith("#"):
+            return text
+        lines = text.splitlines()
+        first_index = next((index for index, line in enumerate(lines) if line.strip()), None)
+        if first_index is None:
+            return ""
+        first_line = lines[first_index].strip()
+        if not first_line.endswith(":"):
+            return ""
+        label = first_line[:-1].strip().lower()
+        path = manifest_path.strip().lower()
+        path_name = Path(path).name.lower() if path else ""
+        label_declares_artifact = any(token in label for token in ("artifact", "deliverable", "markdown", "body"))
+        if path and path in label:
+            label_declares_artifact = True
+        if path_name and path_name in label:
+            label_declares_artifact = True
+        if not label_declares_artifact:
+            return ""
+        body = "\n".join(lines[first_index + 1 :]).strip()
+        if not body:
+            return ""
+        if body.startswith("#"):
+            return body
+        return ""
 
     @classmethod
     def _workspace_artifact_delivery_mode(cls, result: Any) -> str:
@@ -488,23 +655,28 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
 
         deliverable_mode = str((plan or {}).get("deliverable_mode") or "").strip()
+        path = self._workspace_artifact_manifest_path(manifest_dict)
         content, content_key = self._select_workspace_artifact_content(
             result,
             manifest_dict,
             deliverable_mode=deliverable_mode,
+            manifest_path=path,
         )
         prefer_stream_draft = bool((plan or {}).get("prefer_stream_draft"))
         manifest_needs_body = self._workspace_artifact_manifest_needs_body(manifest_dict)
         if deliverable_mode == "sectioned_workspace_artifact" and manifest_needs_body:
             prefer_stream_draft = True
-        if prefer_stream_draft and manifest_needs_body:
+        if (
+            prefer_stream_draft
+            and manifest_needs_body
+            and not self._workspace_artifact_content_is_complete_body(content)
+        ):
             content = ""
             content_key = ""
         if not deliverable_mode and content_key == "answer":
             if diagnostics:
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return DataFormatter.sanitize(result)
-        path = self._workspace_artifact_manifest_path(manifest_dict)
         if (
             not content
             and allow_stream_draft
@@ -619,6 +791,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 content=content,
                 trusted_refs=trusted_refs,
             )
+            handoff = self._handoff_workspace_artifact_remaining_work_to_verifier(
+                result,
+                diagnostics=diagnostics,
+                path=ref["path"],
+                source=source,
+                content_key=content_key,
+            )
+            if handoff is not None:
+                delivery_record["remaining_work_handoff"] = DataFormatter.sanitize(handoff)
             result["artifact_manifest"] = self._compact_workspace_artifact_manifest_for_hot_path(
                 manifest_dict,
                 trusted_refs=trusted_refs,
@@ -762,6 +943,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             content=content,
             trusted_refs=trusted_refs,
         )
+        handoff = self._handoff_workspace_artifact_remaining_work_to_verifier(
+            result,
+            diagnostics=diagnostics,
+            path=ref["path"],
+            source=source,
+            content_key=content_key,
+        )
+        if handoff is not None:
+            delivery_record["remaining_work_handoff"] = DataFormatter.sanitize(handoff)
         result["artifact_manifest"] = self._compact_workspace_artifact_manifest_for_hot_path(
             manifest_dict,
             trusted_refs=trusted_refs,
@@ -823,6 +1013,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         manifest_dict: Mapping[str, Any],
         *,
         deliverable_mode: str,
+        manifest_path: str = "",
     ) -> tuple[str, str]:
         manifest_content = cls._workspace_artifact_manifest_content(manifest_dict)
         candidates: list[tuple[str, str]] = []
@@ -832,6 +1023,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             value = result.get(key)
             if isinstance(value, str) and value.strip():
                 candidates.append((key, value.strip()))
+        if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
+            candidates.extend(
+                cls._workspace_artifact_evidence_content_candidates(result, manifest_path=manifest_path)
+            )
         if not candidates:
             return "", ""
         if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
@@ -840,6 +1035,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 for item in candidates
                 if item[0]
                 in {"artifact_manifest", "artifact_markdown", "artifact_html", "candidate_final_result", "final_result"}
+                or item[0].startswith("evidence[")
             ]
             answer_candidates = [item for item in candidates if item[0] == "answer"]
             if explicit_candidates:

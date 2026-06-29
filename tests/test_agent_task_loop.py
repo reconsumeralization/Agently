@@ -1576,6 +1576,77 @@ async def test_agent_task_workspace_artifact_delivery_waits_for_remaining_work(t
 
 
 @pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_uses_full_markdown_body_from_evidence(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-evidence-body")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-evidence-body"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    full_body = "# Corrected Report\n\nThis is the complete file body from structured evidence.\n"
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {"path": "reports/final.md", "sections": [{"id": "report"}]},
+            "evidence": [
+                "Source facts were gathered.",
+                f"Corrected reports/final.md content (full body):\n\n{full_body}",
+            ],
+            "remaining_work": [
+                "Write the corrected reports/final.md Workspace artifact using the full body content provided in evidence."
+            ],
+            "ready_for_final_verification": False,
+        },
+        plan={"deliverable_mode": "sectioned_workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact.evidence_body",
+    )
+
+    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    assert written == full_body.strip()
+    assert delivered["workspace_artifact_delivery"]["status"] == "delivered"
+    assert delivered["workspace_artifact_delivery"]["content_key"] == "evidence[1]"
+    assert delivered["workspace_artifact_delivery"]["remaining_work_handoff"]["status"] == (
+        "handed_to_terminal_verification"
+    )
+    assert delivered["remaining_work"] == []
+    assert delivered["ready_for_final_verification"] is True
+    assert delivered["evidence"][1].startswith("Workspace artifact delivered at reports/final.md")
+    assert delivered["workspace_artifact_content_omitted"][0]["field"] == "evidence[1]"
+    assert delivered["diagnostics"][-1]["code"] == (
+        "agent_task.workspace_artifact.remaining_work_handed_to_verifier"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_ignores_non_body_evidence_snippets(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-evidence-snippet")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-evidence-snippet"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {"path": "reports/final.md", "sections": [{"id": "report"}]},
+            "evidence": [
+                "Source excerpt:\n\n# Not The Deliverable\n\nThis is a source page title, not an artifact body.",
+                {"content": "# Still only an untyped snippet\n\nNo artifact role or path marks this as a body."},
+            ],
+            "remaining_work": ["Read README.md before writing the final report."],
+        },
+        plan={"deliverable_mode": "sectioned_workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact.evidence_snippet",
+    )
+
+    assert delivered["artifact_manifest"]["path"] == "reports/final.md"
+    assert delivered["remaining_work"] == ["Read README.md before writing the final report."]
+    assert delivered.get("file_refs") == []
+    assert "workspace_artifact_delivery" not in delivered
+    assert not (workspace.files_root / "reports/final.md").exists()
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_delivery_preserves_existing_full_body(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-preserve-body")
     task = AgentTask.__new__(AgentTask)

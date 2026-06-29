@@ -278,8 +278,15 @@ AgentTask's Workspace artifact writer consumes AgentExecution stream facts:
 natural body text comes from raw delta items, and retry boundaries come from
 `$status` when the provider reports it. This natural-text path does not require
 the draft request to use `.output()`. If the public `type="delta"` replay marker
-`"<$retry>...</$retry>"` reaches the artifact consumer, it is treated as a retry
-control event and is never written or transported as deliverable text.
+	`"<$retry>...</$retry>"` reaches the artifact consumer, it is treated as a retry
+	control event and is never written or transported as deliverable text.
+If a bounded work unit already returned a complete Markdown artifact body in
+structured `evidence`, AgentTask only treats it as a deliverable body when the
+evidence item is explicitly labeled as artifact/body/deliverable/Markdown or
+tied to the manifest path. Untyped source content and source excerpts remain
+evidence snippets, not file bodies. After Workspace write/readback succeeds,
+remaining artifact-write intent is handed to terminal verification instead of
+forcing another iteration just to write the same file.
 When the caller needs separately addressable fields, use Agently
 `.output(..., format=...)` with `xml_field`, `hybrid`, or `yaml_literal` when
 that format fits the payload instead of forcing the long body into compact JSON
