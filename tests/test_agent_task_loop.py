@@ -1798,7 +1798,7 @@ async def test_workspace_artifact_outline_with_remaining_verification_still_draf
         {
             "artifact_manifest": {
                 "path": "final.md",
-                "sections": [
+                "section_outline": [
                     "data boundary",
                     "ticker snapshot",
                     "source list",

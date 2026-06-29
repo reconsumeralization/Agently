@@ -92,6 +92,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         sections = manifest.get("sections")
         if isinstance(sections, Sequence) and not isinstance(sections, str | bytes | bytearray):
             return bool(sections)
+        section_outline = manifest.get("section_outline")
+        if isinstance(section_outline, Sequence) and not isinstance(section_outline, str | bytes | bytearray):
+            return bool(section_outline)
         deliverables = manifest.get("deliverables")
         if isinstance(deliverables, Sequence) and not isinstance(deliverables, str | bytes | bytearray):
             return bool(deliverables)
@@ -101,17 +104,18 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
     def _workspace_artifact_manifest_has_draftable_outline(manifest: Mapping[str, Any] | None) -> bool:
         if not isinstance(manifest, Mapping):
             return False
-        sections = manifest.get("sections")
-        if not isinstance(sections, Sequence) or isinstance(sections, str | bytes | bytearray):
-            return False
-        for section in sections:
-            if isinstance(section, str) and section.strip():
-                return True
-            if isinstance(section, Mapping):
-                for key in ("title", "summary", "intent", "description", "outline"):
-                    value = section.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return True
+        for key in ("sections", "section_outline"):
+            sections = manifest.get(key)
+            if not isinstance(sections, Sequence) or isinstance(sections, str | bytes | bytearray):
+                continue
+            for section in sections:
+                if isinstance(section, str) and section.strip():
+                    return True
+                if isinstance(section, Mapping):
+                    for field in ("title", "summary", "intent", "description", "outline"):
+                        value = section.get(field)
+                        if isinstance(value, str) and value.strip():
+                            return True
         return False
 
     @staticmethod
