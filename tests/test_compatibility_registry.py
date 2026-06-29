@@ -145,6 +145,10 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     )
     assert in_development["companions"]["skills"]["catalog_generation"] == "v2"
     assert in_development["companions"]["skills"]["recommended_bundle"] == "app"
+    artifact_stream_contract = in_development["companions"]["blocks"]["agent_task_artifact_stream_contract"]
+    assert "without .output()" in artifact_stream_contract
+    assert "<$retry>...</$retry> is a consumer-side replay boundary" in artifact_stream_contract
+    assert "targeted_readbacks" in artifact_stream_contract
     execution_contract = in_development["request_input"]["agent_execution_request_scope"]
     assert "AgentExecution" in execution_contract["surface"]
     assert "AgentExecutionResult" in execution_contract["surface"]
@@ -163,6 +167,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "Agent.async_resume" in task_loop_contract["surface"]
     assert "AgentExecution.success_criteria" not in task_loop_contract["surface"]
     assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
+    assert "without .output()" in task_loop_contract["artifact_stream_contract"]
+    assert "targeted_readbacks" in task_loop_contract["artifact_stream_contract"]
     assert "agent.goal(goal_or_goals, success_criteria=None)" in task_loop_contract["contract"]
     assert "4.1.3.8 development target" in task_loop_contract["contract"]
     assert "planner-visible capability summaries" in task_loop_contract["contract"]

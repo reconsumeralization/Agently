@@ -961,7 +961,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         }
         wrote_any = False
         bytes_written = 0
-        draft_stream = draft_execution.get_async_generator(type="specific")
+        draft_stream = draft_execution.get_async_generator(
+            type="specific",
+            specific=["delta", "status", "done"],
+        )
         retry_boundaries: list[dict[str, Any]] = []
 
         async def handle_retry_boundary(retry_boundary: Mapping[str, Any]) -> None:

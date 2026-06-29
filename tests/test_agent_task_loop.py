@@ -1326,6 +1326,72 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_verifier_workspace_artifact_readback_targets_required_sections(tmp_path):
+    agent = _create_agent("agent-task-verifier-targeted-artifact").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="verifier-targeted-artifact",
+        goal="Produce a long source-grounded final artifact.",
+        success_criteria=["The final artifact includes a source list with concrete refs."],
+        workspace=tmp_path / "workspace",
+        options={
+            "execution_prompt_snapshot": {
+                "input": {
+                    "case": {
+                        "output_contract": {
+                            "deliverables": [{"path": "final.md", "media_type": "text/markdown"}],
+                            "sections": ["overview", "analysis", "source list"],
+                        }
+                    }
+                }
+            }
+        },
+    )
+    filler = "\n".join(f"## Analysis {index}\n\nFiller paragraph {index}." for index in range(650))
+    source_section = "\n\n## Source List\n\n- https://example.test/source-a\n- workspace://evidence/ref-a\n"
+    body = "# Long Artifact\n\n" + filler + source_section
+    write_result = await task.workspace.write_file("final.md", body)
+    read_result = await task.workspace.read_file("final.md", max_bytes=4000)
+    ref = {
+        "path": "final.md",
+        "bytes": int(read_result["bytes"]),
+        "sha256": read_result["sha256"],
+        "media_type": write_result.get("media_type"),
+        "content_kind": "text",
+        "role": "workspace_artifact",
+        "source": "test",
+        "preview": str(read_result["content"]),
+        "truncated": True,
+        "read_bytes": int(read_result["read_bytes"]),
+    }
+
+    artifacts = await task._trusted_workspace_artifacts_for_verifier({"artifact_refs": [ref]})
+
+    assert artifacts[0]["readback"]["truncated"] is True
+    assert "https://example.test/source-a" not in artifacts[0]["readback"]["content"]
+    targeted = artifacts[0]["targeted_readbacks"]
+    assert any(item["kind"] == "section_search" and item["query"] == "source list" for item in targeted)
+    assert any("https://example.test/source-a" in item.get("content", "") for item in targeted)
+
+    small_body = "# Small Artifact\n\n## Source List\n\n- https://example.test/source-a\n"
+    small_write_result = await task.workspace.write_file("small.md", small_body)
+    full_read_result = await task.workspace.read_file("small.md", max_bytes=12000)
+    full_ref = {
+        "path": "small.md",
+        "bytes": int(full_read_result["bytes"]),
+        "sha256": full_read_result["sha256"],
+        "media_type": small_write_result.get("media_type"),
+        "content_kind": "text",
+        "role": "workspace_artifact",
+        "source": "test",
+        "truncated": False,
+        "read_bytes": int(full_read_result["read_bytes"]),
+    }
+    full_artifacts = await task._trusted_workspace_artifacts_for_verifier({"artifact_refs": [full_ref]})
+    assert "targeted_readbacks" not in full_artifacts[0]
+
+
+@pytest.mark.asyncio
 async def test_workspace_intermediate_artifact_stays_ref_backed_without_satisfying_final_contract(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-intermediate")
     task = AgentTask.__new__(AgentTask)

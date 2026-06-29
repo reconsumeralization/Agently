@@ -518,8 +518,9 @@ The execution object follows the same consumption style as model responses:
 The default stream is `type="delta"` and yields plain text strings, including
 the reserved `"<$retry>{reason}</$retry>"` boundary when a model stream is
 replayed. The marker is for public text replay consumers only; internal
-artifact writers and structured UIs should consume structured status events
-instead of parsing the marker. Use `type="instant"` for structured execution events:
+artifact writers and structured UIs should prefer structured status events when
+available, and only handle the marker at a plain-text consumption boundary. Use
+`type="instant"` for structured execution events:
 `AgentExecutionStreamData` keeps the familiar `path`, `value`, `delta`, and
 `is_complete` fields and adds route metadata for process-level events.
 

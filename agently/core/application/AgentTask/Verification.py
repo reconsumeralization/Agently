@@ -445,9 +445,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "artifact body only to satisfy a structured field. For source-grounded Workspace artifacts, verify the "
             "artifact body in trusted_workspace_artifacts.readback.content against visible source_refs, Action evidence, "
             "URLs, paths, and refs; a final_result path pointer alone is not enough to satisfy citation or provenance "
-            "requirements. Do not ask a later step to read a Workspace artifact "
-            "solely to paste its full content into final_result. If trusted artifact refs or readback are missing or "
-            "too scoped to verify a material claim, keep is_complete=false and ask for scoped artifact readback or repair. "
+            "requirements. For long artifacts, also inspect trusted_workspace_artifacts.targeted_readbacks for bounded "
+            "section, tail, source-list, risk, reference, or coverage snippets before concluding a required section is "
+            "missing. Do not ask a later step to read a Workspace artifact solely to paste its full content into "
+            "final_result. If trusted artifact refs or readback are missing or too scoped to verify a material claim, "
+            "keep is_complete=false and ask for scoped artifact readback or repair. "
             "When candidate_final_result contains a complete answer/report/artifact body that satisfies the criteria, "
             "use it as final_result. When the plan or success criteria require a Workspace artifact, accept only "
             "trusted Workspace write/readback refs from execution evidence; model-declared file_refs are diagnostics. "
@@ -543,10 +545,165 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                             else ""
                         ),
                     }
+                    targeted_readbacks = await self._trusted_workspace_artifact_targeted_readbacks(ref, read_result)
+                    if targeted_readbacks:
+                        artifact["targeted_readbacks"] = targeted_readbacks
             artifacts.append(artifact)
             if len(artifacts) >= 4:
                 break
         return DataFormatter.sanitize(artifacts)
+
+    async def _trusted_workspace_artifact_targeted_readbacks(
+        self,
+        ref: Mapping[str, Any],
+        read_result: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        path = str(ref.get("path") or read_result.get("path") or "").strip()
+        if not path:
+            return []
+        byte_count = self._coerce_non_negative_int(ref.get("bytes") or read_result.get("bytes"))
+        read_bytes = self._coerce_non_negative_int(read_result.get("read_bytes"))
+        is_scoped_readback = bool(read_result.get("truncated")) or byte_count > read_bytes > 0
+        if not is_scoped_readback:
+            return []
+        max_snippet_bytes = min(_VERIFIER_PROMPT_ITEM_CHARS, 2400)
+        readbacks: list[dict[str, Any]] = []
+
+        if byte_count > read_bytes > 0:
+            offset = max(0, byte_count - max_snippet_bytes)
+            try:
+                tail = await self.workspace.read_file(path, max_bytes=max_snippet_bytes, offset=offset)
+            except Exception as error:
+                readbacks.append(
+                    {
+                        "kind": "tail_window",
+                        "path": path,
+                        "status": "failed",
+                        "offset": offset,
+                        "error": {
+                            "type": error.__class__.__name__,
+                            "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                        },
+                    }
+                )
+            else:
+                readbacks.append(
+                    {
+                        "kind": "tail_window",
+                        "path": str(tail.get("path") or path),
+                        "status": "read",
+                        "offset": int(tail.get("offset") or offset),
+                        "truncated": bool(tail.get("truncated")),
+                        "content": self._truncate_prompt_text(str(tail.get("content") or ""), max_snippet_bytes),
+                    }
+                )
+
+        max_file_bytes = max(byte_count, _VERIFIER_PROMPT_VALUE_CHARS)
+        for query in self._workspace_artifact_verifier_target_queries():
+            if len(readbacks) >= 8:
+                break
+            match = await self._workspace_artifact_search_readback(path, query, max_file_bytes=max_file_bytes)
+            if match is not None:
+                readbacks.append(match)
+        return DataFormatter.sanitize(readbacks)
+
+    async def _workspace_artifact_search_readback(
+        self,
+        path: str,
+        query: str,
+        *,
+        max_file_bytes: int,
+    ) -> dict[str, Any] | None:
+        for search_query in self._workspace_artifact_query_variants(query):
+            try:
+                matches = await self.workspace.search_files(
+                    search_query,
+                    path=path,
+                    max_results=1,
+                    context_lines=4,
+                    max_snippet_bytes=min(_VERIFIER_PROMPT_ITEM_CHARS, 2400),
+                    max_file_bytes=max_file_bytes,
+                )
+            except Exception:
+                continue
+            if not matches:
+                continue
+            match = matches[0]
+            return {
+                "kind": "section_search",
+                "path": str(match.get("path") or path),
+                "query": query,
+                "matched_query": search_query,
+                "line_start": match.get("line_start"),
+                "line_end": match.get("line_end"),
+                "truncated": bool(match.get("truncated")),
+                "content": self._truncate_prompt_text(str(match.get("snippet") or ""), _VERIFIER_PROMPT_ITEM_CHARS),
+            }
+        return None
+
+    def _workspace_artifact_verifier_target_queries(self) -> list[str]:
+        queries: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            text = " ".join(text.split())
+            if len(text) > 120:
+                return
+            key = text.casefold()
+            if key not in {item.casefold() for item in queries}:
+                queries.append(text)
+
+        def collect_section(value: Any) -> None:
+            if isinstance(value, str):
+                add(value)
+                return
+            if isinstance(value, Mapping):
+                for key in ("title", "name", "heading", "id"):
+                    add(value.get(key))
+                return
+
+        def collect_contract(value: Any) -> None:
+            if not isinstance(value, Mapping):
+                return
+            sections = value.get("sections")
+            if isinstance(sections, Sequence) and not isinstance(sections, str | bytes | bytearray):
+                for section in sections:
+                    collect_section(section)
+
+        collect_contract(self._agent_task_option("output_contract", None))
+        execution_prompt = self._execution_prompt_context()
+        collect_contract(execution_prompt.get("output_contract"))
+        prompt_input = execution_prompt.get("input")
+        if isinstance(prompt_input, Mapping):
+            collect_contract(prompt_input.get("output_contract"))
+            case = prompt_input.get("case")
+            if isinstance(case, Mapping):
+                collect_contract(case.get("output_contract"))
+
+        for query in (
+            "source",
+            "sources",
+            "source list",
+            "references",
+            "citations",
+            "risk",
+            "risks",
+            "uncertainty",
+            "coverage",
+        ):
+            add(query)
+        return queries[:12]
+
+    @staticmethod
+    def _workspace_artifact_query_variants(query: str) -> list[str]:
+        variants: list[str] = []
+        for value in (query, query.title(), query.lower(), query.upper()):
+            text = str(value or "").strip()
+            if text and text not in variants:
+                variants.append(text)
+        return variants
 
     @classmethod
     def _workspace_artifact_verifier_readback_bytes(cls, ref: Mapping[str, Any]) -> int:
