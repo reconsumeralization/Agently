@@ -282,9 +282,11 @@ for chunk in result.get_generator(type="delta"):
 ```
 
 The marker reason XML-escapes `<`, `>`, and `&` from the provider message.
-`$status` remains the structured source of truth. A text-only stream cannot
-make a sentinel collision-free, so consumers that must preserve a literal model
-chunk containing `"<$retry>"` should use `instant`, `specific`, or `all`.
+When structured events are available, `$status` is the preferred retry control
+record. When a consumer chooses plain `delta`, the marker is the corresponding
+public replay boundary. A text-only stream cannot make a sentinel collision-free,
+so consumers that must preserve a literal model chunk containing `"<$retry>"`
+should use `instant`, `specific`, or `all`.
 
 An AgentExecution projects the same status as a structured process item and
 adds the originating request/run lineage in `item.meta`. Use `instant` or

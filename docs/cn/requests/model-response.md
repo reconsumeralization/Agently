@@ -273,8 +273,10 @@ for chunk in result.get_generator(type="delta"):
 ```
 
 标记里的 reason 会对 provider 错误消息中的 `<`、`>`、`&` 做 XML text 转义。
-`$status` 仍是结构化事实来源。纯文本流无法让 sentinel 完全无碰撞；必须保留模型输出中
-包含 `"<$retry>"` 的文本 chunk 时，应改用 `instant`、`specific` 或 `all`。
+当结构化事件可用时，`$status` 是优先使用的 retry 控制记录；当消费侧选择纯
+`delta` 时，这个 marker 就是对应的公开 replay boundary。纯文本流无法让 sentinel
+完全无碰撞；必须保留模型输出中包含 `"<$retry>"` 的文本 chunk 时，应改用
+`instant`、`specific` 或 `all`。
 
 AgentExecution 会把同一状态投影成结构化 process item，并在 `item.meta` 中加入来源
 request/run lineage。消费侧需要结构化 retry 事实时，使用 `instant` 或 `specific`：
