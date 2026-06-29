@@ -61,7 +61,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
         result_status = self._taskboard_terminal_status(revision, schedule)
         evidence_view = build_task_board_evidence_view(revision).to_dict()
-        candidate_final_result = await self._taskboard_candidate_final_result_with_readback(revision, evidence_view)
+        candidate_final_result = self._taskboard_candidate_final_result(revision)
+        final_refs = self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view))
         can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
         if result_status != "completed" and not can_attempt_degraded_final:
             self.status = "blocked" if result_status == "blocked" else "error"
@@ -93,7 +94,6 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         final = self._normalize_taskboard_final_result(final, candidate_final_result)
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         final_verification: dict[str, Any] | None = None
-        final_refs = self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view))
         if accepted:
             final_execution_result = {
                 "status": "completed",
@@ -311,23 +311,6 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         if leaf_fallback_candidates:
             return max(leaf_fallback_candidates, key=len, default="")
         return max(fallback_candidates, key=len, default="")
-
-    async def _taskboard_candidate_final_result_with_readback(
-        self,
-        revision: Any,
-        evidence_view: Mapping[str, Any],
-    ) -> str:
-        hot_candidate = self._taskboard_candidate_final_result(revision)
-        readback_candidate = await self._taskboard_workspace_candidate_from_refs(evidence_view)
-        if not readback_candidate:
-            return hot_candidate
-        if (
-            not hot_candidate
-            or len(readback_candidate) > len(hot_candidate)
-            or self._looks_like_workspace_artifact_placeholder(hot_candidate)
-        ):
-            return readback_candidate
-        return hot_candidate
 
     @classmethod
     def _normalize_taskboard_final_result(cls, final: dict[str, Any], candidate_final_result: str) -> dict[str, Any]:

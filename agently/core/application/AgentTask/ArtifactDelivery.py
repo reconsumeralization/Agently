@@ -15,7 +15,13 @@
 
 from __future__ import annotations
 
+import html
+import re
+
 from .TaskShared import *
+
+
+_PUBLIC_DELTA_RETRY_MARKER_RE = re.compile(r"\A<\$retry(?::(?P<label>[^>]*)?)?>(?P<body>.*?)</\$retry>\Z", re.DOTALL)
 
 
 class AgentTaskArtifactMixin(AgentTaskMixinBase):
@@ -106,6 +112,21 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             "next_attempt_index": value.get("next_attempt_index"),
             "reason": str(value.get("reason") or "").strip(),
             "source": "structured_status",
+        }
+
+    @staticmethod
+    def _workspace_artifact_retry_boundary_from_public_delta_marker(value: Any) -> dict[str, Any] | None:
+        text = str(value or "")
+        marker = _PUBLIC_DELTA_RETRY_MARKER_RE.match(text)
+        if marker is None:
+            return None
+        reason = html.unescape(str(marker.group("body") or marker.group("label") or "")).strip()
+        return {
+            "status": "retrying",
+            "attempt_index": None,
+            "next_attempt_index": None,
+            "reason": reason or "Retrying model request.",
+            "source": "delta_replay_marker",
         }
 
     @staticmethod
@@ -940,8 +961,57 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         }
         wrote_any = False
         bytes_written = 0
-        draft_stream = draft_execution.get_async_generator(type="instant")
+        draft_stream = draft_execution.get_async_generator(type="specific")
         retry_boundaries: list[dict[str, Any]] = []
+
+        async def handle_retry_boundary(retry_boundary: Mapping[str, Any]) -> None:
+            nonlocal wrote_any, bytes_written
+            retry_boundaries.append(DataFormatter.sanitize(dict(retry_boundary)))
+            delivery_record["retry_boundaries"] = DataFormatter.sanitize(retry_boundaries)
+            if wrote_any:
+                await self.workspace.write_file(path, "", append=False)
+            wrote_any = False
+            bytes_written = 0
+            if iteration_index is not None:
+                await self._emit(
+                    f"agent_task.iteration.{iteration_index}.workspace_artifact_draft.retry",
+                    {"path": path, "retry_boundary": retry_boundary},
+                    meta={
+                        "task_id": self.id,
+                        "iteration": iteration_index,
+                        "stage": "workspace_artifact_draft",
+                        "stream_kind": "workspace_artifact_draft_retry",
+                        "path": path,
+                    },
+                )
+
+        async def write_chunk(chunk: str) -> None:
+            nonlocal wrote_any, bytes_written
+            if not chunk:
+                return
+            marker_boundary = self._workspace_artifact_retry_boundary_from_public_delta_marker(chunk)
+            if marker_boundary is not None:
+                await handle_retry_boundary(marker_boundary)
+                return
+            await self.workspace.write_file(path, chunk, append=wrote_any)
+            wrote_any = True
+            bytes_written += len(chunk.encode("utf-8"))
+            if iteration_index is not None:
+                await self._emit(
+                    f"agent_task.iteration.{iteration_index}.workspace_artifact_draft.delta",
+                    {"path": path, "bytes_written": bytes_written},
+                    event_type="delta",
+                    delta=chunk,
+                    is_complete=False,
+                    meta={
+                        "task_id": self.id,
+                        "iteration": iteration_index,
+                        "stage": "workspace_artifact_draft",
+                        "stream_kind": "workspace_artifact_draft",
+                        "path": path,
+                    },
+                )
+
         try:
             while True:
                 try:
@@ -952,6 +1022,17 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 except StopAsyncIteration:
                     break
                 if isinstance(stream_item, str):
+                    await write_chunk(stream_item)
+                    continue
+                if isinstance(stream_item, tuple) and len(stream_item) >= 2:
+                    event, data = stream_item[0], stream_item[1]
+                    if event == "status":
+                        retry_boundary = self._workspace_artifact_retry_boundary_from_status("$status", data)
+                        if retry_boundary is not None:
+                            await handle_retry_boundary(retry_boundary)
+                        continue
+                    if event == "delta":
+                        await write_chunk(str(data))
                     continue
                 item_path = str(getattr(stream_item, "path", "") or "")
                 retry_boundary = self._workspace_artifact_retry_boundary_from_status(
@@ -959,48 +1040,12 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     getattr(stream_item, "value", None),
                 )
                 if retry_boundary is not None:
-                    retry_boundaries.append(DataFormatter.sanitize(retry_boundary))
-                    delivery_record["retry_boundaries"] = DataFormatter.sanitize(retry_boundaries)
-                    if wrote_any:
-                        await self.workspace.write_file(path, "", append=False)
-                    wrote_any = False
-                    bytes_written = 0
-                    if iteration_index is not None:
-                        await self._emit(
-                            f"agent_task.iteration.{iteration_index}.workspace_artifact_draft.retry",
-                            {"path": path, "retry_boundary": retry_boundary},
-                            meta={
-                                "task_id": self.id,
-                                "iteration": iteration_index,
-                                "stage": "workspace_artifact_draft",
-                                "stream_kind": "workspace_artifact_draft_retry",
-                                "path": path,
-                            },
-                        )
+                    await handle_retry_boundary(retry_boundary)
                     continue
                 if getattr(stream_item, "event_type", None) != "delta":
                     continue
                 chunk = str(getattr(stream_item, "delta", None) or "")
-                if not chunk:
-                    continue
-                await self.workspace.write_file(path, chunk, append=wrote_any)
-                wrote_any = True
-                bytes_written += len(chunk.encode("utf-8"))
-                if iteration_index is not None:
-                    await self._emit(
-                        f"agent_task.iteration.{iteration_index}.workspace_artifact_draft.delta",
-                        {"path": path, "bytes_written": bytes_written},
-                        event_type="delta",
-                        delta=chunk,
-                        is_complete=False,
-                        meta={
-                            "task_id": self.id,
-                            "iteration": iteration_index,
-                            "stage": "workspace_artifact_draft",
-                            "stream_kind": "workspace_artifact_draft",
-                            "path": path,
-                        },
-                    )
+                await write_chunk(chunk)
             draft_meta = await self._await_task_request(
                 draft_execution.async_get_meta(),
                 stage="workspace_artifact_draft_meta",
@@ -1166,61 +1211,6 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             }
         )
         return DataFormatter.sanitize(delivery_record)
-
-    async def _taskboard_workspace_candidate_from_refs(self, evidence_view: Mapping[str, Any]) -> str:
-        candidates: list[str] = []
-        diagnostics: list[dict[str, Any]] = []
-        for ref in self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view)):
-            if not self._is_trusted_workspace_artifact_ref(ref):
-                continue
-            path = str(ref.get("path") or "").strip()
-            if not path:
-                continue
-            declared_bytes = self._coerce_non_negative_int(ref.get("bytes"))
-            max_bytes = declared_bytes + 1 if declared_bytes > 0 else max(_WORKSPACE_ARTIFACT_PREVIEW_BYTES, 200000)
-            try:
-                read_result = await self.workspace.read_file(path, max_bytes=max_bytes)
-            except Exception as error:
-                diagnostics.append(
-                    {
-                        "status": "failed",
-                        "path": path,
-                        "error": {
-                            "type": error.__class__.__name__,
-                            "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                        },
-                    }
-                )
-                continue
-            content = read_result.get("content")
-            truncated = bool(read_result.get("truncated"))
-            if isinstance(content, str) and content.strip() and not truncated:
-                candidates.append(content.strip())
-                diagnostics.append(
-                    {
-                        "status": "read",
-                        "path": str(read_result.get("path") or path),
-                        "bytes": int(read_result.get("bytes") or 0),
-                        "sha256": str(read_result.get("sha256") or ""),
-                        "read_bytes": int(read_result.get("read_bytes") or 0),
-                    }
-                )
-            else:
-                diagnostics.append(
-                    {
-                        "status": "skipped",
-                        "path": str(read_result.get("path") or path),
-                        "reason": "empty_or_truncated_workspace_artifact_readback",
-                        "bytes": int(read_result.get("bytes") or 0),
-                        "read_bytes": int(read_result.get("read_bytes") or 0),
-                        "truncated": truncated,
-                    }
-                )
-        if diagnostics:
-            self.diagnostics.setdefault("taskboard_final_candidate_readback", []).extend(
-                DataFormatter.sanitize(diagnostics)
-            )
-        return max(candidates, key=len, default="")
 
     @staticmethod
     def _is_trusted_workspace_artifact_ref(ref: Mapping[str, Any]) -> bool:

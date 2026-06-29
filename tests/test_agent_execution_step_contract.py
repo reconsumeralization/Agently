@@ -4597,8 +4597,10 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
-    assert result["final_result"] == "# Control Result\n\nComplete deliverable body."
+    assert result["final_result"] == "# Control Result"
     assert card_result["status"] == "completed"
+    assert card_result["preview"]["workspace_artifact_delivery"]["status"] == "delivered"
+    assert "Complete deliverable body." in card_result["preview"]["workspace_artifact_delivery"]["file_refs"][0]["preview"]
     assert card_result["metadata"]["execution_kind"] == "taskboard_control_request"
     block_carrier = card_result["metadata"]["block_carrier"]
     assert block_carrier["work_unit"]["origin"] == "taskboard_card"
@@ -4762,13 +4764,16 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
-    assert marker in result["final_result"]
+    assert result["final_result"] == "# Sectioned Report"
+    assert marker not in result["final_result"]
     assert delivered["mode"] == "sectioned_workspace_artifact"
     assert delivered["readback"]["bytes"] == len(expected_workspace_body.encode("utf-8"))
     assert delivered["readback"]["sha256"]
     assert taskboard["revision"]["card_results"]["synthesize"]["preview"]["workspace_artifact_delivery"]["mode"] == (
         "sectioned_workspace_artifact"
     )
+    assert final_requests
+    assert all(marker not in request for request in final_requests)
     assert tick_completed_items
     for item in tick_completed_items:
         value_text = json.dumps(DataFormatter.sanitize(getattr(item, "value", None)), ensure_ascii=False)

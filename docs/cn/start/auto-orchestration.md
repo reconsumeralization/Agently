@@ -250,12 +250,16 @@ readback。冷证据会记录 `path`、`bytes`、`sha256`、有界 preview 和 `
 Markdown / plain text，不必为了携带正文而声明 `.output()`；如果调用方需要可独立寻址
 的字段，可在适合目标模型和消费方的情况下使用
 `.output(..., format=...)` 的 `xml_field`、`hybrid` 或 `yaml_literal`；AgentTask 的
-Workspace artifact writer 消费的是结构化 AgentExecution stream item 中的原始文本
-delta 和 `$status` retry 事实，因此这条自然文本路径不依赖 public `type="delta"` replay
-marker。状态、证据和校验保持为单独的紧凑 judgment/readback contract。若 AgentTask 必须交付可信文件
+Workspace artifact writer 消费的是 AgentExecution stream 事实：自然正文来自原始
+delta item，retry 边界优先来自 provider 报告的 `$status`。因此这条自然文本路径不要求
+draft request 使用 `.output()`。如果 public `type="delta"` replay marker
+`"<$retry>...</$retry>"` 到达 artifact consumer，它会被当作 retry control event
+处理，绝不会写入或转运为 deliverable text。状态、证据和校验保持为单独的紧凑 judgment/readback contract。若 AgentTask 必须交付可信文件
 artifact，再使用 `artifact_manifest.sections` 加 Workspace readback。模型声明的
 `file_refs` 只作为 diagnostics，只有框架完成 Workspace 写入和读回后才是可信证据，
-同时仍保留真实 `final.md` 或其他成品文件供 host 复核。
+同时仍保留真实 `final.md` 或其他成品文件供 host 复核。TaskBoard finalization 会把
+file-backed deliverable 正文留在 Workspace；返回的 `final_result` 应保持为简洁摘要或
+path/ref pointer，而不是文件正文的第二份拷贝。
 
 同一套 ref-backed 路径也可以用于中间过程。某个步骤可以下载文件、保存网页快照、
 写入生成代码、沉淀搜索笔记或类似 memory 的任务笔记，或把大段抽取文本持久化为 Workspace / Action artifact refs。

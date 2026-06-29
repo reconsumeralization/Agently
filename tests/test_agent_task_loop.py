@@ -1999,10 +1999,66 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
     delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
     assert delivery["status"] == "delivered"
     assert delivery["mode"] == "streamed_workspace_artifact"
-    assert delivery["retry_boundaries"][0]["source"] == "delta_replay_marker"
+    assert delivery["retry_boundaries"][0]["source"] == "structured_status"
     assert delivery["retry_boundaries"][0]["reason"] == "transient provider disconnect"
     assert delivery["file_refs"][0]["path"] == "final.md"
     assert meta["iterations"][0]["verification"]["reason"] == "trusted streamed Workspace artifact readback is present"
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_stream_draft_consumes_public_retry_marker_without_writing(tmp_path):
+    class WorkspaceArtifactDraftPublicMarkerRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactDraftPublicMarkerRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Write only the final Markdown artifact body for the AgentTask" in text:
+                yield "message", "# Partial attempt that must be discarded\n\n"
+                yield "message", "<$retry>transient provider disconnect</$retry>"
+                yield "message", "# Streamed Report\n\n"
+                yield "message", "This body was written after the public retry marker.\n"
+                return
+            yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-public-marker-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="agent-task-workspace-artifact-public-marker-plugins",
+    )
+    plugin_manager.register("ModelRequester", WorkspaceArtifactDraftPublicMarkerRequester, activate=True)
+    agent = Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="agent-task-workspace-artifact-public-marker",
+    )
+    task = AgentTask(
+        agent,
+        task_id="workspace-artifact-public-marker",
+        goal="Create the final report as a Workspace artifact.",
+        success_criteria=["A final report file is written and read back."],
+        workspace=tmp_path / "task-workspace",
+    )
+
+    delivery = await task._stream_workspace_artifact_draft(
+        path="final.md",
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_result={"artifact_manifest": {"path": "final.md"}},
+        execution_meta={"status": "completed", "logs": {"action_logs": [], "route_logs": {}}},
+        source="test.workspace_artifact_draft.public_marker",
+        context_pack=None,
+        iteration_index=1,
+    )
+
+    assert delivery is not None
+    assert delivery["status"] == "delivered"
+    assert delivery["retry_boundaries"][0]["source"] == "delta_replay_marker"
+    assert delivery["retry_boundaries"][0]["reason"] == "transient provider disconnect"
+    readback = await task.workspace.read_file("final.md")
+    assert "Streamed Report" in readback["content"]
+    assert "This body was written after the public retry marker." in readback["content"]
+    assert "<$retry>" not in readback["content"]
+    assert "Partial attempt" not in readback["content"]
 
 
 @pytest.mark.asyncio

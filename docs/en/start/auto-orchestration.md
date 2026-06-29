@@ -274,9 +274,12 @@ input uses path/ref handles, bounded content or preview, and truncation status.
 For long, sectioned, or prose-heavy
 deliverables, choose the content carrier deliberately. A single freeform
 document can draft as natural Markdown/plain text with no `.output()` contract.
-AgentTask's Workspace artifact writer consumes structured AgentExecution stream
-items for raw text deltas and `$status` retry facts, so this natural-text path
-does not depend on the public `type="delta"` replay marker.
+AgentTask's Workspace artifact writer consumes AgentExecution stream facts:
+natural body text comes from raw delta items, and retry boundaries come from
+`$status` when the provider reports it. This natural-text path does not require
+the draft request to use `.output()`. If the public `type="delta"` replay marker
+`"<$retry>...</$retry>"` reaches the artifact consumer, it is treated as a retry
+control event and is never written or transported as deliverable text.
 When the caller needs separately addressable fields, use Agently
 `.output(..., format=...)` with `xml_field`, `hybrid`, or `yaml_literal` when
 that format fits the payload instead of forcing the long body into compact JSON
@@ -286,6 +289,9 @@ artifact, use `artifact_manifest.sections` plus Workspace readback.
 Model-declared `file_refs` are diagnostics only until the framework has
 produced this Workspace readback evidence, preserving a real `final.md` or other
 deliverable for host-side review.
+TaskBoard finalization keeps file-backed deliverable bodies in Workspace; the
+returned `final_result` should stay a concise summary or path/ref pointer rather
+than a second copy of the file body.
 
 The same ref-backed path is also valid for intermediate work. A step may
 download a file, save a webpage snapshot, write generated code, keep search
