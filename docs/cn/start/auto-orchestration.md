@@ -268,7 +268,8 @@ path/ref pointer，而不是文件正文的第二份拷贝。
 readback work unit 的热 payload 也只使用同一类紧凑 refs；完整 refs 留在冷侧
 Workspace/Blocks 证据中，用于程序化 readback 和审计。这些中间 refs 是执行证据，不是最终交付物存在的证明。发现了某个 URL、路径、下载或
 快照 ref，也不代表已经读过其内容；在有界 readback 或 content preview 可见之前，
-它仍是 `ref_only`。source-grounded 交付物要么用结构化 `target_refs` 请求读取这些
+它仍是 `ref_only`。显式 `content`、`excerpt` 或 `snippet` 字段只算可见片段的
+有界 preview，不代表已经读过整份文件。source-grounded 交付物要么用结构化 `target_refs` 请求读取这些
 未读 refs，要么把它们标为 discovered-only，不能声称事实来自未读内容。如果 Action
 artifact readback 暴露了已物化下载文件的 Workspace `file_refs`，TaskBoard readback
 会把这些嵌套 refs 提升为 card-level `file_refs`，让后续工作可以继续用 Workspace
@@ -280,6 +281,9 @@ card 可以写入该最终路径，避免 repair 只反复产出 working evidenc
 Flat source refs 也遵守同一边界：repository clone/list manifest 中发现的文件路径在文件读取、
 artifact readback 或有界 content preview 出现前都是 `ref_only`。verifier 或 repair
 planner 可以复用这些精确路径作为检索目标，但不能把它们当成文件内容事实的证明。
+TaskBoard final verification 也会接收 board-level source refs，并保留同一套
+`content_state` 边界；final synthesis 不能把 discovered path 升级为 source-content
+evidence，除非已经有有界 preview/readback。
 
 Flat 和 TaskBoard 的 work unit 也会收到同一份 task context contract，其中包含
 紧凑的 `current_time` 事实：`utc`，以及本地时区可识别时的 `local` 和

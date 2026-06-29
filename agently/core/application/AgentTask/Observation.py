@@ -828,6 +828,14 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         action_ids = [record["id"] for record in action_records if record.get("id")]
         action_statuses = {record["id"]: record.get("status", "") for record in action_records if record.get("id")}
         source_refs = cls._collect_source_refs_from_action_records(action_records)
+        raw_explicit_source_refs = logs.get("source_refs")
+        if isinstance(raw_explicit_source_refs, Sequence) and not isinstance(
+            raw_explicit_source_refs, str | bytes | bytearray
+        ):
+            source_refs = cast(
+                list[dict[str, Any]],
+                cls._dedupe_ref_records([*source_refs, *raw_explicit_source_refs]),
+            )[:32]
         # Risk status is judged by the final status per action id (last record
         # wins), so an action that failed and then succeeded within the same step
         # is treated as recovered and does not block verification.
@@ -1305,7 +1313,15 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     def _source_ref_content_state(container: Any, *, field: str) -> str:
         if not isinstance(container, Mapping):
             return "ref_only"
-        for key in ("content", "content_preview", "text"):
+        for key in (
+            "content",
+            "content_preview",
+            "content_snippet",
+            "evidence_snippet",
+            "excerpt",
+            "snippet",
+            "text",
+        ):
             value = container.get(key)
             if isinstance(value, str) and value.strip():
                 return "bounded_readback_available"

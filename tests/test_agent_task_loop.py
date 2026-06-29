@@ -5333,6 +5333,96 @@ def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(t
     )
 
 
+def test_source_refs_treat_excerpt_and_snippet_as_bounded_readback():
+    action_refs = AgentTask._collect_source_refs_from_action_records(
+        [
+            {
+                "id": "read_action_artifact",
+                "status": "success",
+                "action_call_id": "call-artifact",
+                "result_preview": {
+                    "key_files": [
+                        {
+                            "path": "docs/guide/configuration.md",
+                            "excerpt": "Configuration excerpt read from the cloned repository artifact.",
+                        },
+                        {
+                            "path": "docs/guide/dl-analogy.md",
+                            "snippet": "Bounded snippet from the deep learning analogy guide.",
+                        },
+                    ]
+                },
+            }
+        ]
+    )
+    action_ref_states = {
+        ref["value"]: ref["content_state"]
+        for ref in action_refs
+        if ref.get("field") == "path"
+    }
+    assert action_ref_states["docs/guide/configuration.md"] == "bounded_readback_available"
+    assert action_ref_states["docs/guide/dl-analogy.md"] == "bounded_readback_available"
+
+    taskboard_refs = AgentTask._collect_taskboard_source_refs(
+        {
+            "cards": [
+                {
+                    "preview": {
+                        "path": "docs/guide/skill-document.md",
+                        "excerpt": "Bounded excerpt from the skill document guide.",
+                    }
+                }
+            ]
+        }
+    )
+
+    assert taskboard_refs[0]["path"] == "docs/guide/skill-document.md"
+    assert taskboard_refs[0]["content_state"] == "bounded_readback_available"
+
+
+def test_taskboard_final_source_refs_are_visible_to_verifier_summary(tmp_path):
+    agent = _create_agent("agent-task-taskboard-final-source-refs").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Create a source-grounded repository report.",
+        success_criteria=["The report grounds claims in files that were read."],
+        execution="taskboard",
+    )
+    evidence_view = {
+        "source_refs": [
+            {
+                "path": "docs/guide/configuration.md",
+                "content_state": "bounded_readback_available",
+                "excerpt": "Configuration guide excerpt.",
+            },
+            {
+                "path": "docs/guide/unread.md",
+                "content_state": "ref_only",
+            },
+        ]
+    }
+
+    final_source_refs = task._taskboard_final_source_refs_from_evidence_view(evidence_view)
+    summary = task._execution_log_summary(
+        {
+            "status": "completed",
+            "logs": {
+                "artifact_refs": [{"path": "final.md", "role": "workspace_artifact"}],
+                "source_refs": final_source_refs,
+            },
+        }
+    )
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(summary)
+    planner_anchors = AgentTask._planner_evidence_anchors_from_summary(summary)
+
+    verifier_states = {ref["path"]: ref["content_state"] for ref in verifier_summary["source_refs"]}
+    planner_states = {ref["value"]: ref["content_state"] for ref in planner_anchors["source_refs"]}
+    assert verifier_states["docs/guide/configuration.md"] == "bounded_readback_available"
+    assert verifier_states["docs/guide/unread.md"] == "ref_only"
+    assert planner_states["docs/guide/configuration.md"] == "bounded_readback_available"
+    assert planner_states["docs/guide/unread.md"] == "ref_only"
+
+
 def test_flat_source_refs_distinguish_ref_only_repo_manifest_paths(tmp_path):
     agent = _create_agent("agent-task-ref-only-repo-manifest").use_workspace(tmp_path / "task-workspace")
     task = AgentTask(

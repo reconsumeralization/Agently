@@ -75,7 +75,13 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
             return "ref_only"
 
         readback_keys = (
+            "content",
             "content_preview",
+            "content_snippet",
+            "evidence_snippet",
+            "excerpt",
+            "snippet",
+            "text",
             "value_preview",
             "readback_preview",
             "bounded_preview",

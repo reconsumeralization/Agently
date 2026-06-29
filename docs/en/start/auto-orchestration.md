@@ -303,7 +303,9 @@ same compact refs; complete refs remain in cold Workspace/Blocks evidence for
 programmatic readback and audit. These intermediate refs are execution evidence,
 not final deliverable proof. A discovered URL, path, download, or
 snapshot ref is also not evidence that the content has been read; it remains
-`ref_only` until a bounded readback or content preview is visible.
+`ref_only` until a bounded readback or content preview is visible. Explicit
+`content`, `excerpt`, or `snippet` fields count as bounded previews only for the
+visible excerpt, not for the whole file.
 Source-grounded deliverables should either request structured `target_refs`
 readback for unread refs or label them as discovered-only rather than claiming
 facts from them. If an Action artifact readback exposes Workspace `file_refs`
@@ -320,6 +322,9 @@ Flat source refs carry the same boundary: repository clone/list manifest paths
 are `ref_only` until a file read, artifact readback, or bounded content preview
 is visible. A verifier or repair planner can reuse exact paths as retrieval
 targets, but not as proof of file contents.
+TaskBoard final verification receives board-level source refs with the same
+`content_state` boundary, so final synthesis cannot upgrade a discovered path
+into source-content evidence without a bounded preview/readback.
 
 Flat and TaskBoard work units also receive a task context contract with
 compact `current_time` facts: `utc`, plus `local` and `timezone` when the local

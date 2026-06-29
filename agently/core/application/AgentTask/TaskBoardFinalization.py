@@ -57,6 +57,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         ordered = sorted(enumerate(refs), key=priority)
         return [dict(DataFormatter.sanitize(ref)) for _, ref in ordered]
 
+    @classmethod
+    def _taskboard_final_source_refs_from_evidence_view(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return cls._collect_taskboard_source_refs(evidence_view, max_refs=32)
+
     async def _finalize_taskboard(self, revision: Any, *, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
         result_status = self._taskboard_terminal_status(revision, schedule)
@@ -95,6 +99,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         final_verification: dict[str, Any] | None = None
         if accepted:
+            final_source_refs = self._taskboard_final_source_refs_from_evidence_view(evidence_view)
             final_execution_result = {
                 "status": "completed",
                 "accepted": accepted,
@@ -112,7 +117,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     "execution_strategy": self.execution_strategy,
                     "effective_execution_strategy": self.effective_execution_strategy,
                 },
-                "logs": {"artifact_refs": final_refs},
+                "logs": {"artifact_refs": final_refs, "source_refs": final_source_refs},
                 "workspace_refs": {"agent_task_artifacts": final_refs},
                 "diagnostics": {"taskboard_terminal_status": result_status},
             }
@@ -242,6 +247,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "allow_degraded_final": allow_degraded_final,
                 "schedule": DataFormatter.sanitize(schedule.to_dict() if schedule is not None else {}),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
+                "source_ref_policy": self._taskboard_source_ref_policy(),
+                "source_refs": self._taskboard_final_source_refs_from_evidence_view(evidence_view),
                 "revision": self._compact_taskboard_revision_for_prompt(revision),
                 "candidate_final_result": self._compact_verifier_prompt_value(candidate_final_result),
                 "execution_prompt": self._execution_prompt_context(),
@@ -256,6 +263,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             "instead of rewriting it into a shorter summary. For source-grounded tasks, the final_result must include "
             "the concrete source URLs, file paths, or evidence refs that support the deliverable; source titles or "
             "general source names without verifier-visible URL/path refs are not enough when refs are available. "
+            "Apply source_ref_policy: source_refs with content_state='ref_only' are retrieval targets only, while "
+            "source refs marked bounded_readback_available can support only the visible bounded preview/excerpt. "
             "If allow_degraded_final is true, the board has stopped with failed, blocked, skipped, or pending "
             "cards. You may still accept only when the completed/degraded evidence is enough to satisfy the "
             "user goal and success criteria with explicit missing-source or degraded-source boundaries in "

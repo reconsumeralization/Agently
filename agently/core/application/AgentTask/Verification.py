@@ -238,6 +238,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 continue
             field = str(ref.get("field") or "").strip()
             value = str(ref.get("value") or "").strip()
+            if not field and not value:
+                path_value = str(ref.get("path") or "").strip()
+                if path_value:
+                    field = "path"
+                    value = path_value
             action_call_id = str(ref.get("action_call_id") or "").strip()
             if field not in allowed_fields or not value:
                 continue

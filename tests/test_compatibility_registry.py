@@ -169,6 +169,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
     assert "without .output()" in task_loop_contract["artifact_stream_contract"]
     assert "targeted_readbacks" in task_loop_contract["artifact_stream_contract"]
+    assert "content/content_preview/text/excerpt/snippet" in task_loop_contract["contract"]
+    assert "TaskBoard final verification carries board source_refs" in task_loop_contract["contract"]
     assert "agent.goal(goal_or_goals, success_criteria=None)" in task_loop_contract["contract"]
     assert "4.1.3.8 development target" in task_loop_contract["contract"]
     assert "planner-visible capability summaries" in task_loop_contract["contract"]
