@@ -704,6 +704,89 @@ def test_real_sample_runner_exposes_structured_action_data_without_artifact_refs
     assert "last_sale_price" in json.dumps(action_items[0]["preview"], ensure_ascii=False)
 
 
+def test_real_sample_runner_keeps_nested_action_readback_excerpts_for_judge():
+    runner = _load_real_samples_runner()
+    meta = {
+        "logs": {
+            "route_logs": {
+                "agent_task": {
+                    "result": {
+                        "taskboard": {
+                            "evidence_view": {
+                                "cards": [
+                                    {
+                                        "diagnostics": {
+                                            "items": [
+                                                {
+                                                    "evidence_summary": {
+                                                        "actions": [
+                                                            {
+                                                                "id": "clone_github_repo",
+                                                                "action_call_id": "call-clone",
+                                                                "status": "success",
+                                                                "result_preview": {
+                                                                    "repo_url": "https://github.com/example/repo",
+                                                                    "key_files": [
+                                                                        "[dict keys=['path', 'chars', 'excerpt', 'truncated']]"
+                                                                    ],
+                                                                },
+                                                            },
+                                                            {
+                                                                "id": "read_action_artifact",
+                                                                "action_call_id": "call-clone",
+                                                                "status": "success",
+                                                                "result_preview": {
+                                                                    "repo_url": "https://github.com/example/repo",
+                                                                    "key_files": [
+                                                                        {
+                                                                            "path": "docs/guide/configuration.md",
+                                                                            "chars": 4362,
+                                                                            "excerpt": "Configuration guide excerpt.",
+                                                                            "truncated": False,
+                                                                        },
+                                                                        {
+                                                                            "path": "docs/guide/skill-document.md",
+                                                                            "chars": 2566,
+                                                                            "excerpt": "Skill document structure excerpt.",
+                                                                            "truncated": False,
+                                                                        },
+                                                                    ],
+                                                                },
+                                                            },
+                                                        ]
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    readbacks = runner.collect_framework_action_readbacks(meta)
+    assert [item["action_id"] for item in readbacks] == ["clone_github_repo", "read_action_artifact"]
+
+    metrics = runner.Metrics(route="taskboard", case_id="github_repo_reading")
+    candidate = runner.framework_final_candidate(
+        {"final_result": {"answer": "final.md", "artifact_markdown": ""}},
+        {},
+        action_readbacks=readbacks,
+    )
+    normalized = runner.normalized_candidate_for_judge(candidate, metrics)
+    preview_text = json.dumps(normalized["evidence_items"], ensure_ascii=False)
+
+    assert "docs/guide/configuration.md" in preview_text
+    assert "Configuration guide excerpt." in preview_text
+    assert "docs/guide/skill-document.md" in preview_text
+    assert "[dict keys=" not in preview_text
+    assert "sha256" not in preview_text
+
+
 def test_lmcc_framework_criteria_preserve_source_ref_contract():
     runner = _load_block_carrier_runner()
     legacy = runner._load_legacy_runner()
