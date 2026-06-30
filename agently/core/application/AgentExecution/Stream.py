@@ -57,6 +57,8 @@ def _project_done_item_text(path: str, value: Any, meta: Any, *, source: str) ->
                 return _paragraph(f"Still working on {stage}; no new stream events for {quiet_for} seconds.")
             return _paragraph(f"Still working on {stage}.")
         return _paragraph("Still working; no new stream events yet.")
+    if stream_kind == "action_observation":
+        return _paragraph(_action_observation_text(value, item_meta))
     if stream_kind == "phase":
         return _paragraph(_phase_text(value))
     if path == "agent_task.error":
@@ -101,6 +103,74 @@ def _phase_text(value: Any) -> str:
     prefix = f"Iteration {iteration}: " if iteration not in (None, "") else ""
     suffix = f" ({status})" if status else ""
     return f"{prefix}phase {phase}{suffix}."
+
+
+def _action_observation_text(value: Any, meta: Mapping[str, Any]) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    action_id = str(value.get("action_id") or value.get("action_call_id") or "action").strip()
+    action_label = action_id or "action"
+    kind = str(value.get("kind") or value.get("action_type") or "").strip()
+    label = f"{action_label} ({kind})" if kind else action_label
+    phase = str(meta.get("phase") or "").strip().lower()
+    status = str(value.get("status") or "").strip().lower()
+    if phase == "started" or status == "started":
+        text = f"Action started: {label}."
+        input_summary = _compact_inline_text(value.get("input_summary"))
+        if input_summary:
+            text += f" Input: {input_summary}"
+        return text
+    if phase == "failed" or status in {"failed", "error", "timeout", "timed_out", "blocked"}:
+        text = f"Action failed: {label}."
+        error = _compact_inline_text(value.get("error"))
+        if error:
+            text += f" Error: {error}"
+        return text
+    if phase == "completed" or value.get("success") is True or status in {"success", "succeeded", "completed", "ok"}:
+        text = f"Action completed: {label}."
+        output_summary = _compact_inline_text(value.get("output_summary"))
+        if output_summary:
+            text += f" Result: {output_summary}"
+        refs_text = _action_refs_text(value)
+        if refs_text:
+            text += f" Refs: {refs_text}"
+        return text
+    return f"Action update: {label} ({status})." if status else f"Action update: {label}."
+
+
+def _action_refs_text(value: Mapping[str, Any]) -> str:
+    refs: list[str] = []
+    for key in ("artifact_refs", "file_refs", "source_refs"):
+        raw_refs = value.get(key)
+        if not isinstance(raw_refs, list):
+            continue
+        for item in raw_refs:
+            if not isinstance(item, Mapping):
+                continue
+            ref_text = str(
+                item.get("path")
+                or item.get("value")
+                or item.get("url")
+                or item.get("uri")
+                or item.get("id")
+                or ""
+            ).strip()
+            ref_text = _compact_inline_text(ref_text, max_chars=120)
+            if ref_text and ref_text not in refs:
+                refs.append(ref_text)
+            if len(refs) >= 3:
+                return ", ".join(refs)
+    return ", ".join(refs)
+
+
+def _compact_inline_text(value: Any, *, max_chars: int = 280) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    text = _value_to_text(value)
+    text = " ".join(text.split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 14)].rstrip() + " [truncated]"
 
 
 def _terminal_result_text(value: Any) -> str:

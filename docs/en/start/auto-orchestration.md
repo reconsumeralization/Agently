@@ -163,6 +163,16 @@ the task, and the verifier cannot accept the hint as completion evidence. Use
 explicitly wants TaskBoard. Nested AgentExecution instances inherit the parent
 strategy context unless the child explicitly calls `.strategy(...)`.
 
+Auto may reuse a validated minimal board shape from task-shape analysis or fall
+back to Flat when the proposed board is only a small linear sequence with no
+real dependency, parallelism, readback, or recovery value. Explicit
+`execution="taskboard"` still preserves TaskBoard. TaskBoard may also promote a
+completed terminal candidate directly to verification instead of paying for a
+second final synthesis request. These optimizations only remove redundant model
+calls; final acceptance still requires the canonical evidence ledger, Workspace
+readback evidence, deterministic host guards, and model-owned terminal
+verification.
+
 ```python
 agent.language("en")
 
@@ -352,7 +362,14 @@ reports that the same readback is insufficient, the framework does not
 recursively synthesize another readback/continuation chain; the card must
 propose different executable work or remain blocked with diagnostics.
 For scoped Workspace retrieval, `evidence_snippet` records include whether the
-bounded snippet was `truncated`. If a TaskBoard card with scoped retrieval
+bounded snippet was `truncated`. AgentTask now carries these retrieval facts
+through the canonical `EvidenceEnvelope.evidence_items` ledger and injects a
+model-hot `evidence_ledger` view into Flat and TaskBoard work units. The older
+`scoped_retrieval_results` and TaskBoard `source_refs` views remain
+compatibility projections, not separate grounding authorities. Failed or empty
+search/readback items support unavailable or missing-data claims only;
+`ref_only` locator items prove only discovery until a bounded readback evidence
+item exists. If a TaskBoard card with scoped retrieval
 returns blocked/insufficient output without an explicit next action, AgentTask
 turns that local insufficiency into an action-capable evidence card with an
 expanded bounded retrieval plan plus a continuation card. The search result is

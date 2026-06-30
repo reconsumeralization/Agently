@@ -117,6 +117,7 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
             "href",
         }
         metadata_keys = {
+            "evidence_id",
             "role",
             "source",
             "record_id",

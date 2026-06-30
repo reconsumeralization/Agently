@@ -181,10 +181,18 @@ def task_board_planning_output_schema() -> dict[str, Any]:
         "board_goal": (str, "Goal represented by the TaskBoard.", True),
         "cards": [
             {
-                "id": (str, "Stable TaskBoard card id.", True),
+                "id": (
+                    str,
+                    "Optional short card id hint. The framework canonicalizes, deduplicates, or generates stable ids.",
+                    False,
+                ),
                 "action_block": (str, "Card-level work block in the model's own words.", True),
                 "objective": (str, "Objective for this card.", True),
-                "depends_on": ([str], "Upstream card ids this card depends on.", True),
+                "depends_on": (
+                    [str],
+                    "Upstream card id hints or canonical ids this card depends on; framework remaps them to canonical ids.",
+                    True,
+                ),
                 "evidence_to_use": ([str], "Evidence sources or upstream refs this card expects to use.", False),
                 "done_when": (str, "Completion condition for this card.", True),
                 "allowed_execution_shape": (
@@ -231,7 +239,7 @@ def coerce_task_board_planning_result(
     raw_cards = value.get("cards")
     if not isinstance(raw_cards, Sequence) or isinstance(raw_cards, str | bytes | bytearray):
         raise TypeError("TaskBoard planning result requires 'cards' as a sequence.")
-    cards = tuple(_card_from_planning_item(item) for item in raw_cards)
+    cards, card_diagnostics = _cards_from_planning_items(raw_cards)
     board_metadata = {
         "board_goal": value.get("board_goal"),
         "reflection_points": _str_list(value.get("reflection_points")),
@@ -256,7 +264,7 @@ def coerce_task_board_planning_result(
         revision=revision,
         planning_policy=policy,
         raw_result=dict(value),
-        diagnostics=_mapping_tuple(value.get("diagnostics")),
+        diagnostics=(*_mapping_tuple(value.get("diagnostics")), *card_diagnostics),
     )
 
 
@@ -348,12 +356,90 @@ def _effort_alias(name: str) -> str:
     return normalized
 
 
-def _card_from_planning_item(value: Any) -> TaskBoardCard:
+def _cards_from_planning_items(raw_cards: Sequence[Any]) -> tuple[tuple[TaskBoardCard, ...], tuple[Mapping[str, Any], ...]]:
+    raw_items: list[Mapping[str, Any]] = []
+    for item in raw_cards:
+        if not isinstance(item, Mapping):
+            raise TypeError(f"TaskBoard planning card must be a mapping, got: { type(item) }.")
+        raw_items.append(item)
+
+    used_ids: set[str] = set()
+    raw_id_counts: dict[str, int] = {}
+    prepared: list[tuple[Mapping[str, Any], str, str]] = []
+    diagnostics: list[Mapping[str, Any]] = []
+    for index, item in enumerate(raw_items):
+        raw_id = str(item.get("id") or item.get("card_id") or "").strip()
+        if raw_id:
+            raw_id_counts[raw_id] = raw_id_counts.get(raw_id, 0) + 1
+        canonical_id = _canonical_taskboard_card_id(item, index=index, used_ids=used_ids)
+        used_ids.add(canonical_id)
+        prepared.append((item, raw_id, canonical_id))
+        if raw_id != canonical_id:
+            diagnostics.append(
+                {
+                    "code": "taskboard.planning_card_id_canonicalized",
+                    "card_index": index,
+                    "id_hint": raw_id,
+                    "canonical_id": canonical_id,
+                }
+            )
+
+    unique_raw_id_map = {
+        raw_id: canonical_id
+        for _, raw_id, canonical_id in prepared
+        if raw_id and raw_id_counts.get(raw_id) == 1
+    }
+    duplicate_raw_ids = sorted(raw_id for raw_id, count in raw_id_counts.items() if count > 1)
+    if duplicate_raw_ids:
+        diagnostics.append(
+            {
+                "code": "taskboard.planning_card_id_hint_ambiguous",
+                "id_hints": duplicate_raw_ids,
+                "message": "Duplicate raw card id hints were not used for dependency remapping.",
+            }
+        )
+
+    canonical_ids = {canonical_id for _, _, canonical_id in prepared}
+    slug_targets: dict[str, set[str]] = {}
+    for _, raw_id, canonical_id in prepared:
+        for alias in (raw_id, canonical_id):
+            slug = _slugify_taskboard_card_id(alias)
+            if not slug:
+                continue
+            slug_targets.setdefault(slug, set()).add(canonical_id)
+    unique_slug_id_map = {
+        slug: next(iter(targets))
+        for slug, targets in slug_targets.items()
+        if len(targets) == 1
+    }
+
+    cards = tuple(
+        _card_from_planning_item(
+            item,
+            card_id=canonical_id,
+            card_index=index,
+            dependency_id_map=unique_raw_id_map,
+            canonical_ids=canonical_ids,
+            slug_id_map=unique_slug_id_map,
+            ambiguous_dependency_ids=set(duplicate_raw_ids),
+        )
+        for index, (item, _, canonical_id) in enumerate(prepared)
+    )
+    return cards, tuple(diagnostics)
+
+
+def _card_from_planning_item(
+    value: Any,
+    *,
+    card_id: str,
+    card_index: int,
+    dependency_id_map: Mapping[str, str],
+    canonical_ids: set[str],
+    slug_id_map: Mapping[str, str],
+    ambiguous_dependency_ids: set[str],
+) -> TaskBoardCard:
     if not isinstance(value, Mapping):
         raise TypeError(f"TaskBoard planning card must be a mapping, got: { type(value) }.")
-    card_id = str(value.get("id") or value.get("card_id") or "").strip()
-    if not card_id:
-        raise ValueError("TaskBoard planning card requires non-empty 'id'.")
     objective = str(value.get("objective") or value.get("goal") or "").strip()
     if not objective:
         raise ValueError(f"TaskBoard planning card '{ card_id }' requires non-empty objective.")
@@ -366,7 +452,11 @@ def _card_from_planning_item(value: Any) -> TaskBoardCard:
         "action_block": action_block,
         "done_when": done_when,
         "failure_policy": failure_policy,
+        "planning_card_index": card_index,
     }
+    raw_id = str(value.get("id") or value.get("card_id") or "").strip()
+    if raw_id and raw_id != card_id:
+        metadata["planning_id_hint"] = raw_id
     evidence_contract: dict[str, Any] = {
         "action_block": action_block,
         "evidence_to_use": evidence_to_use,
@@ -379,7 +469,15 @@ def _card_from_planning_item(value: Any) -> TaskBoardCard:
     return TaskBoardCard(
         id=card_id,
         objective=objective,
-        depends_on=tuple(_str_list(value.get("depends_on"))),
+        depends_on=tuple(
+            _canonical_taskboard_dependencies(
+                value.get("depends_on"),
+                dependency_id_map=dependency_id_map,
+                canonical_ids=canonical_ids,
+                slug_id_map=slug_id_map,
+                ambiguous_dependency_ids=ambiguous_dependency_ids,
+            )
+        ),
         input_refs=tuple(evidence_to_use),
         required_outputs=(done_when,) if done_when else (),
         allowed_execution_shape=str(value.get("allowed_execution_shape") or "auto"),
@@ -387,6 +485,81 @@ def _card_from_planning_item(value: Any) -> TaskBoardCard:
         failure_policy=failure_policy,
         metadata=metadata,
     )
+
+
+def _canonical_taskboard_card_id(
+    value: Mapping[str, Any],
+    *,
+    index: int,
+    used_ids: set[str],
+) -> str:
+    raw_id = str(value.get("id") or value.get("card_id") or "").strip()
+    if raw_id:
+        base = _slugify_taskboard_card_id(raw_id)
+    else:
+        basis = (
+            str(value.get("objective") or "").strip()
+            or str(value.get("action_block") or "").strip()
+            or str(value.get("done_when") or "").strip()
+            or "card"
+        )
+        slug = _slugify_taskboard_card_id(basis) or "card"
+        base = f"card_{index + 1}_{slug}"
+    base = (base or f"card_{index + 1}")[:72].strip("._-") or f"card_{index + 1}"
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        suffix_text = f"_{suffix}"
+        candidate = f"{base[:72 - len(suffix_text)]}{suffix_text}".strip("._-") or f"card_{index + 1}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _canonical_taskboard_dependencies(
+    value: Any,
+    *,
+    dependency_id_map: Mapping[str, str],
+    canonical_ids: set[str],
+    slug_id_map: Mapping[str, str],
+    ambiguous_dependency_ids: set[str],
+) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for dependency in _str_list(value):
+        if dependency in ambiguous_dependency_ids:
+            raise ValueError(
+                f"TaskBoard planning dependency '{ dependency }' is ambiguous because multiple cards used that id hint."
+            )
+        canonical = dependency_id_map.get(dependency)
+        if canonical is None and dependency in canonical_ids:
+            canonical = dependency
+        if canonical is None:
+            canonical = slug_id_map.get(_slugify_taskboard_card_id(dependency))
+        if canonical is None:
+            canonical = dependency
+        if canonical and canonical not in seen:
+            result.append(canonical)
+            seen.add(canonical)
+    return result
+
+
+def _slugify_taskboard_card_id(value: Any) -> str:
+    text = str(value or "").strip()
+    chars: list[str] = []
+    last_separator = False
+    for char in text:
+        if char.isascii() and char.isalnum():
+            chars.append(char.lower())
+            last_separator = False
+        elif char in {"_", "-", "."}:
+            if chars and not last_separator:
+                chars.append(char)
+                last_separator = True
+        else:
+            if chars and not last_separator:
+                chars.append("_")
+                last_separator = True
+    return "".join(chars).strip("._-")
 
 
 def _reject_forbidden_planning_keys(value: Any, *, path: str = "") -> None:

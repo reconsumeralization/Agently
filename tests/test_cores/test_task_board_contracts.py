@@ -11,6 +11,7 @@ from agently.core import (
     build_task_board_evidence_view,
     coerce_task_board_planning_result,
     resolve_task_board_planning_policy,
+    task_board_planning_output_schema,
 )
 from agently.core.application.AgentTask.Task import AgentTask
 from agently.types.data import TaskBoardCardResult, TaskBoardPatch
@@ -451,6 +452,56 @@ def test_task_board_planning_result_builds_valid_revision():
     assert result.planning_policy.effort_profile.name == "medium"
 
 
+def test_task_board_planning_canonicalizes_optional_card_id_hints():
+    schema = task_board_planning_output_schema()
+    assert schema["cards"][0]["id"][2] is False
+
+    result = coerce_task_board_planning_result(
+        {
+            "board_goal": "Prepare a report.",
+            "cards": [
+                {
+                    "id": "Collect Evidence",
+                    "action_block": "Collect source evidence.",
+                    "objective": "Gather evidence.",
+                    "depends_on": [],
+                    "done_when": "Evidence is available.",
+                },
+                {
+                    "id": "Synthesize Report!",
+                    "action_block": "Synthesize the report.",
+                    "objective": "Write report.",
+                    "depends_on": ["collect evidence"],
+                    "done_when": "Report draft exists.",
+                },
+                {
+                    "action_block": "Review the output.",
+                    "objective": "Review output.",
+                    "depends_on": ["Synthesize Report!"],
+                    "done_when": "Review is complete.",
+                },
+            ],
+            "completion_gate": "Report is reviewed.",
+            "why_this_effort_shape": "Evidence, synthesis, and review are separated.",
+        },
+        board_id="canonical-card-ids",
+    )
+
+    cards = result.revision.graph.cards
+    assert [card.id for card in cards] == [
+        "collect_evidence",
+        "synthesize_report",
+        "card_3_review_output",
+    ]
+    assert cards[1].depends_on == ("collect_evidence",)
+    assert cards[2].depends_on == ("synthesize_report",)
+    assert cards[0].metadata["planning_id_hint"] == "Collect Evidence"
+    assert any(
+        diagnostic.get("code") == "taskboard.planning_card_id_canonicalized"
+        for diagnostic in result.diagnostics
+    )
+
+
 def test_task_board_planning_preserves_scoped_retrieval_plan():
     result = coerce_task_board_planning_result(
         {
@@ -500,6 +551,41 @@ def test_task_board_planning_result_rejects_effort_as_hard_control_keys():
                 "why_this_effort_shape": "Invalid hard control.",
             },
             board_id="invalid",
+        )
+
+
+def test_task_board_planning_fails_closed_on_ambiguous_dependency_hint():
+    with pytest.raises(ValueError, match="ambiguous because multiple cards used that id hint"):
+        coerce_task_board_planning_result(
+            {
+                "board_goal": "Invalid ambiguous dependency board.",
+                "cards": [
+                    {
+                        "id": "dup",
+                        "action_block": "First.",
+                        "objective": "First card.",
+                        "depends_on": [],
+                        "done_when": "First done.",
+                    },
+                    {
+                        "id": "dup",
+                        "action_block": "Second.",
+                        "objective": "Second card.",
+                        "depends_on": [],
+                        "done_when": "Second done.",
+                    },
+                    {
+                        "id": "final",
+                        "action_block": "Finalize.",
+                        "objective": "Write final.",
+                        "depends_on": ["dup"],
+                        "done_when": "Final exists.",
+                    },
+                ],
+                "completion_gate": "Done.",
+                "why_this_effort_shape": "Invalid ambiguous dependency.",
+            },
+            board_id="ambiguous-dependency",
         )
 
 

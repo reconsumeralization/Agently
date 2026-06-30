@@ -21,9 +21,485 @@ from agently.core.application.AgentTask.BlockCarrier import (
     select_carrier_output_policy,
 )
 from agently.core.application.AgentTask import AgentTask
-from agently.types.data import AgentlyRequestData, TaskBoardCard, TaskBoardCardResult, TaskBoardGraph, TaskBoardRevision
+from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
+from agently.types.data import (
+    AgentlyRequestData,
+    AgentExecutionStreamData,
+    ExecutionBlockGraph,
+    TaskBoardCard,
+    TaskBoardCardResult,
+    TaskBoardGraph,
+    TaskBoardRevision,
+)
 from agently.utils import DataFormatter, Settings
 from examples.agent_task.interview_question_preparation import judge_interview_semantics
+
+
+def test_task_shared_star_export_includes_evidence_ledger_helpers():
+    namespace: dict[str, Any] = {}
+    exec("from agently.core.application.AgentTask.TaskShared import *", namespace)
+
+    for helper_name in (
+        "acceptance_locator_view_from_ledger",
+        "collect_evidence_use",
+        "evidence_envelope_from_value",
+        "evidence_ledger_view",
+        "source_refs_from_ledger",
+        "validate_evidence_use",
+        "workspace_artifacts_from_ledger",
+    ):
+        assert callable(namespace.get(helper_name))
+
+
+def test_agent_task_process_summary_is_compact_and_not_evidence():
+    payload = {
+        "decision_basis": ["Use the available bounded evidence."],
+        "short_summary": "x" * 800,
+        "progress_message": "Drafted a bounded artifact section for review.",
+        "criterion_checks": [
+            {
+                "criterion": "Report includes sources.",
+                "status": "partial",
+                "summary": "One source remains unverified.",
+                "api_key": "secret-value",
+                "content": "large body should not be carried as process summary",
+            }
+        ],
+        "evidence_use": [{"claim": "not a process field", "evidence_ids": ["e1"]}],
+    }
+
+    summary = AgentTask._process_summary_from_value(payload, stage="execution")
+    next_step = AgentTask._combined_process_summary(
+        plan=payload,
+        execution_result=payload,
+        verification=payload,
+    )
+
+    assert summary["stage"] == "execution"
+    assert summary["criterion_checks"][0]["api_key"] == "[redacted]"
+    assert "content" not in summary["criterion_checks"][0]
+    assert len(summary["short_summary"]) <= 380
+    assert "evidence_use" not in summary
+    assert "decision_basis" not in next_step.get("plan", {})
+    assert "progress_message" not in next_step["execution"]
+    assert next_step["execution"]["short_summary"]
+
+
+def test_agent_task_process_progress_delta_uses_only_explicit_progress_event():
+    assert AgentTask._is_process_summary_stream_path("self_check")
+    assert AgentTask._is_process_summary_stream_path("artifact.progress_message")
+
+    suppressed_child_delta = AgentExecutionStreamData(
+        path="agent_task.iteration.1.execution.self_check",
+        value="internal self check",
+        delta=None,
+        event_type="delta",
+        is_complete=False,
+        source="agent_task",
+        meta={"stream_kind": "child_execution"},
+    )
+    progress_item = AgentExecutionStreamData(
+        path="agent_task.process.progress",
+        value={"message": "Reading the bounded source evidence."},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        meta={"stream_kind": "progress", "progress_source": "process_summary"},
+    )
+
+    assert project_agent_execution_text_delta(suppressed_child_delta) is None
+    assert project_agent_execution_text_delta(progress_item) == "Reading the bounded source evidence.\n\n"
+
+
+def test_agent_task_action_observation_delta_projects_safe_progress_text():
+    started = AgentExecutionStreamData(
+        path="agent_task.action.started",
+        value={
+            "action_id": "grep_workspace",
+            "status": "started",
+            "kind": "shell_search",
+            "input_summary": {"query": "deadline", "scope": "workspace"},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        meta={"stream_kind": "action_observation", "phase": "started"},
+    )
+    completed = AgentExecutionStreamData(
+        path="agent_task.action.completed",
+        value={
+            "action_id": "grep_workspace",
+            "status": "success",
+            "kind": "shell_search",
+            "success": True,
+            "output_summary": {"path": "notes.md", "content": "deadline is 2026-07-01"},
+            "source_refs": [{"value": "notes.md"}],
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        meta={"stream_kind": "action_observation", "phase": "completed"},
+    )
+    failed = AgentExecutionStreamData(
+        path="agent_task.action.failed",
+        value={"action_id": "read_file", "status": "failed", "error": "file not found"},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        meta={"stream_kind": "action_observation", "phase": "failed"},
+    )
+
+    assert project_agent_execution_text_delta(started) == (
+        'Action started: grep_workspace (shell_search). Input: {"query": "deadline", "scope": "workspace"}\n\n'
+    )
+    completed_text = project_agent_execution_text_delta(completed)
+    assert completed_text is not None
+    assert completed_text.endswith("\n\n")
+    assert "Action completed: grep_workspace (shell_search)." in completed_text
+    assert "Result:" in completed_text
+    assert "deadline is 2026-07-01" in completed_text
+    assert "Refs: notes.md" in completed_text
+    assert project_agent_execution_text_delta(failed) == "Action failed: read_file. Error: file not found\n\n"
+
+
+def test_evidence_ledger_guard_rejects_structurally_invalid_support():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {"id": "quote.failed", "kind": "action_evidence", "status": "failed", "body_state": "bounded"},
+            {"id": "repo.path", "kind": "locator_ref", "status": "ok", "body_state": "ref_only", "path": "src/app.py"},
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {"claim": "The quote was 123.45.", "evidence_ids": ["quote.failed"], "support_type": "content"},
+            {"claim": "src/app.py defines Foo.", "evidence_ids": ["repo.path"], "support_type": "content"},
+            {"claim": "Unknown.", "evidence_ids": ["missing"], "support_type": "content"},
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert guard["blocking_count"] == 3
+    assert {
+        diagnostic["code"]
+        for diagnostic in guard["diagnostics"]
+        if diagnostic.get("blocking") is True
+    } == {
+        "evidence_ledger.unavailable_item_used_as_positive_support",
+        "evidence_ledger.ref_only_item_used_as_content_support",
+        "evidence_ledger.invalid_evidence_id",
+    }
+
+
+def test_evidence_ledger_acceptance_locator_is_ref_pointer_only():
+    from agently.core.application.AgentTask.EvidenceLedger import (
+        acceptance_locator_view_from_ledger,
+        evidence_ledger_view,
+        validate_evidence_use,
+    )
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "locator.final.middle",
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+                "path": "reports/final.md",
+                "criterion_id": "middle",
+                "claim": "The middle section is present.",
+                "heading": "Middle Section",
+                "line_start": 42,
+                "line_end": 48,
+                "byte_offset": 16000,
+                "byte_end": 17500,
+                "source_evidence_ids": ["workspace_artifact_readback:test:reports/final.md"],
+            }
+        ]
+    }
+
+    view = evidence_ledger_view(ledger)
+    locator_view = acceptance_locator_view_from_ledger(view)
+    assert locator_view["items"][0]["line_start"] == 42
+    assert locator_view["items"][0]["heading"] == "Middle Section"
+
+    invalid_guard = validate_evidence_use(
+        [{"claim": "The middle section is present.", "evidence_ids": ["locator.final.middle"], "support_type": "content"}],
+        ledger,
+    )
+    assert invalid_guard["valid"] is False
+    assert any(
+        item["code"] == "evidence_ledger.ref_only_item_used_as_content_support"
+        for item in invalid_guard["diagnostics"]
+    )
+
+    pointer_guard = validate_evidence_use(
+        [
+            {
+                "claim": "reports/final.md has a middle-section locator.",
+                "evidence_ids": ["locator.final.middle"],
+                "support_type": "ref_pointer",
+            }
+        ],
+        ledger,
+    )
+    assert pointer_guard["valid"] is True
+
+
+def test_acceptance_locator_matches_unicode_dash_heading_variants():
+    from agently.core.application.AgentTask.AcceptanceLocator import (
+        build_workspace_artifact_acceptance_locator_items,
+    )
+
+    items = build_workspace_artifact_acceptance_locator_items(
+        path="final.md",
+        source="test",
+        text=(
+            "# Final\n\n"
+            "## Source\u2011backed Evidence Table\n\n"
+            "Evidence rows.\n\n"
+            "## Implementation & Product Highlights\n\n"
+            "Highlights.\n"
+        ),
+        manifest={
+            "sections": [
+                {
+                    "id": "implementation_highlights",
+                    "title": "Implementation / Product Highlights",
+                }
+            ]
+        },
+        acceptance_points=[
+            {
+                "criterion": "The final artifact includes the source-backed evidence table.",
+                "expected_anchor": "Source-backed Evidence Table",
+            }
+        ],
+    )
+
+    locator = next(item for item in items if item.get("criterion_id") == "acceptance_point:0")
+    assert locator["status"] == "ok"
+    assert locator["heading"] == "Source\u2011backed Evidence Table"
+    assert locator["line_start"] == 3
+    assert locator["requirement_level"] == "advisory"
+
+    required_locator = next(item for item in items if item.get("criterion_id") == "implementation_highlights")
+    assert required_locator["status"] == "ok"
+    assert required_locator["requirement_level"] == "required"
+    assert required_locator["heading"] == "Implementation & Product Highlights"
+
+
+def test_evidence_ledger_guard_reconciles_visible_aliases_to_canonical_ids():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "ledger.workspace.readme",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "full",
+                "path": "README.md",
+                "record_id": "record-readme",
+                "source_url": "https://example.test/readme",
+                "body": "README content",
+                "provenance": {"action_id": "repo_read", "action_call_id": "call-1"},
+            },
+            {
+                "id": "ledger.workspace.init",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "skillopt/__init__.py",
+                "body": "__version__ = '1.0'",
+            },
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {"claim": "The README content was read.", "evidence_ids": ["README.md"], "support_type": "content"},
+            {
+                "claim": "The readme record is the selected source.",
+                "evidence_ids": ["record-readme"],
+                "support_type": "content",
+            },
+            {
+                "claim": "The readme URL is available.",
+                "evidence_ids": ["https://example.test/readme"],
+                "support_type": "content",
+            },
+            {
+                "claim": "The repository read action produced this result.",
+                "evidence_ids": ["action_result_repo_read"],
+                "support_type": "content",
+            },
+            {
+                "claim": "The package initializer was read.",
+                "evidence_ids": ["skillopt/__init__.py"],
+                "support_type": "content",
+            },
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["blocking_count"] == 0
+    assert [entry["evidence_ids"] for entry in guard["normalized_evidence_use"]] == [
+        ["ledger.workspace.readme"],
+        ["ledger.workspace.readme"],
+        ["ledger.workspace.readme"],
+        ["ledger.workspace.readme"],
+        ["ledger.workspace.init"],
+    ]
+    assert any(item["code"] == "evidence_ledger.alias_resolved" for item in guard["diagnostics"])
+    assert "available_evidence_refs" in guard
+
+
+def test_evidence_ledger_guard_uses_item_declared_aliases():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "ledger.source.guide",
+                "kind": "action_evidence",
+                "status": "ok",
+                "body_state": "bounded",
+                "aliases": ["load_source:docs/guide.md"],
+                "body": "Guide content from the action result.",
+            }
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The guide content was read.",
+                "evidence_ids": ["load_source:docs/guide.md"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["ledger.source.guide"]
+    assert any(item["code"] == "evidence_ledger.alias_resolved" for item in guard["diagnostics"])
+
+
+def test_blocks_action_evidence_declares_generic_action_ref_aliases():
+    from agently.builtins.plugins.Blocks.AgentlyBlocks import EvidenceMapperRegistry
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    graph = ExecutionBlockGraph.from_value({"graph_id": "graph-generic-alias", "source_plan_id": "plan-generic-alias"})
+    envelope = EvidenceMapperRegistry().map_evidence(
+        graph,
+        {
+            "blocks": {
+                "execution_block_results": [
+                    {
+                        "kind": "agent_step",
+                        "execution_block_id": "exec-load-source",
+                        "status": "completed",
+                        "output": {
+                            "execution_meta": {
+                                "execution_id": "run-generic-alias",
+                                "logs": {
+                                    "action_logs": [
+                                        {
+                                            "id": "load_source",
+                                            "status": "success",
+                                            "action_call_id": "call-load-source",
+                                            "input_preview": {"path": "docs/guide.md"},
+                                            "result_preview": {
+                                                "path": "docs/guide.md",
+                                                "content": "Guide content from the action result.",
+                                            },
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    action_items = [item for item in envelope.evidence_items if item.get("kind") == "action_evidence"]
+    assert len(action_items) == 1
+    action_item = action_items[0]
+    assert "load_source:docs/guide.md" in action_item.get("aliases", [])
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The guide content was read.",
+                "evidence_ids": ["load_source:docs/guide.md"],
+                "support_type": "content",
+            }
+        ],
+        envelope,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == [action_item["id"]]
+
+
+def test_evidence_ledger_guard_blocks_ambiguous_basename_aliases():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {"id": "docs.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "docs/README.md"},
+            {"id": "pkg.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "packages/README.md"},
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [{"claim": "The README explains the package.", "evidence_ids": ["README.md"], "support_type": "content"}],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert guard["blocking_count"] == 1
+    diagnostic = next(item for item in guard["diagnostics"] if item.get("blocking") is True)
+    assert diagnostic["code"] == "evidence_ledger.ambiguous_evidence_alias"
+    assert set(diagnostic["candidates"]) == {"docs.readme", "pkg.readme"}
+
+
+def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "quote.failed",
+                "kind": "action_evidence",
+                "status": "failed",
+                "body_state": "ref_only",
+                "action_id": "quote_lookup",
+            }
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [{"claim": "The quote was 123.45.", "evidence_ids": ["action_result_quote_lookup"], "support_type": "content"}],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["quote.failed"]
+    assert any(item["code"] == "evidence_ledger.alias_resolved" for item in guard["diagnostics"])
+    assert any(
+        item["code"] == "evidence_ledger.unavailable_item_used_as_positive_support"
+        and item.get("blocking") is True
+        for item in guard["diagnostics"]
+    )
 
 
 def test_block_carrier_output_policy_selects_schema_and_body_transport():
@@ -344,11 +820,20 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
 
     async def handler(block_context: Mapping[str, Any]) -> dict[str, Any]:
         scoped_results = task._scoped_retrieval_results_from_block_context(block_context)
+        evidence_ledger = task._evidence_ledger_from_block_context(block_context)
         seen["scoped_results"] = scoped_results
+        seen["evidence_ledger"] = evidence_ledger
         return {
             "execution_result": {
                 "candidate_final_result": "Alpha deadline found.",
                 "scoped_retrieval_results": scoped_results,
+                "evidence_use": [
+                    {
+                        "claim": "Alpha deadline found.",
+                        "evidence_ids": [evidence_ledger["items"][2]["id"]],
+                        "support_type": "content",
+                    }
+                ],
             },
             "execution_meta": {
                 "execution_id": "scoped-retrieval-child",
@@ -368,9 +853,17 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
     )
 
     scoped_results = seen["scoped_results"]
+    evidence_ledger = seen["evidence_ledger"]
     assert len(scoped_results) == 1
     assert scoped_results[0]["query"] == "deadline"
     assert scoped_results[0]["bounded"]["returned_results"] == 1
+    assert [item["kind"] for item in evidence_ledger["items"][:3]] == [
+        "workspace_operation.search",
+        "locator_ref",
+        "evidence_snippet",
+    ]
+    assert evidence_ledger["items"][1]["body_state"] == "ref_only"
+    assert evidence_ledger["items"][2]["body_state"] in {"bounded", "truncated"}
     snippet = scoped_results[0]["evidence_snippets"][0]
     assert snippet["role"] == "evidence_snippet"
     assert snippet["content"].startswith("Alpha deadline")
@@ -383,6 +876,8 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
         for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]
     ]
     assert block_kinds == ["workspace_operation", "agent_step"]
+    block_evidence_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    assert evidence_ledger["items"][2]["id"] in {item["id"] for item in block_evidence_items}
     compact_search_output = execution_meta["blocks"]["evidence"]["execution_block_results"][0]["output"]
     assert compact_search_output["operation"] == "search"
     assert compact_search_output["query"] == "deadline"
@@ -607,6 +1102,10 @@ def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():
     assert "candidate_final_result" not in schema
     assert "artifact_markdown" not in schema
     assert "file_refs" not in schema
+    keys = list(schema)
+    assert keys.index("self_check") > keys.index("acceptance_points")
+    assert keys.index("short_summary") > keys.index("self_check")
+    assert keys.index("progress_message") > keys.index("short_summary")
 
 
 def test_agent_task_defaults_do_not_apply_resource_caps(tmp_path):
@@ -1323,6 +1822,54 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
     assert delivered["workspace_artifact_content_omitted"][0]["field"] == "artifact_markdown"
     assert execution_meta["logs"]["artifact_refs"][0]["path"] == "reports/final.md"
     assert execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"] == "reports/final.md"
+    ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    artifact_item = next(item for item in ledger_items if item["kind"] == "workspace_artifact.readback")
+    assert artifact_item["status"] == "ok"
+    assert artifact_item["path"] == "reports/final.md"
+    assert artifact_item["body"].startswith("# Actual Report")
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_delivery_records_acceptance_locators_from_actual_artifact(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-locator")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-locator"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.success_criteria = ["The final report includes the middle evidence section."]
+
+    execution_meta = {"logs": {}}
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_markdown": "# Report\n\nIntro.\n\n## Middle Evidence\n\nActual middle content.",
+            "artifact_manifest": {"path": "reports/final.md"},
+            "acceptance_points": [
+                {
+                    "criterion": "Middle evidence section is present.",
+                    "expected_anchor": "Middle Evidence",
+                    "line_start": 999,
+                    "evidence_ids": ["source.evidence"],
+                }
+            ],
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.workspace_artifact",
+    )
+
+    assert delivered["workspace_artifact_delivery"]["acceptance_locator_count"] >= 1
+    ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    locator = next(
+        item
+        for item in ledger_items
+        if item["kind"] == "workspace_artifact.acceptance_locator" and item.get("anchor_text") == "Middle Evidence"
+    )
+    assert locator["status"] == "ok"
+    assert locator["body_state"] == "ref_only"
+    assert locator["line_start"] == 5
+    assert locator["byte_offset"] < locator["byte_end"]
+    assert "body" not in locator
+    assert any("workspace_artifact_readback" in item for item in locator["source_evidence_ids"])
 
 
 @pytest.mark.asyncio
@@ -1373,6 +1920,22 @@ async def test_verifier_workspace_artifact_readback_targets_required_sections(tm
     assert any(item["kind"] == "section_search" and item["query"] == "source list" for item in targeted)
     assert any("https://example.test/source-a" in item.get("content", "") for item in targeted)
 
+    execution_meta = {
+        "blocks": {
+            "evidence": {
+                "evidence_items": [task._workspace_artifact_readback_evidence_item(ref)],
+            }
+        }
+    }
+    await task._ensure_workspace_artifact_targeted_readback_evidence(
+        execution_meta,
+        task._cumulative_evidence_ledger(execution_meta),
+    )
+    ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    targeted_items = [item for item in ledger_items if item["kind"] == "workspace_artifact.targeted_readback"]
+    assert targeted_items
+    assert any("https://example.test/source-a" in item.get("body", "") for item in targeted_items)
+
     small_body = "# Small Artifact\n\n## Source List\n\n- https://example.test/source-a\n"
     small_write_result = await task.workspace.write_file("small.md", small_body)
     full_read_result = await task.workspace.read_file("small.md", max_bytes=12000)
@@ -1389,6 +1952,75 @@ async def test_verifier_workspace_artifact_readback_targets_required_sections(tm
     }
     full_artifacts = await task._trusted_workspace_artifacts_for_verifier({"artifact_refs": [full_ref]})
     assert "targeted_readbacks" not in full_artifacts[0]
+
+
+@pytest.mark.asyncio
+async def test_verifier_workspace_artifact_readback_uses_acceptance_locator_for_middle_section(tmp_path):
+    agent = _create_agent("agent-task-verifier-acceptance-locator").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="verifier-acceptance-locator",
+        goal="Produce a long final artifact with a verifiable middle section.",
+        success_criteria=["The final artifact includes the target middle section."],
+        workspace=tmp_path / "workspace",
+    )
+    filler = "\n".join(f"Filler paragraph {index}: " + ("x" * 80) for index in range(220))
+    marker = "TARGET_MIDDLE_SECTION_MARKER"
+    body = f"# Long Report\n\n{filler}\n\n## Target Middle Section\n\n{marker}\n"
+    write_result = await task.workspace.write_file("final.md", body)
+    read_result = await task.workspace.read_file("final.md", max_bytes=4000)
+    ref = {
+        "path": "final.md",
+        "bytes": int(read_result["bytes"]),
+        "sha256": read_result["sha256"],
+        "media_type": write_result.get("media_type"),
+        "content_kind": "text",
+        "role": "workspace_artifact",
+        "source": "test",
+        "preview": str(read_result["content"]),
+        "truncated": True,
+        "read_bytes": int(read_result["read_bytes"]),
+    }
+    locator_items = await task._workspace_artifact_acceptance_locator_evidence_items(
+        ref=ref,
+        result={
+            "acceptance_points": [
+                {
+                    "criterion": "Target middle section is present.",
+                    "expected_anchor": "Target Middle Section",
+                }
+            ]
+        },
+        manifest={"path": "final.md"},
+        source="test",
+        content=body,
+    )
+    locator = next(item for item in locator_items if item["status"] == "ok")
+    assert locator["byte_offset"] > 4000
+
+    execution_meta = {
+        "blocks": {
+            "evidence": {
+                "evidence_items": [
+                    task._workspace_artifact_readback_evidence_item(ref),
+                    locator,
+                ],
+            }
+        }
+    }
+    await task._ensure_workspace_artifact_targeted_readback_evidence(
+        execution_meta,
+        task._cumulative_evidence_ledger(execution_meta),
+    )
+    targeted_items = [
+        item
+        for item in execution_meta["blocks"]["evidence"]["evidence_items"]
+        if item["kind"] == "workspace_artifact.targeted_readback"
+    ]
+    assert any(
+        item.get("provenance", {}).get("source_evidence_id") == locator["id"] and marker in item.get("body", "")
+        for item in targeted_items
+    )
 
 
 @pytest.mark.asyncio
@@ -1943,7 +2575,8 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
                 assert "trusted_workspace_artifacts" in text
                 assert "source-grounded Workspace artifacts" in text
                 assert "trusted_workspace_artifacts.readback.content" in text
-                assert self.__class__.tail_marker in text
+                assert "evidence_ledger" in text
+                assert "reports/final.md" in text
                 assert "https://example.test/source" in text
                 payload = {
                     "is_complete": True,
@@ -2012,7 +2645,7 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
     assert verification["is_complete"] is True
     assert verification["final_result_via_workspace_artifact"] is True
     assert "final_result_missing" not in verification.get("guard_reasons", [])
-    assert WorkspaceArtifactPointerRequester.tail_marker in WorkspaceArtifactPointerRequester.verify_text
+    assert WorkspaceArtifactPointerRequester.tail_marker not in WorkspaceArtifactPointerRequester.verify_text
 
 
 @pytest.mark.asyncio
@@ -3045,6 +3678,157 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     schedule = TaskBoard(repaired, handler=lambda _context: None).schedule()
     assert schedule.runnable_card_ids == (repair.id,)
     assert task.diagnostics["taskboard_final_repair_patches"][0]["repair_card_id"] == repair.id
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_promotes_single_terminal_candidate_without_finalizer(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-promotion").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-promotion",
+        goal="Return the final report.",
+        success_criteria=["The completed card result is returned."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the final report.",
+            "required_outputs": ["Final report"],
+        }
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "taskboard-final-promotion",
+            "revision_id": "rev-1",
+            "graph": {"graph_id": "taskboard-final-promotion-graph", "cards": [card.to_dict()]},
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "final_result": "Final report body from the completed terminal card.",
+                        "remaining_work": [],
+                    },
+                ).to_dict()
+            },
+        }
+    )
+    calls = {"finalizer": 0, "verifier": 0}
+
+    async def fail_finalizer(*_args, **_kwargs):
+        calls["finalizer"] += 1
+        raise AssertionError("TaskBoard finalizer should be skipped for promotable terminal candidate.")
+
+    async def complete_verifier(*_args, **kwargs):
+        calls["verifier"] += 1
+        execution_result = kwargs["execution_result"]
+        assert execution_result["final_result"] == "Final report body from the completed terminal card."
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "complete",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": execution_result["final_result"],
+        }
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", complete_verifier)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert result == {"terminal": True, "status": "completed"}
+    assert calls == {"finalizer": 0, "verifier": 1}
+    assert task.result["taskboard"]["finalization_source"] == "candidate_promotion"
+
+
+def test_taskboard_auto_reuses_initial_plan_and_falls_back_for_small_linear_board(tmp_path):
+    agent = _create_agent("agent-taskboard-auto-plan-reuse").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-auto-plan-reuse",
+        goal="Answer a simple question.",
+        success_criteria=["Return the answer."],
+        execution="auto",
+    )
+    task.task_shape_analysis = task._normalize_task_shape_analysis(
+        {
+            "analysis": "A tiny board would be enough.",
+            "execution_hint": {"recommended_shape": "taskboard", "confidence": "medium"},
+            "initial_taskboard_plan": {
+                "board_goal": "Answer a simple question.",
+                "cards": [
+                    {
+                        "id": "answer",
+                        "action_block": "Answer directly.",
+                        "objective": "Return the answer.",
+                        "depends_on": [],
+                        "done_when": "Answer is returned.",
+                        "allowed_execution_shape": "auto",
+                    }
+                ],
+                "reflection_points": [],
+                "completion_gate": "The answer is returned.",
+                "why_this_effort_shape": "Single card.",
+            },
+        }
+    )
+
+    planning_result = task._initial_taskboard_plan_from_shape_analysis()
+
+    assert planning_result is not None
+    assert [card.id for card in planning_result.revision.graph.cards] == ["answer"]
+    assert task._taskboard_should_fallback_to_flat(planning_result.revision) is True
+
+    readback_revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "readback-board",
+            "revision_id": "rev-readback",
+            "graph": {
+                "graph_id": "readback-graph",
+                "cards": [
+                    TaskBoardCard.from_value(
+                        {
+                            "id": "readback",
+                            "objective": "Read a required artifact.",
+                            "allowed_execution_shape": "readback",
+                        }
+                    ).to_dict()
+                ],
+            },
+        }
+    )
+    assert task._taskboard_should_fallback_to_flat(readback_revision) is False
+
+    explicit_task = AgentTask(
+        agent,
+        task_id="taskboard-explicit-no-fallback",
+        goal="Answer a simple question.",
+        success_criteria=["Return the answer."],
+        execution="taskboard",
+    )
+    assert explicit_task._taskboard_should_fallback_to_flat(planning_result.revision) is False
 
 
 def test_output_contract_guards_invalid_final_result_after_json_fallback(tmp_path):

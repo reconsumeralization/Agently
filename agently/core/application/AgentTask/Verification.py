@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from .TaskShared import *
 
 
@@ -48,6 +50,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     "iteration": record.get("iteration"),
                     "step_instruction": plan.get("step_instruction", ""),
                     "effective_execution_shape": plan.get("effective_execution_shape", plan.get("execution_shape", "")),
+                    "process_summary": DataFormatter.sanitize(record.get("process_summary", {})),
                     "verification": {
                         "is_complete": verification.get("is_complete"),
                         "reason": verification.get("reason", ""),
@@ -140,6 +143,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "advisory_next_step_requirements": next_step_requirements,
             "replan_instruction": replan_instruction,
         }
+        process_summary = latest.get("process_summary")
+        if isinstance(process_summary, Mapping):
+            compact_process = DataFormatter.sanitize(dict(process_summary))
+            if compact_process:
+                repair_context["process_summary"] = compact_process
         cumulative_anchors = cls._cumulative_planner_evidence_anchors(previous_iterations)
         if cumulative_anchors:
             repair_context["available_evidence_anchors"] = cumulative_anchors
@@ -376,17 +384,61 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         execution_meta: dict[str, Any],
         context_pack: "WorkspaceContextPackage",
     ) -> dict[str, Any]:
+        language_policy = self._language_policy()
         raw_execution_evidence_summary = self._execution_log_summary(execution_meta)
         raw_cumulative_evidence_summary = self._cumulative_execution_evidence_summary(execution_meta)
-        trusted_workspace_artifacts = await self._trusted_workspace_artifacts_for_verifier(
-            raw_cumulative_evidence_summary
+        current_evidence_ledger = self._evidence_ledger_from_execution_meta(execution_meta)
+        evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
+        initial_evidence_use = collect_evidence_use(execution_result)
+        initial_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
+        await self._ensure_workspace_artifact_targeted_readback_evidence(
+            execution_meta,
+            evidence_ledger,
+            evidence_use=initial_guard.get("normalized_evidence_use"),
         )
+        raw_execution_evidence_summary = self._execution_log_summary(execution_meta)
+        raw_cumulative_evidence_summary = self._cumulative_execution_evidence_summary(execution_meta)
+        current_evidence_ledger = self._evidence_ledger_from_execution_meta(execution_meta)
+        evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
+        grounding_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
+        normalized_execution_result = value_with_normalized_evidence_use(
+            execution_result,
+            grounding_guard.get("normalized_evidence_use"),
+        )
+        if self._should_attempt_evidence_binding_repair(grounding_guard):
+            repaired_evidence_use = await self._request_evidence_binding_repair(
+                grounding_guard,
+                evidence_ledger,
+                language_policy=language_policy,
+            )
+            if repaired_evidence_use:
+                merged_evidence_use = self._merge_repaired_evidence_use(
+                    grounding_guard.get("normalized_evidence_use"),
+                    repaired_evidence_use,
+                )
+                candidate_execution_result = value_with_normalized_evidence_use(
+                    normalized_execution_result,
+                    merged_evidence_use,
+                )
+                candidate_guard = validate_evidence_use(collect_evidence_use(candidate_execution_result), evidence_ledger)
+                self.diagnostics.setdefault("evidence_binding_repair", []).append(
+                    DataFormatter.sanitize(
+                        {
+                            "accepted": candidate_guard.get("valid") is True,
+                            "blocking_count": candidate_guard.get("blocking_count"),
+                            "diagnostics": candidate_guard.get("diagnostics", []),
+                        }
+                    )
+                )
+                if candidate_guard.get("valid") is True:
+                    normalized_execution_result = candidate_execution_result
+                    grounding_guard = candidate_guard
+        trusted_workspace_artifacts = workspace_artifacts_from_ledger(evidence_ledger)
         evidence_summary = self._compact_verifier_evidence_summary(raw_execution_evidence_summary)
         cumulative_evidence_summary = self._compact_verifier_evidence_summary(raw_cumulative_evidence_summary)
-        verifier_execution_result = self._workspace_artifact_execution_result_for_verifier(execution_result)
-        candidate_final_result = self._candidate_final_result_from_execution_result(execution_result)
+        verifier_execution_result = self._workspace_artifact_execution_result_for_verifier(normalized_execution_result)
+        candidate_final_result = self._candidate_final_result_from_execution_result(normalized_execution_result)
         request = self.agent.create_temp_request()
-        language_policy = self._language_policy()
         self._apply_language_policy_to_request(request, language_policy)
         request.input(
             {
@@ -406,6 +458,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "execution_meta": self._verification_execution_meta_summary(execution_meta, evidence_summary),
                 "execution_evidence_summary": evidence_summary,
                 "cumulative_execution_evidence_summary": cumulative_evidence_summary,
+                "current_evidence_ledger": current_evidence_ledger,
+                "evidence_ledger": evidence_ledger,
+                "acceptance_locator_view": acceptance_locator_view_from_ledger(evidence_ledger),
+                "grounding_guard": grounding_guard,
                 "trusted_workspace_artifacts": trusted_workspace_artifacts,
                 "capability_evidence_requirements": self._capability_evidence_requirements(),
                 "context_pack": self._compact_context_pack_for_verifier(context_pack),
@@ -421,6 +477,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "Treat numeric criteria such as 'at least N' as exact counting rules and fail verification when the "
             "evidence does not meet the count. "
             "Require source/evidence references when the criteria ask for evidence. "
+            "Treat evidence_ledger as the authoritative grounding ledger and use its item ids when judging claims. "
+            "Use acceptance_locator_view as a verifier readback index for Workspace artifacts: locator items show "
+            "where to inspect an artifact, not whether the content is semantically correct. Prefer bounded readback "
+            "items produced from those locators when checking long artifact sections. A locator with "
+            "requirement_level='required' comes from an output contract or success criterion; status=empty on that "
+            "locator is a strong structural gap. A locator with requirement_level='advisory' comes from a model-suggested "
+            "acceptance point; status=empty means that proposed anchor was not found, but it is not by itself proof that "
+            "the deliverable lacks the required content when other required locators or targeted readbacks cover it. "
+            "current_evidence_ledger is the current step view; evidence_ledger includes prior iteration evidence that "
+            "is verifier-visible. Do not perform or assume extra readback outside this ledger. failed/empty ledger "
+            "items are facts of unavailability only; ref_only items prove only a URL/path/ref was found; bounded or "
+            "truncated content supports only the visible body. grounding_guard contains deterministic id/status/body "
+            "state diagnostics that must block completion when blocking_count is non-zero. "
             "Use both execution_evidence_summary and cumulative_execution_evidence_summary; the final verification "
             "must account for evidence gathered in earlier iterations, not only the current write/finalize step. "
             "Use reflection_summaries as evaluator notes linked to evidence and verification; reflection records are not "
@@ -448,9 +517,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "artifact deliverables, the body remains in Workspace and trusted_workspace_artifacts plus file_refs/readback "
             "are the completion evidence; final_result may be a concise path/ref summary and must not copy the full "
             "artifact body only to satisfy a structured field. For source-grounded Workspace artifacts, verify the "
-            "artifact body in trusted_workspace_artifacts.readback.content against visible source_refs, Action evidence, "
+            "artifact body in trusted_workspace_artifacts.readback.content and targeted readback evidence ledger items "
+            "against visible source_refs, Action evidence, "
             "URLs, paths, and refs; a final_result path pointer alone is not enough to satisfy citation or provenance "
-            "requirements. For long artifacts, also inspect trusted_workspace_artifacts.targeted_readbacks for bounded "
+            "requirements. For long artifacts, also inspect workspace_artifact.targeted_readback ledger items for bounded "
             "section, tail, source-list, risk, reference, or coverage snippets before concluding a required section is "
             "missing. Do not ask a later step to read a Workspace artifact solely to paste its full content into "
             "final_result. If trusted artifact refs or readback are missing or too scoped to verify a material claim, "
@@ -463,6 +533,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "blocked verification. The verifier does not choose tools, routes, execution shapes, or exact methods. "
             "repair_constraints and next_step_requirements are advisory compatibility fields only; keep them factual "
             "and do not turn them into a narrow tool script. Also include a short human-readable replan_instruction. "
+            "After the judgment fields, include compact criterion_checks, verification_summary, and progress_message "
+            "for downstream repair context and human progress. These fields are process summaries only; they are not "
+            "completion evidence and must not contain raw chain-of-thought or long evidence bodies. "
             "Set requires_block=true only when the task cannot continue."
         )
         request.output(
@@ -492,6 +565,21 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 ),
                 "final_result_required": (bool, "True when the goal expects a concrete returned final deliverable"),
                 "final_result": (str, "Final business result when complete"),
+                "criterion_checks": (
+                    [dict],
+                    "Compact per-criterion checks: [{criterion, status, summary, evidence_ids?, gaps?}].",
+                    False,
+                ),
+                "verification_summary": (
+                    str,
+                    "Short verifier summary for repair context; no raw chain-of-thought.",
+                    False,
+                ),
+                "progress_message": (
+                    str,
+                    "One safe human-readable verification progress sentence.",
+                    False,
+                ),
             },
             format="json",
         )
@@ -510,11 +598,370 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "final_result_required": False,
                 "final_result": "",
             }
-        return self._normalize_verification(
+        normalized = self._normalize_verification(
             verification,
             execution_evidence_summary=raw_cumulative_evidence_summary,
             candidate_final_result=candidate_final_result,
+            grounding_guard=grounding_guard,
         )
+        await self._emit_process_progress_from_output(
+            normalized,
+            stage="verification",
+            iteration=iteration_index,
+        )
+        return normalized
+
+    async def _ensure_workspace_artifact_targeted_readback_evidence(
+        self,
+        execution_meta: Mapping[str, Any],
+        evidence_ledger: Mapping[str, Any],
+        *,
+        evidence_use: Any = None,
+    ) -> None:
+        if not isinstance(execution_meta, dict):
+            return
+        existing_generic_paths: set[str] = set()
+        existing_locator_readbacks: set[str] = set()
+        for item in evidence_ledger.get("items", []) if isinstance(evidence_ledger, Mapping) else []:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("kind") or "") != "workspace_artifact.targeted_readback":
+                continue
+            path = str(item.get("path") or "").strip()
+            provenance = item.get("provenance")
+            source_evidence_id = (
+                str(provenance.get("source_evidence_id") or "").strip() if isinstance(provenance, Mapping) else ""
+            )
+            if source_evidence_id:
+                existing_locator_readbacks.add(source_evidence_id)
+            elif path:
+                existing_generic_paths.add(path)
+
+        evidence_items: list[dict[str, Any]] = []
+        for locator in acceptance_locator_view_from_ledger(evidence_ledger).get("items", []):
+            if not isinstance(locator, Mapping):
+                continue
+            locator_id = str(locator.get("id") or "").strip()
+            if not locator_id or locator_id in existing_locator_readbacks:
+                continue
+            if str(locator.get("status") or "") != "ok":
+                continue
+            readback = await self._workspace_artifact_acceptance_locator_readback(locator)
+            if readback is not None:
+                evidence_items.append(self._workspace_artifact_targeted_readback_evidence_item(locator, readback))
+                existing_locator_readbacks.add(locator_id)
+
+        claim_queries = self._evidence_use_verifier_target_queries(evidence_use)
+        for artifact in workspace_artifacts_from_ledger(evidence_ledger):
+            path = str(artifact.get("path") or "").strip()
+            if not path or path in existing_generic_paths:
+                continue
+            if str(artifact.get("status") or "") != "ok":
+                continue
+            if str(artifact.get("body_state") or "") != "truncated":
+                continue
+            try:
+                read_result = await self.workspace.read_file(
+                    path,
+                    max_bytes=self._workspace_artifact_verifier_readback_bytes(artifact),
+                )
+            except Exception as error:
+                evidence_items.append(
+                    self._workspace_artifact_targeted_readback_evidence_item(
+                        artifact,
+                        {
+                            "kind": "verifier_readback",
+                            "path": path,
+                            "status": "failed",
+                            "error": {
+                                "type": error.__class__.__name__,
+                                "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                            },
+                        },
+                    )
+                )
+                continue
+            for readback in await self._trusted_workspace_artifact_targeted_readbacks(
+                artifact,
+                read_result,
+                queries=claim_queries,
+            ):
+                evidence_items.append(self._workspace_artifact_targeted_readback_evidence_item(artifact, readback))
+        self._append_execution_meta_evidence_items(execution_meta, evidence_items)
+
+    @classmethod
+    def _workspace_artifact_targeted_readback_evidence_item(
+        cls,
+        artifact: Mapping[str, Any],
+        readback: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        path = str(readback.get("path") or artifact.get("path") or "").strip()
+        raw_status = str(readback.get("status") or "read").strip()
+        status = "failed" if raw_status == "failed" else "ok"
+        kind = str(readback.get("kind") or "targeted_readback").strip()
+        content = str(readback.get("content") or "")
+        query = str(readback.get("query") or readback.get("matched_query") or "")
+        locator = query or str(readback.get("offset") or readback.get("line_start") or kind)
+        evidence_id = cls._workspace_artifact_evidence_id(
+            "workspace_artifact_targeted_readback",
+            path,
+            f"{kind}:{locator}",
+        )
+        item: dict[str, Any] = {
+            "id": evidence_id,
+            "kind": "workspace_artifact.targeted_readback",
+            "status": status,
+            "raw_status": raw_status,
+            "body_state": "ref_only" if status == "failed" else ("truncated" if readback.get("truncated") else "bounded"),
+            "path": path,
+            "source": "agent_task.workspace_artifact.targeted_readback",
+            "provenance": {
+                "source": "agent_task.workspace_artifact.targeted_readback",
+                "source_evidence_id": readback.get("source_evidence_id") or artifact.get("id"),
+                "path": path,
+                "kind": kind,
+                "query": query,
+                "matched_query": readback.get("matched_query"),
+                "offset": readback.get("offset"),
+                "line_start": readback.get("line_start"),
+                "line_end": readback.get("line_end"),
+            },
+            "supports": {
+                "content": status == "ok",
+                "unavailability": status == "failed",
+                "ref_pointer": False,
+            },
+        }
+        if content:
+            item["body"] = content
+        if status == "failed":
+            item["diagnostics"] = [
+                {
+                    "code": "agent_task.workspace_artifact.targeted_readback_failed",
+                    "message": "Workspace artifact targeted readback failed before verifier request.",
+                    "error": DataFormatter.sanitize(readback.get("error") or {}),
+                }
+            ]
+        return DataFormatter.sanitize(item)
+
+    async def _workspace_artifact_acceptance_locator_readback(
+        self,
+        locator: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        path = str(locator.get("path") or locator.get("artifact_path") or "").strip()
+        locator_id = str(locator.get("id") or "").strip()
+        if not path or not locator_id:
+            return None
+        offset = self._coerce_non_negative_int(locator.get("byte_offset"))
+        byte_end = self._coerce_non_negative_int(locator.get("byte_end"))
+        max_bytes = min(_VERIFIER_PROMPT_ITEM_CHARS, 2400)
+        if byte_end > offset:
+            max_bytes = min(max(byte_end - offset, 800), max_bytes)
+        if offset > 0 or byte_end > 0:
+            try:
+                read_result = await self.workspace.read_file(path, max_bytes=max_bytes, offset=offset)
+            except Exception as error:
+                return {
+                    "kind": "acceptance_locator_readback",
+                    "path": path,
+                    "status": "failed",
+                    "source_evidence_id": locator_id,
+                    "offset": offset,
+                    "line_start": locator.get("line_start"),
+                    "line_end": locator.get("line_end"),
+                    "error": {
+                        "type": error.__class__.__name__,
+                        "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    },
+                }
+            return {
+                "kind": "acceptance_locator_readback",
+                "path": str(read_result.get("path") or path),
+                "status": "read",
+                "source_evidence_id": locator_id,
+                "offset": int(read_result.get("offset") or offset),
+                "line_start": locator.get("line_start"),
+                "line_end": locator.get("line_end"),
+                "truncated": bool(read_result.get("truncated")),
+                "query": locator.get("heading") or locator.get("anchor_text") or locator.get("claim"),
+                "content": self._truncate_prompt_text(str(read_result.get("content") or ""), max_bytes),
+            }
+        for query in self._acceptance_locator_search_queries(locator):
+            match = await self._workspace_artifact_search_readback(
+                path,
+                query,
+                max_file_bytes=5_000_000,
+            )
+            if match is not None:
+                match["kind"] = "acceptance_locator_search"
+                match["source_evidence_id"] = locator_id
+                return match
+        return {
+            "kind": "acceptance_locator_readback",
+            "path": path,
+            "status": "failed",
+            "source_evidence_id": locator_id,
+            "error": {
+                "type": "AcceptanceLocatorUnavailable",
+                "message": "Acceptance locator did not include a byte offset and no anchor search matched.",
+            },
+        }
+
+    @classmethod
+    def _acceptance_locator_search_queries(cls, locator: Mapping[str, Any]) -> list[str]:
+        queries: list[str] = []
+        for key in ("heading", "anchor_text", "claim", "topic", "criterion_id"):
+            text = str(locator.get(key) or "").strip()
+            if text and len(text) <= 160 and text not in queries:
+                queries.append(text)
+        return queries[:4]
+
+    def _should_attempt_evidence_binding_repair(self, grounding_guard: Mapping[str, Any]) -> bool:
+        if not isinstance(grounding_guard, Mapping):
+            return False
+        if not grounding_guard.get("blocking_count"):
+            return False
+        blocking_codes = {
+            str(item.get("code") or "")
+            for item in grounding_guard.get("diagnostics", [])
+            if isinstance(item, Mapping) and item.get("blocking") is True
+        }
+        if not blocking_codes:
+            return False
+        binding_codes = {
+            "evidence_ledger.invalid_evidence_id",
+            "evidence_ledger.ambiguous_evidence_alias",
+            "evidence_ledger.missing_evidence_id",
+        }
+        if not blocking_codes.issubset(binding_codes):
+            return False
+        try:
+            count = int(self.diagnostics.get("evidence_binding_repair_attempt_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        return count < 2
+
+    async def _request_evidence_binding_repair(
+        self,
+        grounding_guard: Mapping[str, Any],
+        evidence_ledger: Mapping[str, Any],
+        *,
+        language_policy: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        try:
+            count = int(self.diagnostics.get("evidence_binding_repair_attempt_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        self.diagnostics["evidence_binding_repair_attempt_count"] = count + 1
+        request = self.agent.create_temp_request()
+        self._apply_language_policy_to_request(request, language_policy)
+        request.input(
+            {
+                "task_id": self.id,
+                "blocking_evidence_use_diagnostics": self._evidence_binding_repair_diagnostics(grounding_guard),
+                "current_evidence_use": grounding_guard.get("normalized_evidence_use", []),
+                "available_evidence_refs": grounding_guard.get("available_evidence_refs", []),
+                "grounding_rules": evidence_ledger.get("grounding_rules", {}) if isinstance(evidence_ledger, Mapping) else {},
+            }
+        )
+        request.instruct(
+            "Repair only the structured evidence_use bindings that failed deterministic id binding. "
+            "Do not rewrite, summarize, or regenerate the candidate final result. "
+            "Choose evidence_ids only from available_evidence_refs.id or available_evidence_refs.cite_as. "
+            "If no listed evidence item can support a claim under the rules, return that claim with an empty evidence_ids "
+            "list so the host can block precisely. Preserve each claim text and support_type."
+        )
+        request.output(
+            {
+                "evidence_use": (
+                    [
+                        {
+                            "claim_index": (int, "Index of the claim in current_evidence_use when available", False),
+                            "claim": (str, "Original claim text", True),
+                            "evidence_ids": ([str], "Corrected evidence ids or cite_as handles from available_evidence_refs", True),
+                            "support_type": (
+                                str,
+                                "content, unavailability, or ref_pointer; keep the original type unless it was structurally wrong",
+                                True,
+                            ),
+                        }
+                    ],
+                    "Only corrected evidence_use entries for claims with binding diagnostics",
+                    True,
+                ),
+                "repair_summary": (
+                    str,
+                    "Short summary of the evidence binding repair result; no candidate rewrite.",
+                    False,
+                ),
+                "progress_message": (
+                    str,
+                    "One safe human-readable repair progress sentence.",
+                    False,
+                ),
+            },
+            format="json",
+        )
+        repaired = await self._await_task_request(request.async_get_data(), stage="evidence_binding_repair")
+        if not isinstance(repaired, Mapping):
+            return []
+        await self._emit_process_progress_from_output(
+            repaired,
+            stage="evidence_binding_repair",
+        )
+        evidence_use = repaired.get("evidence_use")
+        if not isinstance(evidence_use, Sequence) or isinstance(evidence_use, str | bytes | bytearray):
+            return []
+        return [dict(DataFormatter.sanitize(item)) for item in evidence_use if isinstance(item, Mapping)]
+
+    @classmethod
+    def _evidence_binding_repair_diagnostics(cls, grounding_guard: Mapping[str, Any]) -> list[dict[str, Any]]:
+        diagnostics: list[dict[str, Any]] = []
+        for item in grounding_guard.get("diagnostics", []) if isinstance(grounding_guard, Mapping) else []:
+            if not isinstance(item, Mapping) or item.get("blocking") is not True:
+                continue
+            if str(item.get("code") or "") not in {
+                "evidence_ledger.invalid_evidence_id",
+                "evidence_ledger.ambiguous_evidence_alias",
+                "evidence_ledger.missing_evidence_id",
+            }:
+                continue
+            diagnostics.append(
+                {
+                    "code": item.get("code"),
+                    "claim_index": item.get("index"),
+                    "claim": item.get("claim"),
+                    "evidence_id": item.get("evidence_id"),
+                    "candidates": item.get("candidates"),
+                    "support_type": item.get("support_type"),
+                }
+            )
+        return DataFormatter.sanitize(diagnostics)
+
+    @classmethod
+    def _merge_repaired_evidence_use(cls, current_evidence_use: Any, repaired_evidence_use: Any) -> list[dict[str, Any]]:
+        current = [dict(item) for item in current_evidence_use if isinstance(item, Mapping)] if isinstance(current_evidence_use, Sequence) and not isinstance(current_evidence_use, str | bytes | bytearray) else []
+        repaired = [dict(item) for item in repaired_evidence_use if isinstance(item, Mapping)] if isinstance(repaired_evidence_use, Sequence) and not isinstance(repaired_evidence_use, str | bytes | bytearray) else []
+        by_index: dict[int, dict[str, Any]] = {}
+        by_claim: dict[str, dict[str, Any]] = {}
+        for item in repaired:
+            raw_claim_index = item.get("claim_index")
+            try:
+                claim_index = int(raw_claim_index) if raw_claim_index is not None else -1
+            except (TypeError, ValueError):
+                claim_index = -1
+            if claim_index >= 0:
+                by_index[claim_index] = item
+            claim = str(item.get("claim") or "").strip()
+            if claim:
+                by_claim[claim] = item
+        merged: list[dict[str, Any]] = []
+        for index, item in enumerate(current):
+            replacement = by_index.get(index)
+            if replacement is None:
+                replacement = by_claim.get(str(item.get("claim") or "").strip())
+            merged.append(DataFormatter.sanitize(replacement if replacement is not None else item))
+        return merged
 
     async def _trusted_workspace_artifacts_for_verifier(
         self,
@@ -562,6 +1009,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         self,
         ref: Mapping[str, Any],
         read_result: Mapping[str, Any],
+        *,
+        queries: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         path = str(ref.get("path") or read_result.get("path") or "").strip()
         if not path:
@@ -604,7 +1053,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 )
 
         max_file_bytes = max(byte_count, _VERIFIER_PROMPT_VALUE_CHARS)
-        for query in self._workspace_artifact_verifier_target_queries():
+        for query in [*list(queries or ()), *self._workspace_artifact_verifier_target_queries()]:
             if len(readbacks) >= 8:
                 break
             match = await self._workspace_artifact_search_readback(path, query, max_file_bytes=max_file_bytes)
@@ -699,6 +1148,30 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "coverage",
         ):
             add(query)
+        return queries[:12]
+
+    @classmethod
+    def _evidence_use_verifier_target_queries(cls, evidence_use: Any) -> list[str]:
+        queries: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            text = " ".join(text.split())
+            if len(text) > 160:
+                return
+            key = text.casefold()
+            if key not in {item.casefold() for item in queries}:
+                queries.append(text)
+
+        for use in collect_evidence_use({"evidence_use": evidence_use}):
+            if not isinstance(use, Mapping):
+                continue
+            add(use.get("claim"))
+            for evidence_id in cls._normalize_string_list(use.get("evidence_ids")):
+                if "/" in evidence_id or "." in evidence_id:
+                    add(PurePosixPath(evidence_id).name)
         return queries[:12]
 
     @staticmethod
@@ -951,6 +1424,42 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "diagnostics": cls._compact_verifier_prompt_value(diagnostics, max_chars=1200),
             "evidence_summary": dict(evidence_summary),
         }
+
+    @classmethod
+    def _evidence_ledger_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+        blocks = execution_meta.get("blocks")
+        if isinstance(blocks, Mapping):
+            evidence = blocks.get("evidence")
+            if isinstance(evidence, Mapping):
+                return evidence_ledger_view(evidence, max_items=80, body_chars=2400)
+        return evidence_ledger_view({"evidence_items": ()}, max_items=80, body_chars=2400)
+
+    def _cumulative_evidence_ledger(self, current_execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        for iteration in self.iterations:
+            if not isinstance(iteration, Mapping):
+                continue
+            previous_meta = iteration.get("execution_meta")
+            if not isinstance(previous_meta, Mapping):
+                continue
+            previous_ledger = self._evidence_ledger_from_execution_meta(previous_meta)
+            for item in previous_ledger.get("items", []):
+                if isinstance(item, Mapping):
+                    items.append(dict(item))
+        current_ledger = self._evidence_ledger_from_execution_meta(current_execution_meta)
+        for item in current_ledger.get("items", []):
+            if isinstance(item, Mapping):
+                items.append(dict(item))
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            evidence_id = str(item.get("id") or "").strip()
+            if evidence_id and evidence_id in seen:
+                continue
+            if evidence_id:
+                seen.add(evidence_id)
+            deduped.append(item)
+        return evidence_ledger_view({"evidence_items": deduped}, max_items=120, body_chars=2400)
 
     def _cumulative_execution_evidence_summary(self, current_execution_meta: Mapping[str, Any]) -> dict[str, Any]:
         summaries: list[dict[str, Any]] = []
@@ -1340,6 +1849,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         *,
         execution_evidence_summary: dict[str, Any],
         candidate_final_result: str = "",
+        grounding_guard: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized: dict[str, Any] = {
             "is_complete": self._normalize_bool(verification.get("is_complete"), default=False),
@@ -1354,6 +1864,26 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "final_result": str(verification.get("final_result") or ""),
         }
         guard_reasons: list[str] = []
+        if isinstance(grounding_guard, Mapping):
+            normalized["grounding_guard"] = DataFormatter.sanitize(dict(grounding_guard))
+            if int(grounding_guard.get("blocking_count") or 0) > 0 or grounding_guard.get("valid") is False:
+                normalized["is_complete"] = False
+                guard_reasons.append("evidence_ledger_grounding_guard_failed")
+                guard_messages = [
+                    str(item.get("message") or item.get("code") or "")
+                    for item in grounding_guard.get("diagnostics", [])
+                    if isinstance(item, Mapping) and item.get("blocking") is True
+                ]
+                if not guard_messages:
+                    guard_messages = ["Evidence ledger grounding guard found invalid claim-to-evidence bindings."]
+                normalized["missing_criteria"] = self._merge_string_lists(
+                    normalized.get("missing_criteria"),
+                    guard_messages,
+                )
+                normalized["acceptance_delta"] = self._merge_string_lists(
+                    normalized.get("acceptance_delta"),
+                    guard_messages,
+                )
         if normalized["requires_block"]:
             normalized["is_complete"] = False
             guard_reasons.append("requires_block_true")

@@ -35,6 +35,42 @@ TaskFrame
 | `TriggerFlow` | TriggerFlow | Runtime dispatch, signals, joins, concurrency, pause/resume, stream, close snapshot, and recovery. |
 | `EvidenceEnvelope` | Blocks mapper / AgentTaskLoop | Runtime facts used by the verifier and deterministic host guards. |
 
+## Evidence Ledger
+
+`EvidenceEnvelope` is the authoritative internal evidence ledger. Its
+`evidence_items` list carries stable `id`, `kind`, `status`, `body_state`, and
+provenance for every Blocks/Workspace/Action/readback fact that can ground a
+claim.
+
+`status` is one of `ok`, `failed`, or `empty`. Failed and empty items are still
+evidence: they can support unavailable or missing-data claims, but they cannot
+support positive business facts. `body_state=ref_only` proves only that a URL,
+path, artifact, or record ref was found or materialized. `bounded` and
+`truncated` content can support only the visible body; full-source claims require
+a later readback evidence item.
+
+Flat bounded steps, TaskBoard card/final synthesis, verifier prompts, and host
+guards all derive their hot views from the same ledger ids. Compatibility views
+such as `scoped_retrieval_results`, TaskBoard `source_refs`, and legacy
+EvidenceEnvelope buckets remain, but they are not separate grounding
+authorities. Structured model outputs may include `evidence_use` bindings so
+deterministic guards can reject invalid ids, failed/empty positive support, and
+`ref_only` content support before verifier judgment.
+
+Model prompts may show short `cite_as` handles beside canonical ids. Those
+handles plus producer-declared structural aliases such as paths, record ids,
+URLs, artifact ids, action ids, and action/ref pairs are deterministic aliases
+only; AgentTask canonicalizes them back to ledger ids before verifier input.
+Ambiguous aliases block instead of guessing, and the guard does not maintain
+business-specific action-name rules.
+
+Workspace artifact write/readback and targeted artifact readback are ledger
+producers. A verifier can inspect only readback facts that have been written to
+the ledger; it does not create a private readback view that synthesis could not
+also use. TaskBoard may skip redundant final synthesis when a terminal card has
+already produced a trusted candidate, but the promoted result still passes
+through the same ledger guard and terminal verifier.
+
 ## Skill Activation
 
 Skills are progressive context and capability packages. A `skill_activation`

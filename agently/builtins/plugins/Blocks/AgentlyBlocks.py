@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any, cast
 
@@ -53,6 +53,21 @@ _HANDLER_REQUIRED_EXECUTION_KINDS = frozenset(
         "external_wait",
         "flow_segment",
         "agent_step",
+    }
+)
+_ACTION_REF_ALIAS_FIELDS = frozenset(
+    {
+        "path",
+        "record_id",
+        "source_url",
+        "selected_url",
+        "requested_url",
+        "canonical_url",
+        "url",
+        "href",
+        "artifact_id",
+        "output_ref",
+        "ref",
     }
 )
 
@@ -444,9 +459,27 @@ class EvidenceMapperRegistry:
         plan_results = blocks_state.get("plan_block_results", output.get("plan_block_results", ()))
         diagnostics = blocks_state.get("diagnostics", output.get("diagnostics", ()))
         semantic_outputs = blocks_state.get("semantic_outputs", output.get("semantic_outputs", {}))
+        diagnostic_items = _ledger_items_from_blocks_state(
+            execution_results=(),
+            plan_results=(),
+            diagnostics=_diagnostics_with_replan_signals(diagnostics, blocks_state.get("replan_signals", ())),
+        )
+        evidence_items = _mapping_sequence(blocks_state.get("evidence_items"))
+        if evidence_items:
+            evidence_items = [*evidence_items, *_new_ledger_items(evidence_items, diagnostic_items)]
+        else:
+            evidence_items = _ledger_items_from_blocks_state(
+                execution_results=execution_results,
+                plan_results=plan_results,
+                diagnostics=_diagnostics_with_replan_signals(
+                    diagnostics,
+                    blocks_state.get("replan_signals", ()),
+                ),
+            )
         return EvidenceEnvelope.from_value(
             {
                 "plan_id": graph.source_plan_id,
+                "evidence_items": evidence_items,
                 "execution_block_results": execution_results,
                 "plan_block_results": plan_results,
                 "semantic_outputs": semantic_outputs if isinstance(semantic_outputs, Mapping) else {},
@@ -824,6 +857,671 @@ def _merge_mapping(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[st
 
 def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+
+
+def _ledger_items_from_blocks_state(
+    *,
+    execution_results: Any,
+    plan_results: Any,
+    diagnostics: Any,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for index, result in enumerate(_mapping_sequence(execution_results)):
+        items.extend(_ledger_items_from_execution_result(result, index=index))
+    for index, result in enumerate(_mapping_sequence(plan_results)):
+        items.append(
+            _ledger_item(
+                "plan_block",
+                index=len(items),
+                status=_ledger_status_from_result(result),
+                body_state=_ledger_body_state_from_value(result),
+                body=_ledger_body_from_value(result),
+                provenance={
+                    "plan_block_id": result.get("plan_block_id"),
+                    "source_plan_block_id": result.get("source_plan_block_id"),
+                },
+                raw_status=result.get("status", result.get("success")),
+                extra={
+                    key: result.get(key)
+                    for key in ("plan_block_id", "source_plan_block_id", "output_ref")
+                    if result.get(key) not in (None, "", [], {})
+                },
+            )
+        )
+    for index, diagnostic in enumerate(_mapping_sequence(diagnostics)):
+        items.append(
+            _ledger_item(
+                "diagnostic",
+                index=len(items),
+                status="failed",
+                body_state="bounded",
+                body=diagnostic.get("message") or diagnostic.get("reason") or diagnostic,
+                provenance={
+                    "source": "blocks.diagnostics",
+                    "execution_block_id": diagnostic.get("execution_block_id"),
+                    "source_plan_block_id": diagnostic.get("source_plan_block_id"),
+                },
+                raw_status="failed",
+                diagnostics=(diagnostic,),
+                extra={"diagnostic_index": index, "code": diagnostic.get("code")},
+            )
+        )
+    return items
+
+
+def _ledger_items_from_execution_result(result: Mapping[str, Any], *, index: int) -> list[dict[str, Any]]:
+    output = result.get("output")
+    output_map = dict(output) if isinstance(output, Mapping) else {}
+    operation = str(output_map.get("operation") or "").strip()
+    block_kind = str(result.get("kind") or "execution_block").strip() or "execution_block"
+    kind = f"{block_kind}.{operation}" if operation else block_kind
+    diagnostics = _mapping_sequence(output_map.get("diagnostics"))
+    status = _ledger_status_from_result(result)
+    if operation in {"search", "scoped_search"}:
+        bounded = output_map.get("bounded")
+        returned_results = 0
+        if isinstance(bounded, Mapping):
+            try:
+                returned_results = int(bounded.get("returned_results") or 0)
+            except (TypeError, ValueError):
+                returned_results = 0
+        if returned_results <= 0:
+            status = "failed" if diagnostics else "empty"
+    body_state = _ledger_body_state_from_value(output_map) if output_map else "ref_only"
+    items = [
+        _ledger_item(
+            kind,
+            index=index,
+            status=status,
+            body_state=body_state,
+            body=_ledger_body_from_value(output_map),
+            provenance=_ledger_provenance(result, source="blocks.execution_block_results"),
+            raw_status=result.get("status", result.get("success")),
+            diagnostics=diagnostics,
+            extra={
+                **({"block_kind": result.get("kind")} if result.get("kind") not in (None, "", [], {}) else {}),
+                **{
+                    key: result.get(key)
+                    for key in (
+                        "id",
+                        "execution_block_id",
+                        "source_plan_block_id",
+                        "source_task_dag_node_id",
+                        "cancelled",
+                        "waiting",
+                    )
+                    if result.get(key) not in (None, "", [], {})
+                },
+            },
+        )
+    ]
+    if operation in {"search", "scoped_search"}:
+        items.extend(_ledger_items_from_workspace_search(result, output_map, start_index=len(items)))
+    elif operation == "read_bounded":
+        items.extend(_ledger_items_from_workspace_readback(result, output_map, start_index=len(items)))
+    items.extend(_ledger_items_from_nested_execution_meta(result, output_map, start_index=len(items)))
+    return items
+
+
+def _ledger_items_from_workspace_search(
+    result: Mapping[str, Any],
+    output: Mapping[str, Any],
+    *,
+    start_index: int,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for index, ref in enumerate(_mapping_sequence(output.get("locator_refs"))):
+        items.append(
+            _ledger_item(
+                "locator_ref",
+                index=start_index + len(items),
+                status="ok",
+                body_state="ref_only",
+                body=ref.get("summary") or ref.get("title") or ref.get("label"),
+                provenance=_ledger_workspace_provenance(result, ref, source="blocks.workspace_operation.search"),
+                raw_status="ok",
+                extra=_ledger_ref_fields(ref, evidence_role="locator_ref", query=output.get("query")),
+            )
+        )
+    for index, snippet in enumerate(_mapping_sequence(output.get("evidence_snippets"))):
+        body = (
+            snippet.get("content")
+            if snippet.get("content") is not None
+            else snippet.get("snippet", snippet.get("text"))
+        )
+        body_state = "truncated" if snippet.get("truncated") is True else "bounded"
+        items.append(
+            _ledger_item(
+                "evidence_snippet",
+                index=start_index + len(items),
+                status="ok",
+                body_state=body_state,
+                body=body,
+                provenance=_ledger_workspace_provenance(result, snippet, source="blocks.workspace_operation.search"),
+                raw_status="ok",
+                extra=_ledger_ref_fields(snippet, evidence_role="evidence_snippet", query=output.get("query")),
+            )
+        )
+    for diagnostic in _mapping_sequence(output.get("diagnostics")):
+        items.append(
+            _ledger_item(
+                "workspace_operation.diagnostic",
+                index=start_index + len(items),
+                status="failed",
+                body_state="bounded",
+                body=diagnostic.get("message") or diagnostic,
+                provenance=_ledger_workspace_provenance(result, diagnostic, source="blocks.workspace_operation.search"),
+                raw_status="failed",
+                diagnostics=(diagnostic,),
+                extra=_ledger_ref_fields(diagnostic, evidence_role="diagnostic", query=output.get("query")),
+            )
+        )
+    return items
+
+
+def _ledger_items_from_workspace_readback(
+    result: Mapping[str, Any],
+    output: Mapping[str, Any],
+    *,
+    start_index: int,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    locator = output.get("locator_ref")
+    if isinstance(locator, Mapping):
+        items.append(
+            _ledger_item(
+                "locator_ref",
+                index=start_index + len(items),
+                status="ok",
+                body_state="ref_only",
+                provenance=_ledger_workspace_provenance(result, locator, source="blocks.workspace_operation.read_bounded"),
+                raw_status="ok",
+                extra=_ledger_ref_fields(locator, evidence_role="locator_ref"),
+            )
+        )
+    for snippet in _mapping_sequence(output.get("evidence_snippets")):
+        body = (
+            snippet.get("content")
+            if snippet.get("content") is not None
+            else snippet.get("snippet", snippet.get("text"))
+        )
+        body_state = "truncated" if snippet.get("truncated") is True else "bounded"
+        items.append(
+            _ledger_item(
+                "readback",
+                index=start_index + len(items),
+                status="ok",
+                body_state=body_state,
+                body=body,
+                provenance=_ledger_workspace_provenance(result, snippet, source="blocks.workspace_operation.read_bounded"),
+                raw_status="ok",
+                extra=_ledger_ref_fields(snippet, evidence_role="readback"),
+            )
+        )
+    return items
+
+
+def _ledger_items_from_nested_execution_meta(
+    result: Mapping[str, Any],
+    output: Mapping[str, Any],
+    *,
+    start_index: int,
+) -> list[dict[str, Any]]:
+    execution_meta = output.get("execution_meta")
+    if not isinstance(execution_meta, Mapping):
+        return []
+    logs = execution_meta.get("logs")
+    logs = logs if isinstance(logs, Mapping) else {}
+    items: list[dict[str, Any]] = []
+    for action_index, action in enumerate(_ledger_action_records(logs)):
+        action_id = str(action.get("id") or action.get("name") or "").strip()
+        action_call_id = action.get("action_call_id")
+        status = _ledger_status_from_action(action)
+        body = action.get("result_preview")
+        if body in (None, "", [], {}):
+            body = action.get("error") or action.get("message")
+        body_state = "bounded" if body not in (None, "", [], {}) else "ref_only"
+        aliases = _ledger_action_ref_aliases(
+            action,
+            action_id=action_id,
+            action_call_id=action_call_id,
+        )
+        extra = {
+            "action_id": action_id,
+            "action_call_id": action_call_id,
+            "action_type": action.get("action_type"),
+        }
+        if aliases:
+            extra["aliases"] = aliases
+        items.append(
+            _ledger_item(
+                "action_evidence",
+                index=start_index + len(items),
+                status=status,
+                body_state=body_state,
+                body=body,
+                provenance={
+                    **_ledger_provenance(result, source="execution_meta.logs"),
+                    "execution_id": execution_meta.get("execution_id"),
+                    "action_id": action_id,
+                    "action_call_id": action_call_id,
+                },
+                raw_status=action.get("status"),
+                diagnostics=_action_diagnostics(action),
+                extra=extra,
+            )
+        )
+    for ref in _mapping_sequence(logs.get("artifact_refs")):
+        items.append(
+            _ledger_item(
+                "artifact_ref",
+                index=start_index + len(items),
+                status=_ledger_status_from_ref(ref),
+                body_state=_ledger_body_state_from_ref(ref),
+                body=_ledger_body_from_value(ref),
+                provenance={**_ledger_provenance(result, source="execution_meta.logs.artifact_refs")},
+                raw_status=ref.get("status", "ok"),
+                extra=_ledger_ref_fields(ref, evidence_role="artifact_ref"),
+            )
+        )
+    for ref in _mapping_sequence(logs.get("source_refs")):
+        items.append(
+            _ledger_item(
+                "source_ref",
+                index=start_index + len(items),
+                status="ok",
+                body_state=_ledger_body_state_from_ref(ref),
+                body=_ledger_body_from_value(ref),
+                provenance={**_ledger_provenance(result, source="execution_meta.logs.source_refs")},
+                raw_status=ref.get("status", "ok"),
+                extra=_ledger_ref_fields(ref, evidence_role="source_ref"),
+            )
+        )
+    for error in _error_sequence(logs.get("errors")):
+        items.append(
+            _ledger_item(
+                "execution_error",
+                index=start_index + len(items),
+                status="failed",
+                body_state="bounded",
+                body=error.get("message") or error,
+                provenance={**_ledger_provenance(result, source="execution_meta.logs.errors")},
+                raw_status="failed",
+                diagnostics=(error,),
+                extra={"type": error.get("type")},
+            )
+        )
+    diagnostics = execution_meta.get("diagnostics")
+    if isinstance(diagnostics, Mapping) and diagnostics.get("execution_error") is not None:
+        error = diagnostics.get("execution_error")
+        error_map = dict(error) if isinstance(error, Mapping) else {"message": str(error)}
+        items.append(
+            _ledger_item(
+                "execution_error",
+                index=start_index + len(items),
+                status="failed",
+                body_state="bounded",
+                body=error_map.get("message") or error_map,
+                provenance={**_ledger_provenance(result, source="execution_meta.diagnostics.execution_error")},
+                raw_status="failed",
+                diagnostics=(error_map,),
+                extra={"type": error_map.get("type")},
+            )
+        )
+    return items
+
+
+def _ledger_item(
+    kind: str,
+    *,
+    index: int,
+    status: str,
+    body_state: str,
+    provenance: Mapping[str, Any] | None = None,
+    raw_status: Any = None,
+    body: Any = None,
+    diagnostics: Any = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    clean_kind = str(kind or "evidence").strip() or "evidence"
+    provenance_dict = {
+        str(key): value
+        for key, value in dict(provenance or {}).items()
+        if value not in (None, "", [], {})
+    }
+    item = {
+        "id": _ledger_item_id(clean_kind, index, provenance_dict, extra),
+        "kind": clean_kind,
+        "status": status if status in {"ok", "failed", "empty"} else "ok",
+        "raw_status": raw_status if raw_status is not None else status,
+        "body_state": body_state if body_state in {"full", "bounded", "truncated", "ref_only"} else "ref_only",
+        "provenance": provenance_dict,
+    }
+    if body not in (None, "", [], {}):
+        item["body"] = body if isinstance(body, str) else str(body)
+    diagnostics_items = _mapping_sequence(diagnostics)
+    if diagnostics_items:
+        item["diagnostics"] = diagnostics_items
+    for key, value in dict(extra or {}).items():
+        if value not in (None, "", [], {}):
+            item[str(key)] = value
+    return item
+
+
+def _ledger_item_id(
+    kind: str,
+    index: int,
+    provenance: Mapping[str, Any],
+    extra: Mapping[str, Any] | None,
+) -> str:
+    parts = [
+        kind,
+        provenance.get("execution_block_id"),
+        provenance.get("source_plan_block_id"),
+        provenance.get("action_call_id"),
+        provenance.get("action_id"),
+    ]
+    extra = extra or {}
+    parts.extend(extra.get(key) for key in ("record_id", "path", "artifact_id", "evidence_role"))
+    parts.append(str(index))
+    raw = ":".join(str(part).strip() for part in parts if str(part or "").strip())
+    if not raw:
+        raw = f"{kind}:{index}"
+    return "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in raw)[:240]
+
+
+def _ledger_provenance(result: Mapping[str, Any], *, source: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "execution_block_id": result.get("execution_block_id") or result.get("id"),
+        "source_plan_block_id": result.get("source_plan_block_id"),
+        "source_task_dag_node_id": result.get("source_task_dag_node_id"),
+    }
+
+
+def _ledger_workspace_provenance(
+    result: Mapping[str, Any],
+    ref: Mapping[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    provenance = _ledger_provenance(result, source=source)
+    for key in ("record_id", "path", "collection", "kind", "source_url", "selected_url", "requested_url", "url", "href"):
+        if ref.get(key) not in (None, "", [], {}):
+            provenance[key] = ref.get(key)
+    raw_ref = ref.get("ref")
+    if isinstance(raw_ref, Mapping):
+        for key in ("id", "path", "collection", "kind"):
+            if raw_ref.get(key) not in (None, "", [], {}):
+                provenance[f"ref_{key}"] = raw_ref.get(key)
+    return provenance
+
+
+def _ledger_ref_fields(ref: Mapping[str, Any], *, evidence_role: str, query: Any = None) -> dict[str, Any]:
+    fields: dict[str, Any] = {"evidence_role": evidence_role}
+    for key in (
+        "path",
+        "record_id",
+        "collection",
+        "source_url",
+        "selected_url",
+        "requested_url",
+        "canonical_url",
+        "url",
+        "href",
+        "artifact_id",
+        "content_state",
+        "truncated",
+        "line",
+        "line_start",
+        "line_end",
+    ):
+        if ref.get(key) not in (None, "", [], {}):
+            fields[key] = ref.get(key)
+    if query not in (None, "", [], {}):
+        fields["query"] = query
+    raw_ref = ref.get("ref")
+    if isinstance(raw_ref, Mapping):
+        fields["ref"] = {
+            key: raw_ref.get(key)
+            for key in ("id", "path", "collection", "kind", "summary", "title", "label")
+            if raw_ref.get(key) not in (None, "", [], {})
+        }
+    return fields
+
+
+def _ledger_body_from_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        for key in (
+            "body",
+            "content",
+            "content_preview",
+            "snippet",
+            "text",
+            "preview",
+            "result_preview",
+            "answer",
+            "step_result",
+        ):
+            item = value.get(key)
+            if item not in (None, "", [], {}):
+                return item
+    return None
+
+
+def _ledger_body_state_from_value(value: Any) -> str:
+    if isinstance(value, Mapping):
+        raw = str(value.get("body_state") or value.get("content_state") or "").strip()
+        if raw == "ref_only":
+            return "ref_only"
+        if value.get("truncated") is True:
+            return "truncated"
+        if _ledger_body_from_value(value) not in (None, "", [], {}):
+            return "bounded"
+    return "ref_only"
+
+
+def _ledger_body_state_from_ref(ref: Mapping[str, Any]) -> str:
+    raw = str(ref.get("body_state") or ref.get("content_state") or "").strip()
+    if raw == "ref_only":
+        return "ref_only"
+    if raw in {"full", "bounded", "truncated"}:
+        return raw
+    if ref.get("truncated") is True:
+        return "truncated"
+    if _ledger_body_from_value(ref) not in (None, "", [], {}):
+        return "bounded"
+    return "ref_only"
+
+
+def _ledger_status_from_result(result: Mapping[str, Any]) -> str:
+    raw_status = str(result.get("status") or "").strip().lower()
+    if raw_status in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+        return "failed"
+    if raw_status in {"empty", "not_found", "no_results", "missing"}:
+        return "empty"
+    if result.get("success") is False or result.get("cancelled") is True:
+        return "failed"
+    return "ok"
+
+
+def _ledger_status_from_action(action: Mapping[str, Any]) -> str:
+    raw_status = str(action.get("status") or "").strip().lower()
+    if raw_status in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+        return "failed"
+    if raw_status in {"empty", "not_found", "no_results", "missing"}:
+        return "empty"
+    if action.get("error") not in (None, "", [], {}):
+        return "failed"
+    return "ok"
+
+
+def _ledger_status_from_ref(ref: Mapping[str, Any]) -> str:
+    raw_status = str(ref.get("status") or "").strip().lower()
+    if raw_status in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+        return "failed"
+    if raw_status in {"empty", "not_found", "no_results", "missing"}:
+        return "empty"
+    return "ok"
+
+
+def _mapping_sequence(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        return [dict(value)]
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [dict(item) for item in value if isinstance(item, Mapping)]
+    return []
+
+
+def _new_ledger_items(existing: Sequence[Mapping[str, Any]], candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    seen = {str(item.get("id") or "") for item in existing if str(item.get("id") or "").strip()}
+    additions: list[dict[str, Any]] = []
+    for candidate in candidates:
+        evidence_id = str(candidate.get("id") or "").strip()
+        if evidence_id and evidence_id in seen:
+            continue
+        if evidence_id:
+            seen.add(evidence_id)
+        additions.append(dict(candidate))
+    return additions
+
+
+def _error_sequence(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        return [dict(value)]
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [dict(item) if isinstance(item, Mapping) else {"message": str(item)} for item in value]
+    return [{"message": str(value)}]
+
+
+def _ledger_action_records(logs: Mapping[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+
+    def add_entries(entries: Any) -> None:
+        if isinstance(entries, Mapping):
+            for action_id, record in entries.items():
+                if isinstance(record, Mapping):
+                    action_record = dict(record)
+                    action_record.setdefault("id", str(action_id))
+                    records.append(action_record)
+                else:
+                    records.append({"id": str(action_id), "name": str(action_id), "status": str(record or "")})
+        elif isinstance(entries, Sequence) and not isinstance(entries, str | bytes | bytearray):
+            for item in entries:
+                if isinstance(item, Mapping):
+                    records.append(dict(item))
+
+    add_entries(logs.get("action_logs", {}))
+    route_logs = logs.get("route_logs", {})
+    if isinstance(route_logs, Mapping):
+        add_entries(route_logs.get("action_logs", {}))
+        route_output = route_logs.get("output", {})
+        if isinstance(route_output, Mapping):
+            add_entries(route_output.get("history", []))
+    return records
+
+
+def _action_diagnostics(action: Mapping[str, Any]) -> list[dict[str, Any]]:
+    error = action.get("error")
+    if error is None:
+        return []
+    if isinstance(error, Mapping):
+        return [dict(error)]
+    return [{"message": str(error)}]
+
+
+def _ledger_action_ref_aliases(
+    action: Mapping[str, Any],
+    *,
+    action_id: str,
+    action_call_id: Any,
+) -> list[str]:
+    prefixes = _dedupe_strings(
+        (
+            action_id,
+            action_call_id,
+            f"action_{ action_id }" if action_id else "",
+            f"action_result_{ action_id }" if action_id else "",
+            f"action_{ action_call_id }" if action_call_id else "",
+            f"action_result_{ action_call_id }" if action_call_id else "",
+        )
+    )
+    refs = _ledger_action_ref_values(action)
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for prefix in prefixes:
+        for ref in refs:
+            alias = f"{ prefix }:{ ref }"
+            if alias in seen:
+                continue
+            seen.add(alias)
+            aliases.append(alias)
+            if len(aliases) >= 32:
+                return aliases
+    return aliases
+
+
+def _ledger_action_ref_values(action: Mapping[str, Any]) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for nested_key in _ACTION_REF_ALIAS_FIELDS:
+                nested = value.get(nested_key)
+                if nested not in (None, "", [], {}):
+                    add(nested)
+            return
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            for item in list(value)[:24]:
+                add(item)
+            return
+        text = str(value or "").strip()
+        if not text or "\n" in text or len(text) > 500:
+            return
+        if text in seen:
+            return
+        seen.add(text)
+        refs.append(text)
+
+    def visit(value: Any, *, depth: int = 0) -> None:
+        if depth > 5:
+            return
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text in _ACTION_REF_ALIAS_FIELDS:
+                    add(item)
+                    continue
+                if key_text in {"body", "content", "text", "snippet", "preview", "result_preview"}:
+                    continue
+                visit(item, depth=depth + 1)
+            return
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            for item in list(value)[:24]:
+                visit(item, depth=depth + 1)
+
+    for key in ("input_preview", "result_preview", "raw", "artifact_refs", "file_refs"):
+        value = action.get(key)
+        if value not in (None, "", [], {}):
+            visit(value)
+    return refs[:32]
+
+
+def _dedupe_strings(values: Sequence[Any]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
 
 
 def _evidence_kinds_for(kind: str) -> tuple[str, ...]:
@@ -1529,7 +2227,11 @@ def _resolve_runtime_handler(block: ExecutionBlock, data: TriggerFlowRuntimeData
 
 
 async def _record_block_result(data: TriggerFlowRuntimeData, result: Mapping[str, Any]) -> None:
+    current_results = data.get_state("blocks.execution_block_results", []) or []
+    result_index = len(current_results) if isinstance(current_results, list) else 0
     await _append_state_item(data, "blocks.execution_block_results", dict(result))
+    for evidence_item in _ledger_items_from_execution_result(result, index=result_index):
+        await _append_state_item(data, "blocks.evidence_items", evidence_item)
     plan_block_id = result.get("source_plan_block_id")
     if plan_block_id:
         await _append_state_item(

@@ -34,6 +34,34 @@ TaskFrame
 | `TriggerFlow` | TriggerFlow | Runtime dispatch、signals、joins、concurrency、pause/resume、stream、close snapshot 和 recovery。 |
 | `EvidenceEnvelope` | Blocks mapper / AgentTaskLoop | Verifier 与 deterministic host guards 使用的运行事实。 |
 
+## Evidence Ledger
+
+`EvidenceEnvelope` 是内部权威证据账本。它的 `evidence_items` 列表为每个可
+支撑声明的 Blocks、Workspace、Action 和 readback 事实保留稳定 `id`、`kind`、
+`status`、`body_state` 和 provenance。
+
+`status` 是 `ok`、`failed` 或 `empty`。失败和空结果也是证据：它们只能支撑
+不可用或缺失数据声明，不能支撑正向业务事实。`body_state=ref_only` 只能证明
+URL、路径、artifact 或 record ref 被发现或物化。`bounded` 和 `truncated`
+内容只能支撑可见正文；完整来源声明需要后续 readback evidence item。
+
+Flat bounded step、TaskBoard card/final synthesis、verifier prompt 和 host guard
+都从同一批 ledger id 派生热视图。兼容视图如 `scoped_retrieval_results`、
+TaskBoard `source_refs` 和旧 EvidenceEnvelope buckets 仍然存在，但它们不是
+独立 grounding 权威。结构化模型输出可以包含 `evidence_use` 绑定，让
+deterministic guard 在 verifier 判断前拒绝无效 id、failed/empty 正向支撑和
+`ref_only` 内容支撑。
+
+模型 prompt 可以展示短 `cite_as` 句柄以及 canonical id。这些句柄、路径、
+record id、URL、artifact id 和 action id 只是确定性别名；AgentTask 会在进入
+verifier 前把它们归一回 ledger id。别名冲突时阻断，不猜测。
+
+Workspace artifact write/readback 和 targeted artifact readback 都是 ledger
+producer。Verifier 只能检查已经进入 ledger 的 readback 事实；它不会创建一条
+合成端看不到的私有 readback 视图。TaskBoard 可以在终态卡片已经产出可信
+candidate 时跳过重复 final synthesis，但 promoted result 仍必须通过同一个
+ledger guard 和 terminal verifier。
+
 ## Skill Activation
 
 Skills 是 progressive context 和 capability package。`skill_activation`

@@ -29,6 +29,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             content={
                 "iteration": iteration_index,
                 "plan": DataFormatter.sanitize(plan),
+                "process_summary": self._process_summary_from_value(plan, stage="plan"),
                 "context_pack_diagnostics": DataFormatter.sanitize(context_pack.get("diagnostics", {})),
                 "context_item_count": len(context_pack.get("items", [])),
             },
@@ -58,6 +59,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 "decision_ref": decision_ref,
                 "execution_result": DataFormatter.sanitize(execution_result),
                 "execution_meta": DataFormatter.sanitize(execution_meta),
+                "process_summary": self._process_summary_from_value(execution_result, stage="execution"),
             },
             collection="observations",
             kind="agent_task_observation",
@@ -233,6 +235,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 "iteration": iteration_index,
                 "verification": DataFormatter.sanitize(verification),
                 "observation_ref": observation_ref,
+                "process_summary": self._process_summary_from_value(verification, stage="verification"),
             },
             collection="verification",
             kind="agent_task_verification",

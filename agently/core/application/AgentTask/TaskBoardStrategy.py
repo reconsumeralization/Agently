@@ -59,15 +59,23 @@ class AgentTaskTaskBoardStrategyMixin(
             if resumed_taskboard_state is not None and isinstance(resumed_taskboard_state.get("revision"), Mapping):
                 resumed_revision = TaskBoardRevision.from_value(resumed_taskboard_state["revision"])
             if resumed_revision is None:
-                await self._emit_progress(
-                    iteration_index,
-                    "taskboard_plan",
-                    "TaskBoard: asking the model to plan the initial board.",
-                )
-                planning_result = await self._await_task_deadline(
-                    self._request_taskboard_plan(context_pack),
-                    stage="taskboard_plan",
-                )
+                planning_result = self._initial_taskboard_plan_from_shape_analysis()
+                if planning_result is None:
+                    await self._emit_progress(
+                        iteration_index,
+                        "taskboard_plan",
+                        "TaskBoard: asking the model to plan the initial board.",
+                    )
+                    planning_result = await self._await_task_deadline(
+                        self._request_taskboard_plan(context_pack),
+                        stage="taskboard_plan",
+                    )
+                else:
+                    await self._emit_progress(
+                        iteration_index,
+                        "taskboard_plan",
+                        "TaskBoard: reusing the task-shape analysis initial board plan.",
+                    )
                 board_revision = planning_result.revision
                 planning_policy = planning_result.planning_policy
             else:
@@ -88,6 +96,17 @@ class AgentTaskTaskBoardStrategyMixin(
                 limit_name=error.limit_name,
                 timeout_seconds=error.timeout_seconds,
             )
+
+        if resumed_revision is None and self._taskboard_should_fallback_to_flat(board_revision):
+            self.diagnostics.setdefault("execution_strategy_gates", []).append(
+                {
+                    "gate": "taskboard_small_linear_board_fallback",
+                    "accepted": True,
+                    "card_count": len(getattr(board_revision.graph, "cards", ()) or ()),
+                }
+            )
+            self._set_effective_execution_strategy("flat", source="taskboard_small_linear_board_fallback")
+            return await self._run_flat()
 
         board = TaskBoard(
             board_revision,
@@ -410,6 +429,8 @@ class AgentTaskTaskBoardStrategyMixin(
             "specific provider, endpoint, file format, or auxiliary guidance source unless the user explicitly "
             "requires that exact source or artifact. Mark replaceable evidence attempts, optional guidance, "
             "style checks, and non-critical cross-checks as optional or degradable through failure_policy. "
+            "Card ids are optional short hints only; the framework canonicalizes, deduplicates, or generates "
+            "stable ids and remaps dependencies before validation. Do not spend tokens inventing opaque ids. "
             "Use allowed_execution_shape='control' for synthesis, verification, finalization, or board-continuation "
             "decision cards that should be handled by one structured model request. Use allowed_execution_shape='readback' "
             "for cards whose only job is bounded cold artifact readback. Use an action-capable shape such as 'actions' "
@@ -432,6 +453,84 @@ class AgentTaskTaskBoardStrategyMixin(
             planning_policy=policy,
             metadata={"execution_strategy": self.execution_strategy},
         )
+
+    def _initial_taskboard_plan_from_shape_analysis(self):
+        if self.execution_strategy != "auto":
+            return None
+        raw_plan = self.task_shape_analysis.get("initial_taskboard_plan") if isinstance(self.task_shape_analysis, Mapping) else None
+        if not isinstance(raw_plan, Mapping) or not raw_plan:
+            return None
+        policy = resolve_task_board_planning_policy(
+            self._taskboard_effort(),
+            metadata={"execution_strategy": self.execution_strategy, "task_id": self.id, "source": "task_shape_analysis"},
+        )
+        try:
+            planning_result = coerce_task_board_planning_result(
+                raw_plan,
+                board_id=self.id,
+                graph_id=f"{self.id}.taskboard",
+                effort=self._taskboard_effort(),
+                planning_policy=policy,
+                metadata={"execution_strategy": self.execution_strategy, "source": "task_shape_analysis"},
+            )
+        except Exception as error:
+            self.diagnostics.setdefault("taskboard_initial_plan", []).append(
+                {
+                    "source": "task_shape_analysis",
+                    "accepted": False,
+                    "error": {
+                        "type": error.__class__.__name__,
+                        "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    },
+                }
+            )
+            return None
+        self.diagnostics.setdefault("taskboard_initial_plan", []).append(
+            {
+                "source": "task_shape_analysis",
+                "accepted": True,
+                "card_count": len(planning_result.revision.graph.cards),
+            }
+        )
+        return planning_result
+
+    def _taskboard_should_fallback_to_flat(self, revision: Any) -> bool:
+        if self.execution_strategy != "auto":
+            return False
+        cards = list(getattr(getattr(revision, "graph", None), "cards", ()) or ())
+        if not cards or len(cards) > 2:
+            return False
+        if any(str(getattr(card, "failure_policy", "required") or "required") != "required" for card in cards):
+            return False
+        if any(self._taskboard_card_has_complex_contract(card) for card in cards):
+            return False
+        shapes = {str(getattr(card, "allowed_execution_shape", "auto") or "auto").strip().lower() for card in cards}
+        if shapes.intersection({"readback", "artifact_readback", "control", "model_control", "synthesis", "finalize"}):
+            return False
+        dependency_edges = sum(len(getattr(card, "depends_on", ()) or ()) for card in cards)
+        if len(cards) == 1:
+            return True
+        if dependency_edges != 1:
+            return False
+        depended_on = {str(dep) for card in cards for dep in (getattr(card, "depends_on", ()) or ())}
+        card_ids = {str(getattr(card, "id", "")) for card in cards}
+        return depended_on.issubset(card_ids)
+
+    @staticmethod
+    def _taskboard_card_has_complex_contract(card: Any) -> bool:
+        if getattr(card, "policy_scope_refs", ()):
+            return True
+        if getattr(card, "input_refs", ()):
+            return True
+        contract = getattr(card, "evidence_contract", {})
+        if not isinstance(contract, Mapping) or not contract:
+            return False
+        if contract.get("scoped_retrieval"):
+            return True
+        if contract.get("evidence_to_use"):
+            return True
+        informational_keys = {"action_block", "done_when", "failure_policy", "evidence_to_use"}
+        return any(key not in informational_keys and value not in (None, "", [], {}) for key, value in contract.items())
 
     @staticmethod
     def _taskboard_revision_completed(revision: Any) -> bool:

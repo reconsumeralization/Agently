@@ -51,6 +51,16 @@ from .BlockCarrier import (
     scoped_retrieval_policy,
     select_carrier_output_policy,
 )
+from .EvidenceLedger import (
+    acceptance_locator_view_from_ledger,
+    collect_evidence_use,
+    evidence_envelope_from_value,
+    evidence_ledger_view,
+    source_refs_from_ledger,
+    validate_evidence_use,
+    value_with_normalized_evidence_use,
+    workspace_artifacts_from_ledger,
+)
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -152,6 +162,36 @@ _AGENT_TASK_HOT_PATH_REQUEST_PAYLOAD_KEYS = {
     "modelrequestdata",
 }
 _AGENT_TASK_DEFAULT_MAX_ITERATIONS: int | None = None
+_PROCESS_SUMMARY_TEXT_CHARS = 360
+_PROCESS_SUMMARY_LIST_ITEMS = 8
+_PROCESS_SUMMARY_FIELDS = (
+    "task_intent",
+    "turn_intent",
+    "card_intent",
+    "decision_basis",
+    "self_check",
+    "short_summary",
+    "verification_summary",
+    "criterion_checks",
+    "repair_summary",
+    "progress_message",
+)
+_PROCESS_SUMMARY_NEXT_STEP_FIELDS = (
+    "self_check",
+    "short_summary",
+    "verification_summary",
+    "criterion_checks",
+    "repair_summary",
+)
+_PROCESS_SUMMARY_SENSITIVE_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
 
 
 def _format_agent_task_utc_offset(value: str) -> str:
@@ -181,6 +221,154 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
+
+    @classmethod
+    def _process_summary_from_value(
+        cls,
+        value: Any,
+        *,
+        stage: str = "",
+        next_step_only: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {}
+        fields = _PROCESS_SUMMARY_NEXT_STEP_FIELDS if next_step_only else _PROCESS_SUMMARY_FIELDS
+        summary: dict[str, Any] = {}
+        if stage:
+            summary["stage"] = stage
+        for field in fields:
+            if field not in value:
+                continue
+            compacted = cls._compact_process_summary_value(value.get(field))
+            if compacted not in (None, "", [], {}):
+                summary[field] = compacted
+        if len(summary) == 1 and "stage" in summary:
+            return {}
+        return DataFormatter.sanitize(summary)
+
+    @classmethod
+    def _combined_process_summary(
+        cls,
+        *,
+        plan: Any = None,
+        execution_result: Any = None,
+        verification: Any = None,
+    ) -> dict[str, Any]:
+        combined: dict[str, Any] = {}
+        plan_summary = cls._process_summary_from_value(plan, stage="plan", next_step_only=True)
+        execution_summary = cls._process_summary_from_value(
+            execution_result,
+            stage="execution",
+            next_step_only=True,
+        )
+        verification_summary = cls._process_summary_from_value(
+            verification,
+            stage="verification",
+            next_step_only=True,
+        )
+        if plan_summary:
+            combined["plan"] = plan_summary
+        if execution_summary:
+            combined["execution"] = execution_summary
+        if verification_summary:
+            combined["verification"] = verification_summary
+        return DataFormatter.sanitize(combined)
+
+    @classmethod
+    def _compact_process_summary_value(cls, value: Any, *, depth: int = 0) -> Any:
+        if value in (None, "", [], {}):
+            return None
+        if isinstance(value, str):
+            return cls._truncate_process_summary_text(value)
+        if isinstance(value, bool | int | float):
+            return value
+        if isinstance(value, Mapping):
+            if depth >= 2:
+                return cls._truncate_process_summary_text(value)
+            compacted: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                lowered = key_text.lower()
+                if any(part in lowered for part in _PROCESS_SUMMARY_SENSITIVE_KEY_PARTS):
+                    compacted[key_text] = "[redacted]"
+                    continue
+                if lowered in {
+                    "body",
+                    "content",
+                    "data",
+                    "evidence_body",
+                    "full_text",
+                    "raw",
+                    "raw_output",
+                    "text",
+                }:
+                    continue
+                child = cls._compact_process_summary_value(item, depth=depth + 1)
+                if child not in (None, "", [], {}):
+                    compacted[key_text] = child
+                if len(compacted) >= _PROCESS_SUMMARY_LIST_ITEMS:
+                    compacted["omitted"] = {"reason": "process_summary_budget"}
+                    break
+            return compacted or None
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+            compacted_items: list[Any] = []
+            for item in value[:_PROCESS_SUMMARY_LIST_ITEMS]:
+                child = cls._compact_process_summary_value(item, depth=depth + 1)
+                if child not in (None, "", [], {}):
+                    compacted_items.append(child)
+            return compacted_items or None
+        return cls._truncate_process_summary_text(value)
+
+    @staticmethod
+    def _truncate_process_summary_text(value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= _PROCESS_SUMMARY_TEXT_CHARS:
+            return text
+        return text[: max(0, _PROCESS_SUMMARY_TEXT_CHARS - 24)].rstrip() + " [truncated]"
+
+    @staticmethod
+    def _is_process_summary_stream_path(path: Any) -> bool:
+        text = str(path or "").strip()
+        if not text:
+            return False
+        token = text.rsplit(".", 1)[-1].split("[", 1)[0]
+        return token in set(_PROCESS_SUMMARY_FIELDS)
+
+    async def _emit_process_progress_from_output(
+        self,
+        value: Any,
+        *,
+        stage: str,
+        iteration: int | None = None,
+        card_id: str | None = None,
+    ) -> AgentExecutionStreamData | None:
+        summary = self._process_summary_from_value(value, stage=stage)
+        if not summary:
+            return None
+        message = str(summary.get("progress_message") or "").strip()
+        if not message:
+            return None
+        payload = {
+            "message": self._truncate_process_summary_text(message),
+            "stage": stage,
+            "iteration": iteration,
+            "card_id": card_id,
+            "status": getattr(self, "status", None),
+            "process_summary": summary,
+        }
+        return await self._emit(
+            "agent_task.process.progress",
+            payload,
+            meta={
+                "task_id": getattr(self, "id", ""),
+                "status": getattr(self, "status", None),
+                "iteration": iteration,
+                "stage": stage,
+                "card_id": card_id,
+                "stream_kind": "progress",
+                "progress_source": "process_summary",
+            },
+        )
 
     def _task_context_contract(self) -> dict[str, Any]:
         run_epoch = getattr(self, "started_at", None)
@@ -349,6 +537,23 @@ def _agent_task_hot_path_key_is_request_payload(key: Any) -> bool:
     return normalized in _AGENT_TASK_HOT_PATH_REQUEST_PAYLOAD_KEYS
 
 
+def _agent_task_hot_path_key_is_integrity_metadata(key: Any) -> bool:
+    normalized = str(key or "").strip().lower()
+    return normalized in {"sha256", "digest", "bytes", "read_bytes", "size", "media_type", "content_kind", "handler_id"}
+
+
+def _drop_agent_task_integrity_metadata_lines(text: str) -> str:
+    omitted_prefixes = ("sha256:", "digest:", "bytes:", "read_bytes:", "size:", "media_type:", "handler_id:")
+    lines = []
+    changed = False
+    for line in text.splitlines():
+        if line.strip().lower().startswith(omitted_prefixes):
+            changed = True
+            continue
+        lines.append(line)
+    return "\n".join(lines) if changed else text
+
+
 def _omit_agent_task_request_payloads_from_hot_path(value: Any, *, depth: int = 0) -> Any:
     """Remove full provider request payloads before planner/verifier hot paths."""
 
@@ -372,7 +577,7 @@ def _omit_agent_task_request_payloads_from_hot_path(value: Any, *, depth: int = 
                     "reason": "provider_request_payload_hot_path",
                     "chars": len(sanitized),
                 }
-        return sanitized
+        return _drop_agent_task_integrity_metadata_lines(sanitized)
     if depth >= 8:
         return sanitized
     if isinstance(sanitized, Mapping):
@@ -381,6 +586,8 @@ def _omit_agent_task_request_payloads_from_hot_path(value: Any, *, depth: int = 
             key_text = str(key)
             if _agent_task_hot_path_key_is_request_payload(key_text):
                 compacted[key_text] = _agent_task_hot_path_request_payload_omission(item)
+            elif _agent_task_hot_path_key_is_integrity_metadata(key_text):
+                continue
             else:
                 compacted[key_text] = _omit_agent_task_request_payloads_from_hot_path(
                     item,
@@ -476,8 +683,12 @@ __all__ = [
     "_normalize_agent_task_max_iterations",
     "_omit_agent_task_request_payloads_from_hot_path",
     "apply_language_policy_to_prompt",
+    "acceptance_locator_view_from_ledger",
     "build_task_board_evidence_view",
     "coerce_task_board_planning_result",
+    "collect_evidence_use",
+    "evidence_envelope_from_value",
+    "evidence_ledger_view",
     "language_policy_from_prompt_snapshot",
     "parse_output_contract_dict",
     "project_agent_execution_text_delta",
@@ -485,6 +696,10 @@ __all__ = [
     "resolve_task_board_planning_policy",
     "scoped_retrieval_policy",
     "select_carrier_output_policy",
+    "source_refs_from_ledger",
     "task_board_card_required",
     "task_board_planning_output_schema",
+    "validate_evidence_use",
+    "value_with_normalized_evidence_use",
+    "workspace_artifacts_from_ledger",
 ]

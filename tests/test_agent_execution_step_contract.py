@@ -3875,6 +3875,28 @@ def test_taskboard_final_normalization_preserves_complete_workspace_candidate():
     assert normalized["final_result"] == candidate.strip()
 
 
+def test_taskboard_final_normalization_prefers_workspace_ref_fallback_for_file_deliverable():
+    candidate = "# Complete File Deliverable\n\n" + ("file body section\n" * 120)
+    final = {
+        "accepted": True,
+        "reason": "Trusted Workspace artifact refs identify the deliverable.",
+        "missing_criteria": [],
+    }
+
+    normalized = AgentTask._normalize_taskboard_final_result(
+        final,
+        candidate,
+        fallback_final_result=(
+            "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+        ),
+    )
+
+    assert normalized["final_result"] == (
+        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+    )
+    assert "file body section" not in normalized["final_result"]
+
+
 @pytest.mark.asyncio
 async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate(tmp_path):
     agent = _create_flat_replan_agent("execution-flat-strategy").use_workspace(tmp_path / "workspace")
@@ -3997,6 +4019,7 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
 
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
+    delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     iteration = task_meta["iterations"][0]
     step_execution = iteration["plan"]["step_execution"]
@@ -4011,6 +4034,13 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
     assert step_execution["action_scope_source"] == "planner_capabilities"
     assert set(action_ids) == {"probe_action"}
     assert action_ids
+    delta_paragraphs = [item for item in delta_text.split("\n\n") if item.strip()]
+    assert len(delta_paragraphs) >= 3
+    assert "Action started: probe_action" in delta_text
+    assert "Action completed: probe_action" in delta_text
+    assert "Result:" in delta_text
+    assert "flat action accepted result" in delta_text
+    assert delta_text.index("Action started: probe_action") < delta_text.index("Action completed: probe_action")
 
 
 @pytest.mark.asyncio
@@ -4473,6 +4503,7 @@ async def test_taskboard_persists_checkpoint_and_resume_snapshot(tmp_path):
     assert latest_checkpoint_data["revision_ref"]
 
     snapshot = await agent.workspace.get_snapshot(f"{task_id}::resume")
+    assert snapshot is not None
     assert snapshot["manifest"]["effective_execution_strategy"] == "taskboard"
     assert snapshot["taskboard_state"]["revision"]["revision_id"]
     assert snapshot["taskboard_state"]["tick_index"] >= 1
@@ -4609,7 +4640,7 @@ async def test_taskboard_resume_blocked_snapshot_retries_finalization_without_re
     assert resumed_result.get("resumed") is not True
     assert "Plan a TaskBoard for this submitted task" not in request_text
     assert "Execute exactly one TaskBoard card" not in request_text
-    assert "Synthesize the final result for this TaskBoard task" in request_text
+    assert "Synthesize the final result for this TaskBoard task" not in request_text
 
 
 @pytest.mark.asyncio
@@ -4632,7 +4663,10 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
-    assert result["final_result"] == "# Control Result"
+    assert result["final_result"] == (
+        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+    )
+    assert taskboard["finalization_source"] == "candidate_promotion"
     assert card_result["status"] == "completed"
     assert card_result["preview"]["workspace_artifact_delivery"]["status"] == "delivered"
     assert "Complete deliverable body." in card_result["preview"]["workspace_artifact_delivery"]["file_refs"][0]["preview"]
@@ -4799,7 +4833,9 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
-    assert result["final_result"] == "# Sectioned Report"
+    assert result["final_result"] == (
+        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+    )
     assert marker not in result["final_result"]
     assert delivered["mode"] == "sectioned_workspace_artifact"
     assert delivered["readback"]["bytes"] == len(expected_workspace_body.encode("utf-8"))
@@ -4807,15 +4843,14 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
     assert taskboard["revision"]["card_results"]["synthesize"]["preview"]["workspace_artifact_delivery"]["mode"] == (
         "sectioned_workspace_artifact"
     )
-    assert final_requests
+    assert not final_requests
     assert all(marker not in request for request in final_requests)
     assert tick_completed_items
     for item in tick_completed_items:
         value_text = json.dumps(DataFormatter.sanitize(getattr(item, "value", None)), ensure_ascii=False)
         assert marker not in value_text
         assert len(value_text) < 20000
-    assert final_requests
-    assert marker not in final_requests[-1]
+    assert taskboard["finalization_source"] == "candidate_promotion"
 
 
 @pytest.mark.asyncio
@@ -5004,7 +5039,10 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
-    assert result["final_result"] == "taskboard control dependency readback accepted result"
+    assert result["final_result"] == (
+        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+    )
+    assert taskboard["finalization_source"] == "candidate_promotion"
     assert synthesize_result["status"] == "completed"
     assert dependency_carrier["work_unit"]["runtime_preferences"]["handler"] == (
         "agent_task_dependency_artifact_readback"
@@ -5044,6 +5082,7 @@ async def test_taskboard_request_timeout_does_not_cancel_progressing_card_by_def
     result = await execution.async_get_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
+    assert "taskboard" in task_meta["result"], task_meta["result"]
     revision = task_meta["result"]["taskboard"]["revision"]
     slow_result = revision["card_results"]["slow"]
 
@@ -5193,8 +5232,10 @@ async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp
     assert result["status"] == "error"
     assert partial_result["status"] == "failed"
     assert evidence_summaries
-    assert evidence_summaries[0]["action_ids"] == ["probe_action"]
-    assert evidence_summaries[0]["action_statuses"]["probe_action"] in {"success", "succeeded"}
+    first_evidence_summary = evidence_summaries[0]
+    assert isinstance(first_evidence_summary, dict)
+    assert first_evidence_summary["action_ids"] == ["probe_action"]
+    assert first_evidence_summary["action_statuses"]["probe_action"] in {"success", "succeeded"}
     action_events = [item for item in stream_items if item.path.startswith("agent_task.action.")]
     assert {item.path for item in action_events} >= {
         "agent_task.action.started",
