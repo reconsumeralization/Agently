@@ -7149,6 +7149,51 @@ def test_execution_log_summary_treats_partial_success_search_as_succeeded_action
     assert summary["capability_evidence"]["actions"]["failed"] == []
 
 
+def test_execution_log_summary_infers_nested_partial_success_result_as_succeeded_action():
+    from agently.core.application import AgentTask
+
+    summary = AgentTask._execution_log_summary(
+        {
+            "status": "completed",
+            "logs": {
+                "route_logs": {
+                    "output": {
+                        "history": [
+                            {
+                                "name": "web_search",
+                                "result": {
+                                    "status": "partial_success",
+                                    "ok": True,
+                                    "success": True,
+                                    "data": [
+                                        {
+                                            "title": "Official release note",
+                                            "href": "https://example.test/release",
+                                            "body": "A recovered backend returned usable evidence.",
+                                        }
+                                    ],
+                                    "diagnostics": [
+                                        {
+                                            "code": "search_backend_failed",
+                                            "backend": "yahoo",
+                                            "message": "transient backend failure",
+                                        }
+                                    ],
+                                },
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    )
+
+    assert summary["failed_actions"] == []
+    assert summary["action_statuses"]["web_search"] == "partial_success"
+    assert summary["capability_evidence"]["actions"]["succeeded"] == ["web_search"]
+    assert summary["capability_evidence"]["actions"]["failed"] == []
+
+
 def test_execution_log_summary_includes_nested_action_result_previews():
     """AgentTask verifier evidence must include bounded Action observations
     produced inside the TriggerFlow/Blocks bounded-step execution wrapper."""

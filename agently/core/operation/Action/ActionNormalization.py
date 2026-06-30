@@ -29,7 +29,7 @@ from agently.types.data import ActionCall, ActionDecision, ActionResult
 
 def is_execution_error_result(result: Any) -> bool:
     if isinstance(result, dict) and isinstance(result.get("status"), str):
-        return result.get("status") != "success"
+        return result.get("status") not in {"success", "partial_success"}
     if not isinstance(result, str):
         return False
     stripped = result.strip()
@@ -278,7 +278,11 @@ def normalize_execution_record(
         if not isinstance(error, str):
             error = str(error)
 
-        status = record.get("status", "success" if error == "" else "error")
+        nested_status = result.get("status") if isinstance(result, dict) else None
+        default_status = "success" if error == "" else "error"
+        if isinstance(nested_status, str) and nested_status:
+            default_status = nested_status
+        status = record.get("status", default_status)
         if not isinstance(status, str):
             status = "success" if error == "" else "error"
 
@@ -305,7 +309,10 @@ def normalize_execution_record(
             "model_digest": record.get("model_digest", {}),
             "artifact_refs": record.get("artifact_refs", []),
             "artifacts": record.get("artifacts", []),
-            "diagnostics": record.get("diagnostics", []),
+            "diagnostics": record.get(
+                "diagnostics",
+                result.get("diagnostics", []) if isinstance(result, dict) else [],
+            ),
             "approval": record.get("approval", {}),
             "timing": record.get("timing", {}),
             "meta": record.get("meta", {}),

@@ -1409,8 +1409,12 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         normalized_id = str(action_id or record.get("action_id") or record.get("id") or record.get("name") or "")
         status = str(record.get("status") or "").strip()
         if not status:
+            result_value = record.get("result", record.get("data"))
+            nested_status = result_value.get("status") if isinstance(result_value, Mapping) else None
             if record.get("error"):
                 status = "failed"
+            elif isinstance(nested_status, str) and nested_status.strip():
+                status = nested_status.strip()
             elif "result" in record or "artifact" in record:
                 status = "success"
         compact: dict[str, Any] = {
