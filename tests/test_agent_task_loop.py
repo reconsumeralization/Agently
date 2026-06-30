@@ -3763,6 +3763,103 @@ async def test_taskboard_finalization_promotes_single_terminal_candidate_without
     assert task.result["taskboard"]["finalization_source"] == "candidate_promotion"
 
 
+@pytest.mark.asyncio
+async def test_taskboard_final_gate_blocks_only_explicit_dirty_state_facts(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-dirty-state").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-dirty-state",
+        goal="Return the final report.",
+        success_criteria=["The completed card result is returned."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the final report.",
+            "required_outputs": ["Final report"],
+        }
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "taskboard-final-dirty-state",
+            "revision_id": "rev-1",
+            "graph": {"graph_id": "taskboard-final-dirty-state-graph", "cards": [card.to_dict()]},
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "final_result": "Final report body from the completed terminal card.",
+                        "remaining_work": [],
+                    },
+                ).to_dict()
+            },
+            "diagnostics": [
+                {
+                    "kind": "explicit_state_fact",
+                    "code": "task_repo.dirty",
+                    "scope": "task",
+                    "status": "dirty",
+                    "blocking": True,
+                    "reason": "Task-scoped repository files are still dirty.",
+                    "source": "action:git_status",
+                }
+            ],
+        }
+    )
+    calls = {"finalizer": 0, "verifier": 0}
+
+    async def fail_finalizer(*_args, **_kwargs):
+        calls["finalizer"] += 1
+        raise AssertionError("TaskBoard finalizer should be skipped for promotable terminal candidate.")
+
+    async def complete_verifier(*_args, **kwargs):
+        calls["verifier"] += 1
+        execution_result = kwargs["execution_result"]
+        assert execution_result["final_result"] == "Final report body from the completed terminal card."
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "complete before explicit state gate",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": execution_result["final_result"],
+        }
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", complete_verifier)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert result == {"terminal": True, "status": "blocked"}
+    assert calls == {"finalizer": 0, "verifier": 1}
+    assert task.result["accepted"] is False
+    assert task.result["artifact_status"] == "partial"
+    assert task.result["taskboard"]["explicit_state_facts"][0]["code"] == "task_repo.dirty"
+    assert "Task-scoped repository files are still dirty." in task.result["reason"]
+
+
 def test_taskboard_auto_reuses_initial_plan_and_falls_back_for_small_linear_board(tmp_path):
     agent = _create_agent("agent-taskboard-auto-plan-reuse").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -3862,6 +3959,183 @@ def test_output_contract_guards_invalid_final_result_after_json_fallback(tmp_pat
     assert "final_result_output_parse_failed" in verification["guard_reasons"]
     assert "parse as a dict" in verification["missing_criteria"][0]
     assert "hybrid -> json" in verification["missing_criteria"][0]
+
+
+def test_verification_accepts_file_backed_result_despite_soft_liveness_failure(tmp_path):
+    agent = _create_agent("agent-soft-liveness-final").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="soft-liveness-final",
+        goal="Produce a file-backed report.",
+        success_criteria=["The report exists and satisfies every criterion."],
+    )
+    idle_error = "AgentExecution made no progress before idle deadline: max_no_progress_seconds=90.0."
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "All success criteria are satisfied.",
+            "failure_analysis": "All success criteria are satisfied.",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "Task complete, no replan needed.",
+            "next_step_requirements": ["Task complete, no replan needed."],
+            "progress_message": "Verification successful: deliverable complete and accepted.",
+            "final_result_required": True,
+            "final_result": "final.md",
+            "criterion_checks": [
+                {"criterion": "sections", "status": "satisfied", "summary": "All required sections are present."},
+                {"criterion": "grounding", "status": "satisfied", "summary": "Grounding guard is clear."},
+            ],
+        },
+        execution_evidence_summary={
+            "status": "failed",
+            "errors": [
+                {
+                    "error_type": "RuntimeStageStallError",
+                    "stage": "action_planning",
+                    "status": "stalled",
+                    "message": idle_error,
+                    "last_progress_event": "action_planning.started",
+                }
+            ],
+            "action_ids": ["list_files", "read_file"],
+            "action_statuses": {"list_files": "success", "read_file": "success"},
+            "failed_actions": [],
+            "blocked_actions": [],
+            "approval_required_actions": [],
+            "artifact_refs": [
+                {
+                    "path": "final.md",
+                    "role": "workspace_artifact",
+                    "source": "agent_task.workspace_artifact.stream_drafted",
+                    "readback": {"content": "# Report\n\nDone.", "truncated": False},
+                }
+            ],
+        },
+        grounding_guard={
+            "valid": True,
+            "blocking_count": 0,
+            "checked_claims": [],
+            "diagnostics": [],
+        },
+    )
+
+    assert verification["is_complete"] is True
+    assert "execution_status_failed" not in verification.get("guard_reasons", [])
+    assert "Execution step status is failed" not in " ".join(verification.get("missing_criteria", []))
+    assert "Execution step status is failed" not in " ".join(verification.get("repair_constraints", []))
+    assert verification["final_result_via_workspace_artifact"] is True
+    assert verification["non_blocking_execution_status"]["error_type"] == "RuntimeStageStallError"
+
+
+def test_verification_keeps_liveness_failure_blocking_without_criterion_checks(tmp_path):
+    agent = _create_agent("agent-soft-liveness-needs-checks").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="soft-liveness-needs-checks",
+        goal="Produce a file-backed report.",
+        success_criteria=["The report exists and satisfies every criterion."],
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "All success criteria are satisfied.",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "Task complete, no replan needed.",
+            "final_result_required": True,
+            "final_result": "final.md",
+        },
+        execution_evidence_summary={
+            "status": "failed",
+            "errors": [
+                {
+                    "error_type": "RuntimeStageStallError",
+                    "stage": "action_planning",
+                    "status": "stalled",
+                    "message": "AgentExecution made no progress before idle deadline.",
+                }
+            ],
+            "action_statuses": {"read_file": "success"},
+            "failed_actions": [],
+            "blocked_actions": [],
+            "approval_required_actions": [],
+            "artifact_refs": [
+                {
+                    "path": "final.md",
+                    "role": "workspace_artifact",
+                    "source": "agent_task.workspace_artifact.stream_drafted",
+                    "readback": {"content": "# Report\n\nDone.", "truncated": False},
+                }
+            ],
+        },
+        grounding_guard={
+            "valid": True,
+            "blocking_count": 0,
+            "checked_claims": [],
+            "diagnostics": [],
+        },
+    )
+
+    assert verification["is_complete"] is False
+    assert "execution_status_failed" in verification["guard_reasons"]
+    assert "non_blocking_execution_status" not in verification
+
+
+def test_verification_guard_rewrites_conflicting_completion_fields(tmp_path):
+    agent = _create_agent("agent-guard-field-alignment").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="guard-field-alignment",
+        goal="Produce a grounded report.",
+        success_criteria=["Every claim is grounded in bounded readback evidence."],
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "All success criteria are satisfied.",
+            "failure_analysis": "All success criteria are satisfied.",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "Task complete, no replan needed.",
+            "next_step_requirements": ["Task complete, no replan needed."],
+            "progress_message": "Verification successful: deliverable complete and accepted.",
+            "final_result_required": True,
+            "final_result": "final.md",
+        },
+        execution_evidence_summary={"status": "completed"},
+        grounding_guard={
+            "valid": False,
+            "blocking_count": 1,
+            "checked_claims": [
+                {
+                    "claim": "A factual claim.",
+                    "evidence_ids": ["action_evidence:ref-only"],
+                    "support_type": "content",
+                }
+            ],
+            "diagnostics": [
+                {
+                    "blocking": True,
+                    "code": "evidence_ledger.ref_only_item_used_as_content_support",
+                    "message": "ref_only evidence supports only discovery/ref-pointer claims until readback evidence exists.",
+                }
+            ],
+        },
+    )
+
+    assert verification["is_complete"] is False
+    assert "evidence_ledger_grounding_guard_failed" in verification["guard_reasons"]
+    assert "Verification successful" not in verification.get("progress_message", "")
+    assert "Task complete" not in verification.get("replan_instruction", "")
+    assert "Task complete" not in " ".join(verification.get("next_step_requirements", []))
+    assert "ref_only evidence" in " ".join(verification.get("missing_criteria", []))
 
 
 def test_output_contract_accepts_declared_hybrid_final_result(tmp_path):

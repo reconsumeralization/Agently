@@ -120,8 +120,31 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             effective_revision = TaskBoardRevision.from_value(revision)
             revision_dict = effective_revision.to_dict()
             evidence_view = build_task_board_evidence_view(effective_revision).to_dict()
+            schedule = TaskBoard(effective_revision, handler=lambda _context: None).schedule()
+            explicit_state_facts = task_board_explicit_state_facts(effective_revision, evidence_view=evidence_view)
+            acceptance_index = build_task_board_acceptance_index(
+                effective_revision,
+                success_criteria=self.success_criteria,
+                verification=final_result or {},
+                evidence_view=evidence_view,
+                explicit_state_facts=explicit_state_facts,
+            )
             revision_id = str(effective_revision.revision_id)
             step_id = f"taskboard-{stage}-{tick_index}-{revision_id}"
+            handoff_projection = build_task_board_handoff_projection(
+                task_id=self.id,
+                execution_strategy=self.execution_strategy,
+                effective_execution_strategy=self.effective_execution_strategy or "taskboard",
+                stage=stage,
+                tick_index=tick_index,
+                revision=effective_revision,
+                schedule=schedule,
+                evidence_view=evidence_view,
+                acceptance_index=acceptance_index,
+                runtime_topology=runtime_topology or {},
+                final_result=final_result or {},
+                explicit_state_facts=explicit_state_facts,
+            )
             record_ref = await self.workspace.ingest(
                 content={
                     "schema_version": "agent_task_taskboard_checkpoint/v1",
@@ -132,6 +155,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     "status": self.status,
                     "revision": DataFormatter.sanitize(revision_dict),
                     "evidence_view": DataFormatter.sanitize(evidence_view),
+                    "acceptance_index": DataFormatter.sanitize(acceptance_index),
+                    "handoff_projection": DataFormatter.sanitize(handoff_projection),
                     "runtime_topology": DataFormatter.sanitize(runtime_topology or {}),
                     "terminal_reason": terminal_reason,
                     "final_result": DataFormatter.sanitize(final_result or {}),
@@ -167,6 +192,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     "status": self.status,
                     "revision_id": revision_id,
                     "revision_ref": record_ref.get("id"),
+                    "acceptance_index": DataFormatter.sanitize(acceptance_index),
+                    "handoff_projection": DataFormatter.sanitize(handoff_projection),
                     "terminal_reason": terminal_reason,
                     "final_status": (final_result or {}).get("status"),
                     "accepted": (final_result or {}).get("accepted"),
@@ -208,6 +235,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 tick_index=tick_index,
                 revision=effective_revision,
                 evidence_view=evidence_view,
+                handoff_projection=handoff_projection,
                 runtime_topology=runtime_topology or {},
                 terminal_reason=terminal_reason,
                 final_result=final_result,

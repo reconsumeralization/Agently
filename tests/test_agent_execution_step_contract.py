@@ -4130,6 +4130,30 @@ async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate
 
 
 @pytest.mark.asyncio
+async def test_flat_strategy_does_not_receive_taskboard_harness_state(tmp_path):
+    agent = _create_flat_replan_agent("execution-flat-no-taskboard-harness").use_workspace(tmp_path / "workspace")
+
+    execution = agent.create_task(
+        goal="Produce a checked answer.",
+        success_criteria=["The answer is accepted by verifier."],
+        execution="flat",
+        max_iterations=2,
+    )
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    request_text = "\n".join(MockAgentExecutionRequester.requests)
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+
+    assert result["status"] == "completed"
+    assert task_meta["execution_strategy"] == "flat"
+    assert "task_board_acceptance_index" not in request_text
+    assert "task_board_handoff_projection" not in request_text
+    assert "handoff_projection" not in str(task_meta)
+    assert "acceptance_index" not in str(task_meta)
+
+
+@pytest.mark.asyncio
 async def test_structured_deliverable_contract_requires_workspace_readback(tmp_path):
     agent = _create_goal_pursuit_agent("execution-deliverable-contract-guard").use_workspace(tmp_path / "workspace")
 
@@ -4677,7 +4701,7 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_taskboard_persists_checkpoint_and_resume_snapshot(tmp_path):
+async def test_taskboard_checkpoint_and_resume_snapshot_include_handoff_projection(tmp_path):
     task_id = "taskboard-resume-checkpoint"
     workspace_dir = tmp_path / "workspace"
     agent = _create_taskboard_agent("execution-taskboard-checkpoint").use_workspace(workspace_dir)
@@ -4703,11 +4727,16 @@ async def test_taskboard_persists_checkpoint_and_resume_snapshot(tmp_path):
     assert latest_checkpoint_data["step_id"].startswith("taskboard-")
     assert latest_checkpoint_data["strategy"] == "taskboard"
     assert latest_checkpoint_data["revision_ref"]
+    assert latest_checkpoint_data["handoff_projection"]["schema_version"] == "task_board_handoff_projection/v1"
+    assert latest_checkpoint_data["handoff_projection"]["task_id"] == task_id
+    assert latest_checkpoint_data["handoff_projection"]["effective_execution_strategy"] == "taskboard"
 
     snapshot = await agent.workspace.get_snapshot(f"{task_id}::resume")
     assert snapshot is not None
     assert snapshot["manifest"]["effective_execution_strategy"] == "taskboard"
     assert snapshot["taskboard_state"]["revision"]["revision_id"]
+    assert snapshot["taskboard_state"]["handoff_projection"]["schema_version"] == "task_board_handoff_projection/v1"
+    assert snapshot["taskboard_state"]["handoff_projection"]["task_id"] == task_id
     assert snapshot["taskboard_state"]["tick_index"] >= 1
     assert snapshot["taskboard_state"]["stage"] in {"tick", "finalize"}
     assert snapshot["last_verification"]["is_complete"] is True

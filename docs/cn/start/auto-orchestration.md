@@ -204,6 +204,12 @@ checkpoint-store port 写入，task evidence 关系通过 `workspace.link_eviden
 记录。下一轮通过 `workspace.build_context(...)` 取得 ContextPackage，因此 loop
 可以把证据带入下一轮，但 Workspace 不会变成自主规划器。
 
+TaskBoard checkpoint 还会包含有界的长任务定向投影：基于声明 criteria/card refs
+生成的 acceptance index，以及包含 active/blocked/deferred card、evidence ref、
+artifact ref 和显式 state fact 的 handoff projection。这些投影用于 resume 或人工
+检查时快速理解 board 状态，不会重放 raw trace。它们不是 `EvidenceEnvelope` 证据，
+也不会验收任务；语义完成仍归 verifier 和 host guard 判断。
+
 AgentTask 的验证仍由模型判断拥有，但最终验收采用保守 guard。loop 会规范化
 verifier 输出；当仍有 missing criteria、必需 action evidence 失败或被 blocked、
 仍需 approval，或必需 final deliverable 缺失时，不会把任务标记为 complete。

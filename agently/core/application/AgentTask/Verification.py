@@ -1324,6 +1324,177 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return deduped
 
     @classmethod
+    def _trusted_workspace_artifact_refs_have_readback(cls, refs: Sequence[Mapping[str, Any]]) -> bool:
+        for ref in refs:
+            if not isinstance(ref, Mapping):
+                continue
+            readback = ref.get("readback")
+            if isinstance(readback, Mapping):
+                content = str(readback.get("content") or readback.get("preview") or readback.get("text") or "").strip()
+                if content:
+                    return True
+                if cls._coerce_non_negative_int(readback.get("bytes")) > 0:
+                    return True
+                if cls._coerce_non_negative_int(readback.get("read_bytes")) > 0:
+                    return True
+            if cls._coerce_non_negative_int(ref.get("bytes")) > 0 and str(ref.get("sha256") or "").strip():
+                return True
+            file_refs = ref.get("file_refs")
+            if isinstance(file_refs, Sequence) and not isinstance(file_refs, str | bytes | bytearray):
+                if cls._trusted_workspace_artifact_refs_have_readback(
+                    [item for item in file_refs if isinstance(item, Mapping)]
+                ):
+                    return True
+        return False
+
+    @classmethod
+    def _execution_status_liveness_diagnostic(
+        cls,
+        *,
+        execution_status: str,
+        execution_evidence_summary: Mapping[str, Any],
+        verification: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+        trusted_workspace_artifact_refs: Sequence[Mapping[str, Any]],
+        grounding_guard: Mapping[str, Any] | None,
+        final_result_required: bool,
+    ) -> dict[str, Any] | None:
+        if execution_status not in {"failed", "error", "timed_out", "blocked"}:
+            return None
+        if not final_result_required or not trusted_workspace_artifact_refs:
+            return None
+        if not cls._trusted_workspace_artifact_refs_have_readback(trusted_workspace_artifact_refs):
+            return None
+        if normalized.get("is_complete") is not True or normalized.get("requires_block") is True:
+            return None
+        if cls._normalize_string_list(normalized.get("missing_criteria")):
+            return None
+        if not isinstance(grounding_guard, Mapping):
+            return None
+        if grounding_guard.get("valid") is not True or int(grounding_guard.get("blocking_count") or 0) > 0:
+            return None
+        if not cls._verification_criteria_are_satisfied(verification.get("criterion_checks")):
+            return None
+        if cls._normalize_string_list(execution_evidence_summary.get("failed_actions")):
+            return None
+        if cls._normalize_string_list(execution_evidence_summary.get("blocked_actions")):
+            return None
+        if cls._normalize_string_list(execution_evidence_summary.get("approval_required_actions")):
+            return None
+        action_statuses = execution_evidence_summary.get("action_statuses")
+        if isinstance(action_statuses, Mapping):
+            for value in action_statuses.values():
+                if str(value or "").strip().lower() in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+                    return None
+        for action in execution_evidence_summary.get("actions", []) or []:
+            if not isinstance(action, Mapping):
+                continue
+            status = str(action.get("status") or "").strip().lower()
+            if status in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+                return None
+
+        errors = execution_evidence_summary.get("errors")
+        error_records = [dict(error) for error in errors if isinstance(error, Mapping)] if isinstance(errors, list) else []
+        if not error_records:
+            return None
+        first_error = error_records[0]
+        if not cls._is_liveness_stall_error(first_error):
+            return None
+        return {
+            "status": execution_status,
+            "error_type": str(first_error.get("error_type") or first_error.get("type") or ""),
+            "stage": str(first_error.get("stage") or ""),
+            "message": str(first_error.get("message") or ""),
+            "last_progress_event": first_error.get("last_progress_event"),
+            "idle_seconds": first_error.get("idle_seconds"),
+            "elapsed_seconds": first_error.get("elapsed_seconds"),
+            "diagnostic_only": True,
+        }
+
+    @classmethod
+    def _verification_criteria_are_satisfied(cls, criterion_checks: Any) -> bool:
+        if not isinstance(criterion_checks, Sequence) or isinstance(criterion_checks, str | bytes | bytearray):
+            return False
+        satisfied_statuses = {"satisfied", "passed", "pass", "ok", "complete", "completed", "accepted"}
+        checked = False
+        for check in criterion_checks:
+            if not isinstance(check, Mapping):
+                continue
+            status = str(check.get("status") or "").strip().lower()
+            if status not in satisfied_statuses:
+                return False
+            checked = True
+        return checked
+
+    @classmethod
+    def _is_liveness_stall_error(cls, error: Mapping[str, Any]) -> bool:
+        error_type = str(error.get("error_type") or error.get("type") or "")
+        status = str(error.get("status") or "")
+        message = str(error.get("message") or "")
+        combined = f"{error_type} {status} {message}".lower()
+        return (
+            "runtimestagestallerror" in combined
+            or "no progress" in combined
+            or "idle deadline" in combined
+            or "stalled" in combined
+        )
+
+    @classmethod
+    def _completion_like_guard_text(cls, value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        return any(
+            marker in text
+            for marker in (
+                "task complete",
+                "no replan needed",
+                "verification successful",
+                "deliverable complete",
+                "complete and accepted",
+                "all success criteria are satisfied",
+            )
+        )
+
+    @classmethod
+    def _align_guarded_verification_fields(
+        cls,
+        normalized: dict[str, Any],
+        guard_reasons: Sequence[str],
+        raw_verification: Mapping[str, Any] | None = None,
+    ) -> None:
+        if normalized.get("is_complete") is True or not guard_reasons:
+            return
+        raw_verification = raw_verification or {}
+        missing = cls._normalize_string_list(normalized.get("missing_criteria"))
+        guard_label = ", ".join(str(reason) for reason in guard_reasons if str(reason).strip()) or "verification_guard"
+        summary = missing[0] if missing else f"Verification is blocked by {guard_label}."
+        guarded_reason = f"Verification is not complete: {summary}"
+        if cls._completion_like_guard_text(normalized.get("reason")):
+            normalized["reason"] = guarded_reason
+        if cls._completion_like_guard_text(normalized.get("failure_analysis")):
+            normalized["failure_analysis"] = guarded_reason
+        progress_message = normalized.get("progress_message", raw_verification.get("progress_message"))
+        if cls._completion_like_guard_text(progress_message):
+            normalized["progress_message"] = guarded_reason
+        if (
+            not str(normalized.get("replan_instruction") or "").strip()
+            or cls._completion_like_guard_text(normalized.get("replan_instruction"))
+        ):
+            normalized["replan_instruction"] = (
+                "Run another bounded step and produce explicit evidence for the guarded criteria."
+            )
+        filtered_requirements = [
+            item
+            for item in cls._normalize_string_list(normalized.get("next_step_requirements"))
+            if not cls._completion_like_guard_text(item)
+        ]
+        normalized["next_step_requirements"] = cls._merge_string_lists(
+            filtered_requirements,
+            [normalized.get("replan_instruction")] if normalized.get("replan_instruction") else [],
+        )
+
+    @classmethod
     def _trusted_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
         summary = {
             "path": str(ref.get("path") or ""),
@@ -1995,10 +2166,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if normalized["missing_criteria"]:
             normalized["is_complete"] = False
             guard_reasons.append("missing_criteria_present")
+        final_result_required = self._normalize_bool(verification.get("final_result_required"), default=False)
+        trusted_workspace_artifact_refs = self._trusted_workspace_artifact_refs_from_summary(execution_evidence_summary)
         execution_status = str(execution_evidence_summary.get("status") or "").strip().lower()
         if execution_status in {"failed", "error", "timed_out", "blocked"}:
-            normalized["is_complete"] = False
-            guard_reasons.append("execution_status_failed")
             execution_errors = execution_evidence_summary.get("errors", [])
             error_message = ""
             if isinstance(execution_errors, list) and execution_errors:
@@ -2008,14 +2179,31 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 else:
                     error_message = str(first_error)
             detail = f": {error_message}" if error_message else ""
-            normalized["missing_criteria"] = [
-                *normalized["missing_criteria"],
-                f"Execution step status is {execution_status}{detail}.",
-            ]
-            normalized["acceptance_delta"] = self._merge_string_lists(
-                normalized.get("acceptance_delta"),
-                [f"Execution step status is {execution_status}{detail}."],
+            liveness_diagnostic = self._execution_status_liveness_diagnostic(
+                execution_status=execution_status,
+                execution_evidence_summary=execution_evidence_summary,
+                verification=verification,
+                normalized=normalized,
+                trusted_workspace_artifact_refs=trusted_workspace_artifact_refs,
+                grounding_guard=grounding_guard,
+                final_result_required=final_result_required,
             )
+            if liveness_diagnostic is not None:
+                normalized["non_blocking_execution_status"] = liveness_diagnostic
+                self.diagnostics.setdefault("non_blocking_execution_status", []).append(
+                    {"task_id": self.id, **liveness_diagnostic}
+                )
+            else:
+                normalized["is_complete"] = False
+                guard_reasons.append("execution_status_failed")
+                normalized["missing_criteria"] = [
+                    *normalized["missing_criteria"],
+                    f"Execution step status is {execution_status}{detail}.",
+                ]
+                normalized["acceptance_delta"] = self._merge_string_lists(
+                    normalized.get("acceptance_delta"),
+                    [f"Execution step status is {execution_status}{detail}."],
+                )
         raw_current_replan_signals = execution_evidence_summary.get("current_replan_signals")
         raw_replan_signals = (
             raw_current_replan_signals
@@ -2135,9 +2323,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         # Surface unenforced requirements so a reserved or not-yet-wired evidence
         # kind is visible rather than a silent no-op (it does not block).
         normalized["unenforced_evidence_requirements"] = unenforced_requirements
-        final_result_required = self._normalize_bool(verification.get("final_result_required"), default=False)
         normalized["final_result_required"] = final_result_required
-        trusted_workspace_artifact_refs = self._trusted_workspace_artifact_refs_from_summary(execution_evidence_summary)
         if normalized["is_complete"] and final_result_required and not normalized["final_result"].strip():
             if candidate_final_result.strip():
                 normalized["final_result"] = candidate_final_result.strip()
@@ -2239,6 +2425,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 }
             )
         if guard_reasons:
+            self._align_guarded_verification_fields(normalized, guard_reasons, verification)
             normalized["guard_reasons"] = guard_reasons
             if not normalized["replan_instruction"]:
                 normalized["replan_instruction"] = (

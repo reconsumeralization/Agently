@@ -91,6 +91,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         revision: Any,
         evidence_view: Mapping[str, Any],
         runtime_topology: Mapping[str, Any],
+        handoff_projection: Mapping[str, Any] | None = None,
         terminal_reason: str | None = None,
         final_result: Mapping[str, Any] | None = None,
     ) -> None:
@@ -140,6 +141,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                             "terminal_reason": terminal_reason,
                             "revision": effective_revision.to_dict(),
                             "evidence_view": evidence_view,
+                            "handoff_projection": dict(handoff_projection or {}),
                             "runtime_topology": dict(runtime_topology),
                             "workspace_refs": DataFormatter.sanitize(self.workspace_refs),
                             "final_result": dict(final_result),

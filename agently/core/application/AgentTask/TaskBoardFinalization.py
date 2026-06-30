@@ -69,6 +69,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         result_status = self._taskboard_terminal_status(revision, schedule)
         evidence_view = build_task_board_evidence_view(revision).to_dict()
         evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
+        explicit_state_facts = task_board_explicit_state_facts(revision, evidence_view=evidence_view)
+        blocking_state_facts = task_board_blocking_state_facts(explicit_state_facts)
         candidate_final_result = self._taskboard_candidate_final_result(revision)
         final_refs = self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view))
         trusted_final_refs = [
@@ -179,7 +181,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                         "diagnostics": [],
                     }
                 },
-                "diagnostics": {"taskboard_terminal_status": result_status},
+                "diagnostics": {
+                    "taskboard_terminal_status": result_status,
+                    "taskboard_explicit_state_facts": explicit_state_facts,
+                    "taskboard_blocking_state_facts": blocking_state_facts,
+                },
             }
             try:
                 final_verification = await self._request_verification(
@@ -214,6 +220,22 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             missing_deliverables = await self._missing_required_workspace_deliverables()
             if missing_deliverables:
                 self._guard_missing_required_deliverables(final_verification, missing_deliverables)
+            if blocking_state_facts and final_verification is not None:
+                reason = "; ".join(
+                    str(fact.get("reason") or fact.get("code") or fact.get("status") or "explicit state fact")
+                    for fact in blocking_state_facts
+                )
+                final_verification["is_complete"] = False
+                final_verification["requires_block"] = True
+                final_verification["reason"] = reason or "TaskBoard final gate blocked on explicit state facts."
+                final_verification["missing_criteria"] = [
+                    *list(final_verification.get("missing_criteria") or []),
+                    "Resolve explicit task-scoped state facts before accepting the final result.",
+                ]
+                final_verification["guard_reasons"] = [
+                    *list(final_verification.get("guard_reasons") or []),
+                    "taskboard_explicit_state_fact_block",
+                ]
             if final_verification is not None and bool(final_verification.get("is_complete")):
                 accepted = True
                 final = dict(final)
@@ -280,6 +302,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     "revision": revision.to_dict(),
                     "schedule": schedule.to_dict(),
                     "evidence_view": evidence_view,
+                    "explicit_state_facts": explicit_state_facts,
+                    "blocking_state_facts": blocking_state_facts,
                     "terminal_status": result_status,
                     "degraded_finalization_attempted": result_status != "completed",
                     "finalization_source": finalization_source,
@@ -310,6 +334,19 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         allow_degraded_final: bool = False,
     ) -> dict[str, Any]:
         language_policy = self._language_policy()
+        explicit_state_facts = task_board_explicit_state_facts(revision, evidence_view=evidence_view)
+        acceptance_index = build_task_board_acceptance_index(
+            revision,
+            success_criteria=self.success_criteria,
+            evidence_view=evidence_view,
+            explicit_state_facts=explicit_state_facts,
+        )
+        focus_payload = build_task_board_focus_payload(
+            revision,
+            acceptance_index=acceptance_index,
+            schedule=schedule,
+            preflight_diagnostics=explicit_state_facts,
+        )
         request = self.agent.create_temp_request()
         self._apply_language_policy_to_request(request, language_policy)
         request.input(
@@ -322,6 +359,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "schedule": DataFormatter.sanitize(schedule.to_dict() if schedule is not None else {}),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
                 "evidence_ledger": evidence_ledger_view(evidence_view, max_items=120, body_chars=2400),
+                "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+                "taskboard_focus_payload": DataFormatter.sanitize(focus_payload),
+                "taskboard_explicit_state_facts": DataFormatter.sanitize(explicit_state_facts),
                 "source_ref_policy": self._taskboard_source_ref_policy(),
                 "source_refs": source_refs_from_ledger(evidence_view, max_refs=32)
                 or self._taskboard_final_source_refs_from_evidence_view(evidence_view),

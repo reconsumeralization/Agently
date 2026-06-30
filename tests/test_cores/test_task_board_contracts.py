@@ -13,6 +13,12 @@ from agently.core import (
     resolve_task_board_planning_policy,
     task_board_planning_output_schema,
 )
+from agently.core.orchestration.TaskBoard import (
+    build_task_board_acceptance_index,
+    build_task_board_focus_payload,
+    build_task_board_handoff_projection,
+    task_board_preflight_diagnostics,
+)
 from agently.core.application.AgentTask.Task import AgentTask
 from agently.types.data import TaskBoardCardResult, TaskBoardPatch
 
@@ -479,6 +485,236 @@ def test_evidence_binding_repair_uses_deterministic_unique_ref_alias():
             "support_type": "content",
         }
     ]
+
+
+def test_task_board_acceptance_index_derives_from_criteria_cards_verifier_and_locators():
+    revision = TaskBoardRevision.create(
+        board_id="acceptance-index",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "acceptance-index-graph",
+                "cards": [
+                    {
+                        "id": "draft",
+                        "objective": "Draft the report.",
+                        "metadata": {"acceptance_criteria": ["Report includes source citations."]},
+                    },
+                    {
+                        "id": "publish",
+                        "objective": "Publish the final report.",
+                        "depends_on": ["draft"],
+                        "metadata": {"acceptance_criteria": ["Report includes source citations."]},
+                    },
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision=revision.revision_id,
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": "Drafted with source citations.",
+                        "metadata": {
+                            "evidence_ledger": {
+                                "items": [
+                                    {
+                                        "id": "locator:report:citation",
+                                        "kind": "workspace_artifact.acceptance_locator",
+                                        "status": "ok",
+                                        "body_state": "ref_only",
+                                        "claim": "Report includes source citations.",
+                                        "criterion": "Report includes source citations.",
+                                        "artifact_ref": {"path": "report.md"},
+                                    }
+                                ]
+                            }
+                        },
+                    },
+                },
+            ),
+        ),
+    )
+    evidence_view = build_task_board_evidence_view(revision).to_dict()
+
+    index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["Report includes source citations."],
+        verification={
+            "criterion_checks": [
+                {
+                    "criterion": "Report includes source citations.",
+                    "satisfied": True,
+                    "evidence_ids": ["locator:report:citation"],
+                    "locator_ids": ["locator:report:citation"],
+                    "reason": "Verifier accepted the targeted readback.",
+                }
+            ]
+        },
+        evidence_view=evidence_view,
+    )
+
+    assert index["schema_version"] == "task_board_acceptance_index/v1"
+    item = index["items"][0]
+    assert item["criterion"] == "Report includes source citations."
+    assert item["status"] == "satisfied"
+    assert item["source"] == "verifier"
+    assert item["linked_card_ids"] == ["draft", "publish"]
+    assert item["linked_evidence_ids"] == ["locator:report:citation"]
+    assert item["linked_locator_ids"] == ["locator:report:citation"]
+    assert index["status_counts"]["satisfied"] == 1
+
+
+def test_task_board_acceptance_index_does_not_enter_evidence_envelope():
+    revision = _revision()
+    evidence_view = build_task_board_evidence_view(revision).to_dict()
+    index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["The final answer is accepted."],
+        evidence_view=evidence_view,
+    )
+
+    assert index["schema_version"] == "task_board_acceptance_index/v1"
+    assert "acceptance_index" not in evidence_view
+    assert all(item.get("kind") != "task_board_acceptance_index" for item in evidence_view["evidence_items"])
+    assert all(item.get("schema_version") != "task_board_acceptance_index/v1" for item in evidence_view["evidence_items"])
+
+
+def test_task_board_handoff_projection_is_bounded_and_ref_only():
+    revision = _revision()
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision=revision.revision_id,
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "preview": "x" * 2000,
+                        "artifact_refs": [
+                            {
+                                "path": "artifacts/full.json",
+                                "sha256": "abc",
+                                "content": "must stay cold",
+                                "preview": "also too hot",
+                            }
+                        ],
+                    },
+                },
+            ),
+        ),
+    )
+    evidence_view = build_task_board_evidence_view(revision).to_dict()
+    acceptance_index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["The final answer is accepted."],
+        evidence_view=evidence_view,
+    )
+
+    handoff = build_task_board_handoff_projection(
+        task_id="handoff-task",
+        execution_strategy="taskboard",
+        effective_execution_strategy="taskboard",
+        stage="tick",
+        tick_index=1,
+        revision=revision,
+        schedule=TaskBoard(revision, handler=lambda _context: None).schedule(),
+        evidence_view=evidence_view,
+        acceptance_index=acceptance_index,
+        checkpoint_refs=[{"id": "checkpoint-1", "content": "must stay cold"}],
+    )
+
+    assert handoff["schema_version"] == "task_board_handoff_projection/v1"
+    assert handoff["task_id"] == "handoff-task"
+    assert handoff["completed_card_ids"] == ["collect"]
+    assert handoff["runnable_card_ids"] == ["final"]
+    assert handoff["active_card_ids"] == ["final"]
+    assert handoff["acceptance_index_summary"]["total_items"] == 1
+    assert "content" not in handoff["artifact_refs"][0]
+    assert "preview" not in handoff["artifact_refs"][0]
+    assert "content" not in handoff["checkpoint_refs"][0]
+    assert "x" * 200 not in str(handoff)
+
+
+def test_taskboard_preflight_cards_require_mounted_capabilities():
+    revision = TaskBoardRevision.create(
+        board_id="preflight",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "preflight-graph",
+                "cards": [
+                    {
+                        "id": "browser_health",
+                        "objective": "Check browser readiness.",
+                        "allowed_execution_shape": "actions",
+                        "metadata": {
+                            "preflight_kind": "resource_health",
+                            "requires_capability_ids": ["browser"],
+                        },
+                    },
+                    {
+                        "id": "workspace_readback",
+                        "objective": "Check existing artifact.",
+                        "allowed_execution_shape": "readback",
+                        "metadata": {
+                            "preflight_kind": "readback",
+                            "requires_workspace_refs": ["artifact:report"],
+                        },
+                    },
+                ],
+            }
+        ),
+    )
+
+    missing = task_board_preflight_diagnostics(
+        revision,
+        mounted_capabilities=[{"id": "filesystem"}],
+        workspace_refs=[{"id": "artifact:report"}],
+    )
+    assert missing == [
+        {
+            "code": "taskboard.preflight.unmounted_capability",
+            "card_id": "browser_health",
+            "missing_capability_ids": ["browser"],
+            "status": "blocked",
+        }
+    ]
+
+    available = task_board_preflight_diagnostics(
+        revision,
+        mounted_capabilities=[{"id": "browser"}, {"id": "filesystem"}],
+        workspace_refs=[{"id": "artifact:report"}],
+    )
+    assert available == []
+
+
+def test_taskboard_focus_payload_uses_acceptance_index_without_keyword_routing():
+    revision = _revision()
+    acceptance_index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["The final answer is accepted."],
+    )
+    payload = build_task_board_focus_payload(
+        revision,
+        acceptance_index=acceptance_index,
+        schedule=TaskBoard(revision, handler=lambda _context: None).schedule(),
+        preflight_diagnostics=[],
+    )
+
+    assert payload["schema_version"] == "task_board_focus_payload/v1"
+    assert payload["selected_acceptance_item_ids"] == [acceptance_index["items"][0]["id"]]
+    assert payload["runnable_card_ids"] == ["collect"]
+    assert payload["blocked_card_ids"] == ["final"]
+    assert payload["metadata"]["selection_policy"] == "status_dependency_capability_projection"
+    assert "keyword" not in str(payload).lower()
+    assert "regex" not in str(payload).lower()
 
 
 def test_task_board_effort_policy_does_not_define_hard_budgets_or_action_options():

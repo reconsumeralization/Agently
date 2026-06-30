@@ -213,6 +213,26 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                     "Optional bounded retrieval plan: {query_groups: [{query, expected_role, search_surface?, path?, pattern?, filters?, max_results?, snippet_limit?}]}. query is content text or an exact phrase to search, not a list/read/search command. For workspace_index records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For workspace_files, path is the directory/file scope and pattern is one file glob such as *.md, * or **. Use filters.content_contains only for explicit content keyword lists. The executor returns factual locator_ref/evidence_snippet records only.",
                     False,
                 ),
+                "preflight_kind": (
+                    str,
+                    "Optional readiness check kind such as resource_health, readback, or capability_check. Preflight cards may only use mounted capabilities or existing Workspace refs.",
+                    False,
+                ),
+                "requires_capability_ids": (
+                    [str],
+                    "Optional mounted capability ids required before this card can run. This is a structural requirement, not a permission grant.",
+                    False,
+                ),
+                "requires_workspace_refs": (
+                    [str],
+                    "Optional Workspace/readback refs that must already exist for this preflight card.",
+                    False,
+                ),
+                "focus_item_ids": (
+                    [str],
+                    "Optional acceptance-index item ids this card is meant to advance. These ids are orientation hints only.",
+                    False,
+                ),
             }
         ],
         "reflection_points": ([str], "Review, correction, or decision points judged necessary by the model.", False),
@@ -448,6 +468,10 @@ def _card_from_planning_item(
     done_when = str(value.get("done_when") or "").strip()
     failure_policy = _failure_policy(value.get("failure_policy"))
     scoped_retrieval = value.get("scoped_retrieval")
+    preflight_kind = str(value.get("preflight_kind") or "").strip()
+    requires_capability_ids = _str_list(value.get("requires_capability_ids"))
+    requires_workspace_refs = _str_list(value.get("requires_workspace_refs"))
+    focus_item_ids = _str_list(value.get("focus_item_ids"))
     metadata: dict[str, Any] = {
         "action_block": action_block,
         "done_when": done_when,
@@ -463,6 +487,18 @@ def _card_from_planning_item(
         "done_when": done_when,
         "failure_policy": failure_policy,
     }
+    if preflight_kind:
+        metadata["preflight_kind"] = preflight_kind
+        evidence_contract["preflight_kind"] = preflight_kind
+    if requires_capability_ids:
+        metadata["requires_capability_ids"] = requires_capability_ids
+        evidence_contract["requires_capability_ids"] = requires_capability_ids
+    if requires_workspace_refs:
+        metadata["requires_workspace_refs"] = requires_workspace_refs
+        evidence_contract["requires_workspace_refs"] = requires_workspace_refs
+    if focus_item_ids:
+        metadata["focus_item_ids"] = focus_item_ids
+        evidence_contract["focus_item_ids"] = focus_item_ids
     if isinstance(scoped_retrieval, Mapping):
         evidence_contract["scoped_retrieval"] = dict(scoped_retrieval)
         metadata["scoped_retrieval"] = dict(scoped_retrieval)

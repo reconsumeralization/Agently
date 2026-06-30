@@ -23,6 +23,14 @@ from .TaskBoardEvidence import (
     TaskBoardEvidenceView,
     build_task_board_evidence_view,
 )
+from .TaskBoardHarness import (
+    build_task_board_acceptance_index,
+    build_task_board_focus_payload,
+    build_task_board_handoff_projection,
+    task_board_blocking_state_facts,
+    task_board_explicit_state_facts,
+    task_board_preflight_diagnostics,
+)
 from .TaskBoardPlanning import (
     TaskBoardEffortProfile,
     TaskBoardPlanningPolicy,
@@ -53,11 +61,17 @@ __all__ = [
     "TaskBoardValidation",
     "TaskBoardValidator",
     "apply_task_board_patch",
+    "build_task_board_acceptance_index",
     "build_task_board_evidence_view",
+    "build_task_board_focus_payload",
+    "build_task_board_handoff_projection",
     "coerce_task_board_planning_result",
     "resolve_task_board_effort_profile",
     "resolve_task_board_planning_policy",
     "schedule_task_board_revision",
+    "task_board_blocking_state_facts",
+    "task_board_explicit_state_facts",
     "task_board_planning_output_schema",
+    "task_board_preflight_diagnostics",
     "validate_task_board_revision",
 ]

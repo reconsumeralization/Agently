@@ -222,6 +222,13 @@ Workspace checkpoint-store port, and task evidence relationships use
 `workspace.build_context(...)`, so the loop can carry evidence forward without
 turning Workspace into an autonomous planner.
 
+TaskBoard checkpoints also include bounded orientation projections for long
+runs: an acceptance index over declared criteria/card refs and a handoff
+projection with active/blocked/deferred cards, evidence refs, artifact refs, and
+explicit state facts. These projections help resume or inspect the board without
+replaying raw traces. They are not `EvidenceEnvelope` evidence and do not accept
+the task; semantic completion still belongs to the verifier plus host guards.
+
 AgentTask verification remains model-owned, but completion acceptance is
 conservative. The loop normalizes verifier output and will not accept a task as
 complete when missing criteria remain, required action evidence failed or was

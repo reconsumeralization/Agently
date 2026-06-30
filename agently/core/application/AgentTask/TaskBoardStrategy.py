@@ -413,6 +413,26 @@ class AgentTaskTaskBoardStrategyMixin(
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "planning_policy": policy.to_prompt_payload(),
+                "taskboard_harness_policy": {
+                    "acceptance_index": {
+                        "schema_version": "task_board_acceptance_index/v1",
+                        "authority": "projection_only",
+                        "semantic_owner": "verifier",
+                    },
+                    "handoff_projection": {
+                        "schema_version": "task_board_handoff_projection/v1",
+                        "authority": "orientation_only",
+                    },
+                    "preflight": {
+                        "allowed_only_with_mounted_capabilities": True,
+                        "metadata_fields": [
+                            "preflight_kind",
+                            "requires_capability_ids",
+                            "requires_workspace_refs",
+                            "focus_item_ids",
+                        ],
+                    },
+                },
                 "planner_capabilities": self._planner_capabilities(),
                 "language_policy": language_policy,
             }
@@ -435,6 +455,9 @@ class AgentTaskTaskBoardStrategyMixin(
             "decision cards that should be handled by one structured model request. Use allowed_execution_shape='readback' "
             "for cards whose only job is bounded cold artifact readback. Use an action-capable shape such as 'actions' "
             "or 'auto' for cards that need external tools, Workspace operations, side effects, or mixed action/readback work. "
+            "When readiness checks are necessary, express them as optional preflight metadata on cards "
+            "(preflight_kind, requires_capability_ids, requires_workspace_refs, focus_item_ids) and only for mounted "
+            "capabilities or existing Workspace refs; do not require universal git, browser, shell, or init-script checks. "
             "After evidence fan-in, do not create a serial chain of control-only cards for synthesis, finalization, "
             "review, and next-step decision when one control card can return the deliverable, sufficient/gaps, "
             "next_board_action, diagnostics, and optional patch_proposal. Multiple dependent control cards are only "

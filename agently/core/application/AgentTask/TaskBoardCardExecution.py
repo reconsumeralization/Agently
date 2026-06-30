@@ -602,6 +602,23 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
         evidence_ledger = evidence_ledger_view(evidence_view, max_items=80, body_chars=1800)
+        preflight_diagnostics = task_board_preflight_diagnostics(
+            context.revision,
+            mounted_capabilities=self._planner_capabilities(),
+            workspace_refs=self.workspace_refs.get("artifacts", []) if isinstance(self.workspace_refs, Mapping) else [],
+        )
+        acceptance_index = build_task_board_acceptance_index(
+            context.revision,
+            success_criteria=self.success_criteria,
+            evidence_view=evidence_view,
+            explicit_state_facts=task_board_explicit_state_facts(context.revision, evidence_view=evidence_view),
+        )
+        focus_payload = build_task_board_focus_payload(
+            context.revision,
+            acceptance_index=acceptance_index,
+            schedule=TaskBoard(context.revision, handler=lambda _context: None).schedule(),
+            preflight_diagnostics=preflight_diagnostics,
+        )
         dependency_readbacks = await self._taskboard_dependency_action_artifact_readbacks(
             evidence_view,
             card_id=str(getattr(context.card, "id", "") or ""),
@@ -623,6 +640,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
             "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
             "evidence_ledger": evidence_ledger,
+            "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+            "taskboard_focus_payload": DataFormatter.sanitize(focus_payload),
             "dependency_readbacks": dependency_readbacks,
             "available_readback": self._taskboard_available_readback(evidence_view),
             "source_ref_policy": self._taskboard_source_ref_policy(),
