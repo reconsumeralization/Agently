@@ -1236,7 +1236,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         original_blocking_count = cls._taskboard_evidence_guard_blocking_count(evidence_use_guard)
         if original_blocking_count <= 0:
             return card_output, evidence_use_guard, None
-        repaired_evidence_use = cls._deterministic_evidence_binding_repair(evidence_use_guard)
+        repaired_evidence_use = cls._deterministic_evidence_binding_repair(evidence_use_guard, card_evidence_ledger)
         if not repaired_evidence_use:
             return card_output, evidence_use_guard, None
         repaired_output = value_with_normalized_evidence_use(card_output, repaired_evidence_use)

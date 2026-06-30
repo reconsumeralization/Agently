@@ -683,6 +683,151 @@ def test_taskboard_card_evidence_repair_uses_unique_workspace_readback_for_numer
     assert [item["evidence_ids"] for item in repaired_output["evidence_use"]] == [[readback_id], [readback_id]]
 
 
+def test_taskboard_card_evidence_repair_uses_unique_action_result_body_snippets():
+    from agently.core.application.AgentTask.EvidenceLedger import (
+        collect_evidence_use,
+        evidence_ledger_view,
+        validate_evidence_use,
+    )
+
+    market_quote_id = "agent_task_action_result:market_quotes:call-quotes"
+    ledger = evidence_ledger_view(
+        {
+            "evidence_items": [
+                {
+                    "id": market_quote_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "market_quotes",
+                    "action_call_id": "call-quotes",
+                    "body": (
+                        '{"companies": [{"symbol": "NVDA", "last_sale_price": "$197.88", '
+                        '"net_change": "+2.91", "percentage_change": "+1.49%", '
+                        '"fallback_reason": "CSV request failed 404"}, '
+                        '{"symbol": "AMD", "last_sale_price": "$557.48", '
+                        '"net_change": "+17.99", "percentage_change": "+3.33%", '
+                        '"fallback_reason": "CSV request failed 404"}]}'
+                    ),
+                }
+            ]
+        }
+    )
+    card_output = {
+        "status": "completed",
+        "evidence_use": [
+            {
+                "claim": "NVDA last price $197.88 with +1.49% change.",
+                "evidence_ids": ["NVDA last_sale_price $197.88, net_change +2.91, percentage_change +1.49%"],
+                "support_type": "content",
+            },
+            {
+                "claim": "AMD quote used Nasdaq fallback after Stooq returned 404.",
+                "evidence_ids": ["AMD fallback_reason: CSV request failed 404"],
+                "support_type": "content",
+            },
+        ],
+    }
+    guard = validate_evidence_use(collect_evidence_use(card_output), ledger)
+    repaired_output, repaired_guard, diagnostic = AgentTask._repair_taskboard_card_evidence_use(
+        card_output,
+        guard,
+        ledger,
+    )
+
+    assert diagnostic is not None
+    assert repaired_guard["valid"] is True
+    assert [item["evidence_ids"] for item in repaired_output["evidence_use"]] == [[market_quote_id], [market_quote_id]]
+
+
+def test_taskboard_card_evidence_repair_uses_unique_search_result_titles():
+    from agently.core.application.AgentTask.EvidenceLedger import (
+        collect_evidence_use,
+        evidence_ledger_view,
+        validate_evidence_use,
+    )
+
+    nvda_ref_id = "agent_task_action_result:web_search:call-nvda"
+    amd_ref_id = "agent_task_action_result:web_search:call-amd"
+    avgo_ref_id = "agent_task_action_result:web_search:call-avgo"
+    ledger = evidence_ledger_view(
+        {
+            "evidence_items": [
+                {
+                    "id": nvda_ref_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "web_search",
+                    "action_call_id": "call-nvda",
+                    "body": (
+                        "[{\"title\": \"Prediction: This Will Be Nvidia's Stock Price at the End of 2026\", "
+                        '"href": "https://finance.yahoo.com/markets/stocks/articles/prediction-nvidias-stock-price-end-065500179.html"}]'
+                    ),
+                },
+                {
+                    "id": amd_ref_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "web_search",
+                    "action_call_id": "call-amd",
+                    "body": (
+                        "[{\"title\": \"AMD Stock Is Crushing Nvidia's in 2026. Will That Continue?\", "
+                        '"href": "https://finance.yahoo.com/markets/stocks/articles/amd-stock-crushing-nvidias-2026-180500062.html"}]'
+                    ),
+                },
+                {
+                    "id": avgo_ref_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "web_search",
+                    "action_call_id": "call-avgo",
+                    "body": (
+                        '[{"title": "Could This New Chip Be a Game Changer for Broadcom Stock?", '
+                        '"href": "https://finance.yahoo.com/markets/stocks/articles/could-chip-game-changer-broadcom-135000175.html"}]'
+                    ),
+                },
+            ]
+        }
+    )
+    card_output = {
+        "status": "completed",
+        "evidence_use": [
+            {
+                "claim": "AMD stock rose sharply in 2026.",
+                "evidence_ids": ["Search result: AMD Stock Is Crushing Nvidia's in 2026. Will That Continue?"],
+                "support_type": "content",
+            },
+            {
+                "claim": "NVIDIA has a 2026 price prediction article.",
+                "evidence_ids": ["Search result: Prediction: This Will Be Nvidia's Stock Price at the End of 2026"],
+                "support_type": "content",
+            },
+            {
+                "claim": "Broadcom has a recent custom chip article.",
+                "evidence_ids": ["Search result: Could This New Chip Be a Game Changer for Broadcom Stock?"],
+                "support_type": "content",
+            },
+        ],
+    }
+    guard = validate_evidence_use(collect_evidence_use(card_output), ledger)
+    repaired_output, repaired_guard, diagnostic = AgentTask._repair_taskboard_card_evidence_use(
+        card_output,
+        guard,
+        ledger,
+    )
+
+    assert diagnostic is not None
+    assert repaired_guard["valid"] is True
+    assert [item["evidence_ids"] for item in repaired_output["evidence_use"]] == [
+        [amd_ref_id],
+        [nvda_ref_id],
+        [avgo_ref_id],
+    ]
+
+
 def test_evidence_binding_repair_uses_deterministic_unique_ref_alias():
     repaired = AgentTask._deterministic_evidence_binding_repair(
         {

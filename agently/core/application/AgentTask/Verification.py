@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import PurePosixPath
 
 from .TaskShared import *
@@ -407,7 +408,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             grounding_guard.get("normalized_evidence_use"),
         )
         if self._should_attempt_evidence_binding_repair(grounding_guard):
-            repaired_evidence_use = self._deterministic_evidence_binding_repair(grounding_guard)
+            repaired_evidence_use = self._deterministic_evidence_binding_repair(grounding_guard, evidence_ledger)
             if repaired_evidence_use:
                 self.diagnostics.setdefault("evidence_binding_repair", []).append(
                     DataFormatter.sanitize(
@@ -942,19 +943,26 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return [dict(DataFormatter.sanitize(item)) for item in evidence_use if isinstance(item, Mapping)]
 
     @classmethod
-    def _deterministic_evidence_binding_repair(cls, grounding_guard: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _deterministic_evidence_binding_repair(
+        cls,
+        grounding_guard: Mapping[str, Any],
+        evidence_ledger: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         current = grounding_guard.get("normalized_evidence_use", [])
         if not isinstance(current, Sequence) or isinstance(current, str | bytes | bytearray):
             return []
         current_items = [dict(item) for item in current if isinstance(item, Mapping)]
         if not current_items:
             return []
-        available_refs = cls._evidence_binding_available_ref_index(
-            grounding_guard.get("available_evidence_refs", [])
-        )
         available_ref_records = cls._evidence_binding_available_ref_records(
             grounding_guard.get("available_evidence_refs", [])
         )
+        if evidence_ledger is not None:
+            available_ref_records = cls._merge_evidence_binding_ref_records(
+                available_ref_records,
+                cls._evidence_binding_available_ref_records_from_ledger(evidence_ledger),
+            )
+        available_refs = cls._evidence_binding_available_ref_index(available_ref_records)
         diagnostics = cls._evidence_binding_repair_diagnostics(grounding_guard)
         repaired: list[dict[str, Any]] = []
         seen_indexes: set[int] = set()
@@ -997,6 +1005,48 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _evidence_binding_available_ref_records(value: Any) -> list[dict[str, Any]]:
         refs = value if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray) else []
         return [dict(DataFormatter.sanitize(ref)) for ref in refs if isinstance(ref, Mapping)]
+
+    @staticmethod
+    def _evidence_binding_available_ref_records_from_ledger(value: Any) -> list[dict[str, Any]]:
+        ledger = value if isinstance(value, Mapping) and isinstance(value.get("items"), Sequence) else {}
+        if not ledger and value not in (None, "", [], {}):
+            ledger = evidence_ledger_view(value)
+        raw_items = ledger.get("items") if isinstance(ledger, Mapping) else ()
+        items = raw_items if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray) else ()
+        return [dict(DataFormatter.sanitize(item)) for item in items if isinstance(item, Mapping)]
+
+    @staticmethod
+    def _merge_evidence_binding_ref_records(
+        refs: Sequence[Mapping[str, Any]],
+        ledger_refs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged_by_id: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+
+        def merge(ref: Mapping[str, Any]) -> None:
+            evidence_id = str(ref.get("id") or "").strip()
+            if not evidence_id:
+                return
+            if evidence_id not in merged_by_id:
+                merged_by_id[evidence_id] = {}
+                order.append(evidence_id)
+            existing = merged_by_id[evidence_id]
+            aliases: list[str] = []
+            for source in (existing.get("aliases"), ref.get("aliases")):
+                if isinstance(source, Sequence) and not isinstance(source, str | bytes | bytearray):
+                    for alias in source:
+                        text = str(alias or "").strip()
+                        if text and text not in aliases:
+                            aliases.append(text)
+            existing.update(dict(ref))
+            if aliases:
+                existing["aliases"] = aliases[:24]
+
+        for ref in ledger_refs:
+            merge(ref)
+        for ref in refs:
+            merge(ref)
+        return [merged_by_id[evidence_id] for evidence_id in order]
 
     @staticmethod
     def _evidence_binding_available_ref_index(value: Any) -> dict[str, list[str]]:
@@ -1089,6 +1139,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         action_result_matches = cls._deterministic_action_result_candidates(diagnostic, available_refs)
         if len(action_result_matches) == 1:
             return action_result_matches
+        body_text_matches = cls._deterministic_body_text_candidates(diagnostic, available_refs)
+        if len(body_text_matches) == 1:
+            return body_text_matches
         readback_matches = cls._deterministic_content_readback_candidates(diagnostic, available_refs)
         if len(readback_matches) == 1:
             return readback_matches
@@ -1196,6 +1249,103 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if support_type == "unavailability":
             return unique_action_refs
         return []
+
+    @classmethod
+    def _deterministic_body_text_candidates(
+        cls,
+        diagnostic: Mapping[str, Any],
+        available_refs: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        if str(diagnostic.get("support_type") or "").strip().lower() != "content":
+            return []
+        evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
+        if not evidence_id_text:
+            return []
+        queries = cls._evidence_binding_body_match_queries(evidence_id_text)
+        if not queries:
+            return []
+        matches: list[str] = []
+        for ref in available_refs:
+            if not isinstance(ref, Mapping):
+                continue
+            ref_id = str(ref.get("id") or "").strip()
+            if not ref_id:
+                continue
+            status = str(ref.get("status") or "").strip().lower()
+            body_state = str(ref.get("body_state") or "").strip().lower()
+            if status != "ok" or body_state not in {"full", "bounded", "truncated"}:
+                continue
+            body = cls._evidence_binding_ref_body(ref)
+            if not body:
+                continue
+            if any(cls._evidence_binding_body_query_matches(query, body) for query in queries):
+                matches.append(ref_id)
+        return sorted(set(matches))
+
+    @staticmethod
+    def _evidence_binding_ref_body(ref: Mapping[str, Any]) -> str:
+        for key in ("body", "content", "text", "snippet", "preview", "result", "output", "value"):
+            value = ref.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, str):
+                return value
+            try:
+                return json.dumps(DataFormatter.sanitize(value), ensure_ascii=False, sort_keys=True, default=str)
+            except Exception:
+                return str(value)
+        return ""
+
+    @classmethod
+    def _evidence_binding_body_match_queries(cls, value: str) -> list[str]:
+        raw = value.strip()
+        if not raw:
+            return []
+        queries = [raw]
+        lowered = raw.lower()
+        for prefix in ("search result:", "search:", "result:", "source:", "evidence:"):
+            if lowered.startswith(prefix):
+                stripped = raw[len(prefix) :].strip()
+                if stripped and stripped not in queries:
+                    queries.append(stripped)
+        return [query for query in queries if cls._evidence_binding_body_query_is_informative(query)]
+
+    @classmethod
+    def _evidence_binding_body_query_matches(cls, query: str, body: str) -> bool:
+        normalized_query = cls._normalize_evidence_binding_text(query)
+        if len(normalized_query) < 12:
+            return False
+        normalized_body = cls._normalize_evidence_binding_text(body)
+        if normalized_query in normalized_body:
+            return True
+        query_tokens = cls._evidence_binding_body_match_tokens(query)
+        if len(query_tokens) < 4:
+            return False
+        body_tokens = set(cls._evidence_binding_body_match_tokens(body))
+        if not body_tokens:
+            return False
+        return all(token in body_tokens for token in query_tokens)
+
+    @classmethod
+    def _evidence_binding_body_query_is_informative(cls, query: str) -> bool:
+        return len(cls._evidence_binding_body_match_tokens(query)) >= 4
+
+    @staticmethod
+    def _normalize_evidence_binding_text(value: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", value.lower().replace("_", " ")))
+
+    @staticmethod
+    def _evidence_binding_body_match_tokens(value: str) -> list[str]:
+        tokens = re.findall(r"[a-z0-9]+", value.lower().replace("_", " "))
+        seen: set[str] = set()
+        result: list[str] = []
+        for token in tokens:
+            if not token.isdigit() and len(token) < 2:
+                continue
+            if token not in seen:
+                seen.add(token)
+                result.append(token)
+        return result
 
     @staticmethod
     def _deterministic_content_readback_candidates(
