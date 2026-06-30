@@ -704,6 +704,68 @@ def test_real_sample_runner_exposes_structured_action_data_without_artifact_refs
     assert "last_sale_price" in json.dumps(action_items[0]["preview"], ensure_ascii=False)
 
 
+def test_real_sample_runner_prioritizes_action_readbacks_before_ref_limit():
+    runner = _load_real_samples_runner()
+    old_limit = os.environ.get("REAL_SAMPLE_JUDGE_MAX_EVIDENCE_ITEMS")
+    os.environ["REAL_SAMPLE_JUDGE_MAX_EVIDENCE_ITEMS"] = "40"
+    try:
+        metrics = runner.Metrics(route="flat", case_id="stock_risk_outlook")
+        candidate = {
+            "final": {"answer": "final.md", "artifact_markdown": ""},
+            "framework_evidence": {
+                "artifact_refs": [
+                    {"artifact_id": f"artifact-{index}", "preview": {"index": index}}
+                    for index in range(50)
+                ],
+                "evidence_refs": [
+                    {"ref_id": f"ref-{index}", "preview": {"index": index}}
+                    for index in range(50)
+                ],
+                "action_readbacks": [
+                    {
+                        "action_id": "market_quotes",
+                        "action_call_id": "call-quotes",
+                        "status": "success",
+                        "success": True,
+                        "bytes": 128,
+                        "preview": {
+                            "companies": [
+                                {
+                                    "ticker": "NVDA",
+                                    "last_sale_price": "$199.71",
+                                    "source": "nasdaq_quote_api",
+                                }
+                            ]
+                        },
+                        "support_semantics": {
+                            "supports_content_claims": True,
+                            "status_class": "success",
+                        },
+                    }
+                ],
+                "action_readback_count": 1,
+            },
+        }
+
+        normalized = runner.normalized_candidate_for_judge(candidate, metrics)
+    finally:
+        if old_limit is None:
+            os.environ.pop("REAL_SAMPLE_JUDGE_MAX_EVIDENCE_ITEMS", None)
+        else:
+            os.environ["REAL_SAMPLE_JUDGE_MAX_EVIDENCE_ITEMS"] = old_limit
+
+    action_items = [
+        item
+        for item in normalized["evidence_items"]
+        if item.get("source") == "framework_action_result_preview"
+    ]
+    assert len(normalized["evidence_items"]) == 40
+    assert normalized["evidence_items_omitted"] > 0
+    assert action_items
+    assert action_items[0]["action_id"] == "market_quotes"
+    assert action_items[0]["preview"]["companies"][0]["last_sale_price"] == "$199.71"
+
+
 def test_real_sample_runner_keeps_nested_action_readback_excerpts_for_judge():
     runner = _load_real_samples_runner()
     meta = {
