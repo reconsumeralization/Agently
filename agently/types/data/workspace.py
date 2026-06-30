@@ -164,6 +164,7 @@ class WorkspaceFileWriteResult(TypedDict):
     encoding: str | None
     mode: str
     handler_id: str
+    replacements: NotRequired[int]
     diagnostics: list[WorkspaceFileDiagnostic]
     file_refs: list[WorkspaceFileRef]
 

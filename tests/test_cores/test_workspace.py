@@ -861,7 +861,7 @@ async def test_workspace_coding_file_operations_edit_glob_grep_and_patch(tmp_pat
         await workspace.edit_file("src/app.py", "print('old')", "print('new')")
 
     edited = await workspace.edit_file("src/app.py", "print('old')", "print('new')", replace_all=True)
-    assert edited["replacements"] == 2
+    assert edited.get("replacements") == 2
     readback = await workspace.read_file("src/app.py")
     assert readback["content"] == "print('new')\nprint('new')\n"
 
