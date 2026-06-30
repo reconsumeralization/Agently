@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -605,6 +606,13 @@ class Workspace:
             raise ValueError(f"Path is outside workspace file root: { path }") from error
         return resolved
 
+    def inspect_file(self, path: str | Path) -> WorkspaceFileInfo:
+        target = self.resolve_file_path(path)
+        return self.manager.inspect_file_path(
+            target,
+            relative_path=str(target.relative_to(self.files_root)),
+        )
+
     async def read_file(
         self,
         path: str | Path,
@@ -625,6 +633,127 @@ class Workspace:
             handler=handler,
             options=options,
         )
+
+    async def glob_files(
+        self,
+        pattern: str,
+        *,
+        path: str | Path = ".",
+        max_results: int = 200,
+        include_hidden: bool = False,
+    ) -> dict[str, Any]:
+        requested_pattern = str(pattern or "*").strip() or "*"
+        effective_pattern = "**/*" if requested_pattern in {"**", "**/"} else requested_pattern
+        safe_max_results = max(1, min(int(max_results), 5000))
+        base = self.resolve_file_path(path)
+        if base.is_file():
+            candidates = [base] if base.match(requested_pattern) or requested_pattern in {"*", "**", "**/*"} else []
+        elif base.exists():
+            candidates = base.rglob(effective_pattern)
+        else:
+            candidates = []
+        matches: list[str] = []
+        truncated = False
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                relative = str(candidate.relative_to(self.files_root))
+            except ValueError:
+                continue
+            if not include_hidden and any(part.startswith(".") for part in Path(relative).parts):
+                continue
+            if len(matches) >= safe_max_results:
+                truncated = True
+                break
+            matches.append(relative)
+        matches = sorted(dict.fromkeys(matches))
+        return {
+            "pattern": requested_pattern,
+            "path": str(path),
+            "matches": matches,
+            "count": len(matches),
+            "truncated": truncated,
+            "max_results": safe_max_results,
+        }
+
+    async def grep_files(
+        self,
+        pattern: str,
+        *,
+        path: str | Path = ".",
+        regex: bool = True,
+        glob: str | None = None,
+        context_lines: int = 0,
+        max_results: int = 50,
+        include_hidden: bool = False,
+        max_file_bytes: int = 200000,
+        max_snippet_bytes: int = 1200,
+    ) -> dict[str, Any]:
+        query_text = str(pattern or "")
+        if not query_text:
+            return {"pattern": query_text, "matches": [], "count": 0, "truncated": False}
+        compiled = re.compile(query_text) if regex else None
+        file_pattern = str(glob or "**/*")
+        safe_context_lines = max(0, min(int(context_lines), 20))
+        safe_max_results = max(1, min(int(max_results), 1000))
+        candidates = await self.glob_files(
+            file_pattern,
+            path=path,
+            max_results=5000,
+            include_hidden=include_hidden,
+        )
+        matches: list[dict[str, Any]] = []
+        truncated = bool(candidates.get("truncated"))
+        for relative in candidates.get("matches", []):
+            if len(matches) >= safe_max_results:
+                truncated = True
+                break
+            if not isinstance(relative, str):
+                continue
+            info = self.inspect_file(relative)
+            if int(info.get("bytes") or 0) > max_file_bytes:
+                continue
+            read_result = await self.read_file(relative, max_bytes=max_file_bytes)
+            if not read_result.get("readable") or read_result.get("content_kind") != "text":
+                continue
+            lines = str(read_result.get("content") or "").splitlines()
+            for line_index, line in enumerate(lines):
+                matched = bool(compiled.search(line)) if compiled is not None else query_text in line
+                if not matched:
+                    continue
+                snippet_start = max(0, line_index - safe_context_lines)
+                snippet_end = min(len(lines), line_index + safe_context_lines + 1)
+                snippet = "\n".join(lines[snippet_start:snippet_end])
+                snippet_raw = snippet.encode("utf-8")
+                snippet_truncated = False
+                if len(snippet_raw) > max_snippet_bytes:
+                    snippet = snippet_raw[:max_snippet_bytes].decode("utf-8", errors="ignore")
+                    snippet_truncated = True
+                matches.append(
+                    {
+                        "path": relative,
+                        "line": line_index + 1,
+                        "text": line,
+                        "snippet": snippet,
+                        "line_start": snippet_start + 1,
+                        "line_end": snippet_end,
+                        "truncated": snippet_truncated,
+                    }
+                )
+                if len(matches) >= safe_max_results:
+                    truncated = True
+                    break
+        return {
+            "pattern": query_text,
+            "regex": regex,
+            "glob": file_pattern,
+            "path": str(path),
+            "matches": matches,
+            "count": len(matches),
+            "truncated": truncated,
+            "max_results": safe_max_results,
+        }
 
     async def search_files(
         self,
@@ -946,6 +1075,118 @@ class Workspace:
             handler=handler,
             options=options,
         )
+
+    async def edit_file(
+        self,
+        path: str | Path,
+        old_string: str,
+        new_string: str,
+        *,
+        replace_all: bool = False,
+        expected_sha256: str | None = None,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileWriteResult:
+        if old_string == new_string:
+            raise ValueError("old_string and new_string are identical; no edit was applied.")
+        info = self.inspect_file(path)
+        if expected_sha256 is not None and info.get("exists") and str(info.get("sha256") or "") != expected_sha256:
+            raise ValueError("Workspace file has changed since the expected sha256.")
+        if not info.get("exists"):
+            if old_string != "":
+                raise FileNotFoundError(f"Workspace file not found: { path }")
+            return await self.write_file(path, new_string, append=False, handler=handler, options=options)
+        read_result = await self.read_file(path, max_bytes=int(info.get("bytes") or 0) + 1)
+        if not read_result.get("readable") or read_result.get("content_kind") != "text":
+            raise ValueError(f"Workspace file is not editable text: { path }")
+        if read_result.get("truncated"):
+            raise ValueError(f"Workspace file must be fully read before edit_file can edit it: { path }")
+        content = str(read_result.get("content") or "")
+        if old_string == "":
+            if content:
+                raise ValueError("Cannot create a file with edit_file because the target already exists.")
+            replacement_count = 1
+            new_content = new_string
+        else:
+            replacement_count = content.count(old_string)
+            if replacement_count <= 0:
+                raise ValueError("old_string was not found in the Workspace file.")
+            if replacement_count > 1 and not replace_all:
+                raise ValueError("old_string matched multiple locations; set replace_all=True or provide more context.")
+            new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+        result = dict(await self.write_file(path, new_content, append=False, handler=handler, options=options))
+        result["replacements"] = replacement_count
+        return cast(WorkspaceFileWriteResult, result)
+
+    async def apply_patch(
+        self,
+        patch: str,
+        *,
+        expected_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if self.capabilities().get("read_only"):
+            raise PermissionError("Workspace is read-only; apply_patch(...) is blocked.")
+        patch_text = str(patch or "")
+        paths = self._paths_from_unified_patch(patch_text)
+        if not paths:
+            raise ValueError("Patch did not declare any file paths.")
+        normalized_expected: list[str] = []
+        if expected_files is not None:
+            for item in expected_files:
+                target = self.resolve_file_path(item)
+                normalized_expected.append(str(target.relative_to(self.files_root)))
+            if sorted(paths) != sorted(dict.fromkeys(normalized_expected)):
+                raise ValueError("Patch file set does not match expected_files.")
+        git_path = shutil.which("git")
+        if git_path is None:
+            raise RuntimeError("git executable is required for Workspace.apply_patch(...).")
+        completed = await asyncio.to_thread(
+            subprocess.run,
+            [git_path, "apply", "--whitespace=nowarn"],
+            cwd=str(self.files_root),
+            input=patch_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            message = str(completed.stderr or completed.stdout or "git apply failed").strip()
+            raise ValueError(message)
+        return {
+            "ok": True,
+            "status": "success",
+            "paths": paths,
+            "file_infos": [self.inspect_file(path) for path in paths],
+        }
+
+    def _paths_from_unified_patch(self, patch: str) -> list[str]:
+        paths: list[str] = []
+
+        def add(raw_path: str) -> None:
+            text = raw_path.strip()
+            if not text or text == "/dev/null":
+                return
+            if text.startswith("a/") or text.startswith("b/"):
+                text = text[2:]
+            if "\t" in text:
+                text = text.split("\t", 1)[0]
+            target = self.resolve_file_path(text)
+            relative = str(target.relative_to(self.files_root))
+            if relative not in paths:
+                paths.append(relative)
+
+        for line in patch.splitlines():
+            if line.startswith("diff --git "):
+                parts = line.split()
+                if len(parts) >= 4:
+                    add(parts[2])
+                    add(parts[3])
+                continue
+            if line.startswith("+++ ") or line.startswith("--- "):
+                add(line[4:])
+                continue
+        return paths
 
     async def materialize_file(
         self,

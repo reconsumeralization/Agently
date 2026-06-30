@@ -136,6 +136,7 @@ def test_action_extension_set_tool_loop_config():
     assert agent.action is agent.tool
     assert callable(agent.use_actions)
     assert callable(agent.enable_workspace_file_actions)
+    assert callable(agent.enable_coding_agent_actions)
     assert callable(agent.use_workspace_file_actions)
     assert callable(agent.action_func)
     agent.set_tool_loop(
@@ -403,6 +404,86 @@ def test_action_extension_workspace_file_actions_export_flag_and_idempotent_user
     assert export_result.get("status") == "success"
     assert export_result.get("data", {}).get("exported") is False
     assert export_result.get("data", {}).get("diagnostics", [])[0]["code"] == "workspace.file.no_export_handler"
+
+
+def test_action_extension_enable_coding_agent_actions_registers_guarded_file_tools(tmp_path):
+    agent = Agently.create_agent("coding-agent-actions").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    (workspace.files_root / "src").mkdir(parents=True)
+    (workspace.files_root / "src" / "app.py").write_text("print('old')\n", encoding="utf-8")
+    (workspace.files_root / "src" / "notes.md").write_text("Project Atlas\n", encoding="utf-8")
+
+    agent.enable_coding_agent_actions()
+
+    for action_id in ("read_file", "write_file", "edit_file", "apply_patch", "glob_files", "grep_files"):
+        spec = agent.action.action_registry.get_spec(action_id)
+        assert spec is not None
+        assert spec.get("meta", {}).get("coding_agent") is True or action_id in {"read_file", "write_file"}
+
+    globbed = agent.action.execute_action("glob_files", {"pattern": "*.py", "path": "src"})
+    assert globbed.get("status") == "success"
+    assert globbed.get("data", {}).get("matches") == ["src/app.py"]
+
+    grepped = agent.action.execute_action("grep_files", {"pattern": "Project\\s+Atlas", "path": "src", "glob": "*.md"})
+    assert grepped.get("status") == "success"
+    assert grepped.get("data", {}).get("matches", [])[0]["path"] == "src/notes.md"
+
+    stale_write = agent.action.execute_action("write_file", {"path": "src/app.py", "content": "blocked\n"})
+    assert stale_write.get("status") == "error"
+
+    read = agent.action.execute_action("read_file", {"path": "src/app.py"})
+    assert read.get("status") == "success"
+    original_sha = read.get("data", {}).get("sha256")
+
+    edited = agent.action.execute_action(
+        "edit_file",
+        {
+            "path": "src/app.py",
+            "old_string": "print('old')",
+            "new_string": "print('new')",
+        },
+    )
+    assert edited.get("status") == "success"
+    assert "print('new')" in (workspace.files_root / "src" / "app.py").read_text(encoding="utf-8")
+
+    (workspace.files_root / "src" / "app.py").write_text("print('user change')\n", encoding="utf-8")
+    stale_edit = agent.action.execute_action(
+        "edit_file",
+        {
+            "path": "src/app.py",
+            "old_string": "user",
+            "new_string": "agent",
+            "expected_sha256": original_sha,
+        },
+    )
+    assert stale_edit.get("status") == "error"
+
+    reread = agent.action.execute_action("read_file", {"path": "src/app.py"})
+    current_sha = reread.get("data", {}).get("sha256")
+    written = agent.action.execute_action(
+        "write_file",
+        {"path": "src/app.py", "content": "print('ready')\n", "expected_sha256": current_sha},
+    )
+    assert written.get("status") == "success"
+
+    patch = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-print('ready')
++print('patched')
+"""
+    agent.action.execute_action("read_file", {"path": "src/app.py"})
+    patched = agent.action.execute_action(
+        "apply_patch",
+        {"patch": patch, "expected_files": ["src/app.py"]},
+    )
+    assert patched.get("status") == "success"
+    assert "print('patched')" in (workspace.files_root / "src" / "app.py").read_text(encoding="utf-8")
+
+    outside = agent.action.execute_action("edit_file", {"path": "../outside.py", "old_string": "", "new_string": "x"})
+    assert outside.get("status") == "error"
 
 
 def test_action_extension_enable_workspace_file_actions_inherits_foundation_workspace(tmp_path):
