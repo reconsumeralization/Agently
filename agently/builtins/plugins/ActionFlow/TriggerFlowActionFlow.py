@@ -237,6 +237,60 @@ class TriggerFlowActionFlow:
                 last_round_records = []
             model_visible_done_plans = action.to_model_visible_records(done_plans)
             model_visible_last_round_records = action.to_model_visible_records(last_round_records)
+
+            def max_rounds_diagnostic_records(
+                *,
+                pending_action_count: int = 0,
+                record_index: int = 0,
+            ) -> list[dict[str, Any]]:
+                diagnostic = {
+                    "source": "ActionFlow",
+                    "severity": "warning",
+                    "code": "action_loop.max_rounds_reached",
+                    "message": "Action loop stopped because max_rounds was reached before the planner converged.",
+                    "meta": {
+                        "round_index": round_index,
+                        "max_rounds": max_rounds,
+                        "pending_action_count": pending_action_count,
+                        "planning_protocol": planning_protocol,
+                    },
+                }
+                return [
+                    action._normalize_execution_record(
+                        {
+                            "ok": False,
+                            "status": "blocked",
+                            "success": False,
+                            "purpose": diagnostic["message"],
+                            "action_id": "action_loop",
+                            "tool_name": "action_loop",
+                            "kwargs": {},
+                            "result": diagnostic,
+                            "data": diagnostic,
+                            "error": diagnostic["message"],
+                            "diagnostics": [diagnostic],
+                            "expose_to_model": True,
+                            "meta": {
+                                "planning_protocol": planning_protocol,
+                                "round_index": round_index,
+                                "max_rounds": max_rounds,
+                            },
+                        },
+                        None,
+                        record_index,
+                    )
+                ]
+
+            if isinstance(max_rounds, int) and max_rounds >= 0 and round_index >= max_rounds:
+                await data.async_emit("DONE", [*done_plans, *max_rounds_diagnostic_records()])
+                return {
+                    "next_action": "response",
+                    "use_action": False,
+                    "next": "",
+                    "action_calls": [],
+                    "diagnostics": [],
+                }
+
             visible_action_list = action._with_action_artifact_recall_action(
                 action_list,
                 model_visible_last_round_records or model_visible_done_plans,
@@ -317,41 +371,10 @@ class TriggerFlowActionFlow:
                 and round_index >= max_rounds
             )
             if max_rounds_reached:
-                diagnostic = {
-                    "source": "ActionFlow",
-                    "severity": "warning",
-                    "code": "action_loop.max_rounds_reached",
-                    "message": "Action loop stopped because max_rounds was reached before the planner converged.",
-                    "meta": {
-                        "round_index": round_index,
-                        "max_rounds": max_rounds,
-                        "pending_action_count": len(action_calls) if isinstance(action_calls, list) else 0,
-                        "planning_protocol": planning_protocol,
-                    },
-                }
-                diagnostic_records.append(
-                    action._normalize_execution_record(
-                        {
-                            "ok": False,
-                            "status": "blocked",
-                            "success": False,
-                            "purpose": diagnostic["message"],
-                            "action_id": "action_loop",
-                            "tool_name": "action_loop",
-                            "kwargs": {},
-                            "result": diagnostic,
-                            "data": diagnostic,
-                            "error": diagnostic["message"],
-                            "diagnostics": [diagnostic],
-                            "expose_to_model": True,
-                            "meta": {
-                                "planning_protocol": planning_protocol,
-                                "round_index": round_index,
-                                "max_rounds": max_rounds,
-                            },
-                        },
-                        None,
-                        len(diagnostic_records),
+                diagnostic_records.extend(
+                    max_rounds_diagnostic_records(
+                        pending_action_count=len(action_calls) if isinstance(action_calls, list) else 0,
+                        record_index=len(diagnostic_records),
                     )
                 )
             if action._should_continue(decision, round_index=round_index, max_rounds=max_rounds):

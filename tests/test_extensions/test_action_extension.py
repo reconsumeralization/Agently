@@ -209,6 +209,68 @@ async def test_action_flow_max_rounds_returns_diagnostic_without_executing():
     assert diagnostics[0].get("code") == "action_loop.max_rounds_reached"
 
 
+@pytest.mark.asyncio
+async def test_action_flow_max_rounds_stops_before_extra_planning_round():
+    agent = Agently.create_agent()
+    agent.input("Use one action round, then stop.")
+    action_list = [{"action_id": "dummy_action", "name": "dummy_action", "desc": "Dummy action.", "kwargs": {}}]
+    planning_calls = 0
+    execution_calls = 0
+
+    async def fake_plan_handler(context, request):
+        nonlocal planning_calls
+        _ = (context, request)
+        planning_calls += 1
+        return {
+            "next_action": "execute",
+            "use_action": True,
+            "action_calls": [
+                {
+                    "purpose": "first action",
+                    "action_id": "dummy_action",
+                    "action_input": {},
+                    "policy_override": {},
+                    "todo_suggestion": "Run another action round.",
+                }
+            ],
+        }
+
+    async def fake_execution_handler(context, request):
+        nonlocal execution_calls
+        _ = (context, request)
+        execution_calls += 1
+        return [
+            {
+                "ok": True,
+                "status": "success",
+                "success": True,
+                "purpose": "first action",
+                "action_id": "dummy_action",
+                "kwargs": {},
+                "result": "ok",
+                "data": "ok",
+                "error": "",
+            }
+        ]
+
+    records = await agent.action.async_plan_and_execute(
+        prompt=agent.request.prompt,
+        settings=agent.settings,
+        action_list=action_list,
+        planning_handler=fake_plan_handler,
+        action_execution_handler=fake_execution_handler,
+        max_rounds=1,
+    )
+
+    assert planning_calls == 1
+    assert execution_calls == 1
+    assert [record.get("action_id") for record in records] == ["dummy_action", "action_loop"]
+    assert records[-1].get("status") == "blocked"
+    diagnostics = records[-1].get("diagnostics", [])
+    assert isinstance(diagnostics, list)
+    assert diagnostics[0].get("code") == "action_loop.max_rounds_reached"
+
+
 def test_action_extension_use_sandbox_registers_agent_scoped_bash_action(tmp_path):
     agent = Agently.create_agent()
     action_id = f"agent_bash_sandbox_{ agent.name }"
