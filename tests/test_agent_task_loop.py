@@ -5336,6 +5336,43 @@ def test_required_failed_read_action_still_blocks_execution_risk_guard(tmp_path)
     assert verification.get("non_blocking_failed_actions") in (None, [])
 
 
+def test_framework_action_loop_guard_diagnostic_does_not_force_execution_risk_guard(tmp_path):
+    agent = _create_agent("agent-task-action-loop-diagnostic").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a verified report.",
+        success_criteria=["The report is complete and grounded."],
+        execution="flat",
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The final report is complete.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "final.md",
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "action_ids": ["read_file"],
+            "failed_actions": [],
+            "blocked_actions": ["action_loop"],
+            "approval_required_actions": [],
+            "required_actions": [],
+        },
+    )
+
+    assert verification["is_complete"] is True
+    assert "execution_risk_actions_present" not in verification.get("guard_reasons", [])
+    assert verification["non_blocking_failed_actions"] == ["action_loop"]
+    assert "Unresolved execution risk actions" not in " ".join(verification.get("missing_criteria", []))
+
+
 def test_unknown_failed_action_still_blocks_execution_risk_guard(tmp_path):
     agent = _create_agent("agent-task-unsafe-action").use_workspace(tmp_path / "task-workspace")
     task = AgentTask(

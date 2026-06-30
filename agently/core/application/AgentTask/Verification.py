@@ -2863,16 +2863,26 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 or bool(item.get("replay_safe")) is True
             )
         }
+        framework_diagnostic_actions = {"action_loop", "action_planning"}
         risky_failed: list[str] = []
         non_blocking_failed: list[str] = []
         for action_id in failed_actions:
-            if action_id in read_safe_actions and action_id not in required_actions:
+            if (
+                action_id in framework_diagnostic_actions
+                or action_id in read_safe_actions
+            ) and action_id not in required_actions:
                 non_blocking_failed.append(action_id)
             else:
                 risky_failed.append(action_id)
+        risky_blocked: list[str] = []
+        for action_id in blocked_actions:
+            if action_id in framework_diagnostic_actions and action_id not in required_actions:
+                non_blocking_failed.append(action_id)
+            else:
+                risky_blocked.append(action_id)
         risky_actions = self._merge_string_lists(
             risky_failed,
-            [*blocked_actions, *approval_required_actions],
+            [*risky_blocked, *approval_required_actions],
         )
         return risky_actions, non_blocking_failed
 
