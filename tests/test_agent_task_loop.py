@@ -3078,6 +3078,71 @@ async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anch
 
 
 @pytest.mark.asyncio
+async def test_workspace_artifact_stream_draft_disables_action_loop(tmp_path, monkeypatch):
+    class WorkspaceArtifactDraftNoActionRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactDraftNoActionRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Write only the final Markdown artifact body for the AgentTask" in text:
+                yield "message", "# Draft Without Actions\n\nThe draft used existing evidence only.\n"
+                return
+            yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-draft-no-action-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="agent-task-workspace-artifact-draft-no-action-plugins",
+    )
+    plugin_manager.register("ModelRequester", WorkspaceArtifactDraftNoActionRequester, activate=True)
+    agent = Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="agent-task-workspace-artifact-draft-no-action",
+    )
+
+    def browse(query: str = "") -> str:
+        return f"unexpected browse: {query}"
+
+    agent.use_actions(browse, always=True)
+    calls = 0
+
+    async def fail_if_action_loop_runs(**kwargs: Any):
+        nonlocal calls
+        _ = kwargs
+        calls += 1
+        raise AssertionError("workspace artifact draft must not run the action loop")
+
+    monkeypatch.setattr(agent.action, "async_plan_and_execute", fail_if_action_loop_runs)
+
+    task = AgentTask(
+        agent,
+        task_id="workspace-artifact-draft-no-action",
+        goal="Write a Workspace artifact from existing evidence.",
+        success_criteria=["The final artifact is written without extra actions."],
+        workspace=tmp_path / "task-workspace",
+    )
+
+    delivery = await task._stream_workspace_artifact_draft(
+        path="final.md",
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_result={"artifact_manifest": {"path": "final.md"}},
+        execution_meta={"status": "completed", "logs": {"action_logs": [], "route_logs": {}}},
+        source="test.workspace_artifact_draft.no_action_loop",
+        context_pack=None,
+        iteration_index=1,
+    )
+
+    assert delivery is not None
+    assert delivery["status"] == "delivered"
+    assert calls == 0
+    assert agent.settings.get("action.loop.enabled", True) is True
+    readback = await task.workspace.read_file("final.md")
+    assert "Draft Without Actions" in readback["content"]
+
+
+@pytest.mark.asyncio
 async def test_workspace_artifact_stream_draft_receives_active_repair_context(tmp_path):
     class WorkspaceArtifactDraftRepairRequester(MockAgentTaskRequester):
         name = "WorkspaceArtifactDraftRepairRequester"

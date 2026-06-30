@@ -442,6 +442,15 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             set_setting("tool.loop.max_rounds", max_rounds)
         return execution
 
+    def _disable_child_execution_action_loop(self, execution: Any) -> Any:
+        request = getattr(execution, "request", None)
+        settings = getattr(request, "settings", None)
+        set_setting = getattr(settings, "set", None)
+        if callable(set_setting):
+            set_setting("action.loop.enabled", False)
+            set_setting("tool.loop.enabled", False)
+        return execution
+
     def _child_execution_options(self) -> dict[str, Any]:
         options = dict(self.options)
         options.pop("request_timeout_seconds", None)
