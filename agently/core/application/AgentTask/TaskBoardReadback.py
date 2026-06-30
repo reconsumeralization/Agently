@@ -145,6 +145,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             file_readbacks: list[dict[str, Any]] = []
             effective_file_refs = [dict(ref) for ref in file_refs if isinstance(ref, Mapping)]
             diagnostics: list[dict[str, Any]] = []
+            readback_evidence_items: list[dict[str, Any]] = []
             if not refs and not file_refs:
                 status = "blocked"
                 success_count = 0
@@ -289,6 +290,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     remaining_work.append(f"{ failed_count } artifact refs could not be read.")
                 if file_failed_count:
                     remaining_work.append(f"{ file_failed_count } Workspace file refs could not be read.")
+                readback_evidence_items = self._taskboard_action_artifact_readback_evidence_items(
+                    readbacks,
+                    source="taskboard_readback_card",
+                    card_id=context.card.id,
+                )
                 payload = {
                     "status": status,
                     "answer": (
@@ -298,6 +304,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     "readbacks": readbacks,
                     "file_readbacks": file_readbacks,
                     "file_refs": DataFormatter.sanitize(effective_file_refs),
+                    "evidence_items": DataFormatter.sanitize(readback_evidence_items),
                     "evidence": [
                         *[
                             f"artifact:{ item.get('artifact_id') } status={ item.get('status') }"
@@ -355,6 +362,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     "diagnostics": [execution_diagnostic],
                     "artifact_refs": DataFormatter.sanitize(refs),
                     "file_refs": DataFormatter.sanitize(effective_file_refs),
+                    "blocks": {
+                        "evidence": {
+                            "evidence_items": DataFormatter.sanitize(readback_evidence_items),
+                        }
+                    },
                 },
                 "action_evidence": [
                     {
@@ -424,6 +436,22 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 ),
             }
         )
+        execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
+        payload_evidence_items = payload.get("evidence_items")
+        if isinstance(payload_evidence_items, Sequence) and not isinstance(
+            payload_evidence_items,
+            str | bytes | bytearray,
+        ):
+            execution_evidence_ledger = evidence_ledger_view(
+                {
+                    "evidence_items": [
+                        *list(execution_evidence_ledger.get("items", [])),
+                        *[item for item in payload_evidence_items if isinstance(item, Mapping)],
+                    ]
+                },
+                max_items=80,
+                body_chars=2400,
+            )
         return TaskBoardCardResult(
             card_id=context.card.id,
             status=str(payload.get("status") or "failed"),
@@ -445,6 +473,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     execution_meta.get("block_carrier", {}),
                     blocks=execution_meta.get("blocks"),
                 ),
+                "evidence_ledger": execution_evidence_ledger,
             },
         )
 
@@ -757,6 +786,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             output = dict(payload)
             output["readbacks"] = readbacks
             output["diagnostics"] = diagnostics
+            output["evidence_items"] = self._taskboard_action_artifact_readback_evidence_items(
+                readbacks,
+                source="taskboard_dependency_readback",
+                card_id=card_id,
+            )
             output["success_count"] = sum(1 for item in readbacks if item.get("ok"))
             failed_count = len(readbacks) - int(output["success_count"])
             status = "completed" if int(output["success_count"]) > 0 else "failed"
@@ -794,6 +828,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                         }
                     ],
                     "artifact_refs": DataFormatter.sanitize(refs),
+                    "blocks": {
+                        "evidence": {
+                            "evidence_items": DataFormatter.sanitize(output["evidence_items"]),
+                        }
+                    },
                 },
                 "action_evidence": [
                     {
@@ -839,6 +878,128 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             }
         )
         return DataFormatter.sanitize(output_payload)
+
+    @classmethod
+    def _taskboard_dependency_readback_evidence_items(cls, dependency_readbacks: Any) -> list[dict[str, Any]]:
+        if not isinstance(dependency_readbacks, Mapping):
+            return []
+        raw_items = dependency_readbacks.get("evidence_items")
+        if not isinstance(raw_items, Sequence) or isinstance(raw_items, str | bytes | bytearray):
+            return []
+        return [dict(DataFormatter.sanitize(item)) for item in raw_items if isinstance(item, Mapping)]
+
+    @classmethod
+    def _taskboard_action_artifact_readback_evidence_items(
+        cls,
+        readbacks: Sequence[Any],
+        *,
+        source: str,
+        card_id: str = "",
+    ) -> list[dict[str, Any]]:
+        if not isinstance(readbacks, Sequence) or isinstance(readbacks, str | bytes | bytearray):
+            return []
+        items: list[dict[str, Any]] = []
+        for index, readback in enumerate(readbacks):
+            if not isinstance(readback, Mapping):
+                continue
+            artifact_id = str(readback.get("artifact_id") or "").strip()
+            action_call_id = str(readback.get("action_call_id") or "").strip()
+            value_preview = readback.get("value_preview")
+            body = cls._taskboard_readback_evidence_body(value_preview)
+            preview_meta = readback.get("value_preview_meta")
+            truncated = bool(preview_meta.get("truncated")) if isinstance(preview_meta, Mapping) else False
+            ok = bool(readback.get("ok"))
+            status = "ok" if ok and body else ("empty" if ok else "failed")
+            body_state = "truncated" if ok and body and truncated else ("bounded" if ok and body else "ref_only")
+            raw_status = str(readback.get("status") or status)
+            evidence_id = cls._taskboard_readback_evidence_id(
+                "taskboard_action_artifact_readback",
+                source,
+                card_id,
+                artifact_id,
+                action_call_id,
+                str(index),
+            )
+            item: dict[str, Any] = {
+                "id": evidence_id,
+                "kind": "taskboard_action_artifact.readback",
+                "status": status,
+                "raw_status": raw_status,
+                "body_state": body_state,
+                "artifact_id": artifact_id,
+                "action_call_id": action_call_id,
+                "aliases": cls._taskboard_readback_evidence_aliases(readback),
+                "source": source,
+                "provenance": {
+                    "source": source,
+                    "taskboard_card_id": card_id,
+                    "artifact_id": artifact_id,
+                    "action_call_id": action_call_id,
+                },
+                "supports": {
+                    "content": status == "ok" and body_state in {"bounded", "truncated"},
+                    "unavailability": status in {"failed", "empty"},
+                    "ref_pointer": False,
+                },
+            }
+            ref = readback.get("ref")
+            if isinstance(ref, Mapping):
+                item["ref"] = DataFormatter.sanitize(dict(ref))
+                for field in ("path", "label", "role", "artifact_type"):
+                    value = ref.get(field)
+                    if value not in (None, "", [], {}):
+                        item[field] = DataFormatter.sanitize(value)
+            if body:
+                item["body"] = body
+            error = readback.get("error")
+            if error:
+                item["diagnostics"] = [
+                    {
+                        "code": "taskboard.action_artifact_readback.failed",
+                        "message": cls._truncate_prompt_text(error, 1200),
+                    }
+                ]
+            items.append(DataFormatter.sanitize(item))
+        return items
+
+    @staticmethod
+    def _taskboard_readback_evidence_id(*parts: str) -> str:
+        raw = ":".join(str(part or "").strip() for part in parts if str(part or "").strip())
+        return "".join(ch if ch.isalnum() or ch in "._:-/" else "_" for ch in raw)[:240]
+
+    @classmethod
+    def _taskboard_readback_evidence_body(cls, value: Any) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        if isinstance(value, str):
+            return cls._truncate_prompt_text(value, _TASKBOARD_READBACK_PREVIEW_CHARS)
+        try:
+            text = json.dumps(DataFormatter.sanitize(value), ensure_ascii=False, sort_keys=True)
+        except Exception:
+            text = str(value)
+        return cls._truncate_prompt_text(text, _TASKBOARD_READBACK_PREVIEW_CHARS)
+
+    @classmethod
+    def _taskboard_readback_evidence_aliases(cls, readback: Mapping[str, Any]) -> list[str]:
+        aliases: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+
+        artifact_id = str(readback.get("artifact_id") or "").strip()
+        action_call_id = str(readback.get("action_call_id") or "").strip()
+        add(artifact_id)
+        add(action_call_id)
+        if action_call_id:
+            add(f"action_result_{action_call_id}")
+            add(f"action_{action_call_id}")
+        ref = readback.get("ref")
+        if isinstance(ref, Mapping):
+            for field in ("path", "label", "artifact_type", "role"):
+                add(ref.get(field))
+        return aliases[:16]
 
     @classmethod
     def _compact_taskboard_action_artifact_readback(

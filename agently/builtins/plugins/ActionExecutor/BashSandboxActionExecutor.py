@@ -30,11 +30,15 @@ class BashSandboxActionExecutor:
         allowed_workdir_roots: list[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        max_output_chars: int = 20000,
+        output_artifact_dir: str | Path | None = None,
     ):
         self.allowed_cmd_prefixes = allowed_cmd_prefixes
         self.allowed_workdir_roots = allowed_workdir_roots
         self.timeout = timeout
         self.env = env
+        self.max_output_chars = max_output_chars
+        self.output_artifact_dir = output_artifact_dir
 
     @staticmethod
     def _on_register():
@@ -67,6 +71,8 @@ class BashSandboxActionExecutor:
             allowed_workdir_roots=policy.get("workspace_roots", self.allowed_workdir_roots),
             timeout=int(policy.get("timeout_seconds", self.timeout)),
             env=self.env,
+            max_output_chars=int(policy.get("max_output_chars", self.max_output_chars)),
+            output_artifact_dir=policy.get("output_artifact_dir", self.output_artifact_dir),
         )
         return await cmd.run(
             cmd=action_input.get("cmd", ""),

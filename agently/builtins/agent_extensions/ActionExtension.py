@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import re
+import shutil
+import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar, cast
 from typing_extensions import Self
@@ -21,6 +25,7 @@ from typing_extensions import Self
 from agently.core import BaseAgent
 from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
 from agently.utils import DeprecationWarnings, FunctionShifter
+from agently.builtins.actions.Cmd import DEFAULT_SAFE_CMD_PREFIXES
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -388,21 +393,33 @@ class ActionExtension(BaseAgent):
         expose_to_model: bool = True,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        max_output_chars: int = 20000,
     ) -> Self:
         workspace = getattr(self, "workspace", None)
         if root is None and workspace is not None:
             root = getattr(workspace, "files_root", getattr(workspace, "content_root", None))
-        roots = [str(Path(root).expanduser().resolve())] if root is not None else None
-        default_desc = "Run an allowlisted shell command inside a managed workspace boundary."
+        root_path = Path(root).expanduser().resolve() if root is not None else None
+        roots = [str(root_path)] if root_path is not None else None
+        resolved_commands = list(commands) if commands is not None else list(DEFAULT_SAFE_CMD_PREFIXES)
+        output_artifact_dir = str(root_path / "artifacts" / "shell") if root_path is not None else None
+        default_desc = (
+            "Run an allowlisted shell command inside a managed workspace boundary for tests, builds, "
+            "git status inspection, and read-only diagnostics. Prefer dedicated Workspace actions "
+            "`read_file`, `glob_files`, `grep_files`, `edit_file`, `apply_patch`, and `write_file` for "
+            "file reading, searching, editing, and writing. Do not start background long-running "
+            "commands; each command is bounded by timeout and output preview limits."
+        )
         return self.use_action_sandbox(
             "bash",
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
             expose_to_model=expose_to_model,
-            allowed_cmd_prefixes=commands,
+            allowed_cmd_prefixes=resolved_commands,
             allowed_workdir_roots=roots,
             timeout=timeout,
             env=env,
+            max_output_chars=max_output_chars,
+            output_artifact_dir=output_artifact_dir,
         )
 
     def enable_nodejs(
@@ -497,6 +514,7 @@ class ActionExtension(BaseAgent):
         max_search_file_bytes: int = 200000,
         desc: str | None = None,
         desc_mode: CapabilityDescMode = "append",
+        coding_agent: bool = False,
     ) -> Self:
         workspace = getattr(self, "workspace", None)
         if isolated and root is _WORKSPACE_ROOT_UNSET:
@@ -585,6 +603,52 @@ class ActionExtension(BaseAgent):
                 "result": result,
             }
 
+        read_state: dict[str, dict[str, Any]] = {}
+
+        def inspect_workspace_file(path: str | Path):
+            target = resolve_workspace_path(path)
+            return manager.inspect_file_path(target, relative_path=relative_path(target))
+
+        def remember_read(path: str | Path, result: Mapping[str, Any], *, offset: int = 0):
+            if not coding_agent:
+                return
+            if offset != 0 or result.get("truncated") or not result.get("ok", result.get("readable")):
+                return
+            path_text = str(result.get("path") or relative_path(resolve_workspace_path(path)))
+            sha256 = str(result.get("sha256") or "")
+            if sha256:
+                read_state[path_text] = {"sha256": sha256}
+
+        def remember_write(path: str | Path, result: Mapping[str, Any]):
+            if not coding_agent:
+                return
+            path_text = str(result.get("path") or relative_path(resolve_workspace_path(path)))
+            sha256 = str(result.get("sha256") or "")
+            if sha256:
+                read_state[path_text] = {"sha256": sha256}
+
+        def require_fresh_for_write(path: str | Path, expected_sha256: str | None = None):
+            if not coding_agent:
+                return
+            info = inspect_workspace_file(path)
+            path_text = str(info.get("path") or relative_path(resolve_workspace_path(path)))
+            current_sha = str(info.get("sha256") or "")
+            if not info.get("exists"):
+                if expected_sha256 not in (None, ""):
+                    raise ValueError("Workspace file does not exist; expected_sha256 cannot be satisfied.")
+                return
+            if expected_sha256:
+                if current_sha != str(expected_sha256):
+                    raise ValueError("Workspace file has changed since the expected sha256.")
+                return
+            state = read_state.get(path_text)
+            if not state:
+                raise PermissionError(
+                    "File has not been read through this coding-agent action set; read it first or pass expected_sha256."
+                )
+            if str(state.get("sha256") or "") != current_sha:
+                raise ValueError("File has been modified since it was read; read it again before writing.")
+
         async def manager_read_file(path: str, max_bytes: int = max_file_bytes, offset: int = 0):
             if workspace_for_actions is not None:
                 return await workspace_for_actions.read_file(path, max_bytes=max_bytes, offset=offset)
@@ -608,6 +672,125 @@ class ActionExtension(BaseAgent):
                 content=content,
                 append=append,
             )
+
+        async def manager_edit_file(
+            path: str,
+            old_string: str,
+            new_string: str,
+            *,
+            replace_all: bool = False,
+            expected_sha256: str | None = None,
+        ):
+            require_fresh_for_write(path, expected_sha256)
+            if workspace_for_actions is not None:
+                result = await workspace_for_actions.edit_file(
+                    path,
+                    old_string,
+                    new_string,
+                    replace_all=replace_all,
+                    expected_sha256=expected_sha256,
+                )
+            else:
+                info = inspect_workspace_file(path)
+                if not info.get("exists"):
+                    if old_string != "":
+                        raise FileNotFoundError(f"Workspace file not found: { path }")
+                    result = await manager_write_file(path, new_string, append=False)
+                else:
+                    read_result = await manager_read_file(path, max_bytes=int(info.get("bytes") or 0) + 1)
+                    content = str(read_result.get("content") or "")
+                    if old_string == new_string:
+                        raise ValueError("old_string and new_string are identical; no edit was applied.")
+                    if old_string == "":
+                        if content:
+                            raise ValueError("Cannot create a file with edit_file because the target already exists.")
+                        new_content = new_string
+                        replacements = 1
+                    else:
+                        replacements = content.count(old_string)
+                        if replacements <= 0:
+                            raise ValueError("old_string was not found in the Workspace file.")
+                        if replacements > 1 and not replace_all:
+                            raise ValueError(
+                                "old_string matched multiple locations; set replace_all=True or provide more context."
+                            )
+                        new_content = (
+                            content.replace(old_string, new_string)
+                            if replace_all
+                            else content.replace(old_string, new_string, 1)
+                        )
+                    result = dict(await manager_write_file(path, new_content, append=False))
+                    result["replacements"] = replacements
+            remember_write(path, result)
+            return result
+
+        def patch_paths(patch: str) -> list[str]:
+            paths: list[str] = []
+
+            def add(raw_path: str):
+                text = raw_path.strip()
+                if not text or text == "/dev/null":
+                    return
+                if text.startswith("a/") or text.startswith("b/"):
+                    text = text[2:]
+                if "\t" in text:
+                    text = text.split("\t", 1)[0]
+                target = resolve_workspace_path(text)
+                normalized = relative_path(target)
+                if normalized not in paths:
+                    paths.append(normalized)
+
+            for line in str(patch or "").splitlines():
+                if line.startswith("diff --git "):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        add(parts[2])
+                        add(parts[3])
+                    continue
+                if line.startswith("+++ ") or line.startswith("--- "):
+                    add(line[4:])
+            return paths
+
+        async def manager_apply_patch(patch: str, expected_files: list[str] | None = None):
+            paths = patch_paths(patch)
+            if not paths:
+                raise ValueError("Patch did not declare any file paths.")
+            if expected_files is not None:
+                expected = [relative_path(resolve_workspace_path(item)) for item in expected_files]
+                if sorted(paths) != sorted(dict.fromkeys(expected)):
+                    raise ValueError("Patch file set does not match expected_files.")
+            for path in paths:
+                if inspect_workspace_file(path).get("exists"):
+                    require_fresh_for_write(path)
+            if workspace_for_actions is not None:
+                result = await workspace_for_actions.apply_patch(patch, expected_files=expected_files)
+            else:
+                git_path = shutil.which("git")
+                if git_path is None:
+                    raise RuntimeError("git executable is required for apply_patch.")
+                completed = await asyncio.to_thread(
+                    subprocess.run,
+                    [git_path, "apply", "--whitespace=nowarn"],
+                    cwd=str(root_path),
+                    input=str(patch or ""),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=30,
+                )
+                if completed.returncode != 0:
+                    raise ValueError(str(completed.stderr or completed.stdout or "git apply failed").strip())
+                result = {
+                    "ok": True,
+                    "status": "success",
+                    "paths": paths,
+                    "file_infos": [inspect_workspace_file(path) for path in paths],
+                }
+            for path in paths:
+                info = inspect_workspace_file(path)
+                if info.get("exists"):
+                    read_state[str(info.get("path") or path)] = {"sha256": str(info.get("sha256") or "")}
+            return result
 
         async def manager_export_file(
             source_path: str,
@@ -669,7 +852,9 @@ class ActionExtension(BaseAgent):
         if read and not has_action("read_file"):
 
             async def read_file(path: str, max_bytes: int = max_file_bytes, offset: int = 0):
-                return file_result_action_output(await manager_read_file(path, max_bytes=max_bytes, offset=offset))
+                result = await manager_read_file(path, max_bytes=max_bytes, offset=offset)
+                remember_read(path, result, offset=offset)
+                return file_result_action_output(result)
 
             self.action.register_action(
                 action_id=action_name("read_file"),
@@ -688,6 +873,143 @@ class ActionExtension(BaseAgent):
                 side_effect_level="read",
                 expose_to_model=expose_to_model,
                 meta={"component": "workspace", "root": str(root_path)},
+            )
+
+        if read and coding_agent and not has_action("glob_files"):
+
+            async def glob_files(
+                pattern: str,
+                path: str = ".",
+                max_results: int = 200,
+                include_hidden: bool = False,
+            ):
+                if workspace_for_actions is not None:
+                    return await workspace_for_actions.glob_files(
+                        pattern,
+                        path=path,
+                        max_results=max_results,
+                        include_hidden=include_hidden,
+                    )
+                files = iter_workspace_files(path, pattern, max_results=max_results, include_hidden=include_hidden)
+                matches = [relative_path(file) for file in files]
+                return {
+                    "pattern": pattern,
+                    "path": path,
+                    "matches": matches,
+                    "count": len(matches),
+                    "truncated": len(matches) >= max_results,
+                    "max_results": max_results,
+                }
+
+            self.action.register_action(
+                action_id=action_name("glob_files"),
+                desc=self._build_capability_desc(
+                    (
+                        f"Find files under the workspace root { root_path } by glob. "
+                        "Use this instead of shell find/ls when looking for files."
+                    ),
+                    desc,
+                    mode=desc_mode,
+                ),
+                kwargs={
+                    "pattern": (str, "Glob pattern such as '*.py' or '**/*.md'."),
+                    "path": (str, "Workspace-relative directory or file path. Default: '.'."),
+                    "max_results": (int, "Maximum files to return. Default: 200."),
+                    "include_hidden": (bool, "Whether to include hidden paths. Default: False."),
+                },
+                func=glob_files,
+                tags=[agent_tag],
+                side_effect_level="read",
+                expose_to_model=expose_to_model,
+                meta={"component": "workspace", "root": str(root_path), "coding_agent": True},
+            )
+
+        if read and coding_agent and not has_action("grep_files"):
+
+            async def grep_files(
+                pattern: str,
+                path: str = ".",
+                regex: bool = True,
+                glob: str | None = None,
+                context_lines: int = 0,
+                max_results: int = 50,
+                include_hidden: bool = False,
+            ):
+                if workspace_for_actions is not None:
+                    return await workspace_for_actions.grep_files(
+                        pattern,
+                        path=path,
+                        regex=regex,
+                        glob=glob,
+                        context_lines=context_lines,
+                        max_results=max_results,
+                        include_hidden=include_hidden,
+                        max_file_bytes=max_search_file_bytes,
+                    )
+                compiled = re.compile(pattern) if regex else None
+                results: list[dict[str, Any]] = []
+                files = iter_workspace_files(path, glob or "**/*", max_results=1000, include_hidden=include_hidden)
+                for file in files:
+                    if len(results) >= max_results:
+                        break
+                    if file.stat().st_size > max_search_file_bytes:
+                        continue
+                    read_result = await manager_read_file(relative_path(file), max_bytes=max_search_file_bytes)
+                    text = str(read_result.get("content") or "")
+                    lines = text.splitlines()
+                    for line_index, line in enumerate(lines):
+                        matched = bool(compiled.search(line)) if compiled is not None else str(pattern) in line
+                        if not matched:
+                            continue
+                        start = max(0, line_index - max(0, context_lines))
+                        end = min(len(lines), line_index + max(0, context_lines) + 1)
+                        results.append(
+                            {
+                                "path": relative_path(file),
+                                "line": line_index + 1,
+                                "text": line,
+                                "snippet": "\n".join(lines[start:end]),
+                                "line_start": start + 1,
+                                "line_end": end,
+                                "truncated": False,
+                            }
+                        )
+                        break
+                return {
+                    "pattern": pattern,
+                    "regex": regex,
+                    "glob": glob or "**/*",
+                    "path": path,
+                    "matches": results,
+                    "count": len(results),
+                    "truncated": len(results) >= max_results,
+                    "max_results": max_results,
+                }
+
+            self.action.register_action(
+                action_id=action_name("grep_files"),
+                desc=self._build_capability_desc(
+                    (
+                        f"Search file contents under the workspace root { root_path } with regex or fixed text. "
+                        "Use this instead of shell grep/rg when looking inside files."
+                    ),
+                    desc,
+                    mode=desc_mode,
+                ),
+                kwargs={
+                    "pattern": (str, "Regex or fixed text pattern to search for."),
+                    "path": (str, "Workspace-relative directory or file path. Default: '.'."),
+                    "regex": (bool, "Treat pattern as a regular expression. Default: True."),
+                    "glob": (str, "Optional file glob such as '*.py' or '**/*.md'. Default: None."),
+                    "context_lines": (int, "Number of surrounding lines to include. Default: 0."),
+                    "max_results": (int, "Maximum matches to return. Default: 50."),
+                    "include_hidden": (bool, "Whether to include hidden paths. Default: False."),
+                },
+                func=grep_files,
+                tags=[agent_tag],
+                side_effect_level="read",
+                expose_to_model=expose_to_model,
+                meta={"component": "workspace", "root": str(root_path), "coding_agent": True},
             )
 
         if read and search and not has_action("search_files"):
@@ -786,8 +1108,16 @@ class ActionExtension(BaseAgent):
 
         if write and not has_action("write_file"):
 
-            async def write_file(path: str, content: str, append: bool = False):
-                return file_result_action_output(await manager_write_file(path, content, append=append))
+            async def write_file(
+                path: str,
+                content: str,
+                append: bool = False,
+                expected_sha256: str | None = None,
+            ):
+                require_fresh_for_write(path, expected_sha256)
+                result = await manager_write_file(path, content, append=append)
+                remember_write(path, result)
+                return file_result_action_output(result)
 
             self.action.register_action(
                 action_id=action_name("write_file"),
@@ -800,12 +1130,85 @@ class ActionExtension(BaseAgent):
                     "path": (str, "Workspace-relative file path."),
                     "content": (str, "Text content to write."),
                     "append": (bool, "Append instead of overwrite. Default: False."),
+                    "expected_sha256": (
+                        str,
+                        "Optional current file sha256. In coding-agent mode, existing files require this or a prior full read.",
+                    ),
                 },
                 func=write_file,
                 tags=[agent_tag],
                 side_effect_level="write",
                 expose_to_model=expose_to_model,
                 meta={"component": "workspace", "root": str(root_path), "write": True},
+            )
+
+        if write and coding_agent and not has_action("edit_file"):
+
+            async def edit_file(
+                path: str,
+                old_string: str,
+                new_string: str,
+                replace_all: bool = False,
+                expected_sha256: str | None = None,
+            ):
+                return file_result_action_output(
+                    await manager_edit_file(
+                        path,
+                        old_string,
+                        new_string,
+                        replace_all=replace_all,
+                        expected_sha256=expected_sha256,
+                    )
+                )
+
+            self.action.register_action(
+                action_id=action_name("edit_file"),
+                desc=self._build_capability_desc(
+                    (
+                        f"Edit a text file under the workspace root { root_path } by exact string replacement. "
+                        "Existing files require a prior full read or expected_sha256; ambiguous replacements fail closed."
+                    ),
+                    desc,
+                    mode=desc_mode,
+                ),
+                kwargs={
+                    "path": (str, "Workspace-relative file path."),
+                    "old_string": (str, "Exact string to replace. Use empty string only to create a new file."),
+                    "new_string": (str, "Replacement text."),
+                    "replace_all": (bool, "Replace every occurrence. Default: False."),
+                    "expected_sha256": (str, "Optional current file sha256."),
+                },
+                func=edit_file,
+                tags=[agent_tag],
+                side_effect_level="write",
+                expose_to_model=expose_to_model,
+                meta={"component": "workspace", "root": str(root_path), "write": True, "coding_agent": True},
+            )
+
+        if write and coding_agent and not has_action("apply_patch"):
+
+            async def apply_patch(patch: str, expected_files: list[str] | None = None):
+                return file_result_action_output(await manager_apply_patch(patch, expected_files=expected_files))
+
+            self.action.register_action(
+                action_id=action_name("apply_patch"),
+                desc=self._build_capability_desc(
+                    (
+                        f"Apply a unified diff patch under the workspace root { root_path }. "
+                        "Existing patched files require a prior full read; expected_files must match the patch file set when provided."
+                    ),
+                    desc,
+                    mode=desc_mode,
+                ),
+                kwargs={
+                    "patch": (str, "Unified diff patch to apply."),
+                    "expected_files": ([str], "Optional exact list of Workspace-relative files expected in the patch."),
+                },
+                func=apply_patch,
+                tags=[agent_tag],
+                side_effect_level="write",
+                expose_to_model=expose_to_model,
+                meta={"component": "workspace", "root": str(root_path), "write": True, "coding_agent": True},
             )
 
         if write and export and not has_action("export_file"):
@@ -849,6 +1252,45 @@ class ActionExtension(BaseAgent):
             )
 
         return self
+
+    def enable_coding_agent_actions(
+        self,
+        *,
+        root: str | Path | object = _WORKSPACE_ROOT_UNSET,
+        isolated: bool = False,
+        read: bool = True,
+        write: bool = True,
+        search: bool = True,
+        list_files: bool = True,
+        export: bool = False,
+        action_prefix: str = "",
+        expose_to_model: bool = True,
+        max_file_bytes: int = 20000,
+        max_search_file_bytes: int = 200000,
+        desc: str | None = None,
+        desc_mode: CapabilityDescMode = "append",
+    ) -> Self:
+        default_desc = (
+            "Coding-agent Workspace file actions. Use read_file/glob_files/grep_files for inspection, "
+            "edit_file/apply_patch for targeted edits, and write_file only for deliberate full-file writes. "
+            "Existing file writes require a prior full read through this action set or expected_sha256."
+        )
+        return self.enable_workspace_file_actions(
+            root=root,
+            isolated=isolated,
+            read=read,
+            write=write,
+            search=search,
+            list_files=list_files,
+            export=export,
+            action_prefix=action_prefix,
+            expose_to_model=expose_to_model,
+            max_file_bytes=max_file_bytes,
+            max_search_file_bytes=max_search_file_bytes,
+            desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
+            desc_mode="append",
+            coding_agent=True,
+        )
 
     def enable_workspace(
         self,

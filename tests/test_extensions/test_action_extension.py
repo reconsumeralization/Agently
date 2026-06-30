@@ -7,7 +7,9 @@ import json
 import os
 import asyncio
 import time
+import sys
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from agently import Agently
@@ -136,6 +138,7 @@ def test_action_extension_set_tool_loop_config():
     assert agent.action is agent.tool
     assert callable(agent.use_actions)
     assert callable(agent.enable_workspace_file_actions)
+    assert callable(agent.enable_coding_agent_actions)
     assert callable(agent.use_workspace_file_actions)
     assert callable(agent.action_func)
     agent.set_tool_loop(
@@ -232,6 +235,8 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     assert "Allowed command prefixes: pwd." in spec_desc
     assert f"Allowed working directory roots: {tmp_path}" in spec_desc
     assert "Timeout: 20 seconds." in spec_desc
+    assert "Output preview limit: 20000 characters per stream." in spec_desc
+    assert "Prefer dedicated Workspace actions" in spec_desc
 
     result = agent.action.execute_action(
         "test_run_bash",
@@ -240,6 +245,26 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     assert result.get("status") == "success"
     assert str(tmp_path) in str(result.get("data"))
     assert Agently.execution_resource.list(scope="action_call") == []
+
+
+def test_action_extension_enable_shell_defaults_to_safe_profile(tmp_path):
+    agent = Agently.create_agent()
+    agent.enable_shell(root=tmp_path, action_id="default_safe_bash")
+
+    allowed = agent.action.execute_action(
+        "default_safe_bash",
+        {"cmd": "pwd"},
+    )
+    blocked = agent.action.execute_action(
+        "default_safe_bash",
+        {"cmd": "python -c 'print(1)'"},
+    )
+
+    assert allowed.get("status") == "success"
+    assert str(tmp_path) in str(allowed.get("data", {}).get("stdout", ""))
+    assert blocked.get("status") == "blocked"
+    assert blocked.get("reason") == "cmd_not_allowed"
+    assert blocked.get("diagnostics", [{}])[0].get("code") == "shell.cmd_not_allowed"
 
 
 def test_action_extension_enable_shell_redacts_env_in_action_info(tmp_path):
@@ -292,8 +317,8 @@ def test_action_extension_enable_shell_supports_multi_token_command_prefixes(tmp
 
     assert allowed.get("status") == "success"
     assert "allowed value" in str(allowed.get("data", {}).get("stdout", ""))
-    assert blocked.get("status") == "approval_required"
-    assert blocked.get("error") == "cmd_not_allowed"
+    assert blocked.get("status") == "blocked"
+    assert blocked.get("reason") == "cmd_not_allowed"
 
 
 def test_action_extension_enable_shell_uses_root_as_default_workdir(tmp_path):
@@ -307,6 +332,60 @@ def test_action_extension_enable_shell_uses_root_as_default_workdir(tmp_path):
 
     assert result.get("status") == "success"
     assert str(tmp_path) in str(result.get("data", {}).get("stdout", ""))
+
+
+def test_action_extension_enable_shell_persists_large_output_artifacts(tmp_path):
+    source_path = tmp_path / "big.txt"
+    source_text = "x" * 80
+    source_path.write_text(source_text, encoding="utf-8")
+    agent = Agently.create_agent()
+    agent.enable_shell(
+        root=tmp_path,
+        commands=["cat"],
+        action_id="bounded_output_bash",
+        max_output_chars=12,
+    )
+
+    result = agent.action.execute_action(
+        "bounded_output_bash",
+        {"cmd": "cat big.txt"},
+    )
+
+    data = result.get("data", {})
+    assert result.get("status") == "success"
+    assert data.get("stdout") == source_text[:12]
+    assert data.get("stdout_truncated") is True
+    artifacts = data.get("output_artifacts", [])
+    assert len(artifacts) == 1
+    artifact_path = artifacts[0]["path"]
+    assert artifacts[0]["stream"] == "stdout"
+    assert artifacts[0]["relative_path"].startswith("artifacts/shell/")
+    assert os.path.exists(artifact_path)
+    with open(artifact_path, encoding="utf-8") as handle:
+        assert handle.read() == source_text
+
+
+def test_action_extension_enable_shell_reports_timeout(tmp_path):
+    python_prefix = f"{Path(sys.executable).name} -c"
+    agent = Agently.create_agent()
+    agent.enable_shell(
+        root=tmp_path,
+        commands=[python_prefix],
+        action_id="timeout_bash",
+        timeout=1,
+    )
+
+    result = agent.action.execute_action(
+        "timeout_bash",
+        {"cmd": [sys.executable, "-c", "import time; time.sleep(2)"]},
+    )
+
+    data = result.get("data", {})
+    assert result.get("status") == "error"
+    assert data.get("status") == "timed_out"
+    assert data.get("reason") == "command_timeout"
+    assert data.get("timeout_seconds") == 1
+    assert data.get("diagnostics", [{}])[0].get("code") == "shell.command_timeout"
 
 
 def test_action_extension_enable_helper_desc_modes():
@@ -403,6 +482,86 @@ def test_action_extension_workspace_file_actions_export_flag_and_idempotent_user
     assert export_result.get("status") == "success"
     assert export_result.get("data", {}).get("exported") is False
     assert export_result.get("data", {}).get("diagnostics", [])[0]["code"] == "workspace.file.no_export_handler"
+
+
+def test_action_extension_enable_coding_agent_actions_registers_guarded_file_tools(tmp_path):
+    agent = Agently.create_agent("coding-agent-actions").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    (workspace.files_root / "src").mkdir(parents=True)
+    (workspace.files_root / "src" / "app.py").write_text("print('old')\n", encoding="utf-8")
+    (workspace.files_root / "src" / "notes.md").write_text("Project Atlas\n", encoding="utf-8")
+
+    agent.enable_coding_agent_actions()
+
+    for action_id in ("read_file", "write_file", "edit_file", "apply_patch", "glob_files", "grep_files"):
+        spec = agent.action.action_registry.get_spec(action_id)
+        assert spec is not None
+        assert spec.get("meta", {}).get("coding_agent") is True or action_id in {"read_file", "write_file"}
+
+    globbed = agent.action.execute_action("glob_files", {"pattern": "*.py", "path": "src"})
+    assert globbed.get("status") == "success"
+    assert globbed.get("data", {}).get("matches") == ["src/app.py"]
+
+    grepped = agent.action.execute_action("grep_files", {"pattern": "Project\\s+Atlas", "path": "src", "glob": "*.md"})
+    assert grepped.get("status") == "success"
+    assert grepped.get("data", {}).get("matches", [])[0]["path"] == "src/notes.md"
+
+    stale_write = agent.action.execute_action("write_file", {"path": "src/app.py", "content": "blocked\n"})
+    assert stale_write.get("status") == "error"
+
+    read = agent.action.execute_action("read_file", {"path": "src/app.py"})
+    assert read.get("status") == "success"
+    original_sha = read.get("data", {}).get("sha256")
+
+    edited = agent.action.execute_action(
+        "edit_file",
+        {
+            "path": "src/app.py",
+            "old_string": "print('old')",
+            "new_string": "print('new')",
+        },
+    )
+    assert edited.get("status") == "success"
+    assert "print('new')" in (workspace.files_root / "src" / "app.py").read_text(encoding="utf-8")
+
+    (workspace.files_root / "src" / "app.py").write_text("print('user change')\n", encoding="utf-8")
+    stale_edit = agent.action.execute_action(
+        "edit_file",
+        {
+            "path": "src/app.py",
+            "old_string": "user",
+            "new_string": "agent",
+            "expected_sha256": original_sha,
+        },
+    )
+    assert stale_edit.get("status") == "error"
+
+    reread = agent.action.execute_action("read_file", {"path": "src/app.py"})
+    current_sha = reread.get("data", {}).get("sha256")
+    written = agent.action.execute_action(
+        "write_file",
+        {"path": "src/app.py", "content": "print('ready')\n", "expected_sha256": current_sha},
+    )
+    assert written.get("status") == "success"
+
+    patch = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-print('ready')
++print('patched')
+"""
+    agent.action.execute_action("read_file", {"path": "src/app.py"})
+    patched = agent.action.execute_action(
+        "apply_patch",
+        {"patch": patch, "expected_files": ["src/app.py"]},
+    )
+    assert patched.get("status") == "success"
+    assert "print('patched')" in (workspace.files_root / "src" / "app.py").read_text(encoding="utf-8")
+
+    outside = agent.action.execute_action("edit_file", {"path": "../outside.py", "old_string": "", "new_string": "x"})
+    assert outside.get("status") == "error"
 
 
 def test_action_extension_enable_workspace_file_actions_inherits_foundation_workspace(tmp_path):

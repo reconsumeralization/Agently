@@ -190,6 +190,7 @@ def apply_task_board_patch(
     diagnostics = [dict(item) for item in normalized.diagnostics]
     metadata = dict(normalized.metadata)
     status = str(normalized.status)
+    explicit_board_status = False
 
     for operation in normalized_patch.operations:
         op = str(operation.get("op") or "").strip()
@@ -232,6 +233,7 @@ def apply_task_board_patch(
             diagnostics.append(dict(diagnostic) if isinstance(diagnostic, Mapping) else {"message": str(diagnostic)})
         elif op == "set_board_status":
             status = str(operation.get("status") or status)
+            explicit_board_status = True
         elif op == "update_metadata":
             value = operation.get("metadata") or {}
             if not isinstance(value, Mapping):
@@ -245,6 +247,8 @@ def apply_task_board_patch(
     metadata.setdefault("applied_patches", [])
     if isinstance(metadata["applied_patches"], list):
         metadata["applied_patches"].append(normalized_patch.patch_id)
+    if not explicit_board_status:
+        status = _derive_board_status(cards, card_results, current_status=status)
 
     next_revision = normalized.next_revision(
         normalized.graph.with_cards(cards),
@@ -256,6 +260,35 @@ def apply_task_board_patch(
     )
     validate_task_board_revision(next_revision)
     return next_revision
+
+
+def _derive_board_status(
+    cards: Sequence[TaskBoardCard],
+    card_results: Mapping[str, TaskBoardCardResult],
+    *,
+    current_status: str,
+) -> str:
+    statuses: dict[str, str] = {}
+    for card in cards:
+        result = card_results.get(card.id)
+        statuses[card.id] = str(result.status if result is not None else card.status).strip().lower()
+
+    required_statuses = [
+        status
+        for card in cards
+        for status in (statuses.get(card.id, "pending"),)
+        if task_board_card_required(card)
+    ]
+    if any(status in {"failed", "error"} for status in required_statuses):
+        return "failed"
+    if any(status == "blocked" for status in required_statuses):
+        return "blocked"
+
+    terminal_statuses = {"completed", "failed", "blocked", "skipped"}
+    if all(status in terminal_statuses for status in statuses.values()):
+        if not required_statuses or all(status == "completed" for status in required_statuses):
+            return "completed"
+    return current_status
 
 
 def _topological_order(cards: Sequence[TaskBoardCard]) -> tuple[tuple[str, ...], tuple[str, ...]]:

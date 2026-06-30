@@ -845,6 +845,44 @@ async def test_workspace_search_files_treats_double_star_as_recursive_files(tmp_
 
 
 @pytest.mark.asyncio
+async def test_workspace_coding_file_operations_edit_glob_grep_and_patch(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-coding-files")
+    await workspace.write_file("src/app.py", "print('old')\nprint('old')\n")
+    await workspace.write_file("src/readme.md", "Project Atlas\n")
+
+    globbed = await workspace.glob_files("*.py", path="src")
+    assert globbed["matches"] == ["src/app.py"]
+
+    grep = await workspace.grep_files(r"Project\s+Atlas", path="src", glob="*.md", regex=True)
+    assert grep["matches"][0]["path"] == "src/readme.md"
+    assert grep["matches"][0]["line"] == 1
+
+    with pytest.raises(ValueError, match="multiple"):
+        await workspace.edit_file("src/app.py", "print('old')", "print('new')")
+
+    edited = await workspace.edit_file("src/app.py", "print('old')", "print('new')", replace_all=True)
+    assert edited["replacements"] == 2
+    readback = await workspace.read_file("src/app.py")
+    assert readback["content"] == "print('new')\nprint('new')\n"
+
+    patch = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,2 +1,2 @@
+-print('new')
++print('patched')
+ print('new')
+"""
+    applied = await workspace.apply_patch(patch, expected_files=["src/app.py"])
+    assert applied["paths"] == ["src/app.py"]
+    readback = await workspace.read_file("src/app.py")
+    assert "print('patched')" in readback["content"]
+
+    with pytest.raises(ValueError, match="expected_files"):
+        await workspace.apply_patch(patch, expected_files=["src/other.py"])
+
+
+@pytest.mark.asyncio
 async def test_workspace_search_files_action_returns_retrieval_roles(tmp_path):
     agent = Agently.create_agent("workspace-search-files-roles").use_workspace(tmp_path / "run")
     workspace = agent.workspace

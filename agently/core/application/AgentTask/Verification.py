@@ -406,11 +406,22 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             grounding_guard.get("normalized_evidence_use"),
         )
         if self._should_attempt_evidence_binding_repair(grounding_guard):
-            repaired_evidence_use = await self._request_evidence_binding_repair(
-                grounding_guard,
-                evidence_ledger,
-                language_policy=language_policy,
-            )
+            repaired_evidence_use = self._deterministic_evidence_binding_repair(grounding_guard)
+            if repaired_evidence_use:
+                self.diagnostics.setdefault("evidence_binding_repair", []).append(
+                    DataFormatter.sanitize(
+                        {
+                            "source": "deterministic_alias_resolver",
+                            "repaired_count": len(repaired_evidence_use),
+                        }
+                    )
+                )
+            else:
+                repaired_evidence_use = await self._request_evidence_binding_repair(
+                    grounding_guard,
+                    evidence_ledger,
+                    language_policy=language_policy,
+                )
             if repaired_evidence_use:
                 merged_evidence_use = self._merge_repaired_evidence_use(
                     grounding_guard.get("normalized_evidence_use"),
@@ -913,6 +924,100 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if not isinstance(evidence_use, Sequence) or isinstance(evidence_use, str | bytes | bytearray):
             return []
         return [dict(DataFormatter.sanitize(item)) for item in evidence_use if isinstance(item, Mapping)]
+
+    @classmethod
+    def _deterministic_evidence_binding_repair(cls, grounding_guard: Mapping[str, Any]) -> list[dict[str, Any]]:
+        current = grounding_guard.get("normalized_evidence_use", [])
+        if not isinstance(current, Sequence) or isinstance(current, str | bytes | bytearray):
+            return []
+        current_items = [dict(item) for item in current if isinstance(item, Mapping)]
+        if not current_items:
+            return []
+        available_refs = cls._evidence_binding_available_ref_index(
+            grounding_guard.get("available_evidence_refs", [])
+        )
+        diagnostics = cls._evidence_binding_repair_diagnostics(grounding_guard)
+        repaired: list[dict[str, Any]] = []
+        seen_indexes: set[int] = set()
+        for diagnostic in diagnostics:
+            raw_index = diagnostic.get("claim_index")
+            try:
+                claim_index = int(raw_index) if raw_index is not None else -1
+            except (TypeError, ValueError):
+                claim_index = -1
+            if claim_index < 0 or claim_index >= len(current_items) or claim_index in seen_indexes:
+                continue
+            item = current_items[claim_index]
+            candidate_ids = cls._deterministic_evidence_id_candidates(diagnostic, available_refs)
+            if len(candidate_ids) != 1:
+                continue
+            repaired.append(
+                DataFormatter.sanitize(
+                    {
+                        "claim_index": claim_index,
+                        "claim": item.get("claim", diagnostic.get("claim", "")),
+                        "evidence_ids": candidate_ids,
+                        "support_type": item.get("support_type", diagnostic.get("support_type", "")),
+                    }
+                )
+            )
+            seen_indexes.add(claim_index)
+        return repaired
+
+    @staticmethod
+    def _evidence_binding_available_ref_index(value: Any) -> dict[str, list[str]]:
+        refs = value if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray) else []
+        index: dict[str, list[str]] = {}
+        for ref in refs:
+            if not isinstance(ref, Mapping):
+                continue
+            evidence_id = str(ref.get("id") or "").strip()
+            if not evidence_id:
+                continue
+            aliases: set[str] = {evidence_id}
+            for field in (
+                "cite_as",
+                "path",
+                "record_id",
+                "source_url",
+                "selected_url",
+                "requested_url",
+                "canonical_url",
+                "url",
+                "href",
+                "artifact_id",
+                "action_call_id",
+            ):
+                raw = ref.get(field)
+                if raw not in (None, "", [], {}):
+                    aliases.add(str(raw).strip())
+            raw_aliases = ref.get("aliases")
+            if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
+                aliases.update(str(alias).strip() for alias in raw_aliases if str(alias or "").strip())
+            for alias in aliases:
+                if alias:
+                    index.setdefault(alias, []).append(evidence_id)
+        return index
+
+    @staticmethod
+    def _deterministic_evidence_id_candidates(
+        diagnostic: Mapping[str, Any],
+        available_ref_index: Mapping[str, list[str]],
+    ) -> list[str]:
+        raw_candidates = diagnostic.get("candidates")
+        if isinstance(raw_candidates, Sequence) and not isinstance(raw_candidates, str | bytes | bytearray):
+            candidates = [str(candidate).strip() for candidate in raw_candidates if str(candidate or "").strip()]
+            unique = sorted(set(candidates))
+            if len(unique) == 1:
+                return unique
+        evidence_id = str(diagnostic.get("evidence_id") or "").strip()
+        if not evidence_id:
+            return []
+        matches = [str(item).strip() for item in available_ref_index.get(evidence_id, []) if str(item or "").strip()]
+        unique_matches = sorted(set(matches))
+        if len(unique_matches) == 1:
+            return unique_matches
+        return []
 
     @classmethod
     def _evidence_binding_repair_diagnostics(cls, grounding_guard: Mapping[str, Any]) -> list[dict[str, Any]]:

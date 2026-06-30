@@ -280,6 +280,7 @@ index 组件。它也会报告 `supports_event_sequence`、`supports_range_read`
 
 ```python
 agent.enable_workspace_file_actions(write=True)
+agent.enable_coding_agent_actions()
 agent.enable_shell(commands=["pwd", "pytest"])
 agent.enable_nodejs()
 ```
@@ -288,6 +289,13 @@ agent.enable_nodejs()
 文件作业区暴露成 list/search/read/write 文件 actions。需要把 `export_file` 也暴露给
 Agent 时，同时传 `write=True` 与 `export=True`。只有某个 action 必须使用独立目录时，
 才显式传入 `root=` 或 `cwd=`。
+
+`enable_coding_agent_actions(...)` 是 Workspace owner 暴露给 coding agent 的文件能力
+profile。它在同一个 file boundary 上暴露 `read_file`、`glob_files`、`grep_files`、
+`edit_file`、`apply_patch` 和带 guard 的 `write_file` actions。定点修改优先用
+`edit_file(...)` 或 `apply_patch(...)`；shell 只用于测试、构建、git status/diff/log
+inspection 和只读诊断。coding-agent mode 下，整文件 `write_file(...)` 默认要求已有
+prior read state 或 expected SHA，除非 host 显式关闭这个策略。
 
 ## File IO Handlers
 

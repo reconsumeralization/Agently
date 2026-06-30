@@ -819,6 +819,8 @@ class Action:
         allowed_workdir_roots: list[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        max_output_chars: int = 20000,
+        output_artifact_dir: str | Path | None = None,
     ):
         return self._resource_registrar.register_bash_sandbox_action(
             action_id=action_id,
@@ -830,6 +832,8 @@ class Action:
             allowed_workdir_roots=allowed_workdir_roots,
             timeout=timeout,
             env=env,
+            max_output_chars=max_output_chars,
+            output_artifact_dir=output_artifact_dir,
         )
 
     def register_nodejs_action(

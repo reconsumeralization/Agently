@@ -105,10 +105,11 @@ print(calculate("3333+6666=?"))
 | `agent.use_actions(Search(...))` | 挂载来自 `agently.builtins.actions` 的内置 Search package |
 | `agent.use_actions(Browse(...))` | 挂载来自 `agently.builtins.actions` 的内置 Browse package |
 | `agent.enable_python(...)` | 挂载托管 `run_python` action，用于确定性代码执行 |
-| `agent.enable_shell(...)` | 挂载带 workspace 与命令 allowlist 的托管 `run_bash` action |
+| `agent.enable_shell(...)` | 挂载带 workspace root、命令 allowlist、timeout 和有界输出预览的托管 `run_bash` action |
 | `agent.enable_nodejs(...)` | 挂载托管 `run_nodejs` action |
 | `agent.enable_sqlite(...)` | 挂载托管 `query_sqlite` action |
 | `agent.enable_workspace_file_actions(...)` | 把当前 Workspace 文件作业区暴露成 handler-backed 列表、搜索、读取、写入 actions；`export=True` 且 `write=True` 时额外暴露 `export_file` |
+| `agent.enable_coding_agent_actions(...)` | 暴露 coding-agent Workspace actions，用于文件读回、glob/grep 检索、定点编辑、unified diff patch 和带 guard 的整文件写入 |
 | `@agent.auto_func` | 把 Python 函数签名 + docstring 变成模型驱动的实现，使用 agent 的 action |
 | `agent.get_action_result(prompt=turn.prompt)` | 取 request-scoped turn 的 action 调用记录 |
 | `extra.action_logs` | action loop 期间产生的结构化日志 |
@@ -122,6 +123,21 @@ agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 应用代码要给模型开放 Python、shell、workspace 等常见能力时，优先使用
 `enable_*` helpers。只有在开发自定义 Action 后端时，才需要使用
 `register_action(..., executor=..., execution_resources=[...])`。
+
+coding-agent 风格的本地文件工作优先使用
+`agent.enable_coding_agent_actions(...)`。它会在当前 Workspace file root 上暴露
+`read_file`、`glob_files`、`grep_files`、`edit_file`、`apply_patch` 和带 guard 的
+`write_file`。`edit_file(...)` 可使用 `expected_sha256` stale guard；
+`apply_patch(...)` 应用 unified diff，并可要求精确的 `expected_files`；
+coding-agent mode 下的 `write_file(...)` 默认要求先读过目标文件或提供 expected hash，
+除非 host 显式关闭这个 guard。测试、构建、git inspection 和只读诊断使用 shell；
+文件读取、检索、编辑和写入使用 Workspace file actions。
+
+`agent.enable_shell(...)` 不传显式 `commands=...` allowlist 时，Agently 会使用小型
+safe shell profile，例如 `pwd`、`ls`、`rg`、`cat`、`git status`、`git diff`、
+`git log`、`python -m pytest` 和 `python -m pyright`。stdout/stderr 以有界 preview
+返回；某个 stream 超过 `max_output_chars` 时，完整 stream 会写入 Workspace root 下的
+`artifacts/shell/`，并在 action result 中返回引用。
 
 内置能力 package 位于 `agently.builtins.actions`。例如：
 
