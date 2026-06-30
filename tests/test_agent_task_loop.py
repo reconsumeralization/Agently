@@ -3362,8 +3362,8 @@ def test_agent_task_child_execution_sets_task_local_action_loop_guard(tmp_path):
     )
 
     assert agent.settings.get("action.loop.max_rounds") is None
-    assert execution.request.settings.get("action.loop.max_rounds") == 8
-    assert execution.request.settings.get("tool.loop.max_rounds") == 8
+    assert execution.request.settings.get("action.loop.max_rounds") == 3
+    assert execution.request.settings.get("tool.loop.max_rounds") == 3
 
 
 def test_agent_task_child_execution_respects_explicit_action_loop_guard(tmp_path):

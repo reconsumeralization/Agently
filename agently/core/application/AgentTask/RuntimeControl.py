@@ -17,7 +17,9 @@ from __future__ import annotations
 
 from .TaskShared import *
 
-_AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS = 8
+# A bounded AgentTask step should hand inconclusive action evidence back to the
+# task planner quickly; broader retry strategy belongs to the next task step.
+_AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS = 3
 
 
 class AgentTaskRuntimeMixin(AgentTaskMixinBase):
