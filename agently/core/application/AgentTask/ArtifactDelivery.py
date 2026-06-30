@@ -1506,6 +1506,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             limits=self._child_execution_limits(),
             options=self._child_execution_options(),
         )
+        self._apply_child_execution_action_loop_guard(draft_execution)
         draft_execution.route_policy(
             {
                 "allowed_routes": ["model_request"],

@@ -162,6 +162,53 @@ def test_action_extension_default_loop_has_no_round_cap():
     assert agent.action.tool_settings.get("loop.max_rounds") is None
 
 
+@pytest.mark.asyncio
+async def test_action_flow_max_rounds_returns_diagnostic_without_executing():
+    agent = Agently.create_agent()
+    agent.input("Keep using actions.")
+    action_list = [{"action_id": "dummy_action", "name": "dummy_action", "desc": "Dummy action.", "kwargs": {}}]
+    executed = False
+
+    async def fake_plan_handler(context, request):
+        _ = (context, request)
+        return {
+            "next_action": "execute",
+            "use_action": True,
+            "action_calls": [
+                {
+                    "purpose": "keep going",
+                    "action_id": "dummy_action",
+                    "action_input": {},
+                    "policy_override": {},
+                    "todo_suggestion": "Run another action round.",
+                }
+            ],
+        }
+
+    async def fake_execution_handler(context, request):
+        nonlocal executed
+        _ = (context, request)
+        executed = True
+        return []
+
+    records = await agent.action.async_plan_and_execute(
+        prompt=agent.request.prompt,
+        settings=agent.settings,
+        action_list=action_list,
+        planning_handler=fake_plan_handler,
+        action_execution_handler=fake_execution_handler,
+        max_rounds=0,
+    )
+
+    assert executed is False
+    assert len(records) == 1
+    assert records[0].get("status") == "blocked"
+    assert records[0].get("action_id") == "action_loop"
+    diagnostics = records[0].get("diagnostics", [])
+    assert isinstance(diagnostics, list)
+    assert diagnostics[0].get("code") == "action_loop.max_rounds_reached"
+
+
 def test_action_extension_use_sandbox_registers_agent_scoped_bash_action(tmp_path):
     agent = Agently.create_agent()
     action_id = f"agent_bash_sandbox_{ agent.name }"

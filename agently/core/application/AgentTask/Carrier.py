@@ -197,6 +197,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             limits=self._child_execution_limits(),
             options=self._child_execution_options(),
         )
+        self._apply_child_execution_action_loop_guard(execution)
         self._bind_action_workspace(execution)
         if recall_records:
             set_recall_records = getattr(execution.execution_context, "set_action_artifact_recall_records", None)

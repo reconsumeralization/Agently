@@ -2091,7 +2091,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
 
     def _cumulative_evidence_ledger(self, current_execution_meta: Mapping[str, Any]) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
-        for iteration in self.iterations:
+        current_ledger = self._evidence_ledger_from_execution_meta(current_execution_meta)
+        for item in current_ledger.get("items", []):
+            if isinstance(item, Mapping):
+                items.append(dict(item))
+        for iteration in reversed(self.iterations):
             if not isinstance(iteration, Mapping):
                 continue
             previous_meta = iteration.get("execution_meta")
@@ -2101,10 +2105,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             for item in previous_ledger.get("items", []):
                 if isinstance(item, Mapping):
                     items.append(dict(item))
-        current_ledger = self._evidence_ledger_from_execution_meta(current_execution_meta)
-        for item in current_ledger.get("items", []):
-            if isinstance(item, Mapping):
-                items.append(dict(item))
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in items:

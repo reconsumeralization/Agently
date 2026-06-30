@@ -3279,6 +3279,58 @@ async def test_agent_create_task_exposes_scoped_workspace_coding_actions(tmp_pat
     assert "corrected wording" in str(updated.get("content") or "")
 
 
+def test_agent_task_child_execution_sets_task_local_action_loop_guard(tmp_path):
+    agent = _create_agent("agent-task-action-loop-guard").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Use actions inside a bounded task step.",
+        success_criteria=["The child action loop has a task-local safety guard."],
+        execution="flat",
+    )
+
+    execution = task._create_bounded_child_execution(
+        lineage={
+            "task_id": task.id,
+            "iteration_id": "iter-1",
+            "step_id": "execute",
+        }
+    )
+
+    assert agent.settings.get("action.loop.max_rounds") is None
+    assert execution.request.settings.get("action.loop.max_rounds") == 8
+    assert execution.request.settings.get("tool.loop.max_rounds") == 8
+
+
+def test_agent_task_child_execution_respects_explicit_action_loop_guard(tmp_path):
+    agent = _create_agent("agent-task-action-loop-explicit").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Use actions inside a bounded task step.",
+        success_criteria=["The child action loop honors explicit task options."],
+        execution="flat",
+        options={"agent_task": {"action_loop_max_rounds": 3}},
+    )
+    disabled_task = AgentTask(
+        agent,
+        goal="Use actions without task-local loop guard.",
+        success_criteria=["The explicit None option disables the task guard."],
+        execution="flat",
+        options={"agent_task": {"action_loop_max_rounds": None}},
+    )
+
+    execution = task._create_bounded_child_execution(
+        lineage={"task_id": task.id, "iteration_id": "iter-1", "step_id": "execute"}
+    )
+    disabled_execution = disabled_task._create_bounded_child_execution(
+        lineage={"task_id": disabled_task.id, "iteration_id": "iter-1", "step_id": "execute"}
+    )
+
+    assert execution.request.settings.get("action.loop.max_rounds") == 3
+    assert execution.request.settings.get("tool.loop.max_rounds") == 3
+    assert disabled_execution.request.settings.get("action.loop.max_rounds") is None
+    assert disabled_execution.request.settings.get("tool.loop.max_rounds") is None
+
+
 @pytest.mark.asyncio
 async def test_agent_goal_success_criteria_uses_task_execution_path(tmp_path):
     MockAgentTaskRequester.reset()
@@ -6620,6 +6672,75 @@ def test_cumulative_verifier_evidence_keeps_previous_iteration_action_previews(t
         ref["field"] == "selected_url" and ref["value"] == "https://example.test/specific"
         for ref in verifier_summary["source_refs"]
     )
+
+
+def test_cumulative_evidence_ledger_keeps_current_action_result_when_old_items_overflow(tmp_path):
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    agent = _create_agent("agent-task-current-evidence-priority").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Create a source-grounded report.",
+        success_criteria=["Current source evidence remains verifier-visible."],
+        execution="flat",
+    )
+    for index in range(150):
+        task.iterations.append(
+            {
+                "iteration": index + 1,
+                "execution_meta": {
+                    "status": "completed",
+                    "logs": {
+                        "action_logs": [
+                            {
+                                "action_id": "browse",
+                                "status": "success",
+                                "action_call_id": f"act_call_old_{index}",
+                                "model_digest": {
+                                    "result_preview": {
+                                        "selected_url": f"https://example.test/old/{index}",
+                                        "content": f"Old bounded evidence {index}",
+                                    },
+                                    "result_preview_meta": {"truncated": False},
+                                },
+                            }
+                        ],
+                        "route_logs": {},
+                    },
+                },
+            }
+        )
+
+    current_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "browse",
+                    "status": "success",
+                    "action_call_id": "act_call_current",
+                    "model_digest": {
+                        "result_preview": {
+                            "selected_url": "https://example.test/current",
+                            "content": "Current official syllabus evidence.",
+                        },
+                        "result_preview_meta": {"truncated": False},
+                    },
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    ledger = task._cumulative_evidence_ledger(current_meta)
+    current_id = "agent_task_action_result:browse:act_call_current"
+
+    assert current_id in {item.get("id") for item in ledger.get("items", [])}
+    guard = validate_evidence_use(
+        [{"claim": "Current syllabus evidence.", "evidence_ids": [current_id], "support_type": "content"}],
+        ledger,
+    )
+    assert guard["valid"] is True
 
 
 def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(tmp_path):
