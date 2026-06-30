@@ -128,6 +128,56 @@ def test_task_board_schedule_waits_for_completed_dependencies():
     assert next_revision.card_results["collect"].file_refs[0]["path"] == "facts.md"
 
 
+def test_task_board_record_card_results_derives_terminal_board_status():
+    revision = _revision()
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision="rev-0",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {"card_id": "collect", "status": "completed"},
+                },
+                {
+                    "op": "record_card_result",
+                    "result": {"card_id": "final", "status": "completed"},
+                },
+            ),
+        ),
+    )
+
+    assert completed_revision.status == "completed"
+
+
+def test_task_board_terminal_status_derivation_handles_all_optional_cards():
+    revision = TaskBoardRevision.create(
+        board_id="optional-only",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "optional-only-graph",
+                "cards": [
+                    {"id": "optional_source", "objective": "Try optional source.", "failure_policy": "optional"}
+                ],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision="rev-0",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {"card_id": "optional_source", "status": "failed"},
+                },
+            ),
+        ),
+    )
+
+    assert completed_revision.status == "completed"
+
+
 def test_task_board_required_failed_dependency_blocks_downstream():
     revision = TaskBoardRevision.create(
         board_id="required-failure",
@@ -160,6 +210,7 @@ def test_task_board_required_failed_dependency_blocks_downstream():
 
     schedule = TaskBoardValidator().schedule(failed_revision)
 
+    assert failed_revision.status == "failed"
     assert schedule.runnable_card_ids == ()
     assert schedule.blocked_card_ids == ("final",)
     assert not AgentTask._taskboard_revision_completed(failed_revision)
@@ -372,6 +423,62 @@ def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
 def test_task_board_evidence_view_rejects_unknown_card_scope():
     with pytest.raises(ValueError, match="unknown card ids"):
         build_task_board_evidence_view(_revision(), card_ids=["missing"])
+
+
+def test_taskboard_agent_card_status_blocks_on_invalid_evidence_use():
+    status = AgentTask._taskboard_card_status(
+        {"status": "completed", "answer": "unsupported claim"},
+        {"status": "completed"},
+        evidence_use_guard={
+            "schema_version": "evidence_use_guard/v1",
+            "valid": False,
+            "blocking_count": 1,
+            "diagnostics": [{"code": "evidence_ledger.invalid_evidence_id", "blocking": True}],
+        },
+    )
+
+    assert status == "blocked"
+
+
+def test_evidence_binding_repair_uses_deterministic_unique_ref_alias():
+    repaired = AgentTask._deterministic_evidence_binding_repair(
+        {
+            "normalized_evidence_use": [
+                {
+                    "claim": "The report uses the final file.",
+                    "evidence_ids": ["final.md"],
+                    "support_type": "content",
+                }
+            ],
+            "available_evidence_refs": [
+                {
+                    "id": "workspace_artifact.final_readback",
+                    "path": "final.md",
+                    "body_state": "bounded",
+                    "status": "ok",
+                }
+            ],
+            "diagnostics": [
+                {
+                    "code": "evidence_ledger.invalid_evidence_id",
+                    "blocking": True,
+                    "index": 0,
+                    "claim": "The report uses the final file.",
+                    "evidence_id": "final.md",
+                    "support_type": "content",
+                }
+            ],
+        }
+    )
+
+    assert repaired == [
+        {
+            "claim_index": 0,
+            "claim": "The report uses the final file.",
+            "evidence_ids": ["workspace_artifact.final_readback"],
+            "support_type": "content",
+        }
+    ]
 
 
 def test_task_board_effort_policy_does_not_define_hard_budgets_or_action_options():

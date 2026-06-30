@@ -3898,6 +3898,86 @@ def test_taskboard_final_normalization_prefers_workspace_ref_fallback_for_file_d
 
 
 @pytest.mark.asyncio
+async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_path, monkeypatch):
+    agent = _create_agent("execution-taskboard-finalizer-rejection-verifier").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Produce a final answer.",
+        success_criteria=["The final answer is verified."],
+        execution="taskboard",
+    )
+    revision = TaskBoardRevision.create(
+        board_id="finalizer-rejection",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "finalizer-rejection-graph",
+                "cards": [{"id": "final", "objective": "Produce the final answer."}],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": "rev-0",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final",
+                        "status": "completed",
+                        "preview": {"answer": "Complete candidate final answer."},
+                    },
+                }
+            ],
+        },
+    )
+    verification_calls: list[dict[str, Any]] = []
+
+    async def fake_taskboard_final(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "accepted": False,
+            "reason": "Finalizer could not bind evidence.",
+            "final_result": "",
+            "missing_criteria": ["Terminal verifier must inspect candidate evidence."],
+        }
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        verification_calls.append(DataFormatter.sanitize(kwargs))
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Terminal verifier accepted the candidate.",
+            "final_result": "Verified final answer.",
+            "missing_criteria": [],
+        }
+
+    async def no_missing_deliverables() -> list[dict[str, Any]]:
+        return []
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+
+    assert verification_calls
+    assert verification_calls[0]["execution_result"]["final_result"] == "Complete candidate final answer."
+    assert terminal == {"terminal": True, "status": "completed"}
+    assert task.result["status"] == "completed"
+    assert task.result["accepted"] is True
+    assert task.result["final_result"] == "Verified final answer."
+    assert task.result["taskboard"]["final_verification"]["is_complete"] is True
+
+
+@pytest.mark.asyncio
 async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate(tmp_path):
     agent = _create_flat_replan_agent("execution-flat-strategy").use_workspace(tmp_path / "workspace")
 

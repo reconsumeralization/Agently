@@ -504,7 +504,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     execution_meta,
                 ),
             )
-            card_status = self._taskboard_card_status(card_output, execution_meta)
+            card_status = self._taskboard_card_status(
+                card_output,
+                execution_meta,
+                evidence_use_guard=evidence_use_guard,
+            )
             diagnostics = []
             if isinstance(card_output, Mapping):
                 raw_diagnostics = card_output.get("diagnostics")
@@ -1178,10 +1182,22 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         )
 
     @staticmethod
-    def _taskboard_card_status(card_output: Any, execution_meta: Mapping[str, Any]) -> str:
+    def _taskboard_card_status(
+        card_output: Any,
+        execution_meta: Mapping[str, Any],
+        *,
+        evidence_use_guard: Mapping[str, Any] | None = None,
+    ) -> str:
         execution_status = str(execution_meta.get("status") or "").strip().lower()
         if execution_status in {"failed", "error", "timed_out", "blocked"}:
             return "failed"
+        if isinstance(evidence_use_guard, Mapping):
+            try:
+                blocking_count = int(evidence_use_guard.get("blocking_count") or 0)
+            except (TypeError, ValueError):
+                blocking_count = 0
+            if blocking_count > 0:
+                return "blocked"
         if isinstance(card_output, Mapping):
             status = str(card_output.get("status") or "completed").strip().lower()
             if status in {"completed", "blocked", "failed", "skipped"}:

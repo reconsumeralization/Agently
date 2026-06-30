@@ -71,6 +71,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
         candidate_final_result = self._taskboard_candidate_final_result(revision)
         final_refs = self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view))
+        trusted_final_refs = [
+            ref
+            for ref in final_refs
+            if isinstance(ref, Mapping) and self._is_trusted_workspace_artifact_ref(ref)
+        ]
         can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
         if result_status != "completed" and not can_attempt_degraded_final:
             self.status = "blocked" if result_status == "blocked" else "error"
@@ -125,11 +130,6 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 schedule=schedule,
                 allow_degraded_final=result_status != "completed",
             )
-            trusted_final_refs = [
-                ref
-                for ref in final_refs
-                if isinstance(ref, Mapping) and self._is_trusted_workspace_artifact_ref(ref)
-            ]
             final = self._normalize_taskboard_final_result(
                 final,
                 candidate_final_result,
@@ -139,12 +139,23 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         final = value_with_normalized_evidence_use(final, final_evidence_guard.get("normalized_evidence_use"))
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         final_verification: dict[str, Any] | None = None
-        if accepted:
+        should_verify_final = (
+            accepted
+            or bool(str(final.get("final_result") or "").strip())
+            or bool(str(candidate_final_result or "").strip())
+            or bool(final_refs)
+        )
+        if should_verify_final:
             final_source_refs = self._taskboard_final_source_refs_from_evidence_view(evidence_view)
+            verifier_final_result = str(final.get("final_result") or "").strip()
+            if not verifier_final_result and trusted_final_refs:
+                verifier_final_result = self._workspace_artifact_final_result_from_refs(trusted_final_refs)
+            if not verifier_final_result:
+                verifier_final_result = str(candidate_final_result or "").strip()
             final_execution_result = {
                 "status": "completed",
                 "accepted": accepted,
-                "final_result": final.get("final_result", ""),
+                "final_result": verifier_final_result,
                 "reason": final.get("reason", ""),
                 "missing_criteria": final.get("missing_criteria", []),
                 "evidence_use": DataFormatter.sanitize(final.get("evidence_use", [])),
@@ -203,7 +214,20 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             missing_deliverables = await self._missing_required_workspace_deliverables()
             if missing_deliverables:
                 self._guard_missing_required_deliverables(final_verification, missing_deliverables)
-            if final_verification is not None and not bool(final_verification.get("is_complete")):
+            if final_verification is not None and bool(final_verification.get("is_complete")):
+                accepted = True
+                final = dict(final)
+                final["accepted"] = True
+                verification_final_result = final_verification.get("final_result")
+                if not str(final.get("final_result") or "").strip():
+                    if verification_final_result not in (None, "", [], {}):
+                        final["final_result"] = str(verification_final_result).strip()
+                    elif verifier_final_result:
+                        final["final_result"] = verifier_final_result
+                if not str(final.get("reason") or "").strip():
+                    final["reason"] = final_verification.get("reason") or "TaskBoard final verification accepted."
+                final["missing_criteria"] = []
+            elif final_verification is not None and not bool(final_verification.get("is_complete")):
                 repair_revision = None
                 if not bool(final_verification.get("requires_block")):
                     repair_revision = self._taskboard_final_verification_repair_revision(
