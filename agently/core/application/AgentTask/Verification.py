@@ -417,11 +417,22 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                         }
                     )
                 )
-            else:
+            elif self._can_attempt_model_evidence_binding_repair():
                 repaired_evidence_use = await self._request_evidence_binding_repair(
                     grounding_guard,
                     evidence_ledger,
                     language_policy=language_policy,
+                )
+            else:
+                self.diagnostics.setdefault("evidence_binding_repair", []).append(
+                    DataFormatter.sanitize(
+                        {
+                            "source": "model_repair_attempt_gate",
+                            "skipped": True,
+                            "attempt_count": self.diagnostics.get("evidence_binding_repair_attempt_count"),
+                            "reason": "model evidence binding repair attempt limit reached; deterministic repair had no unique candidate",
+                        }
+                    )
                 )
             if repaired_evidence_use:
                 merged_evidence_use = self._merge_repaired_evidence_use(
@@ -848,6 +859,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         }
         if not blocking_codes.issubset(binding_codes):
             return False
+        return True
+
+    def _can_attempt_model_evidence_binding_repair(self) -> bool:
         try:
             count = int(self.diagnostics.get("evidence_binding_repair_attempt_count") or 0)
         except (TypeError, ValueError):

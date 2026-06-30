@@ -828,6 +828,65 @@ def test_evidence_binding_repair_replaces_ref_only_content_with_action_result_re
     ]
 
 
+def test_evidence_binding_repair_attempt_gate_only_limits_model_repair():
+    write_result_id = "agent_task_action_result:write_file:act_call_write"
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "final.md content was written through write_file.",
+                "evidence_ids": ["agent_task_action_result:write_file:act_call_read"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": "agent_task_action_result:read_file:act_call_read",
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "action_call_id": "act_call_read",
+                "path": "final.md",
+                "body_state": "truncated",
+                "status": "ok",
+                "aliases": ["read_file", "act_call_read", "final.md"],
+            },
+            {
+                "id": write_result_id,
+                "kind": "agent_task.action.result",
+                "action_id": "write_file",
+                "action_call_id": "act_call_write",
+                "path": "final.md",
+                "body_state": "bounded",
+                "status": "ok",
+                "aliases": ["write_file", "act_call_write", "final.md"],
+            },
+        ],
+        "blocking_count": 1,
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "final.md content was written through write_file.",
+                "evidence_id": "agent_task_action_result:write_file:act_call_read",
+                "support_type": "content",
+            }
+        ],
+    }
+    task = AgentTask.__new__(AgentTask)
+    task.diagnostics = {"evidence_binding_repair_attempt_count": 2}
+
+    assert task._can_attempt_model_evidence_binding_repair() is False
+    assert task._should_attempt_evidence_binding_repair(guard) is True
+    assert AgentTask._deterministic_evidence_binding_repair(guard) == [
+        {
+            "claim_index": 0,
+            "claim": "final.md content was written through write_file.",
+            "evidence_ids": [write_result_id],
+            "support_type": "content",
+        }
+    ]
+
+
 def test_task_board_acceptance_index_derives_from_criteria_cards_verifier_and_locators():
     revision = TaskBoardRevision.create(
         board_id="acceptance-index",
