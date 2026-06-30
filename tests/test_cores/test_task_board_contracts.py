@@ -973,6 +973,158 @@ def test_evidence_binding_repair_replaces_ref_only_content_with_action_result_re
     ]
 
 
+def test_evidence_binding_repair_maps_workspace_readback_section_label_to_latest_readback():
+    latest_readback_id = (
+        "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair-3.continue.workspace_artifact:final.md"
+    )
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "The final brief includes the non-investment-advice statement.",
+                "evidence_ids": [
+                    "workspace_artifact_readback:final-verification-repair-3.continue:final.md:non-investment-advice-section"
+                ],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair.workspace_artifact:final.md",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "path": "final.md",
+            },
+            {
+                "id": latest_readback_id,
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "path": "final.md",
+            },
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "The final brief includes the non-investment-advice statement.",
+                "evidence_id": (
+                    "workspace_artifact_readback:final-verification-repair-3.continue:final.md:non-investment-advice-section"
+                ),
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair.workspace_artifact:final.md",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "path": "final.md",
+                "body": "## Non-Investment-Advice Statement\nThis brief is for informational purposes only.",
+            },
+            {
+                "id": latest_readback_id,
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "path": "final.md",
+                "body": "## Non-Investment-Advice Statement\nThis brief is for informational purposes only.",
+            },
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "The final brief includes the non-investment-advice statement.",
+            "evidence_ids": [latest_readback_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readback():
+    targeted_readback_id = (
+        "workspace_artifact_targeted_readback:final.md:acceptance_locator_search:Non-Investment-Advice_Statement"
+    )
+    source_locator_id = (
+        "workspace_artifact_acceptance_locator:agent_task.taskboard.card.final-verification-repair.workspace_artifact"
+        ":final.md:non-investment-advice:Non-Investment-Advice_Statement"
+    )
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "Non-investment-advice statement",
+                "evidence_ids": ["artifact_locator:16"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": source_locator_id,
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+                "path": "final.md",
+                "criterion_id": "non-investment-advice",
+                "heading": "Non-Investment-Advice Statement",
+            },
+            {
+                "id": targeted_readback_id,
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+            },
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "Non-investment-advice statement",
+                "evidence_id": "artifact_locator:16",
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": source_locator_id,
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+                "path": "final.md",
+                "criterion_id": "non-investment-advice",
+                "heading": "Non-Investment-Advice Statement",
+            },
+            {
+                "id": targeted_readback_id,
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+                "aliases": [source_locator_id, "Non-Investment-Advice Statement", "non-investment-advice-statement"],
+                "body": "## Non-Investment-Advice Statement\nThis brief is for informational purposes only.",
+            },
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "Non-investment-advice statement",
+            "evidence_ids": [targeted_readback_id],
+            "support_type": "content",
+        }
+    ]
+
+
 def test_evidence_binding_repair_attempt_gate_only_limits_model_repair():
     write_result_id = "agent_task_action_result:write_file:act_call_write"
     guard = {

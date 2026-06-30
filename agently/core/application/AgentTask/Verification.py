@@ -738,6 +738,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "raw_status": raw_status,
             "body_state": "ref_only" if status == "failed" else ("truncated" if readback.get("truncated") else "bounded"),
             "path": path,
+            "aliases": cls._workspace_artifact_targeted_readback_aliases(
+                path=path,
+                query=query,
+                readback=readback,
+                artifact=artifact,
+            ),
             "source": "agent_task.workspace_artifact.targeted_readback",
             "provenance": {
                 "source": "agent_task.workspace_artifact.targeted_readback",
@@ -767,6 +773,41 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 }
             ]
         return DataFormatter.sanitize(item)
+
+    @classmethod
+    def _workspace_artifact_targeted_readback_aliases(
+        cls,
+        *,
+        path: str,
+        query: str,
+        readback: Mapping[str, Any],
+        artifact: Mapping[str, Any],
+    ) -> list[str]:
+        aliases: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+            slug = cls._workspace_artifact_readback_alias_slug(text)
+            if slug and slug not in aliases:
+                aliases.append(slug)
+
+        add(path)
+        add(PurePosixPath(path.replace("\\", "/")).name if path else "")
+        add(query)
+        add(readback.get("matched_query"))
+        add(readback.get("source_evidence_id"))
+        add(artifact.get("id"))
+        return aliases[:24]
+
+    @staticmethod
+    def _workspace_artifact_readback_alias_slug(value: str) -> str:
+        text = str(value or "").strip().lower().replace("_", " ")
+        if not text:
+            return ""
+        slug = "-".join(re.findall(r"[a-z0-9]+", text))
+        return slug[:160]
 
     async def _workspace_artifact_acceptance_locator_readback(
         self,
@@ -1262,9 +1303,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if not evidence_id_text:
             return []
         queries = cls._evidence_binding_body_match_queries(evidence_id_text)
+        if cls._evidence_binding_id_looks_like_workspace_locator(evidence_id_text):
+            queries.extend(cls._evidence_binding_body_match_queries(str(diagnostic.get("claim") or "")))
+        queries = cls._dedupe_evidence_binding_queries(queries)
         if not queries:
             return []
-        matches: list[str] = []
+        matches: list[Mapping[str, Any]] = []
         for ref in available_refs:
             if not isinstance(ref, Mapping):
                 continue
@@ -1279,8 +1323,14 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if not body:
                 continue
             if any(cls._evidence_binding_body_query_matches(query, body) for query in queries):
-                matches.append(ref_id)
-        return sorted(set(matches))
+                matches.append(ref)
+        unique_matches = cls._unique_evidence_binding_ref_ids(matches)
+        if len(unique_matches) <= 1:
+            return unique_matches
+        coalesced_workspace_match = cls._coalesced_workspace_body_text_candidate(matches)
+        if coalesced_workspace_match:
+            return [coalesced_workspace_match]
+        return unique_matches
 
     @staticmethod
     def _evidence_binding_ref_body(ref: Mapping[str, Any]) -> str:
@@ -1308,6 +1358,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 stripped = raw[len(prefix) :].strip()
                 if stripped and stripped not in queries:
                     queries.append(stripped)
+        for separator in (":", "/", "#"):
+            if separator in raw:
+                tail = raw.rsplit(separator, 1)[-1].strip()
+                if tail and tail not in queries:
+                    queries.append(tail)
         return [query for query in queries if cls._evidence_binding_body_query_is_informative(query)]
 
     @classmethod
@@ -1328,24 +1383,99 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
 
     @classmethod
     def _evidence_binding_body_query_is_informative(cls, query: str) -> bool:
-        return len(cls._evidence_binding_body_match_tokens(query)) >= 4
+        return len(cls._evidence_binding_body_match_tokens(query)) >= 3
 
     @staticmethod
-    def _normalize_evidence_binding_text(value: str) -> str:
-        return " ".join(re.findall(r"[a-z0-9]+", value.lower().replace("_", " ")))
+    def _dedupe_evidence_binding_queries(queries: Sequence[str]) -> list[str]:
+        deduped: list[str] = []
+        for query in queries:
+            text = str(query or "").strip()
+            if text and text not in deduped:
+                deduped.append(text)
+        return deduped
+
+    @staticmethod
+    def _evidence_binding_id_looks_like_workspace_locator(evidence_id: str) -> bool:
+        text = str(evidence_id or "").strip().lower()
+        return (
+            not text
+            or "workspace_artifact" in text
+            or "artifact_locator" in text
+            or "acceptance_locator" in text
+            or "readback" in text
+        )
+
+    @classmethod
+    def _normalize_evidence_binding_text(cls, value: str) -> str:
+        return " ".join(cls._evidence_binding_body_match_tokens(value))
 
     @staticmethod
     def _evidence_binding_body_match_tokens(value: str) -> list[str]:
         tokens = re.findall(r"[a-z0-9]+", value.lower().replace("_", " "))
+        ignored = {
+            "a",
+            "an",
+            "and",
+            "artifact",
+            "claim",
+            "content",
+            "evidence",
+            "final",
+            "id",
+            "locator",
+            "md",
+            "read",
+            "readback",
+            "section",
+            "source",
+            "targeted",
+            "the",
+            "workspace",
+        }
         seen: set[str] = set()
         result: list[str] = []
         for token in tokens:
+            if token in ignored:
+                continue
             if not token.isdigit() and len(token) < 2:
                 continue
             if token not in seen:
                 seen.add(token)
                 result.append(token)
         return result
+
+    @staticmethod
+    def _unique_evidence_binding_ref_ids(refs: Sequence[Mapping[str, Any]]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for ref in refs:
+            evidence_id = str(ref.get("id") or "").strip()
+            if evidence_id and evidence_id not in seen:
+                seen.add(evidence_id)
+                ordered.append(evidence_id)
+        return ordered
+
+    @classmethod
+    def _coalesced_workspace_body_text_candidate(cls, refs: Sequence[Mapping[str, Any]]) -> str:
+        workspace_refs: list[Mapping[str, Any]] = []
+        for ref in refs:
+            kind = str(ref.get("kind") or "").strip().lower()
+            if kind not in {"workspace_artifact.readback", "workspace_artifact.targeted_readback"}:
+                continue
+            path = str(ref.get("path") or "").strip()
+            evidence_id = str(ref.get("id") or "").strip()
+            if path and evidence_id:
+                workspace_refs.append(ref)
+        if not workspace_refs:
+            return ""
+        paths = {str(ref.get("path") or "").strip() for ref in workspace_refs}
+        if len(paths) != 1:
+            return ""
+        targeted_refs = [
+            ref for ref in workspace_refs if str(ref.get("kind") or "").strip().lower() == "workspace_artifact.targeted_readback"
+        ]
+        selected_pool = targeted_refs or workspace_refs
+        return str(selected_pool[-1].get("id") or "").strip()
 
     @staticmethod
     def _deterministic_content_readback_candidates(
