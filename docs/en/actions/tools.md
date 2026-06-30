@@ -147,7 +147,10 @@ fails closed instead of sending raw bytes into the model hot path.
 
 For shell access, prefer `agent.enable_shell(...)`, which mounts a managed
 `run_bash` action. `Cmd` remains available as a low-level compatibility package
-and as an implementation helper for Bash execution.
+and as an implementation helper for Bash execution. Use shell for tests,
+builds, git inspection, and read-only diagnostics; use Workspace file actions
+such as `read_file`, `grep_files`, `edit_file`, and `apply_patch` for file
+reading, searching, editing, and writing.
 
 See `examples/builtin_actions/` for the current action-native examples.
 Historical built-in tool examples live under `examples/archived/builtin_tools/`

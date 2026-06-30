@@ -105,10 +105,11 @@ print(calculate("3333+6666=?"))
 | `agent.use_actions(Search(...))` | mount the built-in Search package from `agently.builtins.actions` |
 | `agent.use_actions(Browse(...))` | mount the built-in Browse package from `agently.builtins.actions` |
 | `agent.enable_python(...)` | mount a managed `run_python` action for deterministic code execution |
-| `agent.enable_shell(...)` | mount a managed `run_bash` action with workspace and command allowlists |
+| `agent.enable_shell(...)` | mount a managed `run_bash` action with workspace roots, command allowlists, timeouts, and bounded output previews |
 | `agent.enable_nodejs(...)` | mount a managed `run_nodejs` action |
 | `agent.enable_sqlite(...)` | mount a managed `query_sqlite` action |
 | `agent.enable_workspace_file_actions(...)` | expose the current Workspace file area as handler-backed list/search/read/write actions, plus `export_file` when `export=True` and `write=True` |
+| `agent.enable_coding_agent_actions(...)` | expose coding-agent Workspace actions for file readback, glob/grep search, targeted edit, unified-diff patch, and guarded full-file writes |
 | `@agent.auto_func` | turn a Python function signature + docstring into a model-backed implementation that uses the agent's actions |
 | `agent.get_action_result(prompt=turn.prompt)` | retrieve action call records for a request-scoped turn |
 | `extra.action_logs` | structured logs produced during the action loop |
@@ -125,6 +126,24 @@ For application code, prefer `enable_*` helpers when the goal is to give the
 model a common capability such as Python, shell, or workspace access. Use
 `register_action(..., executor=..., execution_resources=[...])` when you are
 building a custom Action backend.
+
+For coding-agent style local file work, prefer
+`agent.enable_coding_agent_actions(...)`. It exposes `read_file`,
+`glob_files`, `grep_files`, `edit_file`, `apply_patch`, and guarded
+`write_file` over the current Workspace file root. `edit_file(...)` can use an
+`expected_sha256` stale guard, `apply_patch(...)` applies a unified diff and can
+require exact `expected_files`, and `write_file(...)` in coding-agent mode
+requires either prior read state or an expected hash unless the host disables
+that guard. Use shell for tests, builds, git inspection, and read-only
+diagnostics; use Workspace file actions for file reading, search, editing, and
+writing.
+
+When `agent.enable_shell(...)` is called without an explicit `commands=...`
+allowlist, Agently uses a small safe shell profile for commands such as `pwd`,
+`ls`, `rg`, `cat`, `git status`, `git diff`, `git log`, `python -m pytest`, and
+`python -m pyright`. Stdout and stderr are returned as bounded previews; if a
+stream exceeds `max_output_chars`, the full stream is written under the
+Workspace root at `artifacts/shell/` and referenced from the action result.
 
 Built-in capability packages live under `agently.builtins.actions`. For example:
 

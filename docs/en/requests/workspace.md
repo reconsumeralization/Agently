@@ -303,6 +303,7 @@ used by Workspace records.
 
 ```python
 agent.enable_workspace_file_actions(write=True)
+agent.enable_coding_agent_actions()
 agent.enable_shell(commands=["pwd", "pytest"])
 agent.enable_nodejs()
 ```
@@ -312,6 +313,15 @@ exposes list/search/read/write file actions over the current Workspace file
 area. Pass `export=True` together with `write=True` when the Agent should also
 receive an `export_file` action. Pass an explicit `root=` or `cwd=` only when an
 action must use an independent directory.
+
+`enable_coding_agent_actions(...)` is the Workspace-owned profile for coding
+agents. It exposes `read_file`, `glob_files`, `grep_files`, `edit_file`,
+`apply_patch`, and guarded `write_file` actions over the same file boundary.
+Use `edit_file(...)` or `apply_patch(...)` for targeted edits, and keep shell
+commands for tests, builds, git status/diff/log inspection, and read-only
+diagnostics. In coding-agent mode, full-file `write_file(...)` is guarded by
+prior read state or an expected SHA unless the host explicitly disables that
+policy.
 
 ## File IO Handlers
 
