@@ -27,13 +27,13 @@ flowchart TD
 
     business -->|"single answer"| model_request
     business -->|"Agent run, tools, Skills, goals, stream"| agent_execution
+    business -->|"submitted dependency graph"| task_dag
     agent_execution -->|"direct route"| model_request
     agent_execution -->|"bounded task frame"| blocks
-    agent_execution -->|"DAG-shaped route or bounded step"| task_dag
     task_dag -->|"validated DAG segment"| blocks
     blocks -->|"compiled execution block graph"| triggerflow
     agent_execution -->|"task evidence"| workspace
-    task_dag -->|"result and runtime facts"| agent_execution
+    task_dag -.->|"snapshot evidence handoff"| agent_execution
     triggerflow -->|"runtime events, state, pause/resume"| task_dag
 ```
 
@@ -45,6 +45,9 @@ Contract behind the edges:
 - `TaskDAG` owns graph-shaped planning and execution logic: Planner,
   Validator, Resolver, Executor, handlers, dependency results, semantic
   outputs, and runtime placeholders.
+- `TaskDAG` is an independent submitted-DAG API. `AgentExecution` may consume a
+  TaskDAG snapshot as evidence, but it does not select TaskDAG / DynamicTask as
+  a route or bounded-step strategy.
 - `Blocks` owns the lowering bridge from bounded ExecutionPlan / PlanBlock
   instances or validated TaskDAG nodes into TriggerFlow-backed
   ExecutionBlocks, plus evidence/result mapping.
@@ -64,7 +67,7 @@ substrate. It can still be used, but the architectural owner is `TaskDAG`.
 | One complex business task that must verify completion | `agent.goal(...).effort(...).start()` or `agent.create_task(...)` | Goal planning, bounded steps, Workspace evidence, model verifier, host guards, replan |
 | A submitted or model-generated dependency graph | `TaskDAG` modules, or the DynamicTask facade | DAG planning, validation, handler resolution, dependency result collection, semantic outputs |
 | A stable workflow topology owned by application code | `TriggerFlow` | Branching, concurrency, signals, pause/resume, persistence, runtime stream |
-| A product team wants maximum DAG customization and still an Agent result surface | Build/customize `TaskDAG` modules, then attach the DAG to `AgentExecution` | Custom Planner/Validator/Resolver/Executor plus AgentExecution result, stream, meta, and evidence paths |
+| A product team wants maximum DAG customization and still an Agent result surface | Build/customize `TaskDAG` modules, then pass its snapshot into `AgentExecution` as evidence | Custom Planner/Validator/Resolver/Executor plus AgentExecution result, stream, meta, and evidence paths |
 
 ## Intervention Points
 
@@ -146,8 +149,14 @@ sequenceDiagram
     participant V as Verifier/Guard
 
     App->>AE: configure prompt, skills, actions, goal, effort
-    AE->>DAG: optional DAG-shaped route or bounded step
-    DAG->>Blocks: validated DAG segment
+    opt independent DAG evidence
+        App->>DAG: run submitted or customized DAG
+        DAG->>Blocks: validated DAG segment
+        Blocks->>TF: ExecutionBlockGraph
+        TF-->>Blocks: block signals, dependency results, snapshots
+        Blocks-->>DAG: DAG snapshot and result
+        DAG-->>AE: optional snapshot evidence
+    end
     AE->>Blocks: bounded ExecutionPlan segment
     Blocks->>TF: ExecutionBlockGraph
     TF-->>Blocks: block signals, dependency results, snapshots

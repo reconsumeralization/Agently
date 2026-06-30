@@ -27,13 +27,13 @@ flowchart TD
 
     business -->|"单个答案"| model_request
     business -->|"Agent run、工具、Skills、目标、stream"| agent_execution
+    business -->|"提交式依赖图"| task_dag
     agent_execution -->|"direct route"| model_request
     agent_execution -->|"bounded task frame"| blocks
-    agent_execution -->|"DAG-shaped route 或 bounded step"| task_dag
     task_dag -->|"validated DAG segment"| blocks
     blocks -->|"compiled execution block graph"| triggerflow
     agent_execution -->|"任务证据"| workspace
-    task_dag -->|"结果与运行事实"| agent_execution
+    task_dag -.->|"snapshot evidence handoff"| agent_execution
     triggerflow -->|"runtime events、state、pause/resume"| task_dag
 ```
 
@@ -43,6 +43,9 @@ flowchart TD
 - `AgentExecution` 负责用户侧 Agent run，以及 result/stream/meta facade。
 - `TaskDAG` 负责图形任务逻辑：Planner、Validator、Resolver、Executor、handlers、
   dependency results、semantic outputs 和 runtime placeholders。
+- `TaskDAG` 是独立的提交式 DAG API。`AgentExecution` 可以把 TaskDAG snapshot
+  当作 evidence 消费，但不会把 TaskDAG / DynamicTask 选成 route 或 bounded-step
+  strategy。
 - `Blocks` 负责把有边界的 ExecutionPlan / PlanBlock instances 或已校验的
   TaskDAG nodes 降低为 TriggerFlow-backed ExecutionBlocks，并做 evidence/result
   mapping。
@@ -62,7 +65,7 @@ owner 是 `TaskDAG`。
 | 一个必须验证完成情况的复杂业务任务 | `agent.goal(...).effort(...).start()` 或 `agent.create_task(...)` | Goal planning、bounded steps、Workspace evidence、model verifier、host guards、replan |
 | 一个提交式或模型生成的依赖图 | `TaskDAG` 模块，或 DynamicTask facade | DAG planning、validation、handler 解析、dependency result collection、semantic outputs |
 | 一个由应用代码拥有的稳定 workflow topology | `TriggerFlow` | 分支、并发、信号、pause/resume、持久化、runtime stream |
-| 产品团队需要最大 DAG 定制自由度，同时仍想要 Agent result surface | 定制 `TaskDAG` 模块，再挂回 `AgentExecution` | 自定义 Planner/Validator/Resolver/Executor，同时保留 AgentExecution result、stream、meta 和 evidence path |
+| 产品团队需要最大 DAG 定制自由度，同时仍想要 Agent result surface | 定制 `TaskDAG` 模块，再把 snapshot 作为 evidence 传给 `AgentExecution` | 自定义 Planner/Validator/Resolver/Executor，同时保留 AgentExecution result、stream、meta 和 evidence path |
 
 ## 介入点
 
@@ -142,8 +145,14 @@ sequenceDiagram
     participant V as Verifier/Guard
 
     App->>AE: 配置 prompt, skills, actions, goal, effort
-    AE->>DAG: 可选 DAG-shaped route 或 bounded step
-    DAG->>Blocks: validated DAG segment
+    opt 独立 DAG evidence
+        App->>DAG: 运行提交式或定制 DAG
+        DAG->>Blocks: validated DAG segment
+        Blocks->>TF: ExecutionBlockGraph
+        TF-->>Blocks: block signals, dependency results, snapshots
+        Blocks-->>DAG: DAG snapshot and result
+        DAG-->>AE: 可选 snapshot evidence
+    end
     AE->>Blocks: bounded ExecutionPlan segment
     Blocks->>TF: ExecutionBlockGraph
     TF-->>Blocks: block signals, dependency results, snapshots
