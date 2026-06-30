@@ -41,22 +41,25 @@ class ActionResourceRegistrar:
         allowed_cmd_prefixes: list[str] | None,
         allowed_workdir_roots: list[str | Path] | None,
         timeout: int,
+        max_output_chars: int | None = None,
     ) -> str:
         command_text = (
             ", ".join(str(prefix) for prefix in allowed_cmd_prefixes)
             if allowed_cmd_prefixes
-            else "no command allowlist configured"
+            else "executor default safe profile"
         )
         roots_text = (
             ", ".join(str(Path(root)) for root in allowed_workdir_roots)
             if allowed_workdir_roots
-            else "current working directory only"
+            else "no Workspace root configured"
         )
         policy_desc = (
             f"Allowed command prefixes: {command_text}. "
             f"Allowed working directory roots: {roots_text}. "
             f"Timeout: {timeout} seconds."
         )
+        if max_output_chars is not None:
+            policy_desc += f" Output preview limit: {max_output_chars} characters per stream."
         base_desc = str(desc).strip()
         return f"{base_desc}\n\n{policy_desc}" if base_desc else policy_desc
 
@@ -75,7 +78,7 @@ class ActionResourceRegistrar:
     ):
         action = self._action
         LazyImport.import_package("fastmcp", version_constraint=">=3", auto_install=False)
-        from fastmcp import Client
+        from fastmcp import Client  # pyright: ignore[reportMissingImports]
 
         transport = normalize_mcp_transport(transport, headers=headers)
         normalized_tags = action._normalize_tags(tags)
@@ -185,6 +188,8 @@ class ActionResourceRegistrar:
         allowed_workdir_roots: list[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        max_output_chars: int = 20000,
+        output_artifact_dir: str | Path | None = None,
     ):
         action = self._action
         model_desc = self._format_bash_sandbox_desc(
@@ -192,6 +197,7 @@ class ActionResourceRegistrar:
             allowed_cmd_prefixes=allowed_cmd_prefixes,
             allowed_workdir_roots=allowed_workdir_roots,
             timeout=timeout,
+            max_output_chars=max_output_chars,
         )
         action.register_action(
             action_id=action_id,
@@ -207,6 +213,8 @@ class ActionResourceRegistrar:
                 allowed_workdir_roots=allowed_workdir_roots,
                 timeout=timeout,
                 env=env,
+                max_output_chars=max_output_chars,
+                output_artifact_dir=output_artifact_dir,
             ),
             tags=tags,
             default_policy=default_policy,
@@ -224,6 +232,8 @@ class ActionResourceRegistrar:
                         "allowed_workdir_roots": allowed_workdir_roots,
                         "timeout": timeout,
                         "env": env,
+                        "max_output_chars": max_output_chars,
+                        "output_artifact_dir": output_artifact_dir,
                     },
                     "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }

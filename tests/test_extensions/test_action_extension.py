@@ -7,7 +7,9 @@ import json
 import os
 import asyncio
 import time
+import sys
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from agently import Agently
@@ -233,6 +235,8 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     assert "Allowed command prefixes: pwd." in spec_desc
     assert f"Allowed working directory roots: {tmp_path}" in spec_desc
     assert "Timeout: 20 seconds." in spec_desc
+    assert "Output preview limit: 20000 characters per stream." in spec_desc
+    assert "Prefer dedicated Workspace actions" in spec_desc
 
     result = agent.action.execute_action(
         "test_run_bash",
@@ -241,6 +245,26 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     assert result.get("status") == "success"
     assert str(tmp_path) in str(result.get("data"))
     assert Agently.execution_resource.list(scope="action_call") == []
+
+
+def test_action_extension_enable_shell_defaults_to_safe_profile(tmp_path):
+    agent = Agently.create_agent()
+    agent.enable_shell(root=tmp_path, action_id="default_safe_bash")
+
+    allowed = agent.action.execute_action(
+        "default_safe_bash",
+        {"cmd": "pwd"},
+    )
+    blocked = agent.action.execute_action(
+        "default_safe_bash",
+        {"cmd": "python -c 'print(1)'"},
+    )
+
+    assert allowed.get("status") == "success"
+    assert str(tmp_path) in str(allowed.get("data", {}).get("stdout", ""))
+    assert blocked.get("status") == "blocked"
+    assert blocked.get("reason") == "cmd_not_allowed"
+    assert blocked.get("diagnostics", [{}])[0].get("code") == "shell.cmd_not_allowed"
 
 
 def test_action_extension_enable_shell_redacts_env_in_action_info(tmp_path):
@@ -293,8 +317,8 @@ def test_action_extension_enable_shell_supports_multi_token_command_prefixes(tmp
 
     assert allowed.get("status") == "success"
     assert "allowed value" in str(allowed.get("data", {}).get("stdout", ""))
-    assert blocked.get("status") == "approval_required"
-    assert blocked.get("error") == "cmd_not_allowed"
+    assert blocked.get("status") == "blocked"
+    assert blocked.get("reason") == "cmd_not_allowed"
 
 
 def test_action_extension_enable_shell_uses_root_as_default_workdir(tmp_path):
@@ -308,6 +332,60 @@ def test_action_extension_enable_shell_uses_root_as_default_workdir(tmp_path):
 
     assert result.get("status") == "success"
     assert str(tmp_path) in str(result.get("data", {}).get("stdout", ""))
+
+
+def test_action_extension_enable_shell_persists_large_output_artifacts(tmp_path):
+    source_path = tmp_path / "big.txt"
+    source_text = "x" * 80
+    source_path.write_text(source_text, encoding="utf-8")
+    agent = Agently.create_agent()
+    agent.enable_shell(
+        root=tmp_path,
+        commands=["cat"],
+        action_id="bounded_output_bash",
+        max_output_chars=12,
+    )
+
+    result = agent.action.execute_action(
+        "bounded_output_bash",
+        {"cmd": "cat big.txt"},
+    )
+
+    data = result.get("data", {})
+    assert result.get("status") == "success"
+    assert data.get("stdout") == source_text[:12]
+    assert data.get("stdout_truncated") is True
+    artifacts = data.get("output_artifacts", [])
+    assert len(artifacts) == 1
+    artifact_path = artifacts[0]["path"]
+    assert artifacts[0]["stream"] == "stdout"
+    assert artifacts[0]["relative_path"].startswith("artifacts/shell/")
+    assert os.path.exists(artifact_path)
+    with open(artifact_path, encoding="utf-8") as handle:
+        assert handle.read() == source_text
+
+
+def test_action_extension_enable_shell_reports_timeout(tmp_path):
+    python_prefix = f"{Path(sys.executable).name} -c"
+    agent = Agently.create_agent()
+    agent.enable_shell(
+        root=tmp_path,
+        commands=[python_prefix],
+        action_id="timeout_bash",
+        timeout=1,
+    )
+
+    result = agent.action.execute_action(
+        "timeout_bash",
+        {"cmd": [sys.executable, "-c", "import time; time.sleep(2)"]},
+    )
+
+    data = result.get("data", {})
+    assert result.get("status") == "error"
+    assert data.get("status") == "timed_out"
+    assert data.get("reason") == "command_timeout"
+    assert data.get("timeout_seconds") == 1
+    assert data.get("diagnostics", [{}])[0].get("code") == "shell.command_timeout"
 
 
 def test_action_extension_enable_helper_desc_modes():

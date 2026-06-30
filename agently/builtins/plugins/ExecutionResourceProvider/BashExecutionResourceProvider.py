@@ -62,6 +62,8 @@ class BashExecutionResourceProvider:
             allowed_workdir_roots=[boundary] if boundary is not None else None,
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 20))),
             env=config.get("env", None),
+            max_output_chars=int(policy.get("max_output_chars", config.get("max_output_chars", 20000))),
+            output_artifact_dir=policy.get("output_artifact_dir", config.get("output_artifact_dir")),
         )
         return {
             "handle_id": f"bash:{ uuid.uuid4().hex }",

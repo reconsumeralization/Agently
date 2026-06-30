@@ -25,6 +25,7 @@ from typing_extensions import Self
 from agently.core import BaseAgent
 from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
 from agently.utils import DeprecationWarnings, FunctionShifter
+from agently.builtins.actions.Cmd import DEFAULT_SAFE_CMD_PREFIXES
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -392,21 +393,33 @@ class ActionExtension(BaseAgent):
         expose_to_model: bool = True,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        max_output_chars: int = 20000,
     ) -> Self:
         workspace = getattr(self, "workspace", None)
         if root is None and workspace is not None:
             root = getattr(workspace, "files_root", getattr(workspace, "content_root", None))
-        roots = [str(Path(root).expanduser().resolve())] if root is not None else None
-        default_desc = "Run an allowlisted shell command inside a managed workspace boundary."
+        root_path = Path(root).expanduser().resolve() if root is not None else None
+        roots = [str(root_path)] if root_path is not None else None
+        resolved_commands = list(commands) if commands is not None else list(DEFAULT_SAFE_CMD_PREFIXES)
+        output_artifact_dir = str(root_path / "artifacts" / "shell") if root_path is not None else None
+        default_desc = (
+            "Run an allowlisted shell command inside a managed workspace boundary for tests, builds, "
+            "git status inspection, and read-only diagnostics. Prefer dedicated Workspace actions "
+            "`read_file`, `glob_files`, `grep_files`, `edit_file`, `apply_patch`, and `write_file` for "
+            "file reading, searching, editing, and writing. Do not start background long-running "
+            "commands; each command is bounded by timeout and output preview limits."
+        )
         return self.use_action_sandbox(
             "bash",
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
             expose_to_model=expose_to_model,
-            allowed_cmd_prefixes=commands,
+            allowed_cmd_prefixes=resolved_commands,
             allowed_workdir_roots=roots,
             timeout=timeout,
             env=env,
+            max_output_chars=max_output_chars,
+            output_artifact_dir=output_artifact_dir,
         )
 
     def enable_nodejs(
