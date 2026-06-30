@@ -292,6 +292,41 @@ def test_acceptance_locator_matches_unicode_dash_heading_variants():
     assert required_locator["heading"] == "Implementation & Product Highlights"
 
 
+def test_acceptance_locator_matches_cjk_numeric_spacing_variants():
+    from agently.core.application.AgentTask.AcceptanceLocator import (
+        build_workspace_artifact_acceptance_locator_items,
+    )
+
+    items = build_workspace_artifact_acceptance_locator_items(
+        path="final.md",
+        source="test",
+        text=(
+            "# LMCC Mock Exam\n\n"
+            "### 第一大题：单选题（每题 3 分，共 60 分）\n\n"
+            "**第 1-10 题：基础概念**\n\n"
+            "题目内容。\n"
+        ),
+        acceptance_points=[
+            {
+                "criterion_id": "single_choice_heading",
+                "criterion": "The single-choice section heading is present.",
+                "expected_anchor": "### 第一大题：单选题（每题3分，共60分）",
+            },
+            {
+                "criterion_id": "question_range",
+                "criterion": "The first question range anchor is present.",
+                "expected_anchor": "第1-10题：基础概念",
+            },
+        ],
+    )
+
+    statuses = {item.get("criterion_id"): item.get("status") for item in items}
+    assert statuses == {
+        "single_choice_heading": "ok",
+        "question_range": "ok",
+    }
+
+
 def test_evidence_ledger_guard_reconciles_visible_aliases_to_canonical_ids():
     from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
 
@@ -500,6 +535,64 @@ def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
         and item.get("blocking") is True
         for item in guard["diagnostics"]
     )
+
+
+def test_execution_meta_action_results_enter_canonical_evidence_ledger():
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "market_quotes",
+                    "status": "partial_success",
+                    "action_call_id": "call-quotes",
+                    "raw": {
+                        "kwargs": {"symbols": ["NVDA", "AMD", "AVGO"]},
+                        "data": {
+                            "quotes": [
+                                {"symbol": "NVDA", "last": "194.97", "as_of": "2026-06-29"},
+                                {"symbol": "AMD", "last": "539.49", "as_of": "2026-06-29"},
+                            ],
+                            "history_status": "unavailable",
+                        },
+                    },
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    ledger = AgentTask._evidence_ledger_from_execution_meta(execution_meta)
+    action_items = [
+        item
+        for item in ledger["items"]
+        if item.get("kind") == "agent_task.action.result"
+        and item.get("action_id") == "market_quotes"
+    ]
+
+    assert len(action_items) == 1
+    item = action_items[0]
+    assert item["status"] == "ok"
+    assert item["body_state"] == "bounded"
+    assert item["action_call_id"] == "call-quotes"
+    assert "action_result_market_quotes" in item["aliases"]
+    assert "NVDA" in json.dumps(item.get("body") or item.get("preview"), ensure_ascii=False)
+
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "NVDA quote data was retrieved.",
+                "evidence_ids": ["action_result_market_quotes"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == [item["id"]]
 
 
 def test_block_carrier_output_policy_selects_schema_and_body_transport():
@@ -3126,6 +3219,64 @@ async def test_agent_create_task_exposes_scoped_workspace_readback_actions(tmp_p
     assert isinstance(data, dict)
     assert data.get("path") == "final.md"
     assert "Scoped Deliverable" in str(data.get("content") or "")
+
+
+@pytest.mark.asyncio
+async def test_agent_create_task_exposes_scoped_workspace_coding_actions(tmp_path):
+    task_id = "workspace-coding-task"
+    agent = _create_agent("agent-task-scoped-workspace-coding-actions")
+
+    execution = agent.create_task(
+        task_id=task_id,
+        goal="Create and repair a workspace deliverable.",
+        success_criteria=["final.md can be edited and read back."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={
+            "agent_task": {
+                "enable_workspace_readback_actions": True,
+                "enable_workspace_coding_actions": True,
+            }
+        },
+    )
+
+    expected_actions = {
+        "list_files",
+        "read_file",
+        "search_files",
+        "glob_files",
+        "grep_files",
+        "write_file",
+        "edit_file",
+        "apply_patch",
+    }
+    assert expected_actions.issubset(set(execution.local_action_ids))
+
+    scoped_workspace = agent.workspace.with_scope_node(
+        "tasks",
+        task_id,
+        scope={"task_id": task_id},
+        search_scope={"task_id": task_id},
+    )
+    await scoped_workspace.write_file("final.md", "# Draft\nold wording\n")
+
+    read_result = await agent.action.async_execute_action("read_file", {"path": "final.md"})
+    assert read_result.get("status") == "success"
+    expected_sha = read_result.get("data", {}).get("sha256")
+
+    edit_result = await agent.action.async_execute_action(
+        "edit_file",
+        {
+            "path": "final.md",
+            "old_string": "old wording",
+            "new_string": "corrected wording",
+            "expected_sha256": expected_sha,
+        },
+    )
+    assert edit_result.get("status") == "success"
+
+    updated = await scoped_workspace.read_file("final.md")
+    assert "corrected wording" in str(updated.get("content") or "")
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,9 @@ ACCEPTANCE_LOCATOR_KIND = "workspace_artifact.acceptance_locator"
 _HEADING_RE = re.compile(r"^\s{0,3}(?P<marks>#{1,6})\s+(?P<title>.+?)\s*#*\s*$")
 _SPACE_RE = re.compile(r"\s+")
 _CONNECTOR_RE = re.compile(r"\s*(?:[/&+]|\band\b)\s*")
+_CJK_NUMERIC_SPACE_RE = re.compile(
+    r"(?<=[\u3400-\u9fff])\s+(?=[0-9０-９])|(?<=[0-9０-９])\s+(?=[\u3400-\u9fff])"
+)
 _DASH_TRANSLATION = str.maketrans(
     {
         "\u2010": "-",
@@ -550,6 +553,7 @@ def _dedupe_strings(values: Sequence[str]) -> list[str]:
 
 def _normalized_anchor(value: str) -> str:
     text = value.translate(_DASH_TRANSLATION).strip().strip("#").strip().casefold()
+    text = _CJK_NUMERIC_SPACE_RE.sub("", text)
     text = _CONNECTOR_RE.sub(" ", text)
     text = _SPACE_RE.sub(" ", text)
     return text

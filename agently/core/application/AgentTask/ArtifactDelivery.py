@@ -1049,6 +1049,20 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 )
                 return DataFormatter.sanitize(result)
             if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
+                if self._normalize_string_list(result.get("remaining_work")):
+                    diagnostics.append(
+                        {
+                            "code": "agent_task.workspace_artifact.awaiting_body",
+                            "message": (
+                                "Workspace artifact delivery is deferred because remaining work exists and no "
+                                "complete artifact body was provided."
+                            ),
+                            "path": path,
+                            "source": source,
+                        }
+                    )
+                    result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+                    return DataFormatter.sanitize(result)
                 return self._workspace_artifact_delivery_failure_result(
                     result,
                     execution_meta,
