@@ -157,6 +157,120 @@ def test_streaming_data_uses_is_complete_completion_field():
     assert item.is_complete is True
 
 
+def test_response_parser_records_complete_streaming_snapshot_fields():
+    from agently.builtins.plugins.ResponseParser.AgentlyResponseParser import AgentlyResponseParser
+
+    class FakePromptObject:
+        output_format = "flat_markdown"
+        output = {
+            "step_result": (str, "status", True),
+            "artifact_manifest": {
+                "path": (str, "path", True),
+                "sections": ([str], "sections", False),
+            },
+        }
+
+    class FakePrompt:
+        def to_prompt_object(self):
+            return FakePromptObject()
+
+        def to_output_model(self):
+            return None
+
+    async def empty_response_generator():
+        if False:
+            yield ("done", "")
+
+    parser = AgentlyResponseParser(
+        "snapshot-agent",
+        "response-snapshot",
+        cast(Any, FakePrompt()),
+        empty_response_generator(),
+        Settings({}),
+    )
+
+    step_item = parser._prepare_streaming_data_for_yield(
+        StreamingData(path="step_result", value="wrote final.md", is_complete=True),
+        "dot",
+    )
+    manifest_path_item = parser._prepare_streaming_data_for_yield(
+        StreamingData(path="artifact_manifest.path", value="final.md", is_complete=True),
+        "slash",
+    )
+    parser._prepare_streaming_data_for_yield(
+        StreamingData(path="artifact_manifest.sections[0]", value="Data Boundary", is_complete=True),
+        "dot",
+    )
+
+    assert step_item.path == "step_result"
+    assert manifest_path_item.path == "/artifact_manifest/path"
+    assert parser.full_result_data["parsed_result"] == {
+        "step_result": "wrote final.md",
+        "artifact_manifest": {
+            "path": "final.md",
+            "sections": ["Data Boundary"],
+        },
+    }
+    assert parser.full_result_data["extra"]["streaming_snapshot"] is True
+    assert parser.full_result_data["extra"]["parse_success"] is True
+
+
+def test_structured_route_completion_uses_ensure_policies_over_streaming_snapshot():
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routes import (
+        _structured_stream_completion_policies,
+        _structured_stream_snapshot_satisfies_policies,
+    )
+
+    class FakeDataFlow:
+        def get_auto_ensure_policies(self, *, key_style="dot"):
+            return {
+                "step_result": "not_null",
+                "artifact_manifest.path": "not_null",
+            }
+
+    class FakeResult:
+        _data_flow = FakeDataFlow()
+
+        class prompt:
+            @staticmethod
+            def to_prompt_object():
+                class PromptObject:
+                    output = {
+                        "step_result": (str, "status", True),
+                        "artifact_manifest": (dict, "manifest", False),
+                        "evidence": ([str], "notes", False),
+                    }
+
+                return PromptObject()
+
+    policies = _structured_stream_completion_policies(
+        FakeResult(),
+        ensure_keys=None,
+        key_style="dot",
+    )
+
+    assert policies == {
+        "step_result": "not_null",
+        "artifact_manifest.path": "not_null",
+        "artifact_manifest": "presence",
+    }
+    assert _structured_stream_snapshot_satisfies_policies(
+        {"parsed_result": {"step_result": "done", "artifact_manifest": {"path": "final.md"}}},
+        policies,
+        key_style="dot",
+    )
+    assert not _structured_stream_snapshot_satisfies_policies(
+        {"parsed_result": {"step_result": "done", "artifact_manifest": {}}},
+        policies,
+        key_style="dot",
+    )
+    assert not _structured_stream_snapshot_satisfies_policies(
+        {"parsed_result": {"step_result": "   ", "artifact_manifest": {"path": "final.md"}}},
+        policies,
+        key_style="dot",
+    )
+
+
 def test_model_response_direct_construction_warns_but_get_result_does_not():
     from agently.core import ModelRequest
     from agently.utils import DeprecationWarnings
@@ -319,6 +433,45 @@ async def test_agent_execution_progress_is_visible_with_raw_stream_delivery():
 
 
 @pytest.mark.asyncio
+async def test_agent_execution_structured_model_bridge_refreshes_progress_clock():
+    class StructuredStreamItem:
+        path = "artifact_manifest.sections[0]"
+        wildcard_path = "artifact_manifest.sections[*]"
+        indexes = [0]
+        value = "data boundary"
+        delta = None
+        event_type = "done"
+        is_complete = True
+
+    agent = Agently.create_agent("execution-structured-bridge-progress-agent")
+    execution = agent.input("structured stream").create_execution()
+
+    assert execution.execution_context.last_progress_event is None
+
+    await execution.bridge_model_stream_item(
+        StructuredStreamItem(),
+        route="model_request",
+        meta={
+            "response_id": "response-1",
+            "request_run_id": "request-run-1",
+            "model_run_id": "model-run-1",
+        },
+    )
+
+    progress = execution.execution_context.last_progress_event
+    assert progress is not None
+    assert progress["stage"] == "artifact_manifest.sections[0]"
+    assert progress["status"] == "completed"
+    assert progress["event_type"] == "artifact_manifest.sections[0]"
+    assert progress["response_id"] == "response-1"
+    assert progress["run_id"] == "model-run-1"
+    assert progress["meta"]["field_path"] == "artifact_manifest.sections[0]"
+    assert progress["meta"]["wildcard_path"] == "artifact_manifest.sections[*]"
+    assert any(item.path == "artifact_manifest.sections[0]" for item in execution.stream.items)
+    assert not any(item.path.startswith("runtime.progress.") for item in execution.stream.items)
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_first_event_timeout_is_typed_stall():
     async def slow_generator():
         await asyncio.sleep(0.05)
@@ -418,6 +571,53 @@ async def test_action_runtime_structured_planning_timeout_is_typed_stage_stall()
     assert raised.value.stage == "action_planning"
     assert raised.value.status == "stalled"
     assert raised.value.planning_protocol == "structured_plan"
+
+
+@pytest.mark.asyncio
+async def test_action_runtime_action_completion_refreshes_execution_progress():
+    agent = Agently.create_agent("action-runtime-action-progress-agent")
+    runtime = agent.action.action_runtime
+
+    @agent.action_func
+    async def slow_first_action():
+        await asyncio.sleep(0.08)
+        return "first"
+
+    @agent.action_func
+    async def slow_second_action():
+        await asyncio.sleep(0.08)
+        return "second"
+
+    context = AgentExecutionContext(
+        execution_id="action-runtime-action-progress",
+        lineage={"task_id": "issue-intake", "step_id": "execute"},
+        limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 0.12},
+    )
+    handler = runtime.resolve_execution_handler()
+
+    with bind_runtime_context(agent_execution_context=context):
+        results = await handler(
+            {"settings": agent.settings},
+            {
+                "action_calls": [
+                    {"action_id": "slow_first_action", "action_input": {}},
+                    {"action_id": "slow_second_action", "action_input": {}},
+                ],
+                "concurrency": 1,
+                "planning_protocol": "structured_plan",
+            },
+        )
+
+    assert [record["result"] for record in results] == ["first", "second"]
+    completed_actions = [
+        event
+        for event in context.stage_events
+        if event.get("event_type") == "action.completed"
+    ]
+    assert [event["meta"]["action_id"] for event in completed_actions] == [
+        "slow_first_action",
+        "slow_second_action",
+    ]
 
 
 @pytest.mark.asyncio
@@ -538,6 +738,109 @@ async def test_model_response_result_materialization_idle_timeout():
 
     assert raised.value.stage == "final_response_text_materialization"
     assert raised.value.status == "stalled"
+
+
+@pytest.mark.asyncio
+async def test_model_response_materialization_refreshes_progress_clock_without_notify():
+    class FastResponseParser:
+        def __init__(self, *_args, **_kwargs):
+            self.full_result_data = {}
+
+        async def async_get_text(self):
+            await asyncio.sleep(0)
+            return "ready"
+
+        async def async_get_data(self, *, type="parsed"):
+            await asyncio.sleep(0)
+            return {"type": type}
+
+        async def async_get_data_object(self):
+            await asyncio.sleep(0)
+            return None
+
+        async def async_get_meta(self):
+            await asyncio.sleep(0)
+            return {}
+
+        def drain_runtime_observations(self):
+            return []
+
+    class MinimalPromptGenerator:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def to_text(self, *_args, **_kwargs):
+            return ""
+
+        def to_messages(self, *_args, **_kwargs):
+            return []
+
+        def to_prompt_object(self, *_args, **_kwargs):
+            return {}
+
+        def to_output_model(self, *_args, **_kwargs):
+            return None
+
+        def to_serializable_prompt_data(self, *_args, **_kwargs):
+            return {}
+
+        def to_json_prompt(self, *_args, **_kwargs):
+            return "{}"
+
+        def to_yaml_prompt(self, *_args, **_kwargs):
+            return ""
+
+    class FakePluginManager:
+        def get_plugin(self, category, *_args):
+            if category == "PromptGenerator":
+                return MinimalPromptGenerator
+            return FastResponseParser
+
+    async def empty_response_generator():
+        if False:
+            yield ("done", "")
+
+    settings = Settings({"plugins": {"ResponseParser": {"activate": "fast"}}})
+    result = ModelRequestResult(
+        "progress-agent",
+        "response-progress",
+        Prompt(cast(Any, FakePluginManager()), settings),
+        empty_response_generator(),
+        cast(Any, FakePluginManager()),
+        settings,
+        ExtensionHandlers(),
+    )
+    context = AgentExecutionContext(
+        execution_id="materialization-progress",
+        lineage={"task_id": "task", "step_id": "execute"},
+        limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 90},
+    )
+    notified_events: list[dict[str, Any]] = []
+    context.set_progress_callback(lambda event: notified_events.append(event))
+    context.record_progress(stage="action_loop_close", status="completed", event_type="action_loop_close.completed")
+
+    with bind_runtime_context(agent_execution_context=context):
+        text = await result.async_get_text()
+
+    assert text == "ready"
+    progress = context.last_progress_event
+    assert progress is not None
+    assert progress["stage"] == "final_response_text_materialization"
+    assert progress["status"] == "completed"
+    assert progress["event_type"] == "final_response_text_materialization.completed"
+    assert progress["response_id"] == "response-progress"
+    assert progress["meta"]["agent_name"] == "progress-agent"
+    assert notified_events == [
+        {
+            "stage": "action_loop_close",
+            "status": "completed",
+            "event_type": "action_loop_close.completed",
+            "run_id": None,
+            "response_id": None,
+            "monotonic_time": notified_events[0]["monotonic_time"],
+            "meta": {},
+        }
+    ]
 
 
 @pytest.mark.asyncio

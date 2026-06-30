@@ -17,6 +17,10 @@ from __future__ import annotations
 
 from .TaskShared import *
 
+# A bounded AgentTask step should hand inconclusive action evidence back to the
+# task planner quickly; broader retry strategy belongs to the next task step.
+_AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS = 2
+
 
 class AgentTaskRuntimeMixin(AgentTaskMixinBase):
     async def async_run(self) -> Any:
@@ -412,6 +416,42 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
 
     def _child_execution_limits(self) -> dict[str, Any]:
         return dict(self.limits)
+
+    def _task_action_loop_max_rounds(self) -> int | None:
+        configured: Any = _AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS
+        if "action_loop_max_rounds" in self.options:
+            configured = self.options.get("action_loop_max_rounds")
+        agent_task_options = self.options.get("agent_task")
+        if isinstance(agent_task_options, dict) and "action_loop_max_rounds" in agent_task_options:
+            configured = agent_task_options.get("action_loop_max_rounds")
+        if configured is None:
+            return None
+        if isinstance(configured, bool):
+            return _AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS
+        if isinstance(configured, int) and configured >= 0:
+            return configured
+        return _AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS
+
+    def _apply_child_execution_action_loop_guard(self, execution: Any) -> Any:
+        max_rounds = self._task_action_loop_max_rounds()
+        if max_rounds is None:
+            return execution
+        request = getattr(execution, "request", None)
+        settings = getattr(request, "settings", None)
+        set_setting = getattr(settings, "set", None)
+        if callable(set_setting):
+            set_setting("action.loop.max_rounds", max_rounds)
+            set_setting("tool.loop.max_rounds", max_rounds)
+        return execution
+
+    def _disable_child_execution_action_loop(self, execution: Any) -> Any:
+        request = getattr(execution, "request", None)
+        settings = getattr(request, "settings", None)
+        set_setting = getattr(settings, "set", None)
+        if callable(set_setting):
+            set_setting("action.loop.enabled", False)
+            set_setting("tool.loop.enabled", False)
+        return execution
 
     def _child_execution_options(self) -> dict[str, Any]:
         options = dict(self.options)

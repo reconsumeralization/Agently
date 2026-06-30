@@ -426,6 +426,80 @@ def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
     assert view["status_counts"]["pending"] == 1
 
 
+def test_task_board_evidence_view_preserves_action_result_ledger_items():
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+
+    revision = _revision()
+    action_ledger = AgentTask._evidence_ledger_from_execution_meta(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "market_quotes",
+                        "status": "partial_success",
+                        "action_call_id": "call-quotes",
+                        "raw": {
+                            "kwargs": {"symbols": ["NVDA", "AMD", "AVGO"]},
+                            "data": {
+                                "quotes": [
+                                    {"symbol": "NVDA", "last": "194.97"},
+                                    {"symbol": "AMD", "last": "539.49"},
+                                ]
+                            },
+                        },
+                    }
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+    next_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision="rev-0",
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "collect",
+                        "status": "completed",
+                        "preview": {"answer": "Collected quote facts."},
+                        "metadata": {"evidence_ledger": action_ledger},
+                    },
+                },
+            ),
+        ),
+    )
+
+    view = build_task_board_evidence_view(next_revision).to_dict()
+    board_ledger = evidence_ledger_view(view)
+    action_items = [
+        item
+        for item in board_ledger["items"]
+        if item.get("kind") == "agent_task.action.result"
+        and item.get("action_id") == "market_quotes"
+    ]
+
+    assert len(action_items) == 1
+    assert action_items[0]["body_state"] == "bounded"
+    assert "NVDA" in str(action_items[0].get("body") or action_items[0].get("preview"))
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "TaskBoard quote facts were collected.",
+                "evidence_ids": ["action_result_market_quotes"],
+                "support_type": "content",
+            }
+        ],
+        board_ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == [action_items[0]["id"]]
+
+
 def test_task_board_evidence_view_rejects_unknown_card_scope():
     with pytest.raises(ValueError, match="unknown card ids"):
         build_task_board_evidence_view(_revision(), card_ids=["missing"])
@@ -444,6 +518,314 @@ def test_taskboard_agent_card_status_blocks_on_invalid_evidence_use():
     )
 
     assert status == "blocked"
+
+
+def test_taskboard_card_evidence_repair_rebinds_unique_action_result_labels():
+    from agently.core.application.AgentTask.EvidenceLedger import collect_evidence_use, validate_evidence_use
+
+    ledger = AgentTask._evidence_ledger_from_execution_meta(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "market_quotes",
+                        "status": "partial_success",
+                        "action_call_id": "call-quotes",
+                        "raw": {
+                            "data": {
+                                "quotes": [
+                                    {"symbol": "NVDA", "last": "196.8464"},
+                                    {"symbol": "AMD", "last": "543.17"},
+                                    {"symbol": "AVGO", "last": "377.26"},
+                                ],
+                                "history_status": "stooq_csv_failed_404",
+                            },
+                        },
+                    }
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+    card_output = {
+        "status": "completed",
+        "answer": "Quote snapshot gathered.",
+        "evidence_use": [
+            {
+                "claim": "NVDA last sale price $196.8464.",
+                "evidence_ids": ["Action result NVDA"],
+                "support_type": "content",
+            },
+            {
+                "claim": "One-year pricing history from Stooq CSV is not available due to HTTP 404.",
+                "evidence_ids": ["Stooq CSV failure"],
+                "support_type": "unavailability",
+            },
+        ],
+    }
+    guard = validate_evidence_use(collect_evidence_use(card_output), ledger)
+    repaired_output, repaired_guard, diagnostic = AgentTask._repair_taskboard_card_evidence_use(
+        card_output,
+        guard,
+        ledger,
+    )
+
+    action_id = next(
+        item["id"]
+        for item in ledger["items"]
+        if item.get("kind") == "agent_task.action.result"
+        and item.get("action_id") == "market_quotes"
+    )
+    assert diagnostic is not None
+    assert repaired_guard["valid"] is True
+    assert [item["evidence_ids"] for item in repaired_output["evidence_use"]] == [[action_id], [action_id]]
+
+
+def test_taskboard_card_evidence_repair_prefers_direct_artifact_ref_alias():
+    from agently.core.application.AgentTask.EvidenceLedger import (
+        collect_evidence_use,
+        evidence_ledger_view,
+        validate_evidence_use,
+    )
+
+    artifact_id = "act_art_guidance"
+    artifact_ref_id = "artifact_ref:taskboard:skill_guidance:attempt:1:act_art_guidance:artifact_ref:5"
+    action_result_id = "agent_task_action_result:read_skill_guidance:call-guidance"
+    ledger = evidence_ledger_view(
+        {
+            "evidence_items": [
+                {
+                    "id": artifact_ref_id,
+                    "kind": "artifact_ref",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "artifact_id": artifact_id,
+                },
+                {
+                    "id": action_result_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "read_skill_guidance",
+                    "aliases": ["read_skill_guidance", artifact_id],
+                },
+            ]
+        }
+    )
+    card_output = {
+        "status": "completed",
+        "evidence_use": [
+            {
+                "claim": "Skill guidance was read and is available as an artifact ref.",
+                "evidence_ids": [artifact_id],
+                "support_type": "content",
+            }
+        ],
+    }
+    guard = validate_evidence_use(collect_evidence_use(card_output), ledger)
+    repaired_output, repaired_guard, diagnostic = AgentTask._repair_taskboard_card_evidence_use(
+        card_output,
+        guard,
+        ledger,
+    )
+
+    assert diagnostic is not None
+    assert repaired_guard["valid"] is True
+    assert repaired_output["evidence_use"][0]["evidence_ids"] == [artifact_ref_id]
+
+
+def test_taskboard_card_evidence_repair_uses_unique_workspace_readback_for_numeric_ids():
+    from agently.core.application.AgentTask.EvidenceLedger import (
+        collect_evidence_use,
+        evidence_ledger_view,
+        validate_evidence_use,
+    )
+
+    readback_id = "workspace_artifact_readback:card:working/taskboard/recent_news/final.md"
+    ledger = evidence_ledger_view(
+        {
+            "evidence_items": [
+                {
+                    "id": readback_id,
+                    "kind": "workspace_artifact.readback",
+                    "status": "ok",
+                    "body_state": "truncated",
+                    "path": "working/taskboard/recent_news/final.md",
+                }
+            ]
+        }
+    )
+    card_output = {
+        "status": "completed",
+        "evidence_use": [
+            {
+                "claim": "NVIDIA introduced Halos for Robotics.",
+                "evidence_ids": ["0"],
+                "support_type": "content",
+            },
+            {
+                "claim": "AMD received a late-June analyst target upgrade.",
+                "evidence_ids": ["1"],
+                "support_type": "content",
+            },
+        ],
+    }
+    guard = validate_evidence_use(collect_evidence_use(card_output), ledger)
+    repaired_output, repaired_guard, diagnostic = AgentTask._repair_taskboard_card_evidence_use(
+        card_output,
+        guard,
+        ledger,
+    )
+
+    assert diagnostic is not None
+    assert repaired_guard["valid"] is True
+    assert [item["evidence_ids"] for item in repaired_output["evidence_use"]] == [[readback_id], [readback_id]]
+
+
+def test_taskboard_card_evidence_repair_uses_unique_action_result_body_snippets():
+    from agently.core.application.AgentTask.EvidenceLedger import (
+        collect_evidence_use,
+        evidence_ledger_view,
+        validate_evidence_use,
+    )
+
+    market_quote_id = "agent_task_action_result:market_quotes:call-quotes"
+    ledger = evidence_ledger_view(
+        {
+            "evidence_items": [
+                {
+                    "id": market_quote_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "market_quotes",
+                    "action_call_id": "call-quotes",
+                    "body": (
+                        '{"companies": [{"symbol": "NVDA", "last_sale_price": "$197.88", '
+                        '"net_change": "+2.91", "percentage_change": "+1.49%", '
+                        '"fallback_reason": "CSV request failed 404"}, '
+                        '{"symbol": "AMD", "last_sale_price": "$557.48", '
+                        '"net_change": "+17.99", "percentage_change": "+3.33%", '
+                        '"fallback_reason": "CSV request failed 404"}]}'
+                    ),
+                }
+            ]
+        }
+    )
+    card_output = {
+        "status": "completed",
+        "evidence_use": [
+            {
+                "claim": "NVDA last price $197.88 with +1.49% change.",
+                "evidence_ids": ["NVDA last_sale_price $197.88, net_change +2.91, percentage_change +1.49%"],
+                "support_type": "content",
+            },
+            {
+                "claim": "AMD quote used Nasdaq fallback after Stooq returned 404.",
+                "evidence_ids": ["AMD fallback_reason: CSV request failed 404"],
+                "support_type": "content",
+            },
+        ],
+    }
+    guard = validate_evidence_use(collect_evidence_use(card_output), ledger)
+    repaired_output, repaired_guard, diagnostic = AgentTask._repair_taskboard_card_evidence_use(
+        card_output,
+        guard,
+        ledger,
+    )
+
+    assert diagnostic is not None
+    assert repaired_guard["valid"] is True
+    assert [item["evidence_ids"] for item in repaired_output["evidence_use"]] == [[market_quote_id], [market_quote_id]]
+
+
+def test_taskboard_card_evidence_repair_uses_unique_search_result_titles():
+    from agently.core.application.AgentTask.EvidenceLedger import (
+        collect_evidence_use,
+        evidence_ledger_view,
+        validate_evidence_use,
+    )
+
+    nvda_ref_id = "agent_task_action_result:web_search:call-nvda"
+    amd_ref_id = "agent_task_action_result:web_search:call-amd"
+    avgo_ref_id = "agent_task_action_result:web_search:call-avgo"
+    ledger = evidence_ledger_view(
+        {
+            "evidence_items": [
+                {
+                    "id": nvda_ref_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "web_search",
+                    "action_call_id": "call-nvda",
+                    "body": (
+                        "[{\"title\": \"Prediction: This Will Be Nvidia's Stock Price at the End of 2026\", "
+                        '"href": "https://finance.yahoo.com/markets/stocks/articles/prediction-nvidias-stock-price-end-065500179.html"}]'
+                    ),
+                },
+                {
+                    "id": amd_ref_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "web_search",
+                    "action_call_id": "call-amd",
+                    "body": (
+                        "[{\"title\": \"AMD Stock Is Crushing Nvidia's in 2026. Will That Continue?\", "
+                        '"href": "https://finance.yahoo.com/markets/stocks/articles/amd-stock-crushing-nvidias-2026-180500062.html"}]'
+                    ),
+                },
+                {
+                    "id": avgo_ref_id,
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "web_search",
+                    "action_call_id": "call-avgo",
+                    "body": (
+                        '[{"title": "Could This New Chip Be a Game Changer for Broadcom Stock?", '
+                        '"href": "https://finance.yahoo.com/markets/stocks/articles/could-chip-game-changer-broadcom-135000175.html"}]'
+                    ),
+                },
+            ]
+        }
+    )
+    card_output = {
+        "status": "completed",
+        "evidence_use": [
+            {
+                "claim": "AMD stock rose sharply in 2026.",
+                "evidence_ids": ["Search result: AMD Stock Is Crushing Nvidia's in 2026. Will That Continue?"],
+                "support_type": "content",
+            },
+            {
+                "claim": "NVIDIA has a 2026 price prediction article.",
+                "evidence_ids": ["Search result: Prediction: This Will Be Nvidia's Stock Price at the End of 2026"],
+                "support_type": "content",
+            },
+            {
+                "claim": "Broadcom has a recent custom chip article.",
+                "evidence_ids": ["Search result: Could This New Chip Be a Game Changer for Broadcom Stock?"],
+                "support_type": "content",
+            },
+        ],
+    }
+    guard = validate_evidence_use(collect_evidence_use(card_output), ledger)
+    repaired_output, repaired_guard, diagnostic = AgentTask._repair_taskboard_card_evidence_use(
+        card_output,
+        guard,
+        ledger,
+    )
+
+    assert diagnostic is not None
+    assert repaired_guard["valid"] is True
+    assert [item["evidence_ids"] for item in repaired_output["evidence_use"]] == [
+        [amd_ref_id],
+        [nvda_ref_id],
+        [avgo_ref_id],
+    ]
 
 
 def test_evidence_binding_repair_uses_deterministic_unique_ref_alias():
@@ -482,6 +864,509 @@ def test_evidence_binding_repair_uses_deterministic_unique_ref_alias():
             "claim_index": 0,
             "claim": "The report uses the final file.",
             "evidence_ids": ["workspace_artifact.final_readback"],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_uses_unique_content_readback_for_invalid_id():
+    repaired = AgentTask._deterministic_evidence_binding_repair(
+        {
+            "normalized_evidence_use": [
+                {
+                    "claim": "The heading correction in final.md is present.",
+                    "evidence_ids": ["step_corrected_content_evidence"],
+                    "support_type": "content",
+                }
+            ],
+            "available_evidence_refs": [
+                {
+                    "id": "workspace_artifact_readback:agent_task.iteration.7.workspace_artifact:final.md",
+                    "kind": "workspace_artifact.targeted_readback",
+                    "path": "final.md",
+                    "body_state": "bounded",
+                    "status": "ok",
+                },
+                {
+                    "id": "workspace_artifact_acceptance_locator:agent_task.iteration.7.workspace_artifact:final.md:heading",
+                    "kind": "workspace_artifact.acceptance_locator",
+                    "path": "final.md",
+                    "body_state": "ref_only",
+                    "status": "ok",
+                },
+            ],
+            "diagnostics": [
+                {
+                    "code": "evidence_ledger.invalid_evidence_id",
+                    "blocking": True,
+                    "index": 0,
+                    "claim": "The heading correction in final.md is present.",
+                    "evidence_id": "step_corrected_content_evidence",
+                    "support_type": "content",
+                }
+            ],
+        }
+    )
+
+    assert repaired == [
+        {
+            "claim_index": 0,
+            "claim": "The heading correction in final.md is present.",
+            "evidence_ids": ["workspace_artifact_readback:agent_task.iteration.7.workspace_artifact:final.md"],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_replaces_ref_only_content_with_action_result_readback():
+    action_result_id = "agent_task_action_result:market_quotes:call-quotes"
+    repaired = AgentTask._deterministic_evidence_binding_repair(
+        {
+            "normalized_evidence_use": [
+                {
+                    "claim": "The quote lookup returned NVDA and AMD prices.",
+                    "evidence_ids": ["call-quotes"],
+                    "support_type": "content",
+                }
+            ],
+            "available_evidence_refs": [
+                {
+                    "id": "action_evidence:market_quotes:call-quotes",
+                    "kind": "action_evidence",
+                    "action_id": "market_quotes",
+                    "action_call_id": "call-quotes",
+                    "body_state": "ref_only",
+                    "status": "ok",
+                    "aliases": ["call-quotes", "action_result_market_quotes"],
+                },
+                {
+                    "id": action_result_id,
+                    "kind": "agent_task.action.result",
+                    "action_id": "market_quotes",
+                    "action_call_id": "call-quotes",
+                    "body_state": "bounded",
+                    "status": "ok",
+                    "aliases": ["call-quotes", "action_result_market_quotes"],
+                    "body": "{\"quotes\": [{\"symbol\": \"NVDA\"}, {\"symbol\": \"AMD\"}]}",
+                },
+            ],
+            "diagnostics": [
+                {
+                    "code": "evidence_ledger.ref_only_item_used_as_content_support",
+                    "blocking": True,
+                    "index": 0,
+                    "claim": "The quote lookup returned NVDA and AMD prices.",
+                    "evidence_id": "call-quotes",
+                    "support_type": "content",
+                }
+            ],
+        }
+    )
+
+    assert repaired == [
+        {
+            "claim_index": 0,
+            "claim": "The quote lookup returned NVDA and AMD prices.",
+            "evidence_ids": [action_result_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_maps_workspace_readback_section_label_to_latest_readback():
+    latest_readback_id = (
+        "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair-3.continue.workspace_artifact:final.md"
+    )
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "The final brief includes the non-investment-advice statement.",
+                "evidence_ids": [
+                    "workspace_artifact_readback:final-verification-repair-3.continue:final.md:non-investment-advice-section"
+                ],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair.workspace_artifact:final.md",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "path": "final.md",
+            },
+            {
+                "id": latest_readback_id,
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "path": "final.md",
+            },
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "The final brief includes the non-investment-advice statement.",
+                "evidence_id": (
+                    "workspace_artifact_readback:final-verification-repair-3.continue:final.md:non-investment-advice-section"
+                ),
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair.workspace_artifact:final.md",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "path": "final.md",
+                "body": "## Non-Investment-Advice Statement\nThis brief is for informational purposes only.",
+            },
+            {
+                "id": latest_readback_id,
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "path": "final.md",
+                "body": "## Non-Investment-Advice Statement\nThis brief is for informational purposes only.",
+            },
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "The final brief includes the non-investment-advice statement.",
+            "evidence_ids": [latest_readback_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readback():
+    targeted_readback_id = (
+        "workspace_artifact_targeted_readback:final.md:acceptance_locator_search:Non-Investment-Advice_Statement"
+    )
+    source_locator_id = (
+        "workspace_artifact_acceptance_locator:agent_task.taskboard.card.final-verification-repair.workspace_artifact"
+        ":final.md:non-investment-advice:Non-Investment-Advice_Statement"
+    )
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "Non-investment-advice statement",
+                "evidence_ids": ["artifact_locator:16"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": source_locator_id,
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+                "path": "final.md",
+                "criterion_id": "non-investment-advice",
+                "heading": "Non-Investment-Advice Statement",
+            },
+            {
+                "id": targeted_readback_id,
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+            },
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "Non-investment-advice statement",
+                "evidence_id": "artifact_locator:16",
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": source_locator_id,
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+                "path": "final.md",
+                "criterion_id": "non-investment-advice",
+                "heading": "Non-Investment-Advice Statement",
+            },
+            {
+                "id": targeted_readback_id,
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+                "aliases": [source_locator_id, "Non-Investment-Advice Statement", "non-investment-advice-statement"],
+                "body": "## Non-Investment-Advice Statement\nThis brief is for informational purposes only.",
+            },
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "Non-investment-advice statement",
+            "evidence_ids": [targeted_readback_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_maps_file_row_label_to_matching_read_file_result():
+    read_file_id = "agent_task_action_result:read_file:read-quotes-summary"
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "AMD last sale price $565.70 as of Jun 30, 2026 11:23 AM ET",
+                "evidence_ids": ["quotes_summary.md table row for AMD"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": "agent_task_action_result:market_quotes:quotes",
+                "kind": "agent_task.action.result",
+                "action_id": "market_quotes",
+                "status": "ok",
+                "body_state": "bounded",
+            },
+            {
+                "id": read_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "quotes_summary.md",
+                "aliases": ["quotes_summary.md"],
+                "status": "ok",
+                "body_state": "bounded",
+            },
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "AMD last sale price $565.70 as of Jun 30, 2026 11:23 AM ET",
+                "evidence_id": "quotes_summary.md table row for AMD",
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": "agent_task_action_result:market_quotes:quotes",
+                "kind": "agent_task.action.result",
+                "action_id": "market_quotes",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "{\"ticker\": \"AMD\", \"last_sale_price\": \"$565.70\"}",
+            },
+            {
+                "id": read_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "quotes_summary.md",
+                "aliases": ["quotes_summary.md"],
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "| AMD | $565.70 | +26.21 | +4.86% | Jun 30, 2026 11:23 AM ET |",
+            },
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "AMD last sale price $565.70 as of Jun 30, 2026 11:23 AM ET",
+            "evidence_ids": [read_file_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_maps_file_section_unavailability_to_content_readback():
+    read_file_id = "agent_task_action_result:read_file:read-quotes-summary"
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "High, low, open, volume, and one-year historical data are not available (Stooq CSV 404 error)",
+                "evidence_ids": ["quotes_summary.md 'Missing Data' section"],
+                "support_type": "unavailability",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": read_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "quotes_summary.md",
+                "aliases": ["quotes_summary.md"],
+                "status": "ok",
+                "body_state": "bounded",
+            }
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "High, low, open, volume, and one-year historical data are not available (Stooq CSV 404 error)",
+                "evidence_id": "quotes_summary.md 'Missing Data' section",
+                "support_type": "unavailability",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": read_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "quotes_summary.md",
+                "aliases": ["quotes_summary.md"],
+                "status": "ok",
+                "body_state": "bounded",
+                "body": (
+                    "## Missing Data\n"
+                    "High, low, open, volume, and one-year historical data are not available "
+                    "because the Stooq CSV endpoint returned a 404 error."
+                ),
+            }
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "High, low, open, volume, and one-year historical data are not available (Stooq CSV 404 error)",
+            "evidence_ids": [read_file_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_refuses_cross_file_body_match_for_file_locator():
+    # A file-locator reference names report.md, but the only ref whose body happens to
+    # contain the claim text is a *different* file (data.csv). Body-text fallback must
+    # not cross files: with no path/anchor agreement the locator stays unbound rather
+    # than silently binding the claim to the wrong file's evidence.
+    other_file_id = "agent_task_action_result:read_file:read-data-csv"
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "project-a throughput is 42 units",
+                "evidence_ids": ["report.md table row for project-a"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": other_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "data.csv",
+                "aliases": ["data.csv"],
+                "status": "ok",
+                "body_state": "bounded",
+            }
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "project-a throughput is 42 units",
+                "evidence_id": "report.md table row for project-a",
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": other_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "data.csv",
+                "aliases": ["data.csv"],
+                "status": "ok",
+                "body_state": "bounded",
+                # body coincidentally contains the claim text, but this is data.csv.
+                "body": "project-a throughput is 42 units (raw export row)",
+            }
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == []
+
+
+def test_evidence_binding_repair_attempt_gate_only_limits_model_repair():
+    write_result_id = "agent_task_action_result:write_file:act_call_write"
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "final.md content was written through write_file.",
+                "evidence_ids": ["agent_task_action_result:write_file:act_call_read"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": "agent_task_action_result:read_file:act_call_read",
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "action_call_id": "act_call_read",
+                "path": "final.md",
+                "body_state": "truncated",
+                "status": "ok",
+                "aliases": ["read_file", "act_call_read", "final.md"],
+            },
+            {
+                "id": write_result_id,
+                "kind": "agent_task.action.result",
+                "action_id": "write_file",
+                "action_call_id": "act_call_write",
+                "path": "final.md",
+                "body_state": "bounded",
+                "status": "ok",
+                "aliases": ["write_file", "act_call_write", "final.md"],
+            },
+        ],
+        "blocking_count": 1,
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "final.md content was written through write_file.",
+                "evidence_id": "agent_task_action_result:write_file:act_call_read",
+                "support_type": "content",
+            }
+        ],
+    }
+    task = AgentTask.__new__(AgentTask)
+    task.diagnostics = {"evidence_binding_repair_attempt_count": 2}
+
+    assert task._can_attempt_model_evidence_binding_repair() is False
+    assert task._should_attempt_evidence_binding_repair(guard) is True
+    assert AgentTask._deterministic_evidence_binding_repair(guard) == [
+        {
+            "claim_index": 0,
+            "claim": "final.md content was written through write_file.",
+            "evidence_ids": [write_result_id],
             "support_type": "content",
         }
     ]

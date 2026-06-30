@@ -392,6 +392,9 @@ class Search:
                         **self._extra_options,
                     )
                 except Exception as error:
+                    if self._is_no_results_error(error):
+                        empty_backends.append(backend)
+                        break
                     retryable = self._is_transient_error(error)
                     errors.append(
                         {
@@ -442,14 +445,50 @@ class Search:
                             "backend": backend,
                             "attempted_backends": candidates,
                             "max_attempts": self.max_attempts,
-                            "failed_backends": [item["backend"] for item in errors],
+                            "failed_backends": list(dict.fromkeys(item["backend"] for item in errors)),
                             "empty_backends": empty_backends,
                         },
                     }
                 empty_backends.append(backend)
                 break
-        if errors and all(self._is_no_results_message(item["message"]) for item in errors):
-            errors = []
+        if errors and empty_backends:
+            return {
+                "ok": True,
+                "success": True,
+                "status": "partial_success",
+                "data": [],
+                "result": [],
+                "diagnostics": [
+                    *[
+                        {
+                            "code": "search_backend_failed",
+                            "backend": item["backend"],
+                            "attempt_index": int(item.get("attempt_index", "0")),
+                            "retryable": item.get("retryable") == "True",
+                            "error_type": item["type"],
+                            "message": item["message"],
+                        }
+                        for item in errors
+                    ],
+                    *[
+                        {
+                            "code": "search_backend_empty",
+                            "backend": backend,
+                            "message": "Backend returned no parsed results.",
+                        }
+                        for backend in empty_backends
+                    ],
+                ],
+                "meta": {
+                    "provider": "ddgs",
+                    "category": category,
+                    "backend": None,
+                    "attempted_backends": candidates,
+                    "max_attempts": self.max_attempts,
+                    "failed_backends": list(dict.fromkeys(item["backend"] for item in errors)),
+                    "empty_backends": empty_backends,
+                },
+            }
         if errors:
             raise RuntimeError(
                 "Search failed after trying backends: "

@@ -555,6 +555,108 @@ class AgentlyResponseParser(ResponseParser):
             max_incomplete_parse_chars=max_chars,
         )
 
+    @staticmethod
+    def _streaming_path_parts(path: str) -> list[str | int]:
+        if not path or path.startswith("$"):
+            return []
+        parts: list[str | int] = []
+        buffer = ""
+        index = 0
+        while index < len(path):
+            char = path[index]
+            if char == ".":
+                if buffer:
+                    parts.append(buffer)
+                    buffer = ""
+                index += 1
+                continue
+            if char == "[":
+                if buffer:
+                    parts.append(buffer)
+                    buffer = ""
+                end = path.find("]", index)
+                if end < 0:
+                    return []
+                raw_index = path[index + 1 : end]
+                if not raw_index.isdigit():
+                    return []
+                parts.append(int(raw_index))
+                index = end + 1
+                continue
+            buffer += char
+            index += 1
+        if buffer:
+            parts.append(buffer)
+        return parts
+
+    @staticmethod
+    def _streaming_child_container(next_part: str | int) -> list[Any] | dict[str, Any]:
+        return [] if isinstance(next_part, int) else {}
+
+    @classmethod
+    def _set_streaming_snapshot_path(cls, root: dict[str, Any], path: str, value: Any) -> None:
+        parts = cls._streaming_path_parts(path)
+        if not parts:
+            return
+        current: Any = root
+        for index, part in enumerate(parts):
+            is_last = index == len(parts) - 1
+            next_part = parts[index + 1] if not is_last else None
+            if isinstance(part, int):
+                if not isinstance(current, list):
+                    return
+                while len(current) <= part:
+                    current.append(None)
+                if is_last:
+                    current[part] = value
+                    return
+                child = current[part]
+                if not isinstance(child, (dict, list)):
+                    child = cls._streaming_child_container(cast(str | int, next_part))
+                    current[part] = child
+                current = child
+                continue
+            if not isinstance(current, dict):
+                return
+            if is_last:
+                current[part] = value
+                return
+            child = current.get(part)
+            if not isinstance(child, (dict, list)):
+                child = cls._streaming_child_container(cast(str | int, next_part))
+                current[part] = child
+            current = child
+
+    def _record_streaming_snapshot(self, streaming_data: StreamingData) -> None:
+        if not streaming_data.is_complete or streaming_data.path.startswith("$"):
+            return
+        snapshot = self.full_result_data.get("parsed_result")
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+            self.full_result_data["parsed_result"] = snapshot
+        if streaming_data.full_data not in (None, "", [], {}):
+            self.full_result_data["parsed_result"] = DataFormatter.sanitize(streaming_data.full_data)
+        else:
+            self._set_streaming_snapshot_path(
+                snapshot,
+                streaming_data.path,
+                DataFormatter.sanitize(streaming_data.value),
+            )
+        parsed_result = self.full_result_data.get("parsed_result")
+        self.full_result_data["result_object"] = self._build_result_object(parsed_result)
+        self.full_result_data["extra"]["streaming_snapshot"] = True
+        self.full_result_data["extra"]["parse_success"] = parsed_result is not None
+
+    def _prepare_streaming_data_for_yield(self, streaming_data: StreamingData, path_style: str) -> StreamingData:
+        self._record_streaming_snapshot(streaming_data)
+        if path_style == "slash":
+            streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+        return streaming_data
+
+    async def async_close(self) -> None:
+        if self._response_consumer is not None:
+            await self._response_consumer.close()
+
     async def _ensure_consumer(self):
         if self._response_consumer is None:
             async with self._consumer_lock:
@@ -822,60 +924,70 @@ class AgentlyResponseParser(ResponseParser):
                         if streaming_json_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_json_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             if event == "tool_calls":
                                 yield StreamingData(path="$tool_calls", value=data)
                             elif event == "done":
                                 async for streaming_data in self._flush_streaming_json_events(streaming_json_parser):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                         if streaming_flat_markdown_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_flat_markdown_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             elif event == "done":
                                 async for streaming_data in streaming_flat_markdown_parser.flush():
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                         if streaming_hybrid_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_hybrid_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             elif event == "done":
                                 async for streaming_data in streaming_hybrid_parser.flush():
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                         if streaming_xml_field_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_xml_field_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             elif event == "done":
                                 async for streaming_data in streaming_xml_field_parser.flush():
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                         if streaming_yaml_literal_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_yaml_literal_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             elif event == "done":
                                 async for streaming_data in streaming_yaml_literal_parser.flush():
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                     case "original":
                         if event.startswith("original"):
                             yield data
@@ -1006,78 +1118,88 @@ class AgentlyResponseParser(ResponseParser):
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_json_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         if event == "tool_calls":
                             yield StreamingData(path="$tool_calls", value=data)
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 self._flush_streaming_json_events(streaming_json_parser)
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                     if streaming_flat_markdown_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_flat_markdown_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_flat_markdown_parser.flush()
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                     if streaming_hybrid_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_hybrid_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_hybrid_parser.flush()
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                     if streaming_xml_field_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_xml_field_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_xml_field_parser.flush()
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                     if streaming_yaml_literal_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_yaml_literal_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_yaml_literal_parser.flush()
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                 case "original":
                     if event.startswith("original"):
                         yield data

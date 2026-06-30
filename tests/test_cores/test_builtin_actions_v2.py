@@ -1164,6 +1164,37 @@ def test_search_package_treats_no_results_as_empty_success(monkeypatch):
     assert result.get("data") == []
 
 
+def test_search_package_treats_mixed_backend_failure_and_empty_as_partial_success(monkeypatch):
+    class FakeDDGS:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text(self, query: str, **kwargs):
+            backend = kwargs.get("backend")
+            if backend == "yahoo":
+                raise RuntimeError("tls handshake eof")
+            raise RuntimeError("No results found.")
+
+    class FakeDDGSModule:
+        DDGS = FakeDDGS
+
+    search_module = importlib.import_module("agently.builtins.actions.Search")
+    monkeypatch.setattr(search_module.LazyImport, "import_package", lambda *args, **kwargs: FakeDDGSModule)
+
+    agent = Agently.create_agent().use_actions(Search(backend="yahoo", search_fallback_backends=["google"]))
+
+    result = agent.action.execute_action("search", {"query": "Agently Moxin", "max_results": 2})
+
+    assert result.get("status") == "partial_success"
+    assert result.get("success") is True
+    assert result.get("ok") is True
+    assert result.get("data") == []
+    assert result.get("meta", {}).get("failed_backends") == ["yahoo"]
+    assert result.get("meta", {}).get("empty_backends") == ["google"]
+    diagnostic_codes = [item.get("code") for item in result.get("diagnostics", [])]
+    assert diagnostic_codes == ["search_backend_failed", "search_backend_failed", "search_backend_empty"]
+
+
 def test_search_action_executor_awaits_async_fallback_methods():
     agent = Agently.create_agent()
     search = Search(timeout=1)

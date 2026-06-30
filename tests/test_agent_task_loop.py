@@ -292,6 +292,78 @@ def test_acceptance_locator_matches_unicode_dash_heading_variants():
     assert required_locator["heading"] == "Implementation & Product Highlights"
 
 
+def test_acceptance_locator_matches_cjk_numeric_spacing_variants():
+    from agently.core.application.AgentTask.AcceptanceLocator import (
+        build_workspace_artifact_acceptance_locator_items,
+    )
+
+    items = build_workspace_artifact_acceptance_locator_items(
+        path="final.md",
+        source="test",
+        text=(
+            "# LMCC Mock Exam\n\n"
+            "### 第一大题：单选题（每题 3 分，共 60 分）\n\n"
+            "**第 1-10 题：基础概念**\n\n"
+            "题目内容。\n"
+        ),
+        acceptance_points=[
+            {
+                "criterion_id": "single_choice_heading",
+                "criterion": "The single-choice section heading is present.",
+                "expected_anchor": "### 第一大题：单选题（每题3分，共60分）",
+            },
+            {
+                "criterion_id": "question_range",
+                "criterion": "The first question range anchor is present.",
+                "expected_anchor": "第1-10题：基础概念",
+            },
+        ],
+    )
+
+    statuses = {item.get("criterion_id"): item.get("status") for item in items}
+    assert statuses == {
+        "single_choice_heading": "ok",
+        "question_range": "ok",
+    }
+
+
+def test_acceptance_locator_uses_manifest_outline_ordinal_for_heading_label_variants():
+    from agently.core.application.AgentTask.AcceptanceLocator import (
+        build_workspace_artifact_acceptance_locator_items,
+    )
+
+    items = build_workspace_artifact_acceptance_locator_items(
+        path="final.md",
+        source="test",
+        text=(
+            "# Final Report\n\n"
+            "## 1. Scope\n\n"
+            "Scope content.\n\n"
+            "## 2. Details\n\n"
+            "### Nested Detail A\n\n"
+            "Nested content.\n\n"
+            "### Nested Detail B\n\n"
+            "Details content.\n\n"
+            "## 3. Closing Boundary\n\n"
+            "Closing content.\n"
+        ),
+        manifest={
+            "section_outline": [
+                "scope",
+                "details",
+                "closing statement",
+            ]
+        },
+    )
+
+    locator = next(item for item in items if item.get("criterion_id") == "section_outline:2")
+    assert locator["status"] == "ok"
+    assert locator["requirement_level"] == "required"
+    assert locator["heading"] == "3. Closing Boundary"
+    assert locator["line_start"] == 17
+    assert locator["byte_offset"] < locator["byte_end"]
+
+
 def test_evidence_ledger_guard_reconciles_visible_aliases_to_canonical_ids():
     from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
 
@@ -500,6 +572,372 @@ def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
         and item.get("blocking") is True
         for item in guard["diagnostics"]
     )
+
+
+def test_evidence_binding_repair_resolves_missing_id_from_unique_claim_body():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "search.amd",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "action_id": "web_search",
+                "body": "AMD shares up 261% over past year and 132% YTD; hit 52-week high $564.76.",
+            },
+            {
+                "id": "search.avgo",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "action_id": "web_search",
+                "body": "AVGO approved a quarterly dividend.",
+            },
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "AMD shares up 261% over past year and 132% YTD; hit 52-week high $564.76",
+                "evidence_ids": [],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    repaired = AgentTask._deterministic_evidence_binding_repair(guard, ledger)
+
+    assert repaired == [
+        {
+            "claim_index": 0,
+            "claim": "AMD shares up 261% over past year and 132% YTD; hit 52-week high $564.76",
+            "evidence_ids": ["search.amd"],
+            "support_type": "content",
+        }
+    ]
+    merged = AgentTask._merge_repaired_evidence_use(guard["normalized_evidence_use"], repaired)
+    assert validate_evidence_use(merged, ledger)["valid"] is True
+
+
+def test_evidence_binding_repair_resolves_missing_unavailability_id_from_failed_action_body():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "browse.reuters.failed",
+                "kind": "agent_task.action.result",
+                "status": "failed",
+                "body_state": "bounded",
+                "action_id": "browse",
+                "body": (
+                    "Can not browse 'https://www.reuters.com/business/broadcom-tumbles-revenue-miss/'. "
+                    "Fallback failed: Page.goto net::ERR_CONNECTION_CLOSED. Error: curl exited 35."
+                ),
+            }
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "Reuters article browse returned error",
+                "evidence_ids": [],
+                "support_type": "unavailability",
+            }
+        ],
+        ledger,
+    )
+
+    repaired = AgentTask._deterministic_evidence_binding_repair(guard, ledger)
+
+    assert repaired == [
+        {
+            "claim_index": 0,
+            "claim": "Reuters article browse returned error",
+            "evidence_ids": ["browse.reuters.failed"],
+            "support_type": "unavailability",
+        }
+    ]
+    merged = AgentTask._merge_repaired_evidence_use(guard["normalized_evidence_use"], repaired)
+    assert validate_evidence_use(merged, ledger)["valid"] is True
+
+
+def test_evidence_binding_repair_leaves_missing_id_unresolved_when_claim_body_is_ambiguous():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "search.one",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "The source says the project risk is material.",
+            },
+            {
+                "id": "search.two",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "Another source says the project risk is material.",
+            },
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The project risk is material.",
+                "evidence_ids": [],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == []
+
+
+def test_evidence_ledger_view_reassigns_unique_cite_as_on_remerge():
+    # The cumulative ledger re-renders sub-ledger items that each carried their own
+    # e1..eN handle. The view must own cite_as and reassign unique handles so a single
+    # view never exposes duplicate cite_as (which would read as ambiguous aliases).
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+
+    merged = {
+        "evidence_items": [
+            {
+                "id": "iter1.read",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "cite_as": "e1",
+                "body": "report body",
+            },
+            {
+                "id": "iter2.read",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "data.csv",
+                "cite_as": "e1",
+                "body": "data body",
+            },
+            {
+                "id": "iter3.read",
+                "kind": "action_evidence",
+                "status": "ok",
+                "body_state": "bounded",
+                "cite_as": "e1",
+                "body": "action body",
+            },
+        ]
+    }
+
+    view = evidence_ledger_view(merged)
+    cite_as_values = [item["cite_as"] for item in view["items"]]
+    assert cite_as_values == ["e1", "e2", "e3"]
+    assert len(set(cite_as_values)) == 3
+
+
+def test_cite_as_handle_resolves_unambiguously_after_remerge():
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+
+    merged = {
+        "evidence_items": [
+            {"id": "iter1.read", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "report.md", "cite_as": "e1", "body": "a"},
+            {"id": "iter2.read", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "data.csv", "cite_as": "e1", "body": "b"},
+            {"id": "iter3.read", "kind": "action_evidence", "status": "ok", "body_state": "bounded", "cite_as": "e1", "body": "c"},
+        ]
+    }
+    view = evidence_ledger_view(merged)
+
+    guard = validate_evidence_use(
+        [{"claim": "The data file was read.", "evidence_ids": ["e2"], "support_type": "content"}],
+        view,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["iter2.read"]
+
+
+def test_evidence_guard_binds_composite_file_locator_to_matching_readback():
+    # A composite/locator reference ("<file> <sub-locator>") that exact-alias cannot
+    # match must bind to the readback whose path anchor it names -- and never another.
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "rb.report",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "body": "| project-a | 42 |",
+            },
+            {
+                "id": "rb.data",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "data.csv",
+                "body": "raw rows",
+            },
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "project-a throughput is 42",
+                "evidence_ids": ["report.md table row for project-a"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["rb.report"]
+    assert any(item["code"] == "evidence_ledger.alias_resolved" for item in guard["diagnostics"])
+
+
+def test_evidence_guard_narrows_composite_section_locator_by_heading():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "rb.report.summary",
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "heading": "Summary",
+                "body": "Summary content",
+            },
+            {
+                "id": "rb.report.risks",
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "heading": "Risks",
+                "body": "Risk content",
+            },
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The risks are enumerated.",
+                "evidence_ids": ["report.md Risks section"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["rb.report.risks"]
+
+
+def test_resolve_evidence_reference_reports_tiers():
+    from agently.core.application.AgentTask.EvidenceLedger import resolve_evidence_reference
+
+    ledger = {
+        "evidence_items": [
+            {"id": "rb.report", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "report.md", "body": "x"},
+            {"id": "rb.data", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "data.csv", "body": "y"},
+        ]
+    }
+
+    assert resolve_evidence_reference("rb.report", ledger)["status"] == "resolved"
+    anchor = resolve_evidence_reference("report.md table row for project-a", ledger)
+    assert anchor["status"] == "resolved"
+    assert anchor["id"] == "rb.report"
+    assert resolve_evidence_reference("some opaque handle that names nothing", ledger)["status"] == "unresolved"
+
+
+def test_resolve_evidence_reference_reports_ambiguous_basename():
+    from agently.core.application.AgentTask.EvidenceLedger import resolve_evidence_reference
+
+    ledger = {
+        "evidence_items": [
+            {"id": "docs.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "docs/README.md"},
+            {"id": "pkg.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "pkg/README.md"},
+        ]
+    }
+
+    resolution = resolve_evidence_reference("README.md", ledger)
+    assert resolution["status"] == "ambiguous"
+    assert set(resolution["candidates"]) == {"docs.readme", "pkg.readme"}
+
+
+def test_execution_meta_action_results_enter_canonical_evidence_ledger():
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "market_quotes",
+                    "status": "partial_success",
+                    "action_call_id": "call-quotes",
+                    "raw": {
+                        "kwargs": {"symbols": ["NVDA", "AMD", "AVGO"]},
+                        "data": {
+                            "quotes": [
+                                {"symbol": "NVDA", "last": "194.97", "as_of": "2026-06-29"},
+                                {"symbol": "AMD", "last": "539.49", "as_of": "2026-06-29"},
+                            ],
+                            "history_status": "unavailable",
+                        },
+                    },
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    ledger = AgentTask._evidence_ledger_from_execution_meta(execution_meta)
+    action_items = [
+        item
+        for item in ledger["items"]
+        if item.get("kind") == "agent_task.action.result"
+        and item.get("action_id") == "market_quotes"
+    ]
+
+    assert len(action_items) == 1
+    item = action_items[0]
+    assert item["status"] == "ok"
+    assert item["body_state"] == "bounded"
+    assert item["action_call_id"] == "call-quotes"
+    assert "action_result_market_quotes" in item["aliases"]
+    assert "NVDA" in json.dumps(item.get("body") or item.get("preview"), ensure_ascii=False)
+
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "NVDA quote data was retrieved.",
+                "evidence_ids": ["action_result_market_quotes"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == [item["id"]]
 
 
 def test_block_carrier_output_policy_selects_schema_and_body_transport():
@@ -1099,6 +1537,8 @@ def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():
     )
 
     assert "artifact_manifest" in schema
+    assert schema["artifact_manifest"][2] is False
+    assert schema["evidence"][2] is False
     assert "candidate_final_result" not in schema
     assert "artifact_markdown" not in schema
     assert "file_refs" not in schema
@@ -1318,6 +1758,24 @@ def test_flat_step_plan_infers_workspace_artifact_mode_from_required_deliverable
     assert plan["deliverable_mode_source"] == "required_workspace_deliverables"
     assert plan["required_workspace_deliverables"] == ["final.md"]
     assert plan["prefer_stream_draft"] is True
+
+
+def test_flat_step_plan_normalizes_expected_evidence_duplicate_prefix_alias():
+    task = AgentTask.__new__(AgentTask)
+    task.options = {}
+
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "write the final file",
+            "expected_expected_evidence": "final.md exists after the Workspace write action",
+            "rationale": "the previous step gathered the evidence",
+        }
+    )
+
+    assert plan["expected_evidence"] == "final.md exists after the Workspace write action"
+    assert "expected_expected_evidence" not in plan
+    assert plan["normalization_diagnostics"][0]["code"] == "agent_task.flat_plan.expected_evidence_alias"
 
 
 @pytest.mark.asyncio
@@ -2208,6 +2666,118 @@ async def test_agent_task_workspace_artifact_delivery_waits_for_remaining_work(t
 
 
 @pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_adopts_successful_action_written_file(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-action-adopt")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-action-adopt"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.success_criteria = ["The final artifact is available through trusted Workspace readback."]
+    task.options = {}
+
+    body = "# Existing Action Report\n\nThis file was written by a Workspace action before execution stalled.\n"
+    await workspace.write_file("final.md", body, append=False)
+    execution_meta = {
+        "status": "failed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_file",
+                    "status": "success",
+                    "result_preview": {
+                        "ok": True,
+                        "mode": "write",
+                        "path": "final.md",
+                        "file_refs": [{"path": "final.md", "role": "output"}],
+                    },
+                    "file_refs": [{"path": "final.md", "role": "output"}],
+                }
+            ]
+        },
+        "diagnostics": {
+            "errors": [
+                {
+                    "error_type": "RuntimeStageStallError",
+                    "message": "AgentExecution made no progress before idle deadline.",
+                    "stage": "action_loop_close",
+                }
+            ]
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {"path": "final.md"},
+            "remaining_work": ["Retry or replan after execution failure."],
+            "ready_for_final_verification": False,
+            "step_result": "",
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="agent_task.iteration.2.workspace_artifact",
+    )
+
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+    assert delivered["workspace_artifact_delivery"]["content_key"] == "action_file_ref"
+    assert delivered["workspace_artifact_delivery"]["readback"]["path"] == "final.md"
+    assert delivered["file_refs"][0]["path"] == "final.md"
+    assert delivered["file_refs"][0]["sha256"]
+    assert delivered["artifact_preview"].startswith("# Existing Action Report")
+    assert delivered["remaining_work"] == []
+    assert delivered["ready_for_final_verification"] is True
+    assert delivered["workspace_artifact_remaining_work_handoff"]["status"] == "handed_to_terminal_verification"
+    assert delivered["diagnostics"][-1]["code"] == "agent_task.workspace_artifact.action_file_adopted"
+    assert execution_meta["logs"]["artifact_refs"][0]["path"] == "final.md"
+    ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    assert any(item["kind"] == "workspace_artifact.readback" and item["path"] == "final.md" for item in ledger_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_does_not_adopt_missing_action_file(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-action-missing")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-action-missing"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.options = {}
+
+    execution_meta = {
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_file",
+                    "status": "success",
+                    "result_preview": {
+                        "ok": True,
+                        "mode": "write",
+                        "path": "final.md",
+                        "file_refs": [{"path": "final.md", "role": "output"}],
+                    },
+                }
+            ]
+        }
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {"path": "final.md"},
+            "remaining_work": ["Retry or replan after execution failure."],
+            "step_result": "",
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="agent_task.iteration.2.workspace_artifact",
+    )
+
+    assert delivered.get("file_refs") == []
+    assert delivered["remaining_work"] == ["Retry or replan after execution failure."]
+    assert "workspace_artifact_delivery" not in delivered
+    diagnostic_codes = [item["code"] for item in delivered["diagnostics"]]
+    assert "agent_task.workspace_artifact.action_file_readback_failed" in diagnostic_codes
+    assert "agent_task.workspace_artifact.awaiting_body" in diagnostic_codes
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_delivery_uses_full_markdown_body_from_evidence(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-evidence-body")
     task = AgentTask.__new__(AgentTask)
@@ -2985,6 +3555,71 @@ async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anch
 
 
 @pytest.mark.asyncio
+async def test_workspace_artifact_stream_draft_disables_action_loop(tmp_path, monkeypatch):
+    class WorkspaceArtifactDraftNoActionRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactDraftNoActionRequester"
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Write only the final Markdown artifact body for the AgentTask" in text:
+                yield "message", "# Draft Without Actions\n\nThe draft used existing evidence only.\n"
+                return
+            yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-draft-no-action-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="agent-task-workspace-artifact-draft-no-action-plugins",
+    )
+    plugin_manager.register("ModelRequester", WorkspaceArtifactDraftNoActionRequester, activate=True)
+    agent = Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="agent-task-workspace-artifact-draft-no-action",
+    )
+
+    def browse(query: str = "") -> str:
+        return f"unexpected browse: {query}"
+
+    agent.use_actions(browse, always=True)
+    calls = 0
+
+    async def fail_if_action_loop_runs(**kwargs: Any):
+        nonlocal calls
+        _ = kwargs
+        calls += 1
+        raise AssertionError("workspace artifact draft must not run the action loop")
+
+    monkeypatch.setattr(agent.action, "async_plan_and_execute", fail_if_action_loop_runs)
+
+    task = AgentTask(
+        agent,
+        task_id="workspace-artifact-draft-no-action",
+        goal="Write a Workspace artifact from existing evidence.",
+        success_criteria=["The final artifact is written without extra actions."],
+        workspace=tmp_path / "task-workspace",
+    )
+
+    delivery = await task._stream_workspace_artifact_draft(
+        path="final.md",
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_result={"artifact_manifest": {"path": "final.md"}},
+        execution_meta={"status": "completed", "logs": {"action_logs": [], "route_logs": {}}},
+        source="test.workspace_artifact_draft.no_action_loop",
+        context_pack=None,
+        iteration_index=1,
+    )
+
+    assert delivery is not None
+    assert delivery["status"] == "delivered"
+    assert calls == 0
+    assert agent.settings.get("action.loop.enabled", True) is True
+    readback = await task.workspace.read_file("final.md")
+    assert "Draft Without Actions" in readback["content"]
+
+
+@pytest.mark.asyncio
 async def test_workspace_artifact_stream_draft_receives_active_repair_context(tmp_path):
     class WorkspaceArtifactDraftRepairRequester(MockAgentTaskRequester):
         name = "WorkspaceArtifactDraftRepairRequester"
@@ -3126,6 +3761,116 @@ async def test_agent_create_task_exposes_scoped_workspace_readback_actions(tmp_p
     assert isinstance(data, dict)
     assert data.get("path") == "final.md"
     assert "Scoped Deliverable" in str(data.get("content") or "")
+
+
+@pytest.mark.asyncio
+async def test_agent_create_task_exposes_scoped_workspace_coding_actions(tmp_path):
+    task_id = "workspace-coding-task"
+    agent = _create_agent("agent-task-scoped-workspace-coding-actions")
+
+    execution = agent.create_task(
+        task_id=task_id,
+        goal="Create and repair a workspace deliverable.",
+        success_criteria=["final.md can be edited and read back."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+        options={
+            "agent_task": {
+                "enable_workspace_readback_actions": True,
+                "enable_workspace_coding_actions": True,
+            }
+        },
+    )
+
+    expected_actions = {
+        "list_files",
+        "read_file",
+        "search_files",
+        "glob_files",
+        "grep_files",
+        "write_file",
+        "edit_file",
+        "apply_patch",
+    }
+    assert expected_actions.issubset(set(execution.local_action_ids))
+
+    scoped_workspace = agent.workspace.with_scope_node(
+        "tasks",
+        task_id,
+        scope={"task_id": task_id},
+        search_scope={"task_id": task_id},
+    )
+    await scoped_workspace.write_file("final.md", "# Draft\nold wording\n")
+
+    read_result = await agent.action.async_execute_action("read_file", {"path": "final.md"})
+    assert read_result.get("status") == "success"
+    expected_sha = read_result.get("data", {}).get("sha256")
+
+    edit_result = await agent.action.async_execute_action(
+        "edit_file",
+        {
+            "path": "final.md",
+            "old_string": "old wording",
+            "new_string": "corrected wording",
+            "expected_sha256": expected_sha,
+        },
+    )
+    assert edit_result.get("status") == "success"
+
+    updated = await scoped_workspace.read_file("final.md")
+    assert "corrected wording" in str(updated.get("content") or "")
+
+
+def test_agent_task_child_execution_sets_task_local_action_loop_guard(tmp_path):
+    agent = _create_agent("agent-task-action-loop-guard").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Use actions inside a bounded task step.",
+        success_criteria=["The child action loop has a task-local safety guard."],
+        execution="flat",
+    )
+
+    execution = task._create_bounded_child_execution(
+        lineage={
+            "task_id": task.id,
+            "iteration_id": "iter-1",
+            "step_id": "execute",
+        }
+    )
+
+    assert agent.settings.get("action.loop.max_rounds") is None
+    assert execution.request.settings.get("action.loop.max_rounds") == 2
+    assert execution.request.settings.get("tool.loop.max_rounds") == 2
+
+
+def test_agent_task_child_execution_respects_explicit_action_loop_guard(tmp_path):
+    agent = _create_agent("agent-task-action-loop-explicit").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Use actions inside a bounded task step.",
+        success_criteria=["The child action loop honors explicit task options."],
+        execution="flat",
+        options={"agent_task": {"action_loop_max_rounds": 3}},
+    )
+    disabled_task = AgentTask(
+        agent,
+        goal="Use actions without task-local loop guard.",
+        success_criteria=["The explicit None option disables the task guard."],
+        execution="flat",
+        options={"agent_task": {"action_loop_max_rounds": None}},
+    )
+
+    execution = task._create_bounded_child_execution(
+        lineage={"task_id": task.id, "iteration_id": "iter-1", "step_id": "execute"}
+    )
+    disabled_execution = disabled_task._create_bounded_child_execution(
+        lineage={"task_id": disabled_task.id, "iteration_id": "iter-1", "step_id": "execute"}
+    )
+
+    assert execution.request.settings.get("action.loop.max_rounds") == 3
+    assert execution.request.settings.get("tool.loop.max_rounds") == 3
+    assert disabled_execution.request.settings.get("action.loop.max_rounds") is None
+    assert disabled_execution.request.settings.get("tool.loop.max_rounds") is None
 
 
 @pytest.mark.asyncio
@@ -5133,6 +5878,43 @@ def test_required_failed_read_action_still_blocks_execution_risk_guard(tmp_path)
     assert verification.get("non_blocking_failed_actions") in (None, [])
 
 
+def test_framework_action_loop_guard_diagnostic_does_not_force_execution_risk_guard(tmp_path):
+    agent = _create_agent("agent-task-action-loop-diagnostic").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a verified report.",
+        success_criteria=["The report is complete and grounded."],
+        execution="flat",
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The final report is complete.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "final.md",
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "action_ids": ["read_file"],
+            "failed_actions": [],
+            "blocked_actions": ["action_loop"],
+            "approval_required_actions": [],
+            "required_actions": [],
+        },
+    )
+
+    assert verification["is_complete"] is True
+    assert "execution_risk_actions_present" not in verification.get("guard_reasons", [])
+    assert verification["non_blocking_failed_actions"] == ["action_loop"]
+    assert "Unresolved execution risk actions" not in " ".join(verification.get("missing_criteria", []))
+
+
 def test_unknown_failed_action_still_blocks_execution_risk_guard(tmp_path):
     agent = _create_agent("agent-task-unsafe-action").use_workspace(tmp_path / "task-workspace")
     task = AgentTask(
@@ -6325,6 +7107,48 @@ def test_execution_log_summary_infers_action_success_from_route_history():
     assert summary["capability_evidence"]["actions"]["failed"] == ["read_file"]
 
 
+def test_execution_log_summary_treats_partial_success_search_as_succeeded_action():
+    from agently.core.application import AgentTask
+
+    summary = AgentTask._execution_log_summary(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "web_search",
+                        "status": "partial_success",
+                        "action_call_id": "call-search",
+                        "model_digest": {
+                            "result_preview": [
+                                {
+                                    "title": "Official release note",
+                                    "href": "https://example.test/release",
+                                    "body": "A successful backend returned useful source evidence.",
+                                }
+                            ],
+                            "result_preview_meta": {"truncated": False},
+                        },
+                        "diagnostics": [
+                            {
+                                "code": "search_backend_failed",
+                                "backend": "yahoo",
+                                "message": "transient backend failure",
+                            }
+                        ],
+                    }
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+
+    assert summary["failed_actions"] == []
+    assert summary["action_statuses"]["web_search"] == "partial_success"
+    assert summary["capability_evidence"]["actions"]["succeeded"] == ["web_search"]
+    assert summary["capability_evidence"]["actions"]["failed"] == []
+
+
 def test_execution_log_summary_includes_nested_action_result_previews():
     """AgentTask verifier evidence must include bounded Action observations
     produced inside the TriggerFlow/Blocks bounded-step execution wrapper."""
@@ -6469,6 +7293,75 @@ def test_cumulative_verifier_evidence_keeps_previous_iteration_action_previews(t
         ref["field"] == "selected_url" and ref["value"] == "https://example.test/specific"
         for ref in verifier_summary["source_refs"]
     )
+
+
+def test_cumulative_evidence_ledger_keeps_current_action_result_when_old_items_overflow(tmp_path):
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    agent = _create_agent("agent-task-current-evidence-priority").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Create a source-grounded report.",
+        success_criteria=["Current source evidence remains verifier-visible."],
+        execution="flat",
+    )
+    for index in range(150):
+        task.iterations.append(
+            {
+                "iteration": index + 1,
+                "execution_meta": {
+                    "status": "completed",
+                    "logs": {
+                        "action_logs": [
+                            {
+                                "action_id": "browse",
+                                "status": "success",
+                                "action_call_id": f"act_call_old_{index}",
+                                "model_digest": {
+                                    "result_preview": {
+                                        "selected_url": f"https://example.test/old/{index}",
+                                        "content": f"Old bounded evidence {index}",
+                                    },
+                                    "result_preview_meta": {"truncated": False},
+                                },
+                            }
+                        ],
+                        "route_logs": {},
+                    },
+                },
+            }
+        )
+
+    current_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "browse",
+                    "status": "success",
+                    "action_call_id": "act_call_current",
+                    "model_digest": {
+                        "result_preview": {
+                            "selected_url": "https://example.test/current",
+                            "content": "Current official syllabus evidence.",
+                        },
+                        "result_preview_meta": {"truncated": False},
+                    },
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    ledger = task._cumulative_evidence_ledger(current_meta)
+    current_id = "agent_task_action_result:browse:act_call_current"
+
+    assert current_id in {item.get("id") for item in ledger.get("items", [])}
+    guard = validate_evidence_use(
+        [{"claim": "Current syllabus evidence.", "evidence_ids": [current_id], "support_type": "content"}],
+        ledger,
+    )
+    assert guard["valid"] is True
 
 
 def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(tmp_path):

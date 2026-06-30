@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import PurePosixPath
 
 from .TaskShared import *
@@ -406,7 +408,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             grounding_guard.get("normalized_evidence_use"),
         )
         if self._should_attempt_evidence_binding_repair(grounding_guard):
-            repaired_evidence_use = self._deterministic_evidence_binding_repair(grounding_guard)
+            repaired_evidence_use = self._deterministic_evidence_binding_repair(grounding_guard, evidence_ledger)
             if repaired_evidence_use:
                 self.diagnostics.setdefault("evidence_binding_repair", []).append(
                     DataFormatter.sanitize(
@@ -416,11 +418,22 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                         }
                     )
                 )
-            else:
+            elif self._can_attempt_model_evidence_binding_repair():
                 repaired_evidence_use = await self._request_evidence_binding_repair(
                     grounding_guard,
                     evidence_ledger,
                     language_policy=language_policy,
+                )
+            else:
+                self.diagnostics.setdefault("evidence_binding_repair", []).append(
+                    DataFormatter.sanitize(
+                        {
+                            "source": "model_repair_attempt_gate",
+                            "skipped": True,
+                            "attempt_count": self.diagnostics.get("evidence_binding_repair_attempt_count"),
+                            "reason": "model evidence binding repair attempt limit reached; deterministic repair had no unique candidate",
+                        }
+                    )
                 )
             if repaired_evidence_use:
                 merged_evidence_use = self._merge_repaired_evidence_use(
@@ -725,6 +738,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "raw_status": raw_status,
             "body_state": "ref_only" if status == "failed" else ("truncated" if readback.get("truncated") else "bounded"),
             "path": path,
+            "aliases": cls._workspace_artifact_targeted_readback_aliases(
+                path=path,
+                query=query,
+                readback=readback,
+                artifact=artifact,
+            ),
             "source": "agent_task.workspace_artifact.targeted_readback",
             "provenance": {
                 "source": "agent_task.workspace_artifact.targeted_readback",
@@ -754,6 +773,41 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 }
             ]
         return DataFormatter.sanitize(item)
+
+    @classmethod
+    def _workspace_artifact_targeted_readback_aliases(
+        cls,
+        *,
+        path: str,
+        query: str,
+        readback: Mapping[str, Any],
+        artifact: Mapping[str, Any],
+    ) -> list[str]:
+        aliases: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+            slug = cls._workspace_artifact_readback_alias_slug(text)
+            if slug and slug not in aliases:
+                aliases.append(slug)
+
+        add(path)
+        add(PurePosixPath(path.replace("\\", "/")).name if path else "")
+        add(query)
+        add(readback.get("matched_query"))
+        add(readback.get("source_evidence_id"))
+        add(artifact.get("id"))
+        return aliases[:24]
+
+    @staticmethod
+    def _workspace_artifact_readback_alias_slug(value: str) -> str:
+        text = str(value or "").strip().lower().replace("_", " ")
+        if not text:
+            return ""
+        slug = "-".join(re.findall(r"[a-z0-9]+", text))
+        return slug[:160]
 
     async def _workspace_artifact_acceptance_locator_readback(
         self,
@@ -843,9 +897,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "evidence_ledger.invalid_evidence_id",
             "evidence_ledger.ambiguous_evidence_alias",
             "evidence_ledger.missing_evidence_id",
+            "evidence_ledger.ref_only_item_used_as_content_support",
         }
         if not blocking_codes.issubset(binding_codes):
             return False
+        return True
+
+    def _can_attempt_model_evidence_binding_repair(self) -> bool:
         try:
             count = int(self.diagnostics.get("evidence_binding_repair_attempt_count") or 0)
         except (TypeError, ValueError):
@@ -926,16 +984,26 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return [dict(DataFormatter.sanitize(item)) for item in evidence_use if isinstance(item, Mapping)]
 
     @classmethod
-    def _deterministic_evidence_binding_repair(cls, grounding_guard: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _deterministic_evidence_binding_repair(
+        cls,
+        grounding_guard: Mapping[str, Any],
+        evidence_ledger: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         current = grounding_guard.get("normalized_evidence_use", [])
         if not isinstance(current, Sequence) or isinstance(current, str | bytes | bytearray):
             return []
         current_items = [dict(item) for item in current if isinstance(item, Mapping)]
         if not current_items:
             return []
-        available_refs = cls._evidence_binding_available_ref_index(
+        available_ref_records = cls._evidence_binding_available_ref_records(
             grounding_guard.get("available_evidence_refs", [])
         )
+        if evidence_ledger is not None:
+            available_ref_records = cls._merge_evidence_binding_ref_records(
+                available_ref_records,
+                cls._evidence_binding_available_ref_records_from_ledger(evidence_ledger),
+            )
+        available_refs = cls._evidence_binding_available_ref_index(available_ref_records)
         diagnostics = cls._evidence_binding_repair_diagnostics(grounding_guard)
         repaired: list[dict[str, Any]] = []
         seen_indexes: set[int] = set()
@@ -948,21 +1016,78 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if claim_index < 0 or claim_index >= len(current_items) or claim_index in seen_indexes:
                 continue
             item = current_items[claim_index]
-            candidate_ids = cls._deterministic_evidence_id_candidates(diagnostic, available_refs)
+            candidate_ids = cls._deterministic_evidence_id_candidates(
+                diagnostic,
+                available_refs,
+                available_ref_records,
+            )
             if len(candidate_ids) != 1:
                 continue
+            support_type = cls._deterministic_repaired_support_type(
+                item,
+                diagnostic,
+                candidate_ids,
+                available_ref_records,
+            )
             repaired.append(
                 DataFormatter.sanitize(
                     {
                         "claim_index": claim_index,
                         "claim": item.get("claim", diagnostic.get("claim", "")),
                         "evidence_ids": candidate_ids,
-                        "support_type": item.get("support_type", diagnostic.get("support_type", "")),
+                        "support_type": support_type,
                     }
                 )
             )
             seen_indexes.add(claim_index)
         return repaired
+
+    @staticmethod
+    def _evidence_binding_available_ref_records(value: Any) -> list[dict[str, Any]]:
+        refs = value if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray) else []
+        return [dict(DataFormatter.sanitize(ref)) for ref in refs if isinstance(ref, Mapping)]
+
+    @staticmethod
+    def _evidence_binding_available_ref_records_from_ledger(value: Any) -> list[dict[str, Any]]:
+        ledger = value if isinstance(value, Mapping) and isinstance(value.get("items"), Sequence) else {}
+        if not ledger and value not in (None, "", [], {}):
+            ledger = evidence_ledger_view(value)
+        raw_items = ledger.get("items") if isinstance(ledger, Mapping) else ()
+        items = raw_items if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray) else ()
+        return [dict(DataFormatter.sanitize(item)) for item in items if isinstance(item, Mapping)]
+
+    @staticmethod
+    def _merge_evidence_binding_ref_records(
+        refs: Sequence[Mapping[str, Any]],
+        ledger_refs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged_by_id: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+
+        def merge(ref: Mapping[str, Any]) -> None:
+            evidence_id = str(ref.get("id") or "").strip()
+            if not evidence_id:
+                return
+            if evidence_id not in merged_by_id:
+                merged_by_id[evidence_id] = {}
+                order.append(evidence_id)
+            existing = merged_by_id[evidence_id]
+            aliases: list[str] = []
+            for source in (existing.get("aliases"), ref.get("aliases")):
+                if isinstance(source, Sequence) and not isinstance(source, str | bytes | bytearray):
+                    for alias in source:
+                        text = str(alias or "").strip()
+                        if text and text not in aliases:
+                            aliases.append(text)
+            existing.update(dict(ref))
+            if aliases:
+                existing["aliases"] = aliases[:24]
+
+        for ref in ledger_refs:
+            merge(ref)
+        for ref in refs:
+            merge(ref)
+        return [merged_by_id[evidence_id] for evidence_id in order]
 
     @staticmethod
     def _evidence_binding_available_ref_index(value: Any) -> dict[str, list[str]]:
@@ -1000,9 +1125,37 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return index
 
     @staticmethod
+    def _deterministic_repaired_support_type(
+        item: Mapping[str, Any],
+        diagnostic: Mapping[str, Any],
+        candidate_ids: Sequence[str],
+        available_refs: Sequence[Mapping[str, Any]],
+    ) -> str:
+        support_type = str(item.get("support_type", diagnostic.get("support_type", "")) or "").strip()
+        if support_type != "unavailability":
+            return support_type
+        refs_by_id = {
+            str(ref.get("id") or "").strip(): ref
+            for ref in available_refs
+            if isinstance(ref, Mapping) and str(ref.get("id") or "").strip()
+        }
+        candidate_refs = [refs_by_id.get(str(candidate_id or "").strip()) for candidate_id in candidate_ids]
+        if not candidate_refs or any(ref is None for ref in candidate_refs):
+            return support_type
+        content_backed = all(
+            str(ref.get("status") or "").strip().lower() == "ok"
+            and str(ref.get("body_state") or "").strip().lower() in {"full", "bounded", "truncated"}
+            for ref in candidate_refs
+            if isinstance(ref, Mapping)
+        )
+        return "content" if content_backed else support_type
+
+    @classmethod
     def _deterministic_evidence_id_candidates(
+        cls,
         diagnostic: Mapping[str, Any],
         available_ref_index: Mapping[str, list[str]],
+        available_refs: Sequence[Mapping[str, Any]] = (),
     ) -> list[str]:
         raw_candidates = diagnostic.get("candidates")
         if isinstance(raw_candidates, Sequence) and not isinstance(raw_candidates, str | bytes | bytearray):
@@ -1011,12 +1164,525 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if len(unique) == 1:
                 return unique
         evidence_id = str(diagnostic.get("evidence_id") or "").strip()
+        unique_matches: list[str] = []
+        requires_content_replacement = False
+        if evidence_id:
+            matches = [
+                str(item).strip()
+                for item in available_ref_index.get(evidence_id, [])
+                if str(item or "").strip()
+            ]
+            unique_matches = sorted(set(matches))
+            requires_content_replacement = (
+                str(diagnostic.get("code") or "") == "evidence_ledger.ref_only_item_used_as_content_support"
+                and str(diagnostic.get("support_type") or "").strip().lower() == "content"
+            )
+            if len(unique_matches) == 1 and not requires_content_replacement:
+                return unique_matches
+            artifact_ref_matches = cls._deterministic_artifact_ref_candidates(diagnostic, available_refs)
+            if len(artifact_ref_matches) == 1:
+                return artifact_ref_matches
+            action_result_matches = cls._deterministic_action_result_candidates(diagnostic, available_refs)
+            if len(action_result_matches) == 1:
+                return action_result_matches
+        body_text_matches = cls._deterministic_body_text_candidates(diagnostic, available_refs)
+        if len(body_text_matches) == 1:
+            return body_text_matches
+        if evidence_id:
+            readback_matches = cls._deterministic_content_readback_candidates(diagnostic, available_refs)
+            if len(readback_matches) == 1:
+                return readback_matches
+        if len(unique_matches) == 1:
+            ref_by_id = {
+                str(ref.get("id") or "").strip(): ref
+                for ref in available_refs
+                if isinstance(ref, Mapping) and str(ref.get("id") or "").strip()
+            }
+            match = ref_by_id.get(unique_matches[0], {})
+            if not requires_content_replacement or str(match.get("body_state") or "").strip().lower() != "ref_only":
+                return unique_matches
+        return []
+
+    @staticmethod
+    def _deterministic_artifact_ref_candidates(
+        diagnostic: Mapping[str, Any],
+        available_refs: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        evidence_id = str(diagnostic.get("evidence_id") or "").strip()
         if not evidence_id:
             return []
-        matches = [str(item).strip() for item in available_ref_index.get(evidence_id, []) if str(item or "").strip()]
-        unique_matches = sorted(set(matches))
-        if len(unique_matches) == 1:
+        raw_candidates = diagnostic.get("candidates")
+        candidates = {
+            str(candidate).strip()
+            for candidate in raw_candidates
+            if str(candidate or "").strip()
+        } if isinstance(raw_candidates, Sequence) and not isinstance(raw_candidates, str | bytes | bytearray) else set()
+        matches: list[str] = []
+        for ref in available_refs:
+            if not isinstance(ref, Mapping):
+                continue
+            ref_id = str(ref.get("id") or "").strip()
+            if not ref_id or candidates and ref_id not in candidates:
+                continue
+            status = str(ref.get("status") or "").strip().lower()
+            body_state = str(ref.get("body_state") or "").strip().lower()
+            kind = str(ref.get("kind") or "").strip().lower()
+            artifact_id = str(ref.get("artifact_id") or "").strip()
+            if status != "ok" or body_state not in {"full", "bounded", "truncated"}:
+                continue
+            if kind == "artifact_ref" and (artifact_id == evidence_id or evidence_id in ref_id):
+                matches.append(ref_id)
+        return sorted(set(matches))
+
+    @staticmethod
+    def _deterministic_action_result_candidates(
+        diagnostic: Mapping[str, Any],
+        available_refs: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        support_type = str(diagnostic.get("support_type") or "").strip().lower()
+        if support_type not in {"content", "unavailability"}:
+            return []
+        text = " ".join(str(diagnostic.get(key) or "") for key in ("claim", "evidence_id")).lower()
+        action_refs: list[Mapping[str, Any]] = []
+        for ref in available_refs:
+            if not isinstance(ref, Mapping):
+                continue
+            evidence_id = str(ref.get("id") or "").strip()
+            if not evidence_id:
+                continue
+            status = str(ref.get("status") or "").strip().lower()
+            body_state = str(ref.get("body_state") or "").strip().lower()
+            kind = str(ref.get("kind") or "").strip().lower()
+            if kind != "agent_task.action.result" or status != "ok":
+                continue
+            if body_state not in {"full", "bounded", "truncated"}:
+                continue
+            action_refs.append(ref)
+        if not action_refs:
+            return []
+        diagnostic_evidence_id = str(diagnostic.get("evidence_id") or "").strip()
+        alias_matches: list[str] = []
+        action_matches: list[str] = []
+        for ref in action_refs:
+            evidence_id = str(ref.get("id") or "").strip()
+            aliases = {
+                evidence_id,
+                str(ref.get("cite_as") or "").strip(),
+                str(ref.get("action_id") or "").strip(),
+                str(ref.get("action_call_id") or "").strip(),
+            }
+            raw_aliases = ref.get("aliases")
+            if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
+                aliases.update(str(alias or "").strip() for alias in raw_aliases)
+            aliases.discard("")
+            if diagnostic_evidence_id and diagnostic_evidence_id in aliases:
+                alias_matches.append(evidence_id)
+            action_id = str(ref.get("action_id") or "").strip().lower()
+            action_tokens = {action_id, action_id.replace("_", " ")} if action_id else set()
+            if action_tokens and any(token and token in text for token in action_tokens):
+                action_matches.append(evidence_id)
+        unique_alias_matches = sorted(set(alias_matches))
+        if len(unique_alias_matches) == 1:
+            return unique_alias_matches
+        unique_action_matches = sorted(set(action_matches))
+        if len(unique_action_matches) == 1:
+            return unique_action_matches
+        unique_action_refs = sorted({str(ref.get("id") or "").strip() for ref in action_refs if ref.get("id")})
+        if len(unique_action_refs) != 1:
+            return []
+        evidence_id = str(diagnostic.get("evidence_id") or "").strip().lower()
+        if evidence_id.startswith(("action result", "action_result", "action-result")):
+            return unique_action_refs
+        if support_type == "unavailability":
+            return unique_action_refs
+        return []
+
+    @classmethod
+    def _deterministic_body_text_candidates(
+        cls,
+        diagnostic: Mapping[str, Any],
+        available_refs: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        support_type = str(diagnostic.get("support_type") or "").strip().lower()
+        if support_type not in {"content", "unavailability"}:
+            return []
+        evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
+        query_specs = [(query, False) for query in cls._evidence_binding_body_match_queries(evidence_id_text)]
+        if not evidence_id_text or cls._evidence_binding_id_looks_like_workspace_locator(evidence_id_text):
+            allow_partial_claim_match = not evidence_id_text
+            query_specs.extend(
+                (query, allow_partial_claim_match)
+                for query in cls._evidence_binding_body_match_queries(str(diagnostic.get("claim") or ""))
+            )
+        query_specs = cls._dedupe_evidence_binding_query_specs(query_specs)
+        if not query_specs:
+            return []
+        matches: list[Mapping[str, Any]] = []
+        for ref in available_refs:
+            if not isinstance(ref, Mapping):
+                continue
+            ref_id = str(ref.get("id") or "").strip()
+            if not ref_id:
+                continue
+            status = str(ref.get("status") or "").strip().lower()
+            body_state = str(ref.get("body_state") or "").strip().lower()
+            status_supported = status == "ok" or (support_type == "unavailability" and status in {"failed", "empty"})
+            if not status_supported or body_state not in {"full", "bounded", "truncated"}:
+                continue
+            body = cls._evidence_binding_ref_body(ref)
+            if not body:
+                continue
+            if any(
+                cls._evidence_binding_body_query_matches(query, body, allow_partial=allow_partial)
+                for query, allow_partial in query_specs
+            ):
+                matches.append(ref)
+        evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
+        if cls._evidence_binding_id_looks_like_file_locator(evidence_id_text):
+            # A file/path/locator reference may bind only to a ref whose own
+            # path/anchor agrees. A body-text coincidence in another file must never
+            # bind -- not even when it is the single body match. Anchor-gate every
+            # file-locator case so cross-file binding is impossible; if no ref agrees,
+            # return nothing and let the path-aware readback tier (or repair) decide.
+            preferred_file_match = cls._preferred_file_locator_body_text_candidate(diagnostic, matches)
+            return [preferred_file_match] if preferred_file_match else []
+        unique_matches = cls._unique_evidence_binding_ref_ids(matches)
+        if len(unique_matches) <= 1:
             return unique_matches
+        coalesced_workspace_match = cls._coalesced_workspace_body_text_candidate(matches)
+        if coalesced_workspace_match:
+            return [coalesced_workspace_match]
+        return unique_matches
+
+    @staticmethod
+    def _evidence_binding_ref_body(ref: Mapping[str, Any]) -> str:
+        for key in ("body", "content", "text", "snippet", "preview", "result", "output", "value"):
+            value = ref.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, str):
+                return value
+            try:
+                return json.dumps(DataFormatter.sanitize(value), ensure_ascii=False, sort_keys=True, default=str)
+            except Exception:
+                return str(value)
+        return ""
+
+    @classmethod
+    def _evidence_binding_body_match_queries(cls, value: str) -> list[str]:
+        raw = value.strip()
+        if not raw:
+            return []
+        queries = [raw]
+        lowered = raw.lower()
+        for prefix in ("search result:", "search:", "result:", "source:", "evidence:"):
+            if lowered.startswith(prefix):
+                stripped = raw[len(prefix) :].strip()
+                if stripped and stripped not in queries:
+                    queries.append(stripped)
+        for separator in (":", "/", "#"):
+            if separator in raw:
+                tail = raw.rsplit(separator, 1)[-1].strip()
+                if tail and tail not in queries:
+                    queries.append(tail)
+        return [query for query in queries if cls._evidence_binding_body_query_is_informative(query)]
+
+    @classmethod
+    def _evidence_binding_body_query_matches(cls, query: str, body: str, *, allow_partial: bool = False) -> bool:
+        normalized_query = cls._normalize_evidence_binding_text(query)
+        if len(normalized_query) < 12:
+            return False
+        normalized_body = cls._normalize_evidence_binding_text(body)
+        if normalized_query in normalized_body:
+            return True
+        query_tokens = cls._evidence_binding_body_match_tokens(query)
+        if len(query_tokens) < 4:
+            return False
+        body_tokens = set(cls._evidence_binding_body_match_tokens(body))
+        if not body_tokens:
+            return False
+        if all(token in body_tokens for token in query_tokens):
+            return True
+        if not allow_partial:
+            return False
+        overlap_count = sum(1 for token in query_tokens if token in body_tokens)
+        required_overlap = min(len(query_tokens), max(3, (len(query_tokens) * 3 + 4) // 5))
+        return overlap_count >= required_overlap
+
+    @classmethod
+    def _evidence_binding_body_query_is_informative(cls, query: str) -> bool:
+        return len(cls._evidence_binding_body_match_tokens(query)) >= 3
+
+    @staticmethod
+    def _dedupe_evidence_binding_queries(queries: Sequence[str]) -> list[str]:
+        deduped: list[str] = []
+        for query in queries:
+            text = str(query or "").strip()
+            if text and text not in deduped:
+                deduped.append(text)
+        return deduped
+
+    @staticmethod
+    def _dedupe_evidence_binding_query_specs(queries: Sequence[tuple[str, bool]]) -> list[tuple[str, bool]]:
+        deduped: list[tuple[str, bool]] = []
+        seen: set[tuple[str, bool]] = set()
+        for query, allow_partial in queries:
+            text = str(query or "").strip()
+            key = (text, bool(allow_partial))
+            if text and key not in seen:
+                seen.add(key)
+                deduped.append(key)
+        return deduped
+
+    @classmethod
+    def _evidence_binding_id_looks_like_workspace_locator(cls, evidence_id: str) -> bool:
+        text = str(evidence_id or "").strip().lower()
+        return (
+            not text
+            or "workspace_artifact" in text
+            or "artifact_locator" in text
+            or "acceptance_locator" in text
+            or "readback" in text
+            or cls._evidence_binding_id_looks_like_file_locator(text)
+        )
+
+    @staticmethod
+    def _evidence_binding_id_looks_like_file_locator(evidence_id: str) -> bool:
+        text = str(evidence_id or "").strip().lower().replace("\\", "/")
+        if not text:
+            return False
+        if re.search(r"(?:^|[/\s'\"`])[\w.-]+\.[a-z0-9]{1,12}(?:\b|[:#/'\"`])", text):
+            return True
+        locator_terms = (" line ", " lines ", " row ", " rows ", " table ", " section ")
+        padded = f" {text} "
+        return any(term in padded for term in locator_terms)
+
+    @classmethod
+    def _normalize_evidence_binding_text(cls, value: str) -> str:
+        return " ".join(cls._evidence_binding_body_match_tokens(value))
+
+    @staticmethod
+    def _evidence_binding_body_match_tokens(value: str) -> list[str]:
+        tokens = re.findall(r"[a-z0-9]+", value.lower().replace("_", " "))
+        ignored = {
+            "a",
+            "an",
+            "and",
+            "artifact",
+            "claim",
+            "content",
+            "evidence",
+            "final",
+            "id",
+            "locator",
+            "md",
+            "read",
+            "readback",
+            "section",
+            "source",
+            "targeted",
+            "the",
+            "workspace",
+        }
+        seen: set[str] = set()
+        result: list[str] = []
+        for token in tokens:
+            if token in ignored:
+                continue
+            if not token.isdigit() and len(token) < 2:
+                continue
+            if token not in seen:
+                seen.add(token)
+                result.append(token)
+        return result
+
+    @staticmethod
+    def _unique_evidence_binding_ref_ids(refs: Sequence[Mapping[str, Any]]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for ref in refs:
+            evidence_id = str(ref.get("id") or "").strip()
+            if evidence_id and evidence_id not in seen:
+                seen.add(evidence_id)
+                ordered.append(evidence_id)
+        return ordered
+
+    @classmethod
+    def _preferred_file_locator_body_text_candidate(
+        cls,
+        diagnostic: Mapping[str, Any],
+        refs: Sequence[Mapping[str, Any]],
+    ) -> str:
+        evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
+        if not cls._evidence_binding_id_looks_like_file_locator(evidence_id_text):
+            return ""
+        locator_text = evidence_id_text.lower().replace("\\", "/")
+        locator_matches = [
+            ref
+            for ref in refs
+            if cls._evidence_binding_ref_matches_locator_text(ref, locator_text)
+        ]
+        unique_locator_matches = cls._unique_evidence_binding_ref_ids(locator_matches)
+        if len(unique_locator_matches) == 1:
+            return unique_locator_matches[0]
+        readable_matches = [
+            ref
+            for ref in locator_matches
+            if cls._evidence_binding_ref_is_readback_like(ref)
+        ]
+        unique_readable_matches = cls._unique_evidence_binding_ref_ids(readable_matches)
+        if len(unique_readable_matches) == 1:
+            return unique_readable_matches[0]
+        coalesced_workspace_match = cls._coalesced_workspace_body_text_candidate(readable_matches)
+        if coalesced_workspace_match:
+            return coalesced_workspace_match
+        return ""
+
+    @classmethod
+    def _evidence_binding_ref_matches_locator_text(cls, ref: Mapping[str, Any], locator_text: str) -> bool:
+        for alias in cls._evidence_binding_ref_locator_aliases(ref):
+            normalized_alias = alias.lower().replace("\\", "/")
+            if len(normalized_alias) < 3:
+                continue
+            if normalized_alias in locator_text:
+                return True
+        return False
+
+    @staticmethod
+    def _evidence_binding_ref_locator_aliases(ref: Mapping[str, Any]) -> list[str]:
+        aliases: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+            if text:
+                basename = PurePosixPath(text.replace("\\", "/")).name
+                if basename and basename not in aliases:
+                    aliases.append(basename)
+
+        for key in ("id", "cite_as", "path", "artifact_id", "action_call_id"):
+            add(ref.get(key))
+        raw_aliases = ref.get("aliases")
+        if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
+            for alias in raw_aliases:
+                add(alias)
+        return aliases
+
+    @staticmethod
+    def _evidence_binding_ref_is_readback_like(ref: Mapping[str, Any]) -> bool:
+        kind = str(ref.get("kind") or "").strip().lower()
+        action_id = str(ref.get("action_id") or "").strip().lower()
+        return (
+            "readback" in kind
+            or kind == "workspace_artifact.readback"
+            or kind == "workspace_artifact.targeted_readback"
+            or action_id in {"read_file", "grep_files", "search_files"}
+        )
+
+    @classmethod
+    def _coalesced_workspace_body_text_candidate(cls, refs: Sequence[Mapping[str, Any]]) -> str:
+        workspace_refs: list[Mapping[str, Any]] = []
+        for ref in refs:
+            kind = str(ref.get("kind") or "").strip().lower()
+            if kind not in {"workspace_artifact.readback", "workspace_artifact.targeted_readback"}:
+                continue
+            path = str(ref.get("path") or "").strip()
+            evidence_id = str(ref.get("id") or "").strip()
+            if path and evidence_id:
+                workspace_refs.append(ref)
+        if not workspace_refs:
+            return ""
+        paths = {str(ref.get("path") or "").strip() for ref in workspace_refs}
+        if len(paths) != 1:
+            return ""
+        targeted_refs = [
+            ref for ref in workspace_refs if str(ref.get("kind") or "").strip().lower() == "workspace_artifact.targeted_readback"
+        ]
+        selected_pool = targeted_refs or workspace_refs
+        return str(selected_pool[-1].get("id") or "").strip()
+
+    @classmethod
+    def _deterministic_content_readback_candidates(
+        cls,
+        diagnostic: Mapping[str, Any],
+        available_refs: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        if str(diagnostic.get("support_type") or "").strip() != "content":
+            return []
+        text = " ".join(
+            str(diagnostic.get(key) or "")
+            for key in ("claim", "evidence_id")
+        ).lower()
+        content_refs: list[Mapping[str, Any]] = []
+        for ref in available_refs:
+            if not isinstance(ref, Mapping):
+                continue
+            evidence_id = str(ref.get("id") or "").strip()
+            if not evidence_id:
+                continue
+            status = str(ref.get("status") or "").strip().lower()
+            body_state = str(ref.get("body_state") or "").strip().lower()
+            kind = str(ref.get("kind") or "").strip().lower()
+            if status != "ok" or body_state not in {"full", "bounded", "truncated"}:
+                continue
+            if (
+                "readback" not in kind
+                and "workspace_artifact" not in kind
+                and kind != "agent_task.action.result"
+            ):
+                continue
+            content_refs.append(ref)
+        if not content_refs:
+            return []
+
+        diagnostic_evidence_id = str(diagnostic.get("evidence_id") or "").strip()
+        alias_matches: list[str] = []
+        path_matches: list[str] = []
+        for ref in content_refs:
+            evidence_id = str(ref.get("id") or "").strip()
+            path = str(ref.get("path") or "").strip()
+            basename = PurePosixPath(path.replace("\\", "/")).name if path else ""
+            aliases = {
+                evidence_id,
+                str(ref.get("cite_as") or "").strip(),
+                str(ref.get("artifact_id") or "").strip(),
+                str(ref.get("action_id") or "").strip(),
+                str(ref.get("action_call_id") or "").strip(),
+                path,
+                basename,
+            }
+            raw_aliases = ref.get("aliases")
+            if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
+                aliases.update(str(alias or "").strip() for alias in raw_aliases)
+            aliases.discard("")
+            if diagnostic_evidence_id and diagnostic_evidence_id in aliases:
+                alias_matches.append(evidence_id)
+            path_tokens = [token.lower() for token in (path, basename) if token]
+            if path_tokens and any(token in text for token in path_tokens):
+                path_matches.append(evidence_id)
+        unique_alias_matches = sorted(set(alias_matches))
+        if len(unique_alias_matches) == 1:
+            return unique_alias_matches
+        unique_path_matches = sorted(set(path_matches))
+        if len(unique_path_matches) == 1:
+            return unique_path_matches
+
+        unique_content_refs = sorted({str(ref.get("id") or "").strip() for ref in content_refs if ref.get("id")})
+        if len(unique_content_refs) == 1:
+            # "Only one content-bearing ref" must not cross files: a file/path/locator
+            # reference may take this shortcut only when that ref's own path/anchor
+            # agrees. Otherwise leave it unbound rather than binding to the wrong file.
+            if cls._evidence_binding_id_looks_like_file_locator(diagnostic_evidence_id):
+                only_ref = next(
+                    (ref for ref in content_refs if str(ref.get("id") or "").strip() == unique_content_refs[0]),
+                    None,
+                )
+                if only_ref is None or not cls._evidence_binding_ref_matches_locator_text(
+                    only_ref, diagnostic_evidence_id.lower().replace("\\", "/")
+                ):
+                    return []
+            return unique_content_refs
         return []
 
     @classmethod
@@ -1029,6 +1695,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "evidence_ledger.invalid_evidence_id",
                 "evidence_ledger.ambiguous_evidence_alias",
                 "evidence_ledger.missing_evidence_id",
+                "evidence_ledger.ref_only_item_used_as_content_support",
             }:
                 continue
             diagnostics.append(
@@ -1703,16 +2370,164 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
 
     @classmethod
     def _evidence_ledger_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+        evidence_items: list[dict[str, Any]] = []
         blocks = execution_meta.get("blocks")
         if isinstance(blocks, Mapping):
             evidence = blocks.get("evidence")
             if isinstance(evidence, Mapping):
-                return evidence_ledger_view(evidence, max_items=80, body_chars=2400)
-        return evidence_ledger_view({"evidence_items": ()}, max_items=80, body_chars=2400)
+                block_ledger = evidence_ledger_view(evidence, max_items=80, body_chars=2400)
+                evidence_items.extend(
+                    dict(item)
+                    for item in block_ledger.get("items", [])
+                    if isinstance(item, Mapping)
+                )
+        evidence_items.extend(cls._action_result_evidence_items_from_execution_meta(execution_meta))
+        return evidence_ledger_view({"evidence_items": evidence_items}, max_items=120, body_chars=2400)
+
+    @classmethod
+    def _action_result_evidence_items_from_execution_meta(
+        cls,
+        execution_meta: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for index, record in enumerate(cls._collect_execution_action_records(execution_meta)):
+            if not isinstance(record, Mapping):
+                continue
+            action_id = str(record.get("id") or record.get("name") or "").strip()
+            if not action_id:
+                continue
+            status = cls._action_result_evidence_status(record)
+            result_preview = record.get("result_preview")
+            error = record.get("error")
+            body_value = result_preview if result_preview not in (None, "", [], {}) else error
+            body = cls._action_result_evidence_body(body_value)
+            body_state = cls._action_result_evidence_body_state(record, status=status, body=body)
+            action_call_id = str(record.get("action_call_id") or "").strip()
+            evidence_id = cls._action_result_evidence_id(
+                action_id=action_id,
+                action_call_id=action_call_id,
+                index=index,
+                preview_sha=str(record.get("result_preview_sha256") or ""),
+            )
+            item: dict[str, Any] = {
+                "id": evidence_id,
+                "kind": "agent_task.action.result",
+                "status": status,
+                "raw_status": record.get("status", status),
+                "body_state": body_state,
+                "action_id": action_id,
+                "action_call_id": action_call_id,
+                "aliases": cls._action_result_evidence_aliases(record),
+                "provenance": {
+                    "source": "agent_task.execution_meta.action_logs",
+                    "action_id": action_id,
+                    "action_call_id": action_call_id,
+                },
+                "supports": {
+                    "content": status == "ok" and body_state in {"full", "bounded", "truncated"},
+                    "unavailability": status in {"failed", "empty"},
+                    "ref_pointer": bool(action_call_id),
+                },
+            }
+            input_preview = record.get("input_preview")
+            if input_preview not in (None, "", [], {}):
+                item["input_preview"] = DataFormatter.sanitize(input_preview)
+            if body:
+                item["body"] = body
+            for ref in cls._collect_source_refs_from_action_records([record]):
+                if not isinstance(ref, Mapping):
+                    continue
+                field = str(ref.get("field") or "").strip()
+                value = str(ref.get("value") or "").strip()
+                if field and value and item.get(field) in (None, "", [], {}):
+                    item[field] = value
+            items.append(DataFormatter.sanitize(item))
+        return items
+
+    @staticmethod
+    def _action_result_evidence_status(record: Mapping[str, Any]) -> str:
+        status = str(record.get("status") or "").strip().lower()
+        if status in {"failed", "failure", "error", "timed_out", "timeout", "blocked"} or record.get("error"):
+            return "failed"
+        if record.get("result_preview") in (None, "", [], {}):
+            return "empty"
+        return "ok"
+
+    @classmethod
+    def _action_result_evidence_body_state(
+        cls,
+        record: Mapping[str, Any],
+        *,
+        status: str,
+        body: str,
+    ) -> str:
+        if not body:
+            return "ref_only" if status == "failed" else "ref_only"
+        preview_meta = record.get("result_preview_meta")
+        if isinstance(preview_meta, Mapping) and preview_meta.get("truncated") is True:
+            return "truncated"
+        return "bounded"
+
+    @staticmethod
+    def _action_result_evidence_body(value: Any) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        sanitized = DataFormatter.sanitize(value)
+        if isinstance(sanitized, str):
+            return sanitized
+        try:
+            return json.dumps(sanitized, ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:
+            return str(sanitized)
+
+    @staticmethod
+    def _action_result_evidence_id(
+        *,
+        action_id: str,
+        action_call_id: str,
+        index: int,
+        preview_sha: str,
+    ) -> str:
+        suffix = action_call_id or preview_sha or str(index)
+        raw = f"agent_task_action_result:{action_id}:{suffix}"
+        return "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in raw)[:240]
+
+    @staticmethod
+    def _action_result_evidence_aliases(record: Mapping[str, Any]) -> list[str]:
+        aliases: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+
+        action_id = str(record.get("id") or record.get("name") or "").strip()
+        action_call_id = str(record.get("action_call_id") or "").strip()
+        add(action_id)
+        add(f"action_{action_id}")
+        add(f"action_result_{action_id}")
+        add(action_call_id)
+        if action_call_id:
+            add(f"action_{action_call_id}")
+            add(f"action_result_{action_call_id}")
+        for ref_key in ("artifact_refs", "file_refs"):
+            refs = record.get(ref_key)
+            if not isinstance(refs, Sequence) or isinstance(refs, str | bytes | bytearray):
+                continue
+            for ref in refs:
+                if not isinstance(ref, Mapping):
+                    continue
+                for field in ("artifact_id", "path", "record_id", "source_url", "selected_url", "url", "href"):
+                    add(ref.get(field))
+        return aliases[:24]
 
     def _cumulative_evidence_ledger(self, current_execution_meta: Mapping[str, Any]) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
-        for iteration in self.iterations:
+        current_ledger = self._evidence_ledger_from_execution_meta(current_execution_meta)
+        for item in current_ledger.get("items", []):
+            if isinstance(item, Mapping):
+                items.append(dict(item))
+        for iteration in reversed(self.iterations):
             if not isinstance(iteration, Mapping):
                 continue
             previous_meta = iteration.get("execution_meta")
@@ -1722,10 +2537,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             for item in previous_ledger.get("items", []):
                 if isinstance(item, Mapping):
                     items.append(dict(item))
-        current_ledger = self._evidence_ledger_from_execution_meta(current_execution_meta)
-        for item in current_ledger.get("items", []):
-            if isinstance(item, Mapping):
-                items.append(dict(item))
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in items:
@@ -2484,16 +3295,26 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 or bool(item.get("replay_safe")) is True
             )
         }
+        framework_diagnostic_actions = {"action_loop", "action_planning"}
         risky_failed: list[str] = []
         non_blocking_failed: list[str] = []
         for action_id in failed_actions:
-            if action_id in read_safe_actions and action_id not in required_actions:
+            if (
+                action_id in framework_diagnostic_actions
+                or action_id in read_safe_actions
+            ) and action_id not in required_actions:
                 non_blocking_failed.append(action_id)
             else:
                 risky_failed.append(action_id)
+        risky_blocked: list[str] = []
+        for action_id in blocked_actions:
+            if action_id in framework_diagnostic_actions and action_id not in required_actions:
+                non_blocking_failed.append(action_id)
+            else:
+                risky_blocked.append(action_id)
         risky_actions = self._merge_string_lists(
             risky_failed,
-            [*blocked_actions, *approval_required_actions],
+            [*risky_blocked, *approval_required_actions],
         )
         return risky_actions, non_blocking_failed
 

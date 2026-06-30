@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Awaitable, Literal, TYPE_CHECKING, cast
 
 from agently.core.application.AgentExecution import RuntimeStageStallError
-from agently.core.runtime import bind_runtime_context
+from agently.core.runtime import bind_runtime_context, get_current_agent_execution_context
 from agently.utils import DataFormatter, DataLocator, DataPathBuilder
 
 if TYPE_CHECKING:
@@ -195,13 +195,46 @@ class ModelRequestResultDataFlow:
             return None
         return timeout if timeout >= 0 else None
 
+    def record_materialization_progress(self, *, stage: str, status: str, event_type: str) -> None:
+        context = get_current_agent_execution_context()
+        record_progress = getattr(context, "record_progress", None)
+        if not callable(record_progress):
+            return
+        result = self._result
+        record_progress(
+            stage=stage,
+            status=status,
+            event_type=event_type,
+            response_id=result._response_id,
+            run_id=result.model_run_context.run_id if result.model_run_context is not None else None,
+            meta={
+                "agent_name": result.agent_name,
+                "attempt_index": result.attempt_index,
+                "request_run_id": result.request_run_context.run_id if result.request_run_context is not None else None,
+                "model_run_id": result.model_run_context.run_id if result.model_run_context is not None else None,
+            },
+            notify=False,
+        )
+
     async def await_materialization(self, awaitable: Awaitable[Any], *, stage: str):
         result = self._result
         timeout = self.materialization_idle_timeout()
+        self.record_materialization_progress(
+            stage=stage,
+            status="started",
+            event_type=f"{stage}.started",
+        )
         try:
             if timeout is None:
-                return await awaitable
-            return await asyncio.wait_for(awaitable, timeout=timeout)
+                materialized = await awaitable
+            else:
+                materialized = await asyncio.wait_for(awaitable, timeout=timeout)
+            self.record_materialization_progress(
+                stage=stage,
+                status="completed",
+                event_type=f"{stage}.completed",
+            )
+            return materialized
         except asyncio.TimeoutError as error:
             stall_error = RuntimeStageStallError(
                 f"Response materialization idle timeout after { timeout } seconds.",
@@ -212,6 +245,11 @@ class ModelRequestResultDataFlow:
                 agent_name=result.agent_name,
                 idle_seconds=timeout,
                 timeout_seconds=timeout,
+            )
+            self.record_materialization_progress(
+                stage=stage,
+                status="stalled",
+                event_type=f"{stage}.stalled",
             )
             await self.emit_materialization_stall(stall_error)
             raise stall_error from error

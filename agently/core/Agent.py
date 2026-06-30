@@ -1044,8 +1044,13 @@ class BaseAgent:
         resolved_options = dict(options or {})
         agent_task_options = dict(resolved_options.get("agent_task") or {})
         scoped_workspace_action_ids: list[str] = []
-        if bool(agent_task_options.get("enable_workspace_readback_actions")):
-            scoped_workspace_action_ids = self._enable_task_workspace_read_actions(resolved_task_id)
+        if bool(agent_task_options.get("enable_workspace_readback_actions")) or bool(
+            agent_task_options.get("enable_workspace_coding_actions")
+        ):
+            scoped_workspace_action_ids = self._enable_task_workspace_read_actions(
+                resolved_task_id,
+                coding_agent=bool(agent_task_options.get("enable_workspace_coding_actions")),
+            )
         language_policy = self.settings.get("agent.language_policy", None)
         if isinstance(language_policy, Mapping):
             agent_task_options.setdefault("language_policy", dict(language_policy))
@@ -1077,10 +1082,14 @@ class BaseAgent:
         agent_execution.workspace = getattr(self, "workspace", None)
         return agent_execution
 
-    def _enable_task_workspace_read_actions(self, task_id: str) -> list[str]:
+    def _enable_task_workspace_read_actions(self, task_id: str, *, coding_agent: bool = False) -> list[str]:
         workspace = getattr(self, "workspace", None)
         with_scope_node = getattr(workspace, "with_scope_node", None)
-        enable = getattr(self, "enable_workspace_file_actions", None)
+        enable = getattr(
+            self,
+            "enable_coding_agent_actions" if coding_agent else "enable_workspace_file_actions",
+            None,
+        )
         if not callable(with_scope_node) or not callable(enable):
             return []
         try:
@@ -1096,15 +1105,21 @@ class BaseAgent:
             enable(
                 root=files_root,
                 read=True,
-                write=False,
+                write=bool(coding_agent),
                 search=True,
                 list_files=True,
                 expose_to_model=True,
                 max_file_bytes=50000,
                 max_search_file_bytes=200000,
                 desc=(
-                    "Read files written by this AgentTask, including trusted "
-                    "Workspace deliverables and bounded evidence readbacks."
+                    "Read and edit files written by this AgentTask, including trusted "
+                    "Workspace deliverables and bounded evidence readbacks. Prefer "
+                    "edit_file/apply_patch for targeted repairs."
+                    if coding_agent
+                    else (
+                        "Read files written by this AgentTask, including trusted "
+                        "Workspace deliverables and bounded evidence readbacks."
+                    )
                 ),
             )
         except Exception:
@@ -1113,7 +1128,17 @@ class BaseAgent:
         has_action = getattr(registry, "has", None)
         if not callable(has_action):
             return []
-        return [action_id for action_id in ("list_files", "read_file", "search_files") if has_action(action_id)]
+        candidates = (
+            "list_files",
+            "read_file",
+            "search_files",
+            "glob_files",
+            "grep_files",
+            "write_file",
+            "edit_file",
+            "apply_patch",
+        )
+        return [action_id for action_id in candidates if has_action(action_id)]
 
     async def async_resume(
         self,

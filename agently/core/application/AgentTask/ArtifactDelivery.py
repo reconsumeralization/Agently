@@ -811,6 +811,290 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 evidence_ids.append(evidence_id)
         return evidence_ids
 
+    @staticmethod
+    def _workspace_artifact_candidate_path_is_local(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text or "\n" in text or len(text) > 512:
+            return False
+        if re.match(r"\A[A-Za-z][A-Za-z0-9+.-]*://", text):
+            return False
+        if text.startswith(("mailto:", "tel:", "urn:")):
+            return False
+        return True
+
+    @classmethod
+    def _workspace_artifact_successful_action_file_paths(cls, execution_meta: Mapping[str, Any] | None) -> list[str]:
+        if not isinstance(execution_meta, Mapping):
+            return []
+        paths: list[str] = []
+
+        def add_path(value: Any) -> None:
+            text = str(value or "").strip()
+            if not cls._workspace_artifact_candidate_path_is_local(text):
+                return
+            if text not in paths:
+                paths.append(text)
+
+        def collect_file_refs(value: Any) -> None:
+            if isinstance(value, Mapping):
+                refs = value.get("file_refs")
+                if isinstance(refs, Sequence) and not isinstance(refs, str | bytes | bytearray):
+                    for ref in refs:
+                        if not isinstance(ref, Mapping):
+                            continue
+                        role = str(ref.get("role") or "").strip().lower()
+                        if role and role not in {"output", "workspace_artifact", "artifact", "file"}:
+                            continue
+                        add_path(ref.get("path") or ref.get("output_path") or ref.get("file_path"))
+                return
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+                for item in value:
+                    if isinstance(item, Mapping):
+                        role = str(item.get("role") or "").strip().lower()
+                        if role and role not in {"output", "workspace_artifact", "artifact", "file"}:
+                            continue
+                        add_path(item.get("path") or item.get("output_path") or item.get("file_path"))
+
+        def mapping_reports_success(value: Any) -> bool:
+            return isinstance(value, Mapping) and (
+                value.get("ok") is True
+                or str(value.get("status") or "").strip().lower() in {"success", "succeeded", "ok"}
+            )
+
+        def collect_result_path(record: Mapping[str, Any], value: Any) -> None:
+            if not isinstance(value, Mapping) or not mapping_reports_success(value):
+                return
+            action_id = str(record.get("id") or record.get("name") or "").strip().lower()
+            mode = str(value.get("mode") or value.get("operation") or "").strip().lower()
+            is_file_materializer = action_id in {"write_file", "edit_file", "apply_patch"} or mode in {
+                "write",
+                "edit",
+                "apply_patch",
+                "replace",
+                "append",
+                "create",
+            }
+            if not is_file_materializer:
+                return
+            add_path(value.get("path") or value.get("output_path") or value.get("file_path"))
+
+        success_statuses = {"success", "succeeded", "ok", "completed", "partial_success"}
+        for record in cls._collect_execution_action_records(execution_meta):
+            if not isinstance(record, Mapping):
+                continue
+            status = str(record.get("status") or "").strip().lower()
+            result_preview = record.get("result_preview")
+            output_summary = record.get("output_summary")
+            if status not in success_statuses and not (
+                mapping_reports_success(result_preview) or mapping_reports_success(output_summary)
+            ):
+                continue
+            collect_file_refs(record.get("file_refs"))
+            collect_file_refs(result_preview)
+            collect_file_refs(output_summary)
+            collect_result_path(record, result_preview)
+            collect_result_path(record, output_summary)
+        return paths
+
+    @classmethod
+    def _workspace_artifact_ordered_action_candidate_paths(
+        cls,
+        action_paths: Sequence[str],
+        *,
+        manifest: Mapping[str, Any],
+        manifest_path: str,
+        required_paths: Sequence[str],
+    ) -> list[str]:
+        remaining = [str(path or "").strip() for path in action_paths if str(path or "").strip()]
+        ordered: list[str] = []
+
+        def promote(path: Any) -> None:
+            text = str(path or "").strip()
+            if text and text in remaining and text not in ordered:
+                ordered.append(text)
+
+        promote(manifest_path)
+        for path in required_paths:
+            promote(path)
+        deliverables = manifest.get("deliverables")
+        if isinstance(deliverables, Sequence) and not isinstance(deliverables, str | bytes | bytearray):
+            for item in deliverables:
+                if isinstance(item, Mapping):
+                    promote(item.get("path") or item.get("output_path") or item.get("file_path"))
+                else:
+                    promote(item)
+        for path in remaining:
+            if path not in ordered:
+                ordered.append(path)
+        return ordered
+
+    @staticmethod
+    def _workspace_artifact_ref_from_readback(
+        read_result: Mapping[str, Any],
+        *,
+        path: str,
+        source: str,
+    ) -> dict[str, Any]:
+        return {
+            "path": str(read_result.get("path") or path),
+            "bytes": int(read_result.get("bytes") or 0),
+            "sha256": str(read_result.get("sha256") or ""),
+            "media_type": read_result.get("media_type"),
+            "content_kind": str(read_result.get("content_kind") or "text"),
+            "role": "workspace_artifact",
+            "source": source,
+            "preview": str(read_result.get("content") or ""),
+            "truncated": bool(read_result.get("truncated")),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "handler_id": read_result.get("handler_id"),
+        }
+
+    async def _adopt_workspace_artifact_from_action_readback(
+        self,
+        result: dict[str, Any],
+        *,
+        manifest_dict: dict[str, Any],
+        path: str,
+        deliverable_mode: str,
+        content_key: str,
+        diagnostics: list[Any],
+        execution_meta: Mapping[str, Any] | None,
+        source: str,
+        card_context: Any | None = None,
+    ) -> dict[str, Any] | None:
+        if deliverable_mode not in {"workspace_artifact", "sectioned_workspace_artifact"}:
+            return None
+        action_paths = self._workspace_artifact_successful_action_file_paths(execution_meta)
+        if not action_paths:
+            return None
+        try:
+            required_paths = self._required_workspace_deliverables()
+        except Exception:
+            required_paths = []
+        candidate_paths = self._workspace_artifact_ordered_action_candidate_paths(
+            action_paths,
+            manifest=manifest_dict,
+            manifest_path=path,
+            required_paths=required_paths,
+        )
+        for candidate_path in candidate_paths:
+            try:
+                read_result = await self.workspace.read_file(
+                    candidate_path,
+                    max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES,
+                )
+            except Exception as error:
+                diagnostics.append(
+                    self._workspace_artifact_readback_missing_diagnostic(
+                        code="agent_task.workspace_artifact.action_file_readback_failed",
+                        message=(
+                            "A successful Workspace file action produced a candidate artifact path, "
+                            "but readback failed; trusted file_refs were not produced for this path."
+                        ),
+                        path=candidate_path,
+                        source=source,
+                        error=error,
+                    )
+                )
+                continue
+            ref = self._workspace_artifact_ref_from_readback(
+                read_result,
+                path=candidate_path,
+                source=source,
+            )
+            if not self._workspace_artifact_ref_has_trusted_readback(ref):
+                diagnostics.append(
+                    self._workspace_artifact_readback_missing_diagnostic(
+                        code="agent_task.workspace_artifact.action_file_readback_insufficient",
+                        message=(
+                            "A successful Workspace file action produced a candidate artifact path, "
+                            "but readback was empty or missing integrity data."
+                        ),
+                        path=candidate_path,
+                        source=source,
+                        readback=read_result,
+                    )
+                )
+                continue
+
+            trusted_refs = [DataFormatter.sanitize(ref)]
+            manifest_dict.update(
+                {
+                    "path": ref["path"],
+                    "bytes": ref["bytes"],
+                    "sha256": ref["sha256"],
+                    "file_refs": trusted_refs,
+                    "source": source,
+                }
+            )
+            result["file_refs"] = trusted_refs
+            result = self._compact_workspace_artifact_result_for_hot_path(
+                result,
+                content_key=content_key,
+                content="",
+                trusted_refs=trusted_refs,
+            )
+            delivery_record: dict[str, Any] = {
+                "source": source,
+                "path": ref["path"],
+                "status": "adopted_existing",
+                "mode": deliverable_mode,
+                "content_key": content_key or "action_file_ref",
+                "candidate_source": "execution_meta.action_logs",
+                "readback": {
+                    "path": ref["path"],
+                    "bytes": ref["bytes"],
+                    "sha256": ref["sha256"],
+                    "truncated": ref["truncated"],
+                    "read_bytes": ref["read_bytes"],
+                    "handler_id": ref["handler_id"],
+                },
+                "file_refs": trusted_refs,
+            }
+            handoff = self._handoff_workspace_artifact_remaining_work_to_verifier(
+                result,
+                diagnostics=diagnostics,
+                path=ref["path"],
+                source=source,
+                content_key=content_key or "action_file_ref",
+            )
+            if handoff is not None:
+                delivery_record["remaining_work_handoff"] = DataFormatter.sanitize(handoff)
+            result["artifact_manifest"] = self._compact_workspace_artifact_manifest_for_hot_path(
+                manifest_dict,
+                trusted_refs=trusted_refs,
+                source=source,
+            )
+            locator_items = await self._workspace_artifact_acceptance_locator_evidence_items(
+                ref=trusted_refs[0],
+                result=result,
+                manifest=manifest_dict,
+                source=source,
+                card_context=card_context,
+            )
+            if locator_items:
+                delivery_record["acceptance_locator_count"] = len(locator_items)
+            diagnostics.append(
+                {
+                    "code": "agent_task.workspace_artifact.action_file_adopted",
+                    "message": (
+                        "A successful Workspace file action produced the artifact path; AgentTask read it back "
+                        "and adopted the readback as trusted Workspace artifact evidence."
+                    ),
+                    "path": ref["path"],
+                    "source": source,
+                }
+            )
+            result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
+            self._append_workspace_artifact_meta(execution_meta, trusted_refs)
+            self._append_execution_meta_evidence_items(execution_meta, locator_items)
+            self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
+                DataFormatter.sanitize(delivery_record)
+            )
+            return DataFormatter.sanitize(result)
+        return None
+
     def _workspace_artifact_delivery_failure_result(
         self,
         result: dict[str, Any],
@@ -927,6 +1211,20 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             if diagnostics:
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return DataFormatter.sanitize(result)
+        if not content:
+            adopted = await self._adopt_workspace_artifact_from_action_readback(
+                result,
+                manifest_dict=manifest_dict,
+                path=path,
+                deliverable_mode=deliverable_mode,
+                content_key=content_key or "action_file_ref",
+                diagnostics=diagnostics,
+                execution_meta=execution_meta,
+                source=source,
+                card_context=card_context,
+            )
+            if adopted is not None:
+                return adopted
         if (
             not content
             and allow_stream_draft
@@ -1049,6 +1347,20 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 )
                 return DataFormatter.sanitize(result)
             if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
+                if self._normalize_string_list(result.get("remaining_work")):
+                    diagnostics.append(
+                        {
+                            "code": "agent_task.workspace_artifact.awaiting_body",
+                            "message": (
+                                "Workspace artifact delivery is deferred because remaining work exists and no "
+                                "complete artifact body was provided."
+                            ),
+                            "path": path,
+                            "source": source,
+                        }
+                    )
+                    result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+                    return DataFormatter.sanitize(result)
                 return self._workspace_artifact_delivery_failure_result(
                     result,
                     execution_meta,
@@ -1492,6 +1804,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             limits=self._child_execution_limits(),
             options=self._child_execution_options(),
         )
+        self._apply_child_execution_action_loop_guard(draft_execution)
+        self._disable_child_execution_action_loop(draft_execution)
         draft_execution.route_policy(
             {
                 "allowed_routes": ["model_request"],

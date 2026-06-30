@@ -312,7 +312,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "evidence": ([str], "Evidence produced or used by this card", False),
                 "evidence_use": (
                     [dict],
-                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
                     False,
                 ),
                 "acceptance_points": (
@@ -495,7 +495,15 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 body_chars=1800,
             )
             evidence_use_guard = validate_evidence_use(collect_evidence_use(card_output), card_evidence_ledger)
+            evidence_repair_diagnostic: dict[str, Any] | None = None
             if isinstance(card_output, Mapping):
+                card_output, evidence_use_guard, evidence_repair_diagnostic = (
+                    self._repair_taskboard_card_evidence_use(
+                        card_output,
+                        evidence_use_guard,
+                        card_evidence_ledger,
+                    )
+                )
                 card_output = value_with_normalized_evidence_use(
                     card_output,
                     evidence_use_guard.get("normalized_evidence_use"),
@@ -520,6 +528,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     diagnostics.extend(
                         dict(item) if isinstance(item, Mapping) else {"value": item} for item in raw_diagnostics
                     )
+            if evidence_repair_diagnostic is not None:
+                diagnostics.append(evidence_repair_diagnostic)
             output_file_refs: list[Any] = []
             if isinstance(card_output, Mapping):
                 raw_file_refs = card_output.get("file_refs")
@@ -742,7 +752,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "evidence": ([str], "Evidence used by this control card", False),
             "evidence_use": (
                 [dict],
-                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
                 False,
             ),
             "acceptance_points": (
@@ -939,7 +949,13 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             body_chars=1800,
         )
         evidence_use_guard = validate_evidence_use(collect_evidence_use(card_output), card_evidence_ledger)
+        evidence_repair_diagnostic: dict[str, Any] | None = None
         if isinstance(card_output, Mapping):
+            card_output, evidence_use_guard, evidence_repair_diagnostic = self._repair_taskboard_card_evidence_use(
+                card_output,
+                evidence_use_guard,
+                card_evidence_ledger,
+            )
             card_output = value_with_normalized_evidence_use(
                 card_output,
                 evidence_use_guard.get("normalized_evidence_use"),
@@ -951,6 +967,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 diagnostics.extend(
                     dict(item) if isinstance(item, Mapping) else {"value": item} for item in raw_diagnostics
                 )
+        if evidence_repair_diagnostic is not None:
+            diagnostics.append(evidence_repair_diagnostic)
         diagnostics.append(
             {
                 "execution_kind": "taskboard_control_request",
@@ -1207,6 +1225,40 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 **metadata,
             },
         )
+
+    @classmethod
+    def _repair_taskboard_card_evidence_use(
+        cls,
+        card_output: Mapping[str, Any],
+        evidence_use_guard: Mapping[str, Any],
+        card_evidence_ledger: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], dict[str, Any] | None]:
+        original_blocking_count = cls._taskboard_evidence_guard_blocking_count(evidence_use_guard)
+        if original_blocking_count <= 0:
+            return card_output, evidence_use_guard, None
+        repaired_evidence_use = cls._deterministic_evidence_binding_repair(evidence_use_guard, card_evidence_ledger)
+        if not repaired_evidence_use:
+            return card_output, evidence_use_guard, None
+        repaired_output = value_with_normalized_evidence_use(card_output, repaired_evidence_use)
+        repaired_guard = validate_evidence_use(collect_evidence_use(repaired_output), card_evidence_ledger)
+        repaired_blocking_count = cls._taskboard_evidence_guard_blocking_count(repaired_guard)
+        if repaired_blocking_count >= original_blocking_count:
+            return card_output, evidence_use_guard, None
+        diagnostic = {
+            "code": "taskboard.card.evidence_binding_repair",
+            "status": "completed" if repaired_blocking_count == 0 else "partial",
+            "original_blocking_count": original_blocking_count,
+            "repaired_blocking_count": repaired_blocking_count,
+            "repaired_claim_count": len(repaired_evidence_use),
+        }
+        return repaired_output, repaired_guard, diagnostic
+
+    @staticmethod
+    def _taskboard_evidence_guard_blocking_count(evidence_use_guard: Mapping[str, Any]) -> int:
+        try:
+            return int(evidence_use_guard.get("blocking_count") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _taskboard_card_status(
