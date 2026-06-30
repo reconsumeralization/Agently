@@ -22,6 +22,13 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 
+# Framework loop signals (e.g. the action-loop max_rounds boundary, planning stalls)
+# are surfaced as records so the model and observers can see them, but they are not
+# capability actions the agent executed. They must not enter the executed action_logs
+# (action scope, capability evidence, required-action gates all read that list).
+_FRAMEWORK_DIAGNOSTIC_ACTION_IDS = frozenset({"action_loop", "action_planning"})
+
+
 def record_model_response_id(owner: "AgentExecution", response_id: str | None) -> None:
     if not response_id:
         return
@@ -78,9 +85,13 @@ async def record_action_log(
             "raw": log,
         }
     )
-    action_logs = owner.logs.setdefault("action_logs", [])
-    if isinstance(action_logs, list):
-        action_logs.append(normalized)
+    # Keep framework loop diagnostics out of the executed action_logs; retain them in
+    # a sibling channel so the boundary signal stays inspectable without being counted
+    # as an action execution.
+    target_log_key = "action_loop_diagnostics" if action_id in _FRAMEWORK_DIAGNOSTIC_ACTION_IDS else "action_logs"
+    target_logs = owner.logs.setdefault(target_log_key, [])
+    if isinstance(target_logs, list):
+        target_logs.append(normalized)
     aggregated_artifact_refs = owner.logs.setdefault("artifact_refs", [])
     if isinstance(aggregated_artifact_refs, list):
         for ref in artifact_refs:

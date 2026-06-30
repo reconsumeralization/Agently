@@ -5986,7 +5986,14 @@ async def test_agent_execution_action_scope_filters_action_runtime_boundary():
     assert planning_calls
     assert "allowed_action" in planning_calls[0]
     assert "blocked_action" not in planning_calls[0]
+    # Only real executed actions enter action_logs; the action-loop boundary signal
+    # (max_rounds) is a framework diagnostic and must not leak in as an executed action.
     assert action_ids == ["allowed_action"]
+    assert "action_loop" not in action_ids
+    boundary_diagnostics = [
+        entry.get("action_id") for entry in meta["logs"].get("action_loop_diagnostics", [])
+    ]
+    assert "action_loop" in boundary_diagnostics
     assert meta["diagnostics"]["action_scope"]["allowed_action_ids"] == ["allowed_action"]
 
 
