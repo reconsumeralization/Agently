@@ -327,6 +327,43 @@ def test_acceptance_locator_matches_cjk_numeric_spacing_variants():
     }
 
 
+def test_acceptance_locator_uses_manifest_outline_ordinal_for_heading_label_variants():
+    from agently.core.application.AgentTask.AcceptanceLocator import (
+        build_workspace_artifact_acceptance_locator_items,
+    )
+
+    items = build_workspace_artifact_acceptance_locator_items(
+        path="final.md",
+        source="test",
+        text=(
+            "# Final Report\n\n"
+            "## 1. Scope\n\n"
+            "Scope content.\n\n"
+            "## 2. Details\n\n"
+            "### Nested Detail A\n\n"
+            "Nested content.\n\n"
+            "### Nested Detail B\n\n"
+            "Details content.\n\n"
+            "## 3. Closing Boundary\n\n"
+            "Closing content.\n"
+        ),
+        manifest={
+            "section_outline": [
+                "scope",
+                "details",
+                "closing statement",
+            ]
+        },
+    )
+
+    locator = next(item for item in items if item.get("criterion_id") == "section_outline:2")
+    assert locator["status"] == "ok"
+    assert locator["requirement_level"] == "required"
+    assert locator["heading"] == "3. Closing Boundary"
+    assert locator["line_start"] == 17
+    assert locator["byte_offset"] < locator["byte_end"]
+
+
 def test_evidence_ledger_guard_reconciles_visible_aliases_to_canonical_ids():
     from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
 
@@ -535,6 +572,135 @@ def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
         and item.get("blocking") is True
         for item in guard["diagnostics"]
     )
+
+
+def test_evidence_binding_repair_resolves_missing_id_from_unique_claim_body():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "search.amd",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "action_id": "web_search",
+                "body": "AMD shares up 261% over past year and 132% YTD; hit 52-week high $564.76.",
+            },
+            {
+                "id": "search.avgo",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "action_id": "web_search",
+                "body": "AVGO approved a quarterly dividend.",
+            },
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "AMD shares up 261% over past year and 132% YTD; hit 52-week high $564.76",
+                "evidence_ids": [],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    repaired = AgentTask._deterministic_evidence_binding_repair(guard, ledger)
+
+    assert repaired == [
+        {
+            "claim_index": 0,
+            "claim": "AMD shares up 261% over past year and 132% YTD; hit 52-week high $564.76",
+            "evidence_ids": ["search.amd"],
+            "support_type": "content",
+        }
+    ]
+    merged = AgentTask._merge_repaired_evidence_use(guard["normalized_evidence_use"], repaired)
+    assert validate_evidence_use(merged, ledger)["valid"] is True
+
+
+def test_evidence_binding_repair_resolves_missing_unavailability_id_from_failed_action_body():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "browse.reuters.failed",
+                "kind": "agent_task.action.result",
+                "status": "failed",
+                "body_state": "bounded",
+                "action_id": "browse",
+                "body": (
+                    "Can not browse 'https://www.reuters.com/business/broadcom-tumbles-revenue-miss/'. "
+                    "Fallback failed: Page.goto net::ERR_CONNECTION_CLOSED. Error: curl exited 35."
+                ),
+            }
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "Reuters article browse returned error",
+                "evidence_ids": [],
+                "support_type": "unavailability",
+            }
+        ],
+        ledger,
+    )
+
+    repaired = AgentTask._deterministic_evidence_binding_repair(guard, ledger)
+
+    assert repaired == [
+        {
+            "claim_index": 0,
+            "claim": "Reuters article browse returned error",
+            "evidence_ids": ["browse.reuters.failed"],
+            "support_type": "unavailability",
+        }
+    ]
+    merged = AgentTask._merge_repaired_evidence_use(guard["normalized_evidence_use"], repaired)
+    assert validate_evidence_use(merged, ledger)["valid"] is True
+
+
+def test_evidence_binding_repair_leaves_missing_id_unresolved_when_claim_body_is_ambiguous():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "search.one",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "The source says the project risk is material.",
+            },
+            {
+                "id": "search.two",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "Another source says the project risk is material.",
+            },
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The project risk is material.",
+                "evidence_ids": [],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == []
 
 
 def test_evidence_ledger_view_reassigns_unique_cite_as_on_remerge():
@@ -1371,6 +1537,8 @@ def test_workspace_artifact_bounded_step_schema_excludes_long_body_fields():
     )
 
     assert "artifact_manifest" in schema
+    assert schema["artifact_manifest"][2] is False
+    assert schema["evidence"][2] is False
     assert "candidate_final_result" not in schema
     assert "artifact_markdown" not in schema
     assert "file_refs" not in schema
@@ -1590,6 +1758,24 @@ def test_flat_step_plan_infers_workspace_artifact_mode_from_required_deliverable
     assert plan["deliverable_mode_source"] == "required_workspace_deliverables"
     assert plan["required_workspace_deliverables"] == ["final.md"]
     assert plan["prefer_stream_draft"] is True
+
+
+def test_flat_step_plan_normalizes_expected_evidence_duplicate_prefix_alias():
+    task = AgentTask.__new__(AgentTask)
+    task.options = {}
+
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "write the final file",
+            "expected_expected_evidence": "final.md exists after the Workspace write action",
+            "rationale": "the previous step gathered the evidence",
+        }
+    )
+
+    assert plan["expected_evidence"] == "final.md exists after the Workspace write action"
+    assert "expected_expected_evidence" not in plan
+    assert plan["normalization_diagnostics"][0]["code"] == "agent_task.flat_plan.expected_evidence_alias"
 
 
 @pytest.mark.asyncio
@@ -2477,6 +2663,118 @@ async def test_agent_task_workspace_artifact_delivery_waits_for_remaining_work(t
     assert delivered.get("file_refs") == []
     assert "workspace_artifact_delivery" not in delivered
     assert not (workspace.files_root / "reports/final.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_adopts_successful_action_written_file(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-action-adopt")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-action-adopt"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.success_criteria = ["The final artifact is available through trusted Workspace readback."]
+    task.options = {}
+
+    body = "# Existing Action Report\n\nThis file was written by a Workspace action before execution stalled.\n"
+    await workspace.write_file("final.md", body, append=False)
+    execution_meta = {
+        "status": "failed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_file",
+                    "status": "success",
+                    "result_preview": {
+                        "ok": True,
+                        "mode": "write",
+                        "path": "final.md",
+                        "file_refs": [{"path": "final.md", "role": "output"}],
+                    },
+                    "file_refs": [{"path": "final.md", "role": "output"}],
+                }
+            ]
+        },
+        "diagnostics": {
+            "errors": [
+                {
+                    "error_type": "RuntimeStageStallError",
+                    "message": "AgentExecution made no progress before idle deadline.",
+                    "stage": "action_loop_close",
+                }
+            ]
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {"path": "final.md"},
+            "remaining_work": ["Retry or replan after execution failure."],
+            "ready_for_final_verification": False,
+            "step_result": "",
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="agent_task.iteration.2.workspace_artifact",
+    )
+
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+    assert delivered["workspace_artifact_delivery"]["content_key"] == "action_file_ref"
+    assert delivered["workspace_artifact_delivery"]["readback"]["path"] == "final.md"
+    assert delivered["file_refs"][0]["path"] == "final.md"
+    assert delivered["file_refs"][0]["sha256"]
+    assert delivered["artifact_preview"].startswith("# Existing Action Report")
+    assert delivered["remaining_work"] == []
+    assert delivered["ready_for_final_verification"] is True
+    assert delivered["workspace_artifact_remaining_work_handoff"]["status"] == "handed_to_terminal_verification"
+    assert delivered["diagnostics"][-1]["code"] == "agent_task.workspace_artifact.action_file_adopted"
+    assert execution_meta["logs"]["artifact_refs"][0]["path"] == "final.md"
+    ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    assert any(item["kind"] == "workspace_artifact.readback" and item["path"] == "final.md" for item in ledger_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_workspace_artifact_delivery_does_not_adopt_missing_action_file(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-action-missing")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-action-missing"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.options = {}
+
+    execution_meta = {
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_file",
+                    "status": "success",
+                    "result_preview": {
+                        "ok": True,
+                        "mode": "write",
+                        "path": "final.md",
+                        "file_refs": [{"path": "final.md", "role": "output"}],
+                    },
+                }
+            ]
+        }
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "artifact_manifest": {"path": "final.md"},
+            "remaining_work": ["Retry or replan after execution failure."],
+            "step_result": "",
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="agent_task.iteration.2.workspace_artifact",
+    )
+
+    assert delivered.get("file_refs") == []
+    assert delivered["remaining_work"] == ["Retry or replan after execution failure."]
+    assert "workspace_artifact_delivery" not in delivered
+    diagnostic_codes = [item["code"] for item in delivered["diagnostics"]]
+    assert "agent_task.workspace_artifact.action_file_readback_failed" in diagnostic_codes
+    assert "agent_task.workspace_artifact.awaiting_body" in diagnostic_codes
 
 
 @pytest.mark.asyncio
@@ -6807,6 +7105,48 @@ def test_execution_log_summary_infers_action_success_from_route_history():
     assert summary["action_statuses"]["read_file"] == "failed"
     assert summary["capability_evidence"]["actions"]["succeeded"] == ["write_file"]
     assert summary["capability_evidence"]["actions"]["failed"] == ["read_file"]
+
+
+def test_execution_log_summary_treats_partial_success_search_as_succeeded_action():
+    from agently.core.application import AgentTask
+
+    summary = AgentTask._execution_log_summary(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "web_search",
+                        "status": "partial_success",
+                        "action_call_id": "call-search",
+                        "model_digest": {
+                            "result_preview": [
+                                {
+                                    "title": "Official release note",
+                                    "href": "https://example.test/release",
+                                    "body": "A successful backend returned useful source evidence.",
+                                }
+                            ],
+                            "result_preview_meta": {"truncated": False},
+                        },
+                        "diagnostics": [
+                            {
+                                "code": "search_backend_failed",
+                                "backend": "yahoo",
+                                "message": "transient backend failure",
+                            }
+                        ],
+                    }
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+
+    assert summary["failed_actions"] == []
+    assert summary["action_statuses"]["web_search"] == "partial_success"
+    assert summary["capability_evidence"]["actions"]["succeeded"] == ["web_search"]
+    assert summary["capability_evidence"]["actions"]["failed"] == []
 
 
 def test_execution_log_summary_includes_nested_action_result_previews():

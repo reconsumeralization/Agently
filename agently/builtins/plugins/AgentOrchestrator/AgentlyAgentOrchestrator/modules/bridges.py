@@ -125,6 +125,31 @@ async def bridge_model_stream_item(
     graph_id: str | None = None,
     meta: dict[str, Any] | None = None,
 ) -> None:
+    raw_path = str(getattr(item, "path", "") or "model")
+    path = f"{path_prefix}.{raw_path}" if path_prefix else raw_path
+    raw_event_type = getattr(item, "event_type", "done")
+    event_type = "delta" if raw_event_type == "delta" else "done"
+    completed = bool(getattr(item, "is_complete", event_type == "done"))
+    progress_meta = {
+        "route": route,
+        "source": source,
+        "field_path": raw_path,
+        "wildcard_path": getattr(item, "wildcard_path", None),
+        "indexes": getattr(item, "indexes", None),
+    }
+    if meta:
+        progress_meta.update(meta)
+    record_progress = getattr(owner.execution_context, "record_progress", None)
+    if callable(record_progress):
+        record_progress(
+            stage=path,
+            status="completed" if completed else "progress",
+            event_type=path,
+            run_id=str(progress_meta.get("model_run_id") or progress_meta.get("request_run_id") or "") or None,
+            response_id=str(progress_meta.get("response_id") or "") or None,
+            meta=progress_meta,
+            notify=False,
+        )
     await owner.stream.bridge_model_stream_item(
         item,
         route=route,

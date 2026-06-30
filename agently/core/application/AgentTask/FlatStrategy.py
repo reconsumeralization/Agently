@@ -777,6 +777,19 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             normalized = plan
         else:
             normalized = {"step_instruction": str(plan), "expected_evidence": "", "rationale": ""}
+        if not str(normalized.get("expected_evidence") or "").strip():
+            expected_evidence_alias = normalized.pop("expected_expected_evidence", None)
+            if isinstance(expected_evidence_alias, str) and expected_evidence_alias.strip():
+                normalized["expected_evidence"] = expected_evidence_alias.strip()
+                diagnostics = normalized.setdefault("normalization_diagnostics", [])
+                if isinstance(diagnostics, list):
+                    diagnostics.append(
+                        {
+                            "code": "agent_task.flat_plan.expected_evidence_alias",
+                            "source_key": "expected_expected_evidence",
+                            "target_key": "expected_evidence",
+                        }
+                    )
         raw_shape = (
             normalized.get("execution_shape")
             or normalized.get("step_kind")
@@ -1372,7 +1385,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     False,
                 ),
                 "step_instruction": (str, "Instruction for one bounded AgentExecution step", True),
-                "expected_evidence": (str, "Evidence this step should produce", True),
+                "expected_evidence": (str, "Evidence this step should produce", False),
                 "rationale": (str, "Why this is the next step", True),
                 "deliverable_mode": (
                     str,
@@ -1667,7 +1680,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "Optional Workspace artifact manifest with path and section outline only; no full body content and no file_refs",
                     False,
                 ),
-                "evidence": ([str], "Evidence produced by the step", True),
+                "evidence": (
+                    [str],
+                    "Optional model-visible evidence notes; Action and Workspace ledger records remain the trusted evidence source",
+                    False,
+                ),
                 "remaining_work": (
                     [str],
                     "Task-level remaining work for the next Flat iteration; non-empty values skip terminal verification unless ready_for_final_verification is explicitly true",

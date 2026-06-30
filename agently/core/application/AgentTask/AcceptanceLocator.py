@@ -396,6 +396,9 @@ def _locate_acceptance_point(
                         len(line_text),
                         candidate,
                     )
+    outline_heading = _find_manifest_outline_heading(point, headings)
+    if outline_heading is not None:
+        return dict(outline_heading)
     return None
 
 
@@ -410,6 +413,81 @@ def _find_heading(candidate: str, headings: Sequence[Mapping[str, Any]]) -> Mapp
         if wanted in _normalized_anchor(str(heading.get("title") or "")):
             return heading
     return None
+
+
+def _find_manifest_outline_heading(
+    point: Mapping[str, Any],
+    headings: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    if str(point.get("source") or "") != "artifact_manifest":
+        return None
+    criterion_id = str(point.get("criterion_id") or "").strip()
+    match = re.match(r"^(?:sections|section_outline):(?P<index>[0-9]+)$", criterion_id)
+    if match is None:
+        return None
+    try:
+        outline_index = int(match.group("index"))
+    except ValueError:
+        return None
+    if outline_index < 0:
+        return None
+    ordinal_heading = _find_numbered_outline_heading(outline_index, headings)
+    if ordinal_heading is not None:
+        return ordinal_heading
+    section_headings = _primary_section_headings(headings)
+    if outline_index < len(section_headings):
+        return section_headings[outline_index]
+    return None
+
+
+def _find_numbered_outline_heading(
+    outline_index: int,
+    headings: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    expected_ordinal = outline_index + 1
+    for heading in headings:
+        title = str(heading.get("title") or "")
+        ordinal = _leading_heading_ordinal(title)
+        if ordinal == expected_ordinal:
+            return heading
+    return None
+
+
+def _primary_section_headings(headings: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    if len(headings) <= 1:
+        return list(headings)
+    levels = [_coerce_heading_level(heading) for heading in headings]
+    nonzero_levels = [level for level in levels if level > 0]
+    if not nonzero_levels:
+        return list(headings)
+    top_level = min(nonzero_levels)
+    deeper_levels_after_title = [level for level in levels[1:] if level > top_level]
+    if levels[0] == top_level and levels.count(top_level) == 1 and deeper_levels_after_title:
+        section_level = min(deeper_levels_after_title)
+        sections = [heading for heading in headings[1:] if _coerce_heading_level(heading) == section_level]
+        if sections:
+            return sections
+    top_level_sections = [heading for heading in headings if _coerce_heading_level(heading) == top_level]
+    return top_level_sections or list(headings)
+
+
+def _leading_heading_ordinal(title: str) -> int | None:
+    text = str(title or "").translate(str.maketrans("０１２３４５６７８９", "0123456789")).strip()
+    match = re.match(r"^(?P<ordinal>[0-9]{1,3})(?:[.)．、:：-]|\s)", text)
+    if match is None:
+        return None
+    try:
+        return int(match.group("ordinal"))
+    except ValueError:
+        return None
+
+
+def _coerce_heading_level(heading: Mapping[str, Any]) -> int:
+    try:
+        level = int(heading.get("level") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(level, 0)
 
 
 def _locator_from_char_position(

@@ -360,6 +360,7 @@ class AgentExecutionContext:
         run_id: str | None = None,
         response_id: str | None = None,
         meta: dict[str, Any] | None = None,
+        notify: bool = True,
     ):
         now = time.monotonic()
         event = {
@@ -374,7 +375,8 @@ class AgentExecutionContext:
         self.last_progress_at = now
         self.last_progress_event = event
         self.stage_events.append(event)
-        self._notify_progress(event)
+        if notify:
+            self._notify_progress(event)
 
     def set_progress_callback(self, callback: Callable[[dict[str, Any]], Any] | None):
         self._progress_callback = callback

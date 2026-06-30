@@ -1164,28 +1164,34 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if len(unique) == 1:
                 return unique
         evidence_id = str(diagnostic.get("evidence_id") or "").strip()
-        if not evidence_id:
-            return []
-        matches = [str(item).strip() for item in available_ref_index.get(evidence_id, []) if str(item or "").strip()]
-        unique_matches = sorted(set(matches))
-        requires_content_replacement = (
-            str(diagnostic.get("code") or "") == "evidence_ledger.ref_only_item_used_as_content_support"
-            and str(diagnostic.get("support_type") or "").strip().lower() == "content"
-        )
-        if len(unique_matches) == 1 and not requires_content_replacement:
-            return unique_matches
-        artifact_ref_matches = cls._deterministic_artifact_ref_candidates(diagnostic, available_refs)
-        if len(artifact_ref_matches) == 1:
-            return artifact_ref_matches
-        action_result_matches = cls._deterministic_action_result_candidates(diagnostic, available_refs)
-        if len(action_result_matches) == 1:
-            return action_result_matches
+        unique_matches: list[str] = []
+        requires_content_replacement = False
+        if evidence_id:
+            matches = [
+                str(item).strip()
+                for item in available_ref_index.get(evidence_id, [])
+                if str(item or "").strip()
+            ]
+            unique_matches = sorted(set(matches))
+            requires_content_replacement = (
+                str(diagnostic.get("code") or "") == "evidence_ledger.ref_only_item_used_as_content_support"
+                and str(diagnostic.get("support_type") or "").strip().lower() == "content"
+            )
+            if len(unique_matches) == 1 and not requires_content_replacement:
+                return unique_matches
+            artifact_ref_matches = cls._deterministic_artifact_ref_candidates(diagnostic, available_refs)
+            if len(artifact_ref_matches) == 1:
+                return artifact_ref_matches
+            action_result_matches = cls._deterministic_action_result_candidates(diagnostic, available_refs)
+            if len(action_result_matches) == 1:
+                return action_result_matches
         body_text_matches = cls._deterministic_body_text_candidates(diagnostic, available_refs)
         if len(body_text_matches) == 1:
             return body_text_matches
-        readback_matches = cls._deterministic_content_readback_candidates(diagnostic, available_refs)
-        if len(readback_matches) == 1:
-            return readback_matches
+        if evidence_id:
+            readback_matches = cls._deterministic_content_readback_candidates(diagnostic, available_refs)
+            if len(readback_matches) == 1:
+                return readback_matches
         if len(unique_matches) == 1:
             ref_by_id = {
                 str(ref.get("id") or "").strip(): ref
@@ -1301,13 +1307,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if support_type not in {"content", "unavailability"}:
             return []
         evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
-        if not evidence_id_text:
-            return []
-        queries = cls._evidence_binding_body_match_queries(evidence_id_text)
-        if cls._evidence_binding_id_looks_like_workspace_locator(evidence_id_text):
-            queries.extend(cls._evidence_binding_body_match_queries(str(diagnostic.get("claim") or "")))
-        queries = cls._dedupe_evidence_binding_queries(queries)
-        if not queries:
+        query_specs = [(query, False) for query in cls._evidence_binding_body_match_queries(evidence_id_text)]
+        if not evidence_id_text or cls._evidence_binding_id_looks_like_workspace_locator(evidence_id_text):
+            allow_partial_claim_match = not evidence_id_text
+            query_specs.extend(
+                (query, allow_partial_claim_match)
+                for query in cls._evidence_binding_body_match_queries(str(diagnostic.get("claim") or ""))
+            )
+        query_specs = cls._dedupe_evidence_binding_query_specs(query_specs)
+        if not query_specs:
             return []
         matches: list[Mapping[str, Any]] = []
         for ref in available_refs:
@@ -1318,12 +1326,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 continue
             status = str(ref.get("status") or "").strip().lower()
             body_state = str(ref.get("body_state") or "").strip().lower()
-            if status != "ok" or body_state not in {"full", "bounded", "truncated"}:
+            status_supported = status == "ok" or (support_type == "unavailability" and status in {"failed", "empty"})
+            if not status_supported or body_state not in {"full", "bounded", "truncated"}:
                 continue
             body = cls._evidence_binding_ref_body(ref)
             if not body:
                 continue
-            if any(cls._evidence_binding_body_query_matches(query, body) for query in queries):
+            if any(
+                cls._evidence_binding_body_query_matches(query, body, allow_partial=allow_partial)
+                for query, allow_partial in query_specs
+            ):
                 matches.append(ref)
         evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
         if cls._evidence_binding_id_looks_like_file_locator(evidence_id_text):
@@ -1376,7 +1388,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return [query for query in queries if cls._evidence_binding_body_query_is_informative(query)]
 
     @classmethod
-    def _evidence_binding_body_query_matches(cls, query: str, body: str) -> bool:
+    def _evidence_binding_body_query_matches(cls, query: str, body: str, *, allow_partial: bool = False) -> bool:
         normalized_query = cls._normalize_evidence_binding_text(query)
         if len(normalized_query) < 12:
             return False
@@ -1389,7 +1401,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         body_tokens = set(cls._evidence_binding_body_match_tokens(body))
         if not body_tokens:
             return False
-        return all(token in body_tokens for token in query_tokens)
+        if all(token in body_tokens for token in query_tokens):
+            return True
+        if not allow_partial:
+            return False
+        overlap_count = sum(1 for token in query_tokens if token in body_tokens)
+        required_overlap = min(len(query_tokens), max(3, (len(query_tokens) * 3 + 4) // 5))
+        return overlap_count >= required_overlap
 
     @classmethod
     def _evidence_binding_body_query_is_informative(cls, query: str) -> bool:
@@ -1402,6 +1420,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             text = str(query or "").strip()
             if text and text not in deduped:
                 deduped.append(text)
+        return deduped
+
+    @staticmethod
+    def _dedupe_evidence_binding_query_specs(queries: Sequence[tuple[str, bool]]) -> list[tuple[str, bool]]:
+        deduped: list[tuple[str, bool]] = []
+        seen: set[tuple[str, bool]] = set()
+        for query, allow_partial in queries:
+            text = str(query or "").strip()
+            key = (text, bool(allow_partial))
+            if text and key not in seen:
+                seen.add(key)
+                deduped.append(key)
         return deduped
 
     @classmethod
