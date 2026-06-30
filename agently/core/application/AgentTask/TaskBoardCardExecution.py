@@ -230,6 +230,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             }
             card_instruction = (
                 "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
+                "Provide short card_intent and decision_basis fields before the card result fields to frame this "
+                "card-local decision; do not include raw chain-of-thought or hidden reasoning. "
                 "Use task_context_contract.current_time when the card needs current/latest/as-of evidence; label older "
                 "or historical source material with its time boundary. "
                 "Use TaskBoard evidence view as the hot summary; request full content only through available "
@@ -257,15 +259,29 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "AgentTask will write/read back Workspace files and produce trusted file_refs; do not invent file_refs "
                 "for deliverables. Apply workspace_delivery_policy: when this card is authorized to write required "
                 "final deliverable paths, use the required path in artifact_manifest.path instead of a working/evidence path. "
+                "For file-backed deliverables, return acceptance_points with expected headings or exact anchors for "
+                "critical verification points; do not invent line numbers or trusted file refs. "
                 "If the task is source-grounded, include concrete source URLs, file paths, or "
                 "evidence refs from source_refs/dependency_readbacks in the deliverable body; do not mention a "
                 "source title or local downloaded filename without its verifier-visible URL/path when such a ref "
                 f"exists. {_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION}Review or "
                 "verification cards must not put review notes in those deliverable fields unless they include the "
-                "full corrected deliverable body. Do not claim the whole task is complete; TaskBoard and AgentTask "
+                "full corrected deliverable body. After the main card result fields, include short self_check, "
+                "short_summary, and progress_message for downstream card/finalizer context and human progress. "
+                "These process fields are not evidence. Do not claim the whole task is complete; TaskBoard and AgentTask "
                 "own lifecycle completion."
             )
             card_output_schema = {
+                "card_intent": (
+                    str,
+                    "One short sentence stating this card's local intent.",
+                    False,
+                ),
+                "decision_basis": (
+                    [str],
+                    "Short card-local decision factors; no raw chain-of-thought.",
+                    False,
+                ),
                 "status": (str, "completed, blocked, or failed for this card", False),
                 "answer": (str, "Card-local result or artifact summary", True),
                 "candidate_final_result": (
@@ -299,7 +315,27 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
                     False,
                 ),
+                "acceptance_points": (
+                    [dict],
+                    "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}]",
+                    False,
+                ),
                 "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
+                "self_check": (
+                    str,
+                    "Short post-card self check of uncertainty or residual risk.",
+                    False,
+                ),
+                "short_summary": (
+                    str,
+                    "Short summary for downstream cards or finalization.",
+                    False,
+                ),
+                "progress_message": (
+                    str,
+                    "One safe human-readable card progress sentence; do not claim whole-task completion.",
+                    False,
+                ),
                 "diagnostics": ([dict], "Optional card diagnostics", False),
             }
             work_unit = WorkUnitIntent(
@@ -507,6 +543,15 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 if isinstance(card_output, Mapping)
                 else None
             )
+            process_summary = self._process_summary_from_value(
+                card_output,
+                stage="taskboard_card",
+            )
+            await self._emit_process_progress_from_output(
+                card_output,
+                stage="taskboard_card",
+                card_id=context.card.id,
+            )
             return TaskBoardCardResult(
                 card_id=context.card.id,
                 status=card_status,
@@ -528,6 +573,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "block_carrier": compact_block_carrier,
                     "evidence_ledger": card_evidence_ledger,
                     "evidence_use_guard": evidence_use_guard,
+                    "process_summary": process_summary,
                 },
             )
         return self._failed_taskboard_card_result(
@@ -584,6 +630,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         control_instruction = (
             "Execute one TaskBoard control card with a single structured model request. "
             "This card is for synthesis, verification, finalization, or deciding the next board action; "
+            "provide short card_intent and decision_basis fields before the control result fields; do not include raw "
+            "chain-of-thought or hidden reasoning. "
             "Use task_context_contract.current_time when current/latest/as-of evidence matters, and label older "
             "or historical source material with its time boundary. "
             "do not plan or call tools from this request. Use TaskBoardEvidenceView as the hot evidence summary "
@@ -607,10 +655,24 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "do not mention a source title without its verifier-visible URL/path when such a ref exists. "
             "Apply workspace_delivery_policy: when this card is authorized to write required final deliverable paths, "
             "use the required path in artifact_manifest.path instead of a working/evidence path. "
+            "For file-backed deliverables, return acceptance_points with expected headings or exact anchors for "
+            "critical verification points; do not invent line numbers or trusted file refs. "
+            "After the main control result fields, include short self_check, short_summary, and progress_message for "
+            "downstream board context and human progress; these process fields are not evidence. "
             f"{_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION}Also return whether the card is sufficient "
             "and what continuation, if any, the board should consider."
         )
         control_output_schema = {
+            "card_intent": (
+                str,
+                "One short sentence stating this control card's local intent.",
+                False,
+            ),
+            "decision_basis": (
+                [str],
+                "Short control-card decision factors; no raw chain-of-thought.",
+                False,
+            ),
             "status": (str, "completed, blocked, failed, or skipped for this card", False),
             "answer": (str, "Card-local synthesis or decision summary", True),
             "candidate_final_result": (
@@ -656,7 +718,27 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
                 False,
             ),
+            "acceptance_points": (
+                [dict],
+                "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}]",
+                False,
+            ),
             "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
+            "self_check": (
+                str,
+                "Short post-control self check of uncertainty or residual risk.",
+                False,
+            ),
+            "short_summary": (
+                str,
+                "Short summary for downstream board execution or finalization.",
+                False,
+            ),
+            "progress_message": (
+                str,
+                "One safe human-readable control-card progress sentence; do not claim whole-task completion.",
+                False,
+            ),
             "diagnostics": ([dict], "Optional control-card diagnostics", False),
             "patch_proposal": (
                 dict,
@@ -891,6 +973,15 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             raw_file_refs = card_output.get("file_refs")
             if isinstance(raw_file_refs, Sequence) and not isinstance(raw_file_refs, str | bytes | bytearray):
                 output_file_refs.extend(DataFormatter.sanitize(item) for item in raw_file_refs)
+        process_summary = self._process_summary_from_value(
+            card_output,
+            stage="taskboard_control",
+        )
+        await self._emit_process_progress_from_output(
+            card_output,
+            stage="taskboard_control",
+            card_id=context.card.id,
+        )
         return TaskBoardCardResult(
             card_id=context.card.id,
             status=card_status,
@@ -910,6 +1001,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 ),
                 "evidence_ledger": card_evidence_ledger,
                 "evidence_use_guard": evidence_use_guard,
+                "process_summary": process_summary,
             },
         )
 
@@ -924,11 +1016,12 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         item: Any,
     ) -> AgentExecutionStreamData:
         raw_path = str(getattr(item, "path", "") or "stream")
+        delta = None if self._is_process_summary_stream_path(raw_path) else getattr(item, "delta", None)
         return await self._emit(
             f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.control.{raw_path}",
             getattr(item, "value", None),
             event_type="delta",
-            delta=getattr(item, "delta", None),
+            delta=delta,
             is_complete=bool(getattr(item, "is_complete", False)),
             meta={
                 "task_id": self.id,
@@ -976,6 +1069,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
     ) -> AgentExecutionStreamData:
         raw_path = str(getattr(item, "path", "") or "stream")
         event_type: Literal["delta", "done"] = "delta" if getattr(item, "event_type", None) == "delta" else "done"
+        delta = None if self._is_process_summary_stream_path(raw_path) else getattr(item, "delta", None)
         item_meta = getattr(item, "meta", None)
         meta: dict[str, Any] = {
             "task_id": self.id,
@@ -994,7 +1088,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.execution.{raw_path}",
             getattr(item, "value", None),
             event_type=event_type,
-            delta=getattr(item, "delta", None),
+            delta=delta,
             is_complete=bool(getattr(item, "is_complete", event_type == "done")),
             meta=meta,
         )

@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from .TaskShared import *
 
 
@@ -48,6 +50,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     "iteration": record.get("iteration"),
                     "step_instruction": plan.get("step_instruction", ""),
                     "effective_execution_shape": plan.get("effective_execution_shape", plan.get("execution_shape", "")),
+                    "process_summary": DataFormatter.sanitize(record.get("process_summary", {})),
                     "verification": {
                         "is_complete": verification.get("is_complete"),
                         "reason": verification.get("reason", ""),
@@ -140,6 +143,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "advisory_next_step_requirements": next_step_requirements,
             "replan_instruction": replan_instruction,
         }
+        process_summary = latest.get("process_summary")
+        if isinstance(process_summary, Mapping):
+            compact_process = DataFormatter.sanitize(dict(process_summary))
+            if compact_process:
+                repair_context["process_summary"] = compact_process
         cumulative_anchors = cls._cumulative_planner_evidence_anchors(previous_iterations)
         if cumulative_anchors:
             repair_context["available_evidence_anchors"] = cumulative_anchors
@@ -381,12 +389,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         raw_cumulative_evidence_summary = self._cumulative_execution_evidence_summary(execution_meta)
         current_evidence_ledger = self._evidence_ledger_from_execution_meta(execution_meta)
         evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
-        await self._ensure_workspace_artifact_targeted_readback_evidence(execution_meta, evidence_ledger)
+        initial_evidence_use = collect_evidence_use(execution_result)
+        initial_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
+        await self._ensure_workspace_artifact_targeted_readback_evidence(
+            execution_meta,
+            evidence_ledger,
+            evidence_use=initial_guard.get("normalized_evidence_use"),
+        )
         raw_execution_evidence_summary = self._execution_log_summary(execution_meta)
         raw_cumulative_evidence_summary = self._cumulative_execution_evidence_summary(execution_meta)
         current_evidence_ledger = self._evidence_ledger_from_execution_meta(execution_meta)
         evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
-        grounding_guard = validate_evidence_use(collect_evidence_use(execution_result), evidence_ledger)
+        grounding_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
         normalized_execution_result = value_with_normalized_evidence_use(
             execution_result,
             grounding_guard.get("normalized_evidence_use"),
@@ -446,6 +460,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "cumulative_execution_evidence_summary": cumulative_evidence_summary,
                 "current_evidence_ledger": current_evidence_ledger,
                 "evidence_ledger": evidence_ledger,
+                "acceptance_locator_view": acceptance_locator_view_from_ledger(evidence_ledger),
                 "grounding_guard": grounding_guard,
                 "trusted_workspace_artifacts": trusted_workspace_artifacts,
                 "capability_evidence_requirements": self._capability_evidence_requirements(),
@@ -463,6 +478,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "evidence does not meet the count. "
             "Require source/evidence references when the criteria ask for evidence. "
             "Treat evidence_ledger as the authoritative grounding ledger and use its item ids when judging claims. "
+            "Use acceptance_locator_view as a verifier readback index for Workspace artifacts: locator items show "
+            "where to inspect an artifact, not whether the content is semantically correct. Prefer bounded readback "
+            "items produced from those locators when checking long artifact sections. A locator with "
+            "requirement_level='required' comes from an output contract or success criterion; status=empty on that "
+            "locator is a strong structural gap. A locator with requirement_level='advisory' comes from a model-suggested "
+            "acceptance point; status=empty means that proposed anchor was not found, but it is not by itself proof that "
+            "the deliverable lacks the required content when other required locators or targeted readbacks cover it. "
             "current_evidence_ledger is the current step view; evidence_ledger includes prior iteration evidence that "
             "is verifier-visible. Do not perform or assume extra readback outside this ledger. failed/empty ledger "
             "items are facts of unavailability only; ref_only items prove only a URL/path/ref was found; bounded or "
@@ -511,6 +533,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "blocked verification. The verifier does not choose tools, routes, execution shapes, or exact methods. "
             "repair_constraints and next_step_requirements are advisory compatibility fields only; keep them factual "
             "and do not turn them into a narrow tool script. Also include a short human-readable replan_instruction. "
+            "After the judgment fields, include compact criterion_checks, verification_summary, and progress_message "
+            "for downstream repair context and human progress. These fields are process summaries only; they are not "
+            "completion evidence and must not contain raw chain-of-thought or long evidence bodies. "
             "Set requires_block=true only when the task cannot continue."
         )
         request.output(
@@ -540,6 +565,21 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 ),
                 "final_result_required": (bool, "True when the goal expects a concrete returned final deliverable"),
                 "final_result": (str, "Final business result when complete"),
+                "criterion_checks": (
+                    [dict],
+                    "Compact per-criterion checks: [{criterion, status, summary, evidence_ids?, gaps?}].",
+                    False,
+                ),
+                "verification_summary": (
+                    str,
+                    "Short verifier summary for repair context; no raw chain-of-thought.",
+                    False,
+                ),
+                "progress_message": (
+                    str,
+                    "One safe human-readable verification progress sentence.",
+                    False,
+                ),
             },
             format="json",
         )
@@ -558,34 +598,63 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "final_result_required": False,
                 "final_result": "",
             }
-        return self._normalize_verification(
+        normalized = self._normalize_verification(
             verification,
             execution_evidence_summary=raw_cumulative_evidence_summary,
             candidate_final_result=candidate_final_result,
             grounding_guard=grounding_guard,
         )
+        await self._emit_process_progress_from_output(
+            normalized,
+            stage="verification",
+            iteration=iteration_index,
+        )
+        return normalized
 
     async def _ensure_workspace_artifact_targeted_readback_evidence(
         self,
         execution_meta: Mapping[str, Any],
         evidence_ledger: Mapping[str, Any],
+        *,
+        evidence_use: Any = None,
     ) -> None:
         if not isinstance(execution_meta, dict):
             return
-        existing_targeted_paths: set[str] = set()
+        existing_generic_paths: set[str] = set()
+        existing_locator_readbacks: set[str] = set()
         for item in evidence_ledger.get("items", []) if isinstance(evidence_ledger, Mapping) else []:
             if not isinstance(item, Mapping):
                 continue
             if str(item.get("kind") or "") != "workspace_artifact.targeted_readback":
                 continue
             path = str(item.get("path") or "").strip()
-            if path:
-                existing_targeted_paths.add(path)
+            provenance = item.get("provenance")
+            source_evidence_id = (
+                str(provenance.get("source_evidence_id") or "").strip() if isinstance(provenance, Mapping) else ""
+            )
+            if source_evidence_id:
+                existing_locator_readbacks.add(source_evidence_id)
+            elif path:
+                existing_generic_paths.add(path)
 
         evidence_items: list[dict[str, Any]] = []
+        for locator in acceptance_locator_view_from_ledger(evidence_ledger).get("items", []):
+            if not isinstance(locator, Mapping):
+                continue
+            locator_id = str(locator.get("id") or "").strip()
+            if not locator_id or locator_id in existing_locator_readbacks:
+                continue
+            if str(locator.get("status") or "") != "ok":
+                continue
+            readback = await self._workspace_artifact_acceptance_locator_readback(locator)
+            if readback is not None:
+                evidence_items.append(self._workspace_artifact_targeted_readback_evidence_item(locator, readback))
+                existing_locator_readbacks.add(locator_id)
+
+        claim_queries = self._evidence_use_verifier_target_queries(evidence_use)
         for artifact in workspace_artifacts_from_ledger(evidence_ledger):
             path = str(artifact.get("path") or "").strip()
-            if not path or path in existing_targeted_paths:
+            if not path or path in existing_generic_paths:
                 continue
             if str(artifact.get("status") or "") != "ok":
                 continue
@@ -612,7 +681,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     )
                 )
                 continue
-            for readback in await self._trusted_workspace_artifact_targeted_readbacks(artifact, read_result):
+            for readback in await self._trusted_workspace_artifact_targeted_readbacks(
+                artifact,
+                read_result,
+                queries=claim_queries,
+            ):
                 evidence_items.append(self._workspace_artifact_targeted_readback_evidence_item(artifact, readback))
         self._append_execution_meta_evidence_items(execution_meta, evidence_items)
 
@@ -644,6 +717,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "source": "agent_task.workspace_artifact.targeted_readback",
             "provenance": {
                 "source": "agent_task.workspace_artifact.targeted_readback",
+                "source_evidence_id": readback.get("source_evidence_id") or artifact.get("id"),
                 "path": path,
                 "kind": kind,
                 "query": query,
@@ -669,6 +743,78 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 }
             ]
         return DataFormatter.sanitize(item)
+
+    async def _workspace_artifact_acceptance_locator_readback(
+        self,
+        locator: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        path = str(locator.get("path") or locator.get("artifact_path") or "").strip()
+        locator_id = str(locator.get("id") or "").strip()
+        if not path or not locator_id:
+            return None
+        offset = self._coerce_non_negative_int(locator.get("byte_offset"))
+        byte_end = self._coerce_non_negative_int(locator.get("byte_end"))
+        max_bytes = min(_VERIFIER_PROMPT_ITEM_CHARS, 2400)
+        if byte_end > offset:
+            max_bytes = min(max(byte_end - offset, 800), max_bytes)
+        if offset > 0 or byte_end > 0:
+            try:
+                read_result = await self.workspace.read_file(path, max_bytes=max_bytes, offset=offset)
+            except Exception as error:
+                return {
+                    "kind": "acceptance_locator_readback",
+                    "path": path,
+                    "status": "failed",
+                    "source_evidence_id": locator_id,
+                    "offset": offset,
+                    "line_start": locator.get("line_start"),
+                    "line_end": locator.get("line_end"),
+                    "error": {
+                        "type": error.__class__.__name__,
+                        "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    },
+                }
+            return {
+                "kind": "acceptance_locator_readback",
+                "path": str(read_result.get("path") or path),
+                "status": "read",
+                "source_evidence_id": locator_id,
+                "offset": int(read_result.get("offset") or offset),
+                "line_start": locator.get("line_start"),
+                "line_end": locator.get("line_end"),
+                "truncated": bool(read_result.get("truncated")),
+                "query": locator.get("heading") or locator.get("anchor_text") or locator.get("claim"),
+                "content": self._truncate_prompt_text(str(read_result.get("content") or ""), max_bytes),
+            }
+        for query in self._acceptance_locator_search_queries(locator):
+            match = await self._workspace_artifact_search_readback(
+                path,
+                query,
+                max_file_bytes=5_000_000,
+            )
+            if match is not None:
+                match["kind"] = "acceptance_locator_search"
+                match["source_evidence_id"] = locator_id
+                return match
+        return {
+            "kind": "acceptance_locator_readback",
+            "path": path,
+            "status": "failed",
+            "source_evidence_id": locator_id,
+            "error": {
+                "type": "AcceptanceLocatorUnavailable",
+                "message": "Acceptance locator did not include a byte offset and no anchor search matched.",
+            },
+        }
+
+    @classmethod
+    def _acceptance_locator_search_queries(cls, locator: Mapping[str, Any]) -> list[str]:
+        queries: list[str] = []
+        for key in ("heading", "anchor_text", "claim", "topic", "criterion_id"):
+            text = str(locator.get(key) or "").strip()
+            if text and len(text) <= 160 and text not in queries:
+                queries.append(text)
+        return queries[:4]
 
     def _should_attempt_evidence_binding_repair(self, grounding_guard: Mapping[str, Any]) -> bool:
         if not isinstance(grounding_guard, Mapping):
@@ -742,13 +888,27 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     ],
                     "Only corrected evidence_use entries for claims with binding diagnostics",
                     True,
-                )
+                ),
+                "repair_summary": (
+                    str,
+                    "Short summary of the evidence binding repair result; no candidate rewrite.",
+                    False,
+                ),
+                "progress_message": (
+                    str,
+                    "One safe human-readable repair progress sentence.",
+                    False,
+                ),
             },
             format="json",
         )
         repaired = await self._await_task_request(request.async_get_data(), stage="evidence_binding_repair")
         if not isinstance(repaired, Mapping):
             return []
+        await self._emit_process_progress_from_output(
+            repaired,
+            stage="evidence_binding_repair",
+        )
         evidence_use = repaired.get("evidence_use")
         if not isinstance(evidence_use, Sequence) or isinstance(evidence_use, str | bytes | bytearray):
             return []
@@ -849,6 +1009,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         self,
         ref: Mapping[str, Any],
         read_result: Mapping[str, Any],
+        *,
+        queries: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         path = str(ref.get("path") or read_result.get("path") or "").strip()
         if not path:
@@ -891,7 +1053,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 )
 
         max_file_bytes = max(byte_count, _VERIFIER_PROMPT_VALUE_CHARS)
-        for query in self._workspace_artifact_verifier_target_queries():
+        for query in [*list(queries or ()), *self._workspace_artifact_verifier_target_queries()]:
             if len(readbacks) >= 8:
                 break
             match = await self._workspace_artifact_search_readback(path, query, max_file_bytes=max_file_bytes)
@@ -986,6 +1148,30 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "coverage",
         ):
             add(query)
+        return queries[:12]
+
+    @classmethod
+    def _evidence_use_verifier_target_queries(cls, evidence_use: Any) -> list[str]:
+        queries: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            text = " ".join(text.split())
+            if len(text) > 160:
+                return
+            key = text.casefold()
+            if key not in {item.casefold() for item in queries}:
+                queries.append(text)
+
+        for use in collect_evidence_use({"evidence_use": evidence_use}):
+            if not isinstance(use, Mapping):
+                continue
+            add(use.get("claim"))
+            for evidence_id in cls._normalize_string_list(use.get("evidence_ids")):
+                if "/" in evidence_id or "." in evidence_id:
+                    add(PurePosixPath(evidence_id).name)
         return queries[:12]
 
     @staticmethod

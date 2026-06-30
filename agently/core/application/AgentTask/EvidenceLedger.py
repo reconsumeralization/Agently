@@ -18,6 +18,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
 
+from .AcceptanceLocator import ACCEPTANCE_LOCATOR_KIND, acceptance_locator_view_from_ledger
+
 from agently.types.data import EvidenceEnvelope
 from agently.utils import DataFormatter
 
@@ -119,6 +121,7 @@ def evidence_ledger_view(
             "status_counts": status_counts,
             "body_state_counts": body_state_counts,
             "source_refs": _dedupe_refs(source_refs),
+            "acceptance_locator_view": acceptance_locator_view_from_ledger({"items": items}),
             "grounding_rules": {
                 "ok_content": "status=ok with body_state full/bounded/truncated supports only visible content.",
                 "ref_only": "body_state=ref_only supports only discovery/ref-pointer claims until readback evidence exists.",
@@ -459,9 +462,35 @@ def _compact_ledger_item(
         compact["diagnostics"] = [DataFormatter.sanitize(entry) for entry in diagnostics[:8]]
         if len(diagnostics) > 8:
             compact["diagnostics"].append({"omitted": len(diagnostics) - 8, "reason": "ledger_view_budget"})
+    aliases = item.get("aliases")
+    if isinstance(aliases, Sequence) and not isinstance(aliases, str | bytes | bytearray):
+        compact_aliases = [str(alias).strip() for alias in aliases if str(alias or "").strip()]
+        if compact_aliases:
+            compact["aliases"] = compact_aliases[:16]
+    elif isinstance(aliases, str) and aliases.strip():
+        compact["aliases"] = [aliases.strip()]
     for field in _ALIAS_FIELDS:
         if field in item and item.get(field) not in (None, "", [], {}):
             compact[field] = DataFormatter.sanitize(item.get(field))
+    if str(item.get("kind") or "") == ACCEPTANCE_LOCATOR_KIND:
+        for field in (
+            "artifact_path",
+            "criterion_id",
+            "claim",
+            "topic",
+            "point_source",
+            "requirement_level",
+            "heading",
+            "anchor_text",
+            "line_start",
+            "line_end",
+            "byte_offset",
+            "byte_end",
+            "content_fingerprint",
+            "source_evidence_ids",
+        ):
+            if item.get(field) not in (None, "", [], {}):
+                compact[field] = DataFormatter.sanitize(item.get(field))
     if include_body:
         body = _first_body_value(item)
         if isinstance(body, str) and body:
@@ -600,6 +629,12 @@ def _evidence_aliases_for_item(item: Mapping[str, Any]) -> set[str]:
     def add(value: Any) -> None:
         aliases.update(_alias_variants(value))
 
+    explicit_aliases = item.get("aliases")
+    if isinstance(explicit_aliases, Sequence) and not isinstance(explicit_aliases, str | bytes | bytearray):
+        for alias in explicit_aliases:
+            add(alias)
+    elif isinstance(explicit_aliases, str):
+        add(explicit_aliases)
     for field in _ALIAS_FIELDS:
         add(item.get(field))
     provenance = item.get("provenance")
@@ -660,12 +695,32 @@ def _available_evidence_refs(raw_items: Sequence[Any], *, max_items: int = 80) -
             "status": str(item.get("status") or ""),
             "body_state": str(item.get("body_state") or ""),
         }
+        if str(item.get("kind") or "") == ACCEPTANCE_LOCATOR_KIND:
+            for field in (
+                "criterion_id",
+                "claim",
+                "topic",
+                "heading",
+                "anchor_text",
+                "line_start",
+                "line_end",
+                "byte_offset",
+                "byte_end",
+            ):
+                value = item.get(field)
+                if value not in (None, "", [], {}):
+                    ref[field] = value
         for field in _ALIAS_FIELDS:
             if field in {"id", "cite_as"}:
                 continue
             value = _first_ref_value(item, (field,))
             if value:
                 ref[field] = value
+        aliases = item.get("aliases")
+        if isinstance(aliases, Sequence) and not isinstance(aliases, str | bytes | bytearray):
+            compact_aliases = [str(alias).strip() for alias in aliases if str(alias or "").strip()]
+            if compact_aliases:
+                ref["aliases"] = compact_aliases[:8]
         refs.append(ref)
         if len(refs) >= max_items:
             break

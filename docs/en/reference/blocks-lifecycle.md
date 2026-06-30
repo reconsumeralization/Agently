@@ -58,9 +58,11 @@ deterministic guards can reject invalid ids, failed/empty positive support, and
 `ref_only` content support before verifier judgment.
 
 Model prompts may show short `cite_as` handles beside canonical ids. Those
-handles, paths, record ids, URLs, artifact ids, and action ids are deterministic
-aliases only; AgentTask canonicalizes them back to ledger ids before verifier
-input. Ambiguous aliases block instead of guessing.
+handles plus producer-declared structural aliases such as paths, record ids,
+URLs, artifact ids, action ids, and action/ref pairs are deterministic aliases
+only; AgentTask canonicalizes them back to ledger ids before verifier input.
+Ambiguous aliases block instead of guessing, and the guard does not maintain
+business-specific action-name rules.
 
 Workspace artifact write/readback and targeted artifact readback are ledger
 producers. A verifier can inspect only readback facts that have been written to

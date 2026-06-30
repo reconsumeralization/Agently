@@ -66,6 +66,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 limit_name=error.limit_name,
                 timeout_seconds=error.timeout_seconds,
             )
+        await self._emit_process_progress_from_output(plan, stage="plan", iteration=iteration_index)
         await self._record_phase(
             "planned",
             iteration=iteration_index,
@@ -168,6 +169,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         execution_meta.setdefault("diagnostics", {})
         if isinstance(execution_meta.get("diagnostics"), dict):
             execution_meta["diagnostics"]["evidence_use_guard"] = DataFormatter.sanitize(flat_evidence_guard)
+        await self._emit_process_progress_from_output(
+            execution_result,
+            stage="execution",
+            iteration=iteration_index,
+        )
         await self._emit_snapshot(
             iteration_index,
             "execution",
@@ -239,6 +245,16 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     stage="verify",
                 )
             except _AgentTaskDeadlineExceeded as error:
+                await self._record_timed_out_verification_iteration(
+                    iteration_index,
+                    plan=plan,
+                    context_pack=context_pack,
+                    decision_ref=decision_ref,
+                    execution_meta=execution_meta,
+                    observation_ref=observation_ref,
+                    step_reflection_ref=step_reflection_ref,
+                    error=error,
+                )
                 return await self._terminate_timed_out(
                     iteration_index,
                     stage=error.stage,
@@ -329,6 +345,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "verification_source": verification_source,
             "reflection_refs": [ref for ref in (step_reflection_ref, verification_reflection_ref) if ref is not None],
             "context_item_count": len(context_pack.get("items", [])),
+            "process_summary": self._combined_process_summary(
+                plan=plan,
+                execution_result=execution_result,
+                verification=verification,
+            ),
         }
         self.iterations.append(DataFormatter.sanitize(iteration_record))
         # The cumulative satisfied-capability sets are updated inside
@@ -1250,6 +1271,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         request.instruct(
             "Plan the next bounded AgentExecution step for this AgentTask. "
+            "Before choosing the execution shape, provide short turn_intent and decision_basis fields to frame this "
+            "single-step decision; do not include raw chain-of-thought, hidden reasoning, or completion claims there. "
             "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
             "Use task_context_contract.current_time for current-time facts and current/latest/as-of source boundaries, "
             "and use task_context_contract for ref-backed "
@@ -1302,6 +1325,16 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         request.output(
             {
+                "turn_intent": (
+                    str,
+                    "One short sentence stating what this iteration should accomplish.",
+                    False,
+                ),
+                "decision_basis": (
+                    [str],
+                    "Short factors that justify the bounded-step decision; no raw chain-of-thought.",
+                    False,
+                ),
                 "execution_shape": (
                     str,
                     "Execution shape for this bounded step: direct, actions, or skills",
@@ -1471,7 +1504,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "section outline for long or multi-section deliverables; use artifact_markdown only for bounded short "
                     "bodies. Do not put the full long body in artifact_manifest section content, answer, "
                     "candidate_final_result, or final_result. AgentTask will stream/write/read back Workspace files and "
-                    "produce trusted file_refs. "
+                    "produce trusted file_refs. Return acceptance_points with expected headings or exact anchors for "
+                    "critical artifact verification points; do not invent line numbers or trusted file refs. "
                     "Do not invent file_refs for deliverables. "
                     "For web-source steps, treat Search results as discovery hints only. Browse official pages and follow "
                     "same-site index/list/download/navigation links before relying on a broad announcement page as the "
@@ -1535,6 +1569,55 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             return result, failed_meta
         return result, cast(dict[str, Any], meta)
 
+    async def _record_timed_out_verification_iteration(
+        self,
+        iteration_index: int,
+        *,
+        plan: dict[str, Any],
+        context_pack: "WorkspaceContextPackage",
+        decision_ref: "WorkspaceRecordRef",
+        execution_meta: dict[str, Any],
+        observation_ref: "WorkspaceRecordRef",
+        step_reflection_ref: "WorkspaceRecordRef | None",
+        error: _AgentTaskDeadlineExceeded,
+    ) -> None:
+        if any(record.get("iteration") == iteration_index for record in self.iterations):
+            return
+        verification = {
+            "is_complete": False,
+            "requires_block": False,
+            "reason": error.reason or str(error),
+            "missing_criteria": ["Verification timed out before completion could be judged."],
+            "failure_analysis": "The verify stage hit the task no-progress or wall-clock guard.",
+            "acceptance_delta": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": "",
+            "guard_reasons": ["verify_timeout"],
+        }
+        verification_ref = await self._record_verification(iteration_index, verification, observation_ref)
+        iteration_record = {
+            "iteration": iteration_index,
+            "plan": plan,
+            "decision_ref": decision_ref,
+            "execution_meta": execution_meta,
+            "observation_ref": observation_ref,
+            "verification": verification,
+            "verification_ref": verification_ref,
+            "verification_source": "verify_timeout_guard",
+            "reflection_refs": [ref for ref in (step_reflection_ref,) if ref is not None],
+            "context_item_count": len(context_pack.get("items", [])),
+            "process_summary": self._combined_process_summary(
+                plan=plan,
+                execution_result={},
+                verification=verification,
+            ),
+        }
+        self.iterations.append(DataFormatter.sanitize(iteration_record))
+        await self._write_resume_snapshot(iteration_index, verification)
+
     @staticmethod
     def _bounded_step_output_schema(carrier_output_policy: Mapping[str, Any] | None) -> dict[str, Any]:
         if (
@@ -1566,6 +1649,26 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "evidence_use": (
                     [dict],
                     "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                    False,
+                ),
+                "acceptance_points": (
+                    [dict],
+                    "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}]",
+                    False,
+                ),
+                "self_check": (
+                    str,
+                    "Short post-step self check of what is still uncertain; no new facts beyond the step output.",
+                    False,
+                ),
+                "short_summary": (
+                    str,
+                    "Short summary for the next AgentTask step; do not include full artifact bodies.",
+                    False,
+                ),
+                "progress_message": (
+                    str,
+                    "One safe human-readable progress sentence; do not claim completion or verification.",
                     False,
                 ),
             }
@@ -1604,6 +1707,26 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "evidence_use": (
                 [dict],
                 "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                False,
+            ),
+            "acceptance_points": (
+                [dict],
+                "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}]",
+                False,
+            ),
+            "self_check": (
+                str,
+                "Short post-step self check of what is still uncertain; no new facts beyond the step output.",
+                False,
+            ),
+            "short_summary": (
+                str,
+                "Short summary for the next AgentTask step; do not include full artifact bodies.",
+                False,
+            ),
+            "progress_message": (
+                str,
+                "One safe human-readable progress sentence; do not claim completion or verification.",
                 False,
             ),
         }
@@ -1647,6 +1770,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
     ) -> AgentExecutionStreamData:
         raw_path = str(getattr(item, "path", "") or "stream")
         event_type: Literal["delta", "done"] = "delta" if getattr(item, "event_type", None) == "delta" else "done"
+        delta = None if self._is_process_summary_stream_path(raw_path) else getattr(item, "delta", None)
         item_meta = getattr(item, "meta", None)
         meta: dict[str, Any] = {
             "task_id": self.id,
@@ -1665,7 +1789,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             f"agent_task.iteration.{iteration_index}.execution.{raw_path}",
             getattr(item, "value", None),
             event_type=event_type,
-            delta=getattr(item, "delta", None),
+            delta=delta,
             is_complete=bool(getattr(item, "is_complete", event_type == "done")),
             meta=meta,
         )

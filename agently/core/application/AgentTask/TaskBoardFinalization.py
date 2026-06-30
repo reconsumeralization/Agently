@@ -125,7 +125,16 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 schedule=schedule,
                 allow_degraded_final=result_status != "completed",
             )
-            final = self._normalize_taskboard_final_result(final, candidate_final_result)
+            trusted_final_refs = [
+                ref
+                for ref in final_refs
+                if isinstance(ref, Mapping) and self._is_trusted_workspace_artifact_ref(ref)
+            ]
+            final = self._normalize_taskboard_final_result(
+                final,
+                candidate_final_result,
+                fallback_final_result=self._workspace_artifact_final_result_from_refs(trusted_final_refs),
+            )
         final_evidence_guard = validate_evidence_use(collect_evidence_use(final), evidence_ledger)
         final = value_with_normalized_evidence_use(final, final_evidence_guard.get("normalized_evidence_use"))
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
@@ -305,26 +314,57 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             "as evidence pointers; do not invent unsupported facts. failed/empty ledger items support only missing "
             "or unavailable-data claims; ref_only items support only URL/path/ref discovery until readback exists. "
             "When candidate_final_result contains a "
-            "complete answer/report/artifact body that satisfies the criteria, preserve it as final_result "
-            "instead of rewriting it into a shorter summary. For source-grounded tasks, the final_result must include "
+            "complete non-file answer/report body that satisfies the criteria, preserve it as final_result "
+            "instead of rewriting it into a shorter summary. For file-backed deliverables, do not copy the file body "
+            "into final_result; return a concise path/ref pointer, or leave final_result empty when trusted refs already "
+            "identify the delivered artifact. For source-grounded tasks, the final_result must include "
             "the concrete source URLs, file paths, or evidence refs that support the deliverable; source titles or "
             "general source names without verifier-visible URL/path refs are not enough when refs are available. "
+            "For file-backed deliverables, return acceptance_points with expected headings or exact anchors for "
+            "critical verification points; do not invent line numbers or trusted file refs. "
             "Apply source_ref_policy: source_refs with content_state='ref_only' are retrieval targets only, while "
             "source refs marked bounded_readback_available can support only the visible bounded preview/excerpt. "
             "If allow_degraded_final is true, the board has stopped with failed, blocked, skipped, or pending "
             "cards. You may still accept only when the completed/degraded evidence is enough to satisfy the "
             "user goal and success criteria with explicit missing-source or degraded-source boundaries in "
-            "the final_result. If critical evidence is missing, set accepted=false and explain the missing criteria."
+            "the final_result. If critical evidence is missing, set accepted=false and explain the missing criteria. "
+            "After the final result fields, include short self_check, short_summary, and progress_message for "
+            "downstream verification/repair context and human progress. These process fields are not evidence and "
+            "must not include raw chain-of-thought or long evidence bodies."
         )
         request.output(
             {
                 "accepted": (bool, "True only when all success criteria are satisfied", True),
                 "reason": (str, "Concise final verification reason", True),
-                "final_result": (str, "Final business result when accepted", True),
+                "final_result": (
+                    str,
+                    "Final non-file business result or concise Workspace artifact path/ref pointer when accepted.",
+                    False,
+                ),
                 "missing_criteria": ([str], "Unmet or weak criteria, empty when accepted", False),
                 "evidence_use": (
                     [dict],
                     "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                    False,
+                ),
+                "acceptance_points": (
+                    [dict],
+                    "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}]",
+                    False,
+                ),
+                "self_check": (
+                    str,
+                    "Short finalization self check of uncertainty or residual risk.",
+                    False,
+                ),
+                "short_summary": (
+                    str,
+                    "Short finalization summary for terminal verification or repair.",
+                    False,
+                ),
+                "progress_message": (
+                    str,
+                    "One safe human-readable finalization progress sentence; do not claim verifier acceptance.",
                     False,
                 ),
             },
@@ -332,6 +372,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         )
         result = await self._await_task_request(request.async_get_data(), stage="taskboard_finalize")
         if isinstance(result, Mapping):
+            await self._emit_process_progress_from_output(
+                result,
+                stage="taskboard_finalize",
+            )
             return dict(result)
         return {"accepted": False, "reason": str(result), "final_result": "", "missing_criteria": self.success_criteria}
 
@@ -476,15 +520,26 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         return max(fallback_candidates, key=len, default="")
 
     @classmethod
-    def _normalize_taskboard_final_result(cls, final: dict[str, Any], candidate_final_result: str) -> dict[str, Any]:
+    def _normalize_taskboard_final_result(
+        cls,
+        final: dict[str, Any],
+        candidate_final_result: str,
+        *,
+        fallback_final_result: str = "",
+    ) -> dict[str, Any]:
         candidate = candidate_final_result.strip()
-        if not candidate:
+        fallback = fallback_final_result.strip()
+        if not candidate and not fallback:
             return final
         accepted = cls._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         if not accepted:
             return final
         final_result = str(final.get("final_result") or "").strip()
-        if (
+        if not final_result and fallback:
+            normalized = dict(final)
+            normalized["final_result"] = fallback
+            return normalized
+        if candidate and (
             not final_result
             or cls._looks_like_candidate_prefix(final_result, candidate)
             or cls._candidate_substantially_more_complete(final_result, candidate)

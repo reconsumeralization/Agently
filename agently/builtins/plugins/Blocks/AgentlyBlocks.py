@@ -55,6 +55,21 @@ _HANDLER_REQUIRED_EXECUTION_KINDS = frozenset(
         "agent_step",
     }
 )
+_ACTION_REF_ALIAS_FIELDS = frozenset(
+    {
+        "path",
+        "record_id",
+        "source_url",
+        "selected_url",
+        "requested_url",
+        "canonical_url",
+        "url",
+        "href",
+        "artifact_id",
+        "output_ref",
+        "ref",
+    }
+)
 
 
 class PlanBlockRegistry:
@@ -1060,11 +1075,24 @@ def _ledger_items_from_nested_execution_meta(
     items: list[dict[str, Any]] = []
     for action_index, action in enumerate(_ledger_action_records(logs)):
         action_id = str(action.get("id") or action.get("name") or "").strip()
+        action_call_id = action.get("action_call_id")
         status = _ledger_status_from_action(action)
         body = action.get("result_preview")
         if body in (None, "", [], {}):
             body = action.get("error") or action.get("message")
         body_state = "bounded" if body not in (None, "", [], {}) else "ref_only"
+        aliases = _ledger_action_ref_aliases(
+            action,
+            action_id=action_id,
+            action_call_id=action_call_id,
+        )
+        extra = {
+            "action_id": action_id,
+            "action_call_id": action_call_id,
+            "action_type": action.get("action_type"),
+        }
+        if aliases:
+            extra["aliases"] = aliases
         items.append(
             _ledger_item(
                 "action_evidence",
@@ -1076,15 +1104,11 @@ def _ledger_items_from_nested_execution_meta(
                     **_ledger_provenance(result, source="execution_meta.logs"),
                     "execution_id": execution_meta.get("execution_id"),
                     "action_id": action_id,
-                    "action_call_id": action.get("action_call_id"),
+                    "action_call_id": action_call_id,
                 },
                 raw_status=action.get("status"),
                 diagnostics=_action_diagnostics(action),
-                extra={
-                    "action_id": action_id,
-                    "action_call_id": action.get("action_call_id"),
-                    "action_type": action.get("action_type"),
-                },
+                extra=extra,
             )
         )
     for ref in _mapping_sequence(logs.get("artifact_refs")):
@@ -1408,6 +1432,96 @@ def _action_diagnostics(action: Mapping[str, Any]) -> list[dict[str, Any]]:
     if isinstance(error, Mapping):
         return [dict(error)]
     return [{"message": str(error)}]
+
+
+def _ledger_action_ref_aliases(
+    action: Mapping[str, Any],
+    *,
+    action_id: str,
+    action_call_id: Any,
+) -> list[str]:
+    prefixes = _dedupe_strings(
+        (
+            action_id,
+            action_call_id,
+            f"action_{ action_id }" if action_id else "",
+            f"action_result_{ action_id }" if action_id else "",
+            f"action_{ action_call_id }" if action_call_id else "",
+            f"action_result_{ action_call_id }" if action_call_id else "",
+        )
+    )
+    refs = _ledger_action_ref_values(action)
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for prefix in prefixes:
+        for ref in refs:
+            alias = f"{ prefix }:{ ref }"
+            if alias in seen:
+                continue
+            seen.add(alias)
+            aliases.append(alias)
+            if len(aliases) >= 32:
+                return aliases
+    return aliases
+
+
+def _ledger_action_ref_values(action: Mapping[str, Any]) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for nested_key in _ACTION_REF_ALIAS_FIELDS:
+                nested = value.get(nested_key)
+                if nested not in (None, "", [], {}):
+                    add(nested)
+            return
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            for item in list(value)[:24]:
+                add(item)
+            return
+        text = str(value or "").strip()
+        if not text or "\n" in text or len(text) > 500:
+            return
+        if text in seen:
+            return
+        seen.add(text)
+        refs.append(text)
+
+    def visit(value: Any, *, depth: int = 0) -> None:
+        if depth > 5:
+            return
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text in _ACTION_REF_ALIAS_FIELDS:
+                    add(item)
+                    continue
+                if key_text in {"body", "content", "text", "snippet", "preview", "result_preview"}:
+                    continue
+                visit(item, depth=depth + 1)
+            return
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            for item in list(value)[:24]:
+                visit(item, depth=depth + 1)
+
+    for key in ("input_preview", "result_preview", "raw", "artifact_refs", "file_refs"):
+        value = action.get(key)
+        if value not in (None, "", [], {}):
+            visit(value)
+    return refs[:32]
+
+
+def _dedupe_strings(values: Sequence[Any]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
 
 
 def _evidence_kinds_for(kind: str) -> tuple[str, ...]:

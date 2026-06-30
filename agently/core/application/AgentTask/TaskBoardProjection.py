@@ -21,6 +21,90 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
     """Prompt and stream projections for TaskBoard state and card evidence."""
 
     @classmethod
+    def _compact_taskboard_evidence_use_guard_summary(cls, guard: Any) -> Any:
+        if not isinstance(guard, Mapping):
+            return {}
+        diagnostics = cls._prompt_sequence(guard.get("diagnostics"))
+        return DataFormatter.sanitize(
+            {
+                "valid": guard.get("valid"),
+                "checked_claims": guard.get("checked_claims"),
+                "blocking_count": guard.get("blocking_count"),
+                "diagnostic_count": len(diagnostics),
+            }
+        )
+
+    @classmethod
+    def _compact_taskboard_ledger_summary(cls, ledger: Any) -> Any:
+        if not isinstance(ledger, Mapping):
+            return {}
+        items = cls._prompt_sequence(ledger.get("items") or ledger.get("evidence_items"))
+        return DataFormatter.sanitize(
+            {
+                "item_count": len(items),
+                "status_counts": ledger.get("status_counts", {}),
+                "body_state_counts": ledger.get("body_state_counts", {}),
+            }
+        )
+
+    @classmethod
+    def _compact_taskboard_card_metadata_for_prompt(cls, metadata: Any) -> dict[str, Any]:
+        if not isinstance(metadata, Mapping):
+            return {}
+        compact: dict[str, Any] = {}
+        for key in (
+            "execution_id",
+            "execution_kind",
+            "execution_strategy",
+            "next_board_action",
+            "attempt_index",
+            "max_attempts",
+            "partial_child_evidence",
+            "partial_child_status",
+        ):
+            value = metadata.get(key)
+            if value not in (None, "", [], {}):
+                compact[key] = DataFormatter.sanitize(value)
+        if isinstance(metadata.get("block_carrier"), Mapping):
+            compact["block_carrier"] = cls._compact_block_carrier_for_taskboard_meta(metadata.get("block_carrier"))
+        guard_summary = cls._compact_taskboard_evidence_use_guard_summary(metadata.get("evidence_use_guard"))
+        if guard_summary:
+            compact["evidence_use_guard"] = guard_summary
+        ledger_summary = cls._compact_taskboard_ledger_summary(metadata.get("evidence_ledger"))
+        if ledger_summary:
+            compact["evidence_ledger"] = ledger_summary
+        return DataFormatter.sanitize(compact)
+
+    @classmethod
+    def _compact_taskboard_card_diagnostic_for_prompt(cls, diagnostic: Any) -> dict[str, Any]:
+        if not isinstance(diagnostic, Mapping):
+            return {"value": cls._truncate_prompt_text(diagnostic, 360)}
+        compact = {
+            key: diagnostic.get(key)
+            for key in (
+                "kind",
+                "type",
+                "code",
+                "status",
+                "message",
+                "card_id",
+                "stage",
+                "attempt_index",
+                "max_attempts",
+            )
+            if diagnostic.get(key) not in (None, "", [], {})
+        }
+        if isinstance(diagnostic.get("block_carrier"), Mapping):
+            compact["block_carrier"] = cls._compact_block_carrier_for_taskboard_meta(diagnostic.get("block_carrier"))
+        guard_summary = cls._compact_taskboard_evidence_use_guard_summary(diagnostic.get("evidence_use_guard"))
+        if guard_summary:
+            compact["evidence_use_guard"] = guard_summary
+        evidence_summary = diagnostic.get("evidence_summary")
+        if isinstance(evidence_summary, Mapping):
+            compact["evidence_summary"] = cls._compact_verifier_evidence_summary(evidence_summary)
+        return DataFormatter.sanitize(compact)
+
+    @classmethod
     def _compact_taskboard_card_result_for_prompt(cls, result: Any) -> dict[str, Any]:
         try:
             effective = TaskBoardCardResult.from_value(result)
@@ -47,8 +131,11 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             ),
             "artifact_refs": artifact_refs,
             "file_refs": file_refs,
-            "diagnostics": cls._compact_verifier_prompt_value(diagnostics[:8], max_chars=1200),
-            "metadata": cls._compact_verifier_prompt_value(effective.metadata, max_chars=1000),
+            "diagnostics": [
+                cls._compact_taskboard_card_diagnostic_for_prompt(item)
+                for item in diagnostics[:8]
+            ],
+            "metadata": cls._compact_taskboard_card_metadata_for_prompt(effective.metadata),
         }
         if len(diagnostics) > 8:
             compact["diagnostics_omitted"] = {"count": len(diagnostics) - 8, "reason": "prompt_budget"}
@@ -65,6 +152,33 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             }
         artifact_refs = [cls._compact_artifact_ref_for_verifier(ref) for ref in list(effective.artifact_refs)[:4]]
         file_refs = [cls._compact_artifact_ref_for_verifier(ref) for ref in list(effective.file_refs)[:4]]
+        metadata: dict[str, Any] = {}
+        if isinstance(effective.metadata, Mapping):
+            for key in (
+                "execution_id",
+                "execution_kind",
+                "execution_strategy",
+                "next_board_action",
+                "attempt_index",
+                "max_attempts",
+                "partial_child_evidence",
+                "partial_child_status",
+            ):
+                value = effective.metadata.get(key)
+                if value not in (None, "", [], {}):
+                    metadata[key] = DataFormatter.sanitize(value)
+        diagnostics = []
+        for item in list(effective.diagnostics)[:3]:
+            if isinstance(item, Mapping):
+                diagnostics.append(
+                    {
+                        key: item.get(key)
+                        for key in ("kind", "type", "code", "status", "message", "card_id", "stage")
+                        if item.get(key) not in (None, "", [], {})
+                    }
+                )
+            else:
+                diagnostics.append({"value": cls._truncate_prompt_text(item, 240)})
         return {
             "schema_version": effective.schema_version,
             "card_id": effective.card_id,
@@ -75,8 +189,9 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "artifact_refs_omitted": max(0, len(effective.artifact_refs) - 4),
             "file_refs": file_refs,
             "file_refs_omitted": max(0, len(effective.file_refs) - 4),
-            "diagnostics": cls._compact_verifier_prompt_value(list(effective.diagnostics)[:4], max_chars=700),
-            "metadata": cls._compact_verifier_prompt_value(effective.metadata, max_chars=500),
+            "diagnostics": DataFormatter.sanitize(diagnostics),
+            "diagnostics_omitted": max(0, len(effective.diagnostics) - 3),
+            "metadata": metadata,
         }
 
     @classmethod
@@ -164,7 +279,64 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
 
     @classmethod
     def _compact_taskboard_evidence_view_for_stream(cls, evidence_view: Mapping[str, Any]) -> Any:
-        return cls._compact_verifier_prompt_value(evidence_view, max_chars=_TASKBOARD_STREAM_SUMMARY_CHARS)
+        raw_cards = cls._prompt_sequence(evidence_view.get("cards"))
+        cards = []
+        for card in list(raw_cards)[:4]:
+            if not isinstance(card, Mapping):
+                continue
+            artifact_refs_source = cls._prompt_sequence(card.get("artifact_refs"))
+            file_refs_source = cls._prompt_sequence(card.get("file_refs"))
+            cards.append(
+                {
+                    "card_id": card.get("card_id", card.get("id")),
+                    "status": card.get("status"),
+                    "output_digest": card.get("output_digest"),
+                    "preview": cls._compact_verifier_prompt_value(
+                        card.get("preview", card.get("summary", card.get("answer"))),
+                        max_chars=360,
+                    ),
+                    "artifact_refs": [
+                        cls._compact_artifact_ref_for_verifier(ref)
+                        for ref in list(artifact_refs_source)[:2]
+                        if isinstance(ref, Mapping)
+                    ],
+                    "artifact_refs_omitted": max(0, len(artifact_refs_source) - 2),
+                    "file_refs": [
+                        cls._compact_artifact_ref_for_verifier(ref)
+                        for ref in list(file_refs_source)[:2]
+                        if isinstance(ref, Mapping)
+                    ],
+                    "file_refs_omitted": max(0, len(file_refs_source) - 2),
+                }
+            )
+        artifact_refs_source = cls._prompt_sequence(evidence_view.get("artifact_refs"))
+        file_refs_source = cls._prompt_sequence(evidence_view.get("file_refs"))
+        evidence_items_source = cls._prompt_sequence(evidence_view.get("evidence_items"))
+        diagnostics_source = cls._prompt_sequence(evidence_view.get("diagnostics"))
+        return DataFormatter.sanitize(
+            {
+                "schema_version": evidence_view.get("schema_version"),
+                "revision_id": evidence_view.get("revision_id"),
+                "status_counts": evidence_view.get("status_counts", {}),
+                "cards": cards,
+                "cards_omitted": max(0, len(raw_cards) - len(cards)),
+                "artifact_refs": [
+                    cls._compact_artifact_ref_for_verifier(ref)
+                    for ref in list(artifact_refs_source)[:4]
+                    if isinstance(ref, Mapping)
+                ],
+                "artifact_refs_omitted": max(0, len(artifact_refs_source) - 4),
+                "file_refs": [
+                    cls._compact_artifact_ref_for_verifier(ref)
+                    for ref in list(file_refs_source)[:4]
+                    if isinstance(ref, Mapping)
+                ],
+                "file_refs_omitted": max(0, len(file_refs_source) - 4),
+                "evidence_item_count": len(evidence_items_source),
+                "diagnostic_count": len(diagnostics_source),
+                "metadata": cls._compact_verifier_prompt_value(evidence_view.get("metadata", {}), max_chars=240),
+            }
+        )
 
     @staticmethod
     def _prompt_sequence(value: Any) -> Sequence[Any]:
@@ -179,21 +351,19 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
         for card in cls._prompt_sequence(raw_cards):
             if not isinstance(card, Mapping):
                 continue
+            raw_metadata = card.get("metadata", {})
+            metadata_has_block_carrier = isinstance(raw_metadata, Mapping) and isinstance(
+                raw_metadata.get("block_carrier"),
+                Mapping,
+            )
             diagnostics = []
             for diagnostic in list(cls._prompt_sequence(card.get("diagnostics")))[:4]:
-                if isinstance(diagnostic, Mapping):
-                    compact_diagnostic = dict(diagnostic)
-                    if "block_carrier" in compact_diagnostic:
-                        compact_diagnostic["block_carrier"] = cls._compact_block_carrier_for_taskboard_meta(
-                            compact_diagnostic.get("block_carrier")
-                        )
+                compact_diagnostic = cls._compact_taskboard_card_diagnostic_for_prompt(diagnostic)
+                if metadata_has_block_carrier:
+                    compact_diagnostic.pop("block_carrier", None)
+                if compact_diagnostic:
                     diagnostics.append(compact_diagnostic)
-                else:
-                    diagnostics.append({"value": diagnostic})
-            metadata = card.get("metadata", {})
-            if isinstance(metadata, Mapping) and "block_carrier" in metadata:
-                metadata = dict(metadata)
-                metadata["block_carrier"] = cls._compact_block_carrier_for_taskboard_meta(metadata.get("block_carrier"))
+            metadata = cls._compact_taskboard_card_metadata_for_prompt(raw_metadata)
             workspace_operations = cls._taskboard_card_workspace_operations_for_prompt(
                 diagnostics=diagnostics,
                 metadata=metadata,
@@ -229,11 +399,8 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                     "source_refs": source_refs_source,
                     "source_refs_omitted": max(0, len(source_refs_sequence) - 8),
                     "workspace_operations": workspace_operations,
-                    "diagnostics": cls._compact_verifier_prompt_value(
-                        diagnostics,
-                        max_chars=800,
-                    ),
-                    "metadata": cls._compact_verifier_prompt_value(metadata, max_chars=600),
+                    "diagnostics": diagnostics,
+                    "metadata": metadata,
                 }
             )
         artifact_refs_source = cls._prompt_sequence(evidence_view.get("artifact_refs"))
@@ -334,18 +501,18 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "work_unit": {
                 "id": work_unit.get("id"),
                 "origin": work_unit.get("origin"),
-                "objective": cls._truncate_prompt_text(str(work_unit.get("objective") or ""), 700),
+                "objective": cls._truncate_prompt_text(str(work_unit.get("objective") or ""), 240),
                 "input_refs": cls._compact_verifier_prompt_value(
                     list(cls._prompt_sequence(work_unit.get("input_refs")))[:8],
-                    max_chars=700,
+                    max_chars=240,
                 ),
                 "expected_deliverable": cls._compact_verifier_prompt_value(
                     work_unit.get("expected_deliverable", {}),
-                    max_chars=700,
+                    max_chars=240,
                 ),
                 "evidence_requirements": cls._compact_verifier_prompt_value(
                     list(cls._prompt_sequence(work_unit.get("evidence_requirements")))[:8],
-                    max_chars=700,
+                    max_chars=240,
                 ),
                 "runtime_preferences": {
                     key: runtime_preferences.get(key)
@@ -364,32 +531,32 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "work_unit_result": {
                 "id": work_unit_result.get("id"),
                 "status": work_unit_result.get("status"),
-                "summary": cls._compact_verifier_prompt_value(work_unit_result.get("summary"), max_chars=700),
+                "summary": cls._compact_verifier_prompt_value(work_unit_result.get("summary"), max_chars=240),
                 "candidate_final_result": cls._compact_verifier_prompt_value(
                     work_unit_result.get("candidate_final_result"),
-                    max_chars=700,
+                    max_chars=240,
                 ),
                 "artifact_manifest": cls._compact_verifier_prompt_value(
                     work_unit_result.get("artifact_manifest", {}),
-                    max_chars=700,
+                    max_chars=240,
                 ),
                 "evidence": cls._compact_verifier_prompt_value(
                     list(cls._prompt_sequence(work_unit_result.get("evidence")))[:8],
-                    max_chars=700,
+                    max_chars=240,
                 ),
                 "diagnostics": cls._compact_verifier_prompt_value(
                     list(cls._prompt_sequence(work_unit_result.get("diagnostics")))[:4],
-                    max_chars=700,
+                    max_chars=240,
                 ),
                 "carrier_meta": {
                     "snapshot_status": carrier_meta.get("snapshot_status"),
                     "execution_plan": cls._compact_verifier_prompt_value(
                         carrier_meta.get("execution_plan", {}),
-                        max_chars=700,
+                        max_chars=240,
                     ),
                     "execution_block_graph": cls._compact_verifier_prompt_value(
                         carrier_meta.get("execution_block_graph", {}),
-                        max_chars=700,
+                        max_chars=240,
                     ),
                 },
             },

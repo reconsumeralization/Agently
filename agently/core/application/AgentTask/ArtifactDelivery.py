@@ -18,7 +18,10 @@ from __future__ import annotations
 import html
 import re
 
+from .AcceptanceLocator import build_workspace_artifact_acceptance_locator_items, collect_acceptance_points
 from .TaskShared import *
+
+_WORKSPACE_ARTIFACT_LOCATOR_SCAN_BYTES = 5_000_000
 
 
 _PUBLIC_DELTA_RETRY_MARKER_RE = re.compile(r"\A<\$retry(?::(?P<label>[^>]*)?)?>(?P<body>.*?)</\$retry>\Z", re.DOTALL)
@@ -617,6 +620,81 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 seen.add(evidence_id)
             ledger_items.append(DataFormatter.sanitize(dict(item)))
 
+    async def _workspace_artifact_acceptance_locator_evidence_items(
+        self,
+        *,
+        ref: Mapping[str, Any],
+        result: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        source: str,
+        content: str = "",
+        card_context: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        path = str(ref.get("path") or manifest.get("path") or "").strip()
+        if not path:
+            return []
+        text = str(content or "")
+        if not text:
+            try:
+                declared_bytes = self._coerce_non_negative_int(ref.get("bytes"))
+                max_bytes = (
+                    declared_bytes + 1
+                    if 0 < declared_bytes <= _WORKSPACE_ARTIFACT_LOCATOR_SCAN_BYTES
+                    else _WORKSPACE_ARTIFACT_LOCATOR_SCAN_BYTES
+                )
+                readback = await self.workspace.read_file(path, max_bytes=max_bytes)
+            except Exception:
+                text = str(ref.get("preview") or "")
+            else:
+                text = str(readback.get("content") or ref.get("preview") or "")
+        acceptance_points = [
+            *collect_acceptance_points(result),
+            *self._workspace_artifact_acceptance_points_from_taskboard_context(card_context),
+        ]
+        artifact_evidence_id = self._workspace_artifact_readback_evidence_item(ref).get("id", "")
+        return build_workspace_artifact_acceptance_locator_items(
+            path=path,
+            source=source,
+            text=text,
+            manifest=manifest,
+            acceptance_points=acceptance_points,
+            success_criteria=getattr(self, "success_criteria", ()),
+            source_evidence_ids=self._artifact_readback_evidence_ids([ref]),
+            artifact_evidence_id=str(artifact_evidence_id or ""),
+        )
+
+    @staticmethod
+    def _workspace_artifact_acceptance_points_from_taskboard_context(card_context: Any | None) -> list[dict[str, Any]]:
+        card = getattr(card_context, "card", None)
+        if card is None:
+            return []
+        card_id = str(getattr(card, "id", "") or "card").strip() or "card"
+        points: list[dict[str, Any]] = []
+        objective = str(getattr(card, "objective", "") or "").strip()
+        if objective:
+            points.append(
+                {
+                    "criterion_id": f"taskboard:{card_id}:objective",
+                    "criterion": objective,
+                    "source": "taskboard_card",
+                }
+            )
+        for index, required_output in enumerate(getattr(card, "required_outputs", ()) or ()):
+            text = str(required_output or "").strip()
+            if not text:
+                continue
+            points.append(
+                {
+                    "criterion_id": f"taskboard:{card_id}:required_output:{index}",
+                    "criterion": text,
+                    "source": "taskboard_card",
+                }
+            )
+        evidence_contract = getattr(card, "evidence_contract", None)
+        if isinstance(evidence_contract, Mapping):
+            points.extend(collect_acceptance_points(evidence_contract))
+        return DataFormatter.sanitize(points)
+
     @classmethod
     def _workspace_artifact_readback_evidence_item(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
         path = str(ref.get("path") or "").strip()
@@ -845,6 +923,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     trusted_refs=trusted_refs,
                     source=source,
                 )
+                locator_items = await self._workspace_artifact_acceptance_locator_evidence_items(
+                    ref=trusted_refs[0],
+                    result=result,
+                    manifest=manifest_dict,
+                    source=source,
+                    card_context=card_context,
+                )
+                if locator_items:
+                    stream_delivery["acceptance_locator_count"] = len(locator_items)
                 result["workspace_artifact_delivery"] = DataFormatter.sanitize(stream_delivery)
                 diagnostics.append(
                     {
@@ -856,6 +943,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 )
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
                 self._append_workspace_artifact_meta(execution_meta, trusted_refs)
+                self._append_execution_meta_evidence_items(execution_meta, locator_items)
                 self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                     DataFormatter.sanitize(stream_delivery)
                 )
@@ -933,9 +1021,19 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 trusted_refs=trusted_refs,
                 source=source,
             )
+            locator_items = await self._workspace_artifact_acceptance_locator_evidence_items(
+                ref=trusted_refs[0],
+                result=result,
+                manifest=manifest_dict,
+                source=source,
+                card_context=card_context,
+            )
+            if locator_items:
+                delivery_record["acceptance_locator_count"] = len(locator_items)
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
             self._append_workspace_artifact_meta(execution_meta, trusted_refs)
+            self._append_execution_meta_evidence_items(execution_meta, locator_items)
             self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
                 DataFormatter.sanitize(delivery_record)
             )
@@ -1122,10 +1220,21 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             trusted_refs=trusted_refs,
             source=source,
         )
+        locator_items = await self._workspace_artifact_acceptance_locator_evidence_items(
+            ref=trusted_refs[0],
+            result=result,
+            manifest=manifest_dict,
+            source=source,
+            content=content,
+            card_context=card_context,
+        )
+        if locator_items:
+            delivery_record["acceptance_locator_count"] = len(locator_items)
         result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
         if diagnostics:
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
         self._append_workspace_artifact_meta(execution_meta, trusted_refs)
+        self._append_execution_meta_evidence_items(execution_meta, locator_items)
         self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
         return DataFormatter.sanitize(result)
 

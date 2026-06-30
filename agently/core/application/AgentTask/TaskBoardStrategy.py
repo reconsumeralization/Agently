@@ -429,6 +429,8 @@ class AgentTaskTaskBoardStrategyMixin(
             "specific provider, endpoint, file format, or auxiliary guidance source unless the user explicitly "
             "requires that exact source or artifact. Mark replaceable evidence attempts, optional guidance, "
             "style checks, and non-critical cross-checks as optional or degradable through failure_policy. "
+            "Card ids are optional short hints only; the framework canonicalizes, deduplicates, or generates "
+            "stable ids and remaps dependencies before validation. Do not spend tokens inventing opaque ids. "
             "Use allowed_execution_shape='control' for synthesis, verification, finalization, or board-continuation "
             "decision cards that should be handled by one structured model request. Use allowed_execution_shape='readback' "
             "for cards whose only job is bounded cold artifact readback. Use an action-capable shape such as 'actions' "

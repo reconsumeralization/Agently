@@ -123,7 +123,8 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
         )
         request.instruct(
             "Analyze this task's execution shape for AgentTaskLoop strategy resolution. "
-            "First write flexible natural-language analysis. Then provide execution_hint as a thin, non-binding "
+            "First provide short task_intent and decision_basis fields that frame the route choice without raw chain-of-thought. "
+            "Then write flexible natural-language analysis and provide execution_hint as a thin, non-binding "
             "structured hint. Do not decide final execution by keywords. Do not treat the hint as completion evidence. "
             "recommended_shape must be flat or taskboard. Prefer flat when confidence is low or uncertainty is material. "
             "When recommending taskboard with medium or high confidence and the board is obvious, you may include an "
@@ -132,6 +133,16 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
         )
         request.output(
             {
+                "task_intent": (
+                    str,
+                    "One short sentence naming the task intent relevant to execution-shape selection.",
+                    False,
+                ),
+                "decision_basis": (
+                    [str],
+                    "Short route-selection factors; no raw chain-of-thought or unsupported completion claims.",
+                    False,
+                ),
                 "analysis": (str, "Free-form task-shape analysis.", True),
                 "execution_hint": (
                     dict,
@@ -180,6 +191,8 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
             "uncertainty": str(hint.get("uncertainty") or "").strip(),
         }
         normalized = {
+            "task_intent": str(source.get("task_intent") or "").strip(),
+            "decision_basis": self._normalize_string_list(source.get("decision_basis")),
             "analysis": str(source.get("analysis") or "").strip(),
             "execution_hint": normalized_hint,
         }
@@ -233,6 +246,10 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
                     "task_id": self.id,
                     "execution_strategy": self.execution_strategy,
                     "task_shape_analysis": DataFormatter.sanitize(self.task_shape_analysis),
+                    "process_summary": self._process_summary_from_value(
+                        self.task_shape_analysis,
+                        stage="task_shape_analysis",
+                    ),
                     "completion_evidence": False,
                 },
                 collection="strategy",
@@ -243,6 +260,10 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
                 meta={"task_id": self.id, "completion_evidence": False},
             )
             self._append_workspace_ref("strategy", record_ref)
+            await self._emit_process_progress_from_output(
+                self.task_shape_analysis,
+                stage="task_shape_analysis",
+            )
         except Exception as error:
             self.diagnostics.setdefault("strategy_record_errors", []).append(
                 {
