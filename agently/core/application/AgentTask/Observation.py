@@ -1333,8 +1333,6 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             key in container for key in ("bytes", "read_bytes", "sha256", "handler_id", "role", "source")
         ):
             return "bounded_readback_available"
-        if bool(container.get("full_value_available")) and bool(container.get("artifact_id")):
-            return "bounded_readback_available"
         return "ref_only"
 
     @staticmethod

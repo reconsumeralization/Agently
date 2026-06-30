@@ -478,6 +478,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 context_pack=context_pack,
                 card_context=context,
             )
+            self._append_execution_meta_evidence_items(
+                cast(dict[str, Any], execution_meta),
+                self._taskboard_dependency_readback_evidence_items(dependency_readbacks),
+            )
             summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
             execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
             card_evidence_ledger = evidence_ledger_view(
@@ -900,6 +904,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             )
         if isinstance(card_output, Mapping):
             card_output = await self._materialize_taskboard_workspace_patch(context, card_output)
+        self._append_execution_meta_evidence_items(
+            cast(dict[str, Any], execution_meta),
+            self._taskboard_dependency_readback_evidence_items(dependency_readbacks),
+        )
         execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
         card_evidence_ledger = evidence_ledger_view(
             {

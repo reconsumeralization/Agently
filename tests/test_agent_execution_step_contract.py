@@ -2551,10 +2551,20 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
             "content_preview": "Bounded extracted source content.",
         }
     )
+    full_value_refs = AgentTask._collect_taskboard_source_refs(
+        {
+            "path": "retained/source.md",
+            "artifact_id": "artifact-1",
+            "full_value_available": True,
+            "bytes": 4096,
+            "sha256": "0" * 64,
+        }
+    )
     policy = AgentTask._taskboard_source_ref_policy()
 
     assert discovered_refs[0]["content_state"] == "ref_only"
     assert read_refs[0]["content_state"] == "bounded_readback_available"
+    assert full_value_refs[0]["content_state"] == "ref_only"
     assert "ref_only" in policy["content_states"]
     assert "sha256" not in discovered_refs[0]
     assert "bytes" not in discovered_refs[0]
@@ -2864,6 +2874,32 @@ def test_action_source_refs_do_not_treat_sha_as_source_evidence():
     assert "source_url" in fields
     assert "path" in fields
     assert "sha256" not in fields
+
+
+def test_action_source_refs_keep_full_value_artifacts_ref_only_until_readback():
+    refs = AgentTask._collect_source_refs_from_action_records(
+        [
+            {
+                "id": "collect",
+                "action_call_id": "call-1",
+                "artifact_refs": [
+                    {
+                        "artifact_id": "artifact-1",
+                        "action_call_id": "call-1",
+                        "path": "retained/source.md",
+                        "full_value_available": True,
+                        "bytes": 4096,
+                        "sha256": "1" * 64,
+                    }
+                ],
+            }
+        ]
+    )
+
+    path_ref = next(ref for ref in refs if ref["field"] == "path")
+    assert path_ref["value"] == "retained/source.md"
+    assert path_ref["content_state"] == "ref_only"
+    assert path_ref["evidence_boundary"] == "discovery_or_materialization_only"
 
 
 def test_taskboard_available_readback_omits_programmatic_provenance_noise():
@@ -3223,6 +3259,67 @@ def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
             "gaps": [],
         }
     ) is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_delivery_blocks_empty_body_without_trusted_readback(tmp_path):
+    agent = _create_agent("execution-workspace-artifact-empty-body").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a trusted Workspace artifact.",
+        success_criteria=["final.md is written and read back."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    execution_meta: dict[str, Any] = {"logs": {"action_logs": {}, "route_logs": {}, "errors": []}}
+
+    delivered = await task._deliver_workspace_artifact(
+        {"status": "completed", "artifact_manifest": {"path": "final.md"}},
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.workspace_artifact.empty_body",
+        allow_stream_draft=False,
+    )
+
+    assert delivered["status"] == "blocked"
+    assert delivered["workspace_artifact_delivery"]["status"] == "failed"
+    assert delivered["workspace_artifact_delivery"]["error"]["type"] == "EmptyWorkspaceArtifactBody"
+    assert delivered["diagnostics"][0]["code"] == "agent_task.workspace_artifact.empty_body"
+    assert not (task.workspace.files_root / "final.md").exists()
+    evidence_items = execution_meta["blocks"]["evidence"]["evidence_items"]
+    assert evidence_items[0]["status"] == "failed"
+    assert evidence_items[0]["supports"]["unavailability"] is True
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_delivery_blocks_structured_wrapper_body(tmp_path):
+    agent = _create_agent("execution-workspace-artifact-wrapper-body").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a natural Markdown Workspace artifact.",
+        success_criteria=["final.md is written as natural text."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    execution_meta: dict[str, Any] = {"logs": {"action_logs": {}, "route_logs": {}, "errors": []}}
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "artifact_manifest": {"path": "final.md"},
+            "artifact_markdown": json.dumps({"answer": "# Final\n\nWrapped body."}),
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.workspace_artifact.wrapper_body",
+        allow_stream_draft=False,
+    )
+
+    assert delivered["status"] == "blocked"
+    assert delivered["workspace_artifact_delivery"]["status"] == "failed"
+    assert delivered["workspace_artifact_delivery"]["error"]["type"] == "StructuredWorkspaceArtifactBody"
+    assert delivered["diagnostics"][0]["code"] == "agent_task.workspace_artifact.structured_wrapper_body"
+    assert not (task.workspace.files_root / "final.md").exists()
 
 
 @pytest.mark.asyncio
@@ -3699,6 +3796,31 @@ async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_
     assert any(
         item.get("code") == "taskboard.readback.workspace_file_refs_discovered"
         for item in payload["diagnostics"]
+        if isinstance(item, dict)
+    )
+    ledger_items = result.metadata["evidence_ledger"]["items"]
+    readback_item = next(
+        item for item in ledger_items if item.get("kind") == "taskboard_action_artifact.readback"
+    )
+    assert readback_item["status"] == "ok"
+    assert readback_item["body_state"] in {"bounded", "truncated"}
+    assert readback_item["artifact_id"] == "act-art-download-output"
+    assert "Only the first page preview" in readback_item["body"]
+    assert "act-call-download" in readback_item["aliases"]
+
+    next_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": result.to_dict()}],
+        },
+    )
+    evidence_view = build_task_board_evidence_view(next_revision).to_dict()
+    assert any(
+        item.get("id") == readback_item["id"]
+        and item.get("body_state") in {"bounded", "truncated"}
+        and "Only the first page preview" in item.get("body", "")
+        for item in evidence_view["evidence_items"]
         if isinstance(item, dict)
     )
 

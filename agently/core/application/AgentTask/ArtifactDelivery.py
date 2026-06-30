@@ -811,6 +811,58 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 evidence_ids.append(evidence_id)
         return evidence_ids
 
+    def _workspace_artifact_delivery_failure_result(
+        self,
+        result: dict[str, Any],
+        execution_meta: Mapping[str, Any] | None,
+        diagnostics: list[Any],
+        *,
+        path: str,
+        source: str,
+        deliverable_mode: str,
+        content_key: str,
+        code: str,
+        message: str,
+        error_type: str,
+        readback: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        diagnostic = self._workspace_artifact_readback_missing_diagnostic(
+            code=code,
+            message=message,
+            path=path,
+            source=source,
+            readback=readback,
+        )
+        diagnostics.append(diagnostic)
+        delivery_record = {
+            "source": source,
+            "path": path,
+            "status": "failed",
+            "mode": deliverable_mode or "workspace_artifact",
+            "content_key": content_key,
+            "error": {"type": error_type, "message": message},
+            "diagnostics": [diagnostic],
+        }
+        result["status"] = "blocked"
+        result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
+        self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
+            DataFormatter.sanitize(delivery_record)
+        )
+        self._append_execution_meta_evidence_items(
+            execution_meta,
+            [
+                self._workspace_artifact_failure_evidence_item(
+                    path=path,
+                    source=source,
+                    code=code,
+                    message=message,
+                    readback=readback,
+                )
+            ],
+        )
+        return DataFormatter.sanitize(result)
+
     async def _deliver_workspace_artifact(
         self,
         execution_result: Any,
@@ -870,6 +922,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         ):
             content = ""
             content_key = ""
+        stream_draft_attempted = False
         if not deliverable_mode and content_key == "answer":
             if diagnostics:
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
@@ -880,6 +933,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             and deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}
             and has_draftable_outline
         ):
+            stream_draft_attempted = True
             stream_delivery = await self._stream_workspace_artifact_draft(
                 path=path,
                 plan=plan,
@@ -949,9 +1003,89 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 )
                 return DataFormatter.sanitize(result)
         if not content:
+            if stream_draft_attempted and deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
+                latest_delivery: Mapping[str, Any] | None = None
+                raw_deliveries = self.diagnostics.get("workspace_artifact_delivery")
+                if isinstance(raw_deliveries, Sequence) and not isinstance(
+                    raw_deliveries,
+                    str | bytes | bytearray,
+                ):
+                    for delivery in reversed(raw_deliveries):
+                        if not isinstance(delivery, Mapping):
+                            continue
+                        if str(delivery.get("path") or "") == path and str(delivery.get("status") or "") == "failed":
+                            latest_delivery = delivery
+                            break
+                error = latest_delivery.get("error") if isinstance(latest_delivery, Mapping) else None
+                message = (
+                    str(error.get("message") or "")
+                    if isinstance(error, Mapping)
+                    else ""
+                ).strip() or (
+                    "Workspace artifact streamed draft failed or produced no content; trusted file_refs were not produced."
+                )
+                diagnostics.append(
+                    self._workspace_artifact_readback_missing_diagnostic(
+                        code="agent_task.workspace_artifact.draft_failed",
+                        message=message,
+                        path=path,
+                        source=source,
+                    )
+                )
+                result["status"] = "blocked"
+                if latest_delivery is not None:
+                    result["workspace_artifact_delivery"] = DataFormatter.sanitize(dict(latest_delivery))
+                result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+                self._append_execution_meta_evidence_items(
+                    execution_meta,
+                    [
+                        self._workspace_artifact_failure_evidence_item(
+                            path=path,
+                            source=source,
+                            code="agent_task.workspace_artifact.draft_failed",
+                            message=message,
+                        )
+                    ],
+                )
+                return DataFormatter.sanitize(result)
+            if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
+                return self._workspace_artifact_delivery_failure_result(
+                    result,
+                    execution_meta,
+                    diagnostics,
+                    path=path,
+                    source=source,
+                    deliverable_mode=deliverable_mode,
+                    content_key=content_key,
+                    code="agent_task.workspace_artifact.empty_body",
+                    message=(
+                        "Workspace artifact delivery requires a non-empty body or a successful streamed draft "
+                        "readback; trusted file_refs were not produced."
+                    ),
+                    error_type="EmptyWorkspaceArtifactBody",
+                )
             if diagnostics:
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return DataFormatter.sanitize(result)
+        if (
+            deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}
+            and self._workspace_artifact_draft_is_structured_wrapper(content)
+        ):
+            return self._workspace_artifact_delivery_failure_result(
+                result,
+                execution_meta,
+                diagnostics,
+                path=path,
+                source=source,
+                deliverable_mode=deliverable_mode,
+                content_key=content_key,
+                code="agent_task.workspace_artifact.structured_wrapper_body",
+                message=(
+                    "Workspace artifact delivery received a structured wrapper instead of the requested natural "
+                    "Markdown/text body; trusted file_refs were not produced."
+                ),
+                error_type="StructuredWorkspaceArtifactBody",
+            )
         delivery_record: dict[str, Any] = {
             "source": source,
             "path": path,
