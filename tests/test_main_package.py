@@ -421,6 +421,53 @@ async def test_action_runtime_structured_planning_timeout_is_typed_stage_stall()
 
 
 @pytest.mark.asyncio
+async def test_action_runtime_action_completion_refreshes_execution_progress():
+    agent = Agently.create_agent("action-runtime-action-progress-agent")
+    runtime = agent.action.action_runtime
+
+    @agent.action_func
+    async def slow_first_action():
+        await asyncio.sleep(0.08)
+        return "first"
+
+    @agent.action_func
+    async def slow_second_action():
+        await asyncio.sleep(0.08)
+        return "second"
+
+    context = AgentExecutionContext(
+        execution_id="action-runtime-action-progress",
+        lineage={"task_id": "issue-intake", "step_id": "execute"},
+        limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 0.12},
+    )
+    handler = runtime.resolve_execution_handler()
+
+    with bind_runtime_context(agent_execution_context=context):
+        results = await handler(
+            {"settings": agent.settings},
+            {
+                "action_calls": [
+                    {"action_id": "slow_first_action", "action_input": {}},
+                    {"action_id": "slow_second_action", "action_input": {}},
+                ],
+                "concurrency": 1,
+                "planning_protocol": "structured_plan",
+            },
+        )
+
+    assert [record["result"] for record in results] == ["first", "second"]
+    completed_actions = [
+        event
+        for event in context.stage_events
+        if event.get("event_type") == "action.completed"
+    ]
+    assert [event["meta"]["action_id"] for event in completed_actions] == [
+        "slow_first_action",
+        "slow_second_action",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_action_flow_close_timeout_is_typed_stage_stall():
     flow = TriggerFlowActionFlow(plugin_manager=Agently.plugin_manager, settings=Agently.settings)
     context = AgentExecutionContext(

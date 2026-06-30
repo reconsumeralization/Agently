@@ -229,6 +229,19 @@ class AgentlyActionRuntime:
         return timeout if timeout > 0 else None
 
     @staticmethod
+    def _record_agent_execution_progress(
+        *,
+        stage: str,
+        status: str,
+        event_type: str,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        context = get_current_agent_execution_context()
+        record_progress = getattr(context, "record_progress", None)
+        if callable(record_progress):
+            record_progress(stage=stage, status=status, event_type=event_type, meta=meta or {})
+
+    @staticmethod
     def _resolve_planning_model_key(settings: Any) -> str | None:
         value = settings.get("action.planning_model_key", None)
         if value is None:
@@ -447,6 +460,14 @@ class AgentlyActionRuntime:
                 policy_override = {}
 
             async def execute_once():
+                command_index = getattr(data, "index", None)
+                progress_meta = {"action_id": action_id, "command_index": command_index}
+                self._record_agent_execution_progress(
+                    stage=f"actions.{action_id}" if action_id else "actions.unknown",
+                    status="started",
+                    event_type="action.started",
+                    meta=progress_meta,
+                )
                 return await self.action.async_execute_action(
                     action_id,
                     action_input,
@@ -458,7 +479,24 @@ class AgentlyActionRuntime:
                     next_value=next_step,
                 )
 
-            return await execute_once()
+            try:
+                result = await execute_once()
+            except BaseException:
+                self._record_agent_execution_progress(
+                    stage=f"actions.{action_id}" if action_id else "actions.unknown",
+                    status="failed",
+                    event_type="action.failed",
+                    meta={"action_id": action_id, "command_index": getattr(data, "index", None)},
+                )
+                raise
+            status = str(result.get("status") or "").strip().lower() if isinstance(result, dict) else ""
+            self._record_agent_execution_progress(
+                stage=f"actions.{action_id}" if action_id else "actions.unknown",
+                status=status or "completed",
+                event_type="action.completed",
+                meta={"action_id": action_id, "command_index": getattr(data, "index", None)},
+            )
+            return result
 
         async def collect_results(data):
             values = data.input if isinstance(data.input, list) else []
