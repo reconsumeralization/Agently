@@ -537,6 +537,185 @@ def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
     )
 
 
+def test_evidence_ledger_view_reassigns_unique_cite_as_on_remerge():
+    # The cumulative ledger re-renders sub-ledger items that each carried their own
+    # e1..eN handle. The view must own cite_as and reassign unique handles so a single
+    # view never exposes duplicate cite_as (which would read as ambiguous aliases).
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+
+    merged = {
+        "evidence_items": [
+            {
+                "id": "iter1.read",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "cite_as": "e1",
+                "body": "report body",
+            },
+            {
+                "id": "iter2.read",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "data.csv",
+                "cite_as": "e1",
+                "body": "data body",
+            },
+            {
+                "id": "iter3.read",
+                "kind": "action_evidence",
+                "status": "ok",
+                "body_state": "bounded",
+                "cite_as": "e1",
+                "body": "action body",
+            },
+        ]
+    }
+
+    view = evidence_ledger_view(merged)
+    cite_as_values = [item["cite_as"] for item in view["items"]]
+    assert cite_as_values == ["e1", "e2", "e3"]
+    assert len(set(cite_as_values)) == 3
+
+
+def test_cite_as_handle_resolves_unambiguously_after_remerge():
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+
+    merged = {
+        "evidence_items": [
+            {"id": "iter1.read", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "report.md", "cite_as": "e1", "body": "a"},
+            {"id": "iter2.read", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "data.csv", "cite_as": "e1", "body": "b"},
+            {"id": "iter3.read", "kind": "action_evidence", "status": "ok", "body_state": "bounded", "cite_as": "e1", "body": "c"},
+        ]
+    }
+    view = evidence_ledger_view(merged)
+
+    guard = validate_evidence_use(
+        [{"claim": "The data file was read.", "evidence_ids": ["e2"], "support_type": "content"}],
+        view,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["iter2.read"]
+
+
+def test_evidence_guard_binds_composite_file_locator_to_matching_readback():
+    # A composite/locator reference ("<file> <sub-locator>") that exact-alias cannot
+    # match must bind to the readback whose path anchor it names -- and never another.
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "rb.report",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "body": "| project-a | 42 |",
+            },
+            {
+                "id": "rb.data",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "data.csv",
+                "body": "raw rows",
+            },
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "project-a throughput is 42",
+                "evidence_ids": ["report.md table row for project-a"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["rb.report"]
+    assert any(item["code"] == "evidence_ledger.alias_resolved" for item in guard["diagnostics"])
+
+
+def test_evidence_guard_narrows_composite_section_locator_by_heading():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "rb.report.summary",
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "heading": "Summary",
+                "body": "Summary content",
+            },
+            {
+                "id": "rb.report.risks",
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "heading": "Risks",
+                "body": "Risk content",
+            },
+        ]
+    }
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The risks are enumerated.",
+                "evidence_ids": ["report.md Risks section"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["rb.report.risks"]
+
+
+def test_resolve_evidence_reference_reports_tiers():
+    from agently.core.application.AgentTask.EvidenceLedger import resolve_evidence_reference
+
+    ledger = {
+        "evidence_items": [
+            {"id": "rb.report", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "report.md", "body": "x"},
+            {"id": "rb.data", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "data.csv", "body": "y"},
+        ]
+    }
+
+    assert resolve_evidence_reference("rb.report", ledger)["status"] == "resolved"
+    anchor = resolve_evidence_reference("report.md table row for project-a", ledger)
+    assert anchor["status"] == "resolved"
+    assert anchor["id"] == "rb.report"
+    assert resolve_evidence_reference("some opaque handle that names nothing", ledger)["status"] == "unresolved"
+
+
+def test_resolve_evidence_reference_reports_ambiguous_basename():
+    from agently.core.application.AgentTask.EvidenceLedger import resolve_evidence_reference
+
+    ledger = {
+        "evidence_items": [
+            {"id": "docs.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "docs/README.md"},
+            {"id": "pkg.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "pkg/README.md"},
+        ]
+    }
+
+    resolution = resolve_evidence_reference("README.md", ledger)
+    assert resolution["status"] == "ambiguous"
+    assert set(resolution["candidates"]) == {"docs.readme", "pkg.readme"}
+
+
 def test_execution_meta_action_results_enter_canonical_evidence_ledger():
     execution_meta = {
         "status": "completed",

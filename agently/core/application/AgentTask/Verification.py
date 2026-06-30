@@ -1297,7 +1297,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         diagnostic: Mapping[str, Any],
         available_refs: Sequence[Mapping[str, Any]],
     ) -> list[str]:
-        if str(diagnostic.get("support_type") or "").strip().lower() != "content":
+        support_type = str(diagnostic.get("support_type") or "").strip().lower()
+        if support_type not in {"content", "unavailability"}:
             return []
         evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
         if not evidence_id_text:
@@ -1324,6 +1325,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 continue
             if any(cls._evidence_binding_body_query_matches(query, body) for query in queries):
                 matches.append(ref)
+        evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
+        if cls._evidence_binding_id_looks_like_file_locator(evidence_id_text):
+            # A file/path/locator reference may bind only to a ref whose own
+            # path/anchor agrees. A body-text coincidence in another file must never
+            # bind -- not even when it is the single body match. Anchor-gate every
+            # file-locator case so cross-file binding is impossible; if no ref agrees,
+            # return nothing and let the path-aware readback tier (or repair) decide.
+            preferred_file_match = cls._preferred_file_locator_body_text_candidate(diagnostic, matches)
+            return [preferred_file_match] if preferred_file_match else []
         unique_matches = cls._unique_evidence_binding_ref_ids(matches)
         if len(unique_matches) <= 1:
             return unique_matches
@@ -1394,8 +1404,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 deduped.append(text)
         return deduped
 
-    @staticmethod
-    def _evidence_binding_id_looks_like_workspace_locator(evidence_id: str) -> bool:
+    @classmethod
+    def _evidence_binding_id_looks_like_workspace_locator(cls, evidence_id: str) -> bool:
         text = str(evidence_id or "").strip().lower()
         return (
             not text
@@ -1403,7 +1413,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             or "artifact_locator" in text
             or "acceptance_locator" in text
             or "readback" in text
+            or cls._evidence_binding_id_looks_like_file_locator(text)
         )
+
+    @staticmethod
+    def _evidence_binding_id_looks_like_file_locator(evidence_id: str) -> bool:
+        text = str(evidence_id or "").strip().lower().replace("\\", "/")
+        if not text:
+            return False
+        if re.search(r"(?:^|[/\s'\"`])[\w.-]+\.[a-z0-9]{1,12}(?:\b|[:#/'\"`])", text):
+            return True
+        locator_terms = (" line ", " lines ", " row ", " rows ", " table ", " section ")
+        padded = f" {text} "
+        return any(term in padded for term in locator_terms)
 
     @classmethod
     def _normalize_evidence_binding_text(cls, value: str) -> str:
@@ -1456,6 +1478,79 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return ordered
 
     @classmethod
+    def _preferred_file_locator_body_text_candidate(
+        cls,
+        diagnostic: Mapping[str, Any],
+        refs: Sequence[Mapping[str, Any]],
+    ) -> str:
+        evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
+        if not cls._evidence_binding_id_looks_like_file_locator(evidence_id_text):
+            return ""
+        locator_text = evidence_id_text.lower().replace("\\", "/")
+        locator_matches = [
+            ref
+            for ref in refs
+            if cls._evidence_binding_ref_matches_locator_text(ref, locator_text)
+        ]
+        unique_locator_matches = cls._unique_evidence_binding_ref_ids(locator_matches)
+        if len(unique_locator_matches) == 1:
+            return unique_locator_matches[0]
+        readable_matches = [
+            ref
+            for ref in locator_matches
+            if cls._evidence_binding_ref_is_readback_like(ref)
+        ]
+        unique_readable_matches = cls._unique_evidence_binding_ref_ids(readable_matches)
+        if len(unique_readable_matches) == 1:
+            return unique_readable_matches[0]
+        coalesced_workspace_match = cls._coalesced_workspace_body_text_candidate(readable_matches)
+        if coalesced_workspace_match:
+            return coalesced_workspace_match
+        return ""
+
+    @classmethod
+    def _evidence_binding_ref_matches_locator_text(cls, ref: Mapping[str, Any], locator_text: str) -> bool:
+        for alias in cls._evidence_binding_ref_locator_aliases(ref):
+            normalized_alias = alias.lower().replace("\\", "/")
+            if len(normalized_alias) < 3:
+                continue
+            if normalized_alias in locator_text:
+                return True
+        return False
+
+    @staticmethod
+    def _evidence_binding_ref_locator_aliases(ref: Mapping[str, Any]) -> list[str]:
+        aliases: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+            if text:
+                basename = PurePosixPath(text.replace("\\", "/")).name
+                if basename and basename not in aliases:
+                    aliases.append(basename)
+
+        for key in ("id", "cite_as", "path", "artifact_id", "action_call_id"):
+            add(ref.get(key))
+        raw_aliases = ref.get("aliases")
+        if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
+            for alias in raw_aliases:
+                add(alias)
+        return aliases
+
+    @staticmethod
+    def _evidence_binding_ref_is_readback_like(ref: Mapping[str, Any]) -> bool:
+        kind = str(ref.get("kind") or "").strip().lower()
+        action_id = str(ref.get("action_id") or "").strip().lower()
+        return (
+            "readback" in kind
+            or kind == "workspace_artifact.readback"
+            or kind == "workspace_artifact.targeted_readback"
+            or action_id in {"read_file", "grep_files", "search_files"}
+        )
+
+    @classmethod
     def _coalesced_workspace_body_text_candidate(cls, refs: Sequence[Mapping[str, Any]]) -> str:
         workspace_refs: list[Mapping[str, Any]] = []
         for ref in refs:
@@ -1477,8 +1572,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         selected_pool = targeted_refs or workspace_refs
         return str(selected_pool[-1].get("id") or "").strip()
 
-    @staticmethod
+    @classmethod
     def _deterministic_content_readback_candidates(
+        cls,
         diagnostic: Mapping[str, Any],
         available_refs: Sequence[Mapping[str, Any]],
     ) -> list[str]:
@@ -1544,6 +1640,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
 
         unique_content_refs = sorted({str(ref.get("id") or "").strip() for ref in content_refs if ref.get("id")})
         if len(unique_content_refs) == 1:
+            # "Only one content-bearing ref" must not cross files: a file/path/locator
+            # reference may take this shortcut only when that ref's own path/anchor
+            # agrees. Otherwise leave it unbound rather than binding to the wrong file.
+            if cls._evidence_binding_id_looks_like_file_locator(diagnostic_evidence_id):
+                only_ref = next(
+                    (ref for ref in content_refs if str(ref.get("id") or "").strip() == unique_content_refs[0]),
+                    None,
+                )
+                if only_ref is None or not cls._evidence_binding_ref_matches_locator_text(
+                    only_ref, diagnostic_evidence_id.lower().replace("\\", "/")
+                ):
+                    return []
             return unique_content_refs
         return []
 

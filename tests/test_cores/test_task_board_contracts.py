@@ -1125,6 +1125,194 @@ def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readbac
     ]
 
 
+def test_evidence_binding_repair_maps_file_row_label_to_matching_read_file_result():
+    read_file_id = "agent_task_action_result:read_file:read-quotes-summary"
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "AMD last sale price $565.70 as of Jun 30, 2026 11:23 AM ET",
+                "evidence_ids": ["quotes_summary.md table row for AMD"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": "agent_task_action_result:market_quotes:quotes",
+                "kind": "agent_task.action.result",
+                "action_id": "market_quotes",
+                "status": "ok",
+                "body_state": "bounded",
+            },
+            {
+                "id": read_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "quotes_summary.md",
+                "aliases": ["quotes_summary.md"],
+                "status": "ok",
+                "body_state": "bounded",
+            },
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "AMD last sale price $565.70 as of Jun 30, 2026 11:23 AM ET",
+                "evidence_id": "quotes_summary.md table row for AMD",
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": "agent_task_action_result:market_quotes:quotes",
+                "kind": "agent_task.action.result",
+                "action_id": "market_quotes",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "{\"ticker\": \"AMD\", \"last_sale_price\": \"$565.70\"}",
+            },
+            {
+                "id": read_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "quotes_summary.md",
+                "aliases": ["quotes_summary.md"],
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "| AMD | $565.70 | +26.21 | +4.86% | Jun 30, 2026 11:23 AM ET |",
+            },
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "AMD last sale price $565.70 as of Jun 30, 2026 11:23 AM ET",
+            "evidence_ids": [read_file_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_maps_file_section_unavailability_to_content_readback():
+    read_file_id = "agent_task_action_result:read_file:read-quotes-summary"
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "High, low, open, volume, and one-year historical data are not available (Stooq CSV 404 error)",
+                "evidence_ids": ["quotes_summary.md 'Missing Data' section"],
+                "support_type": "unavailability",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": read_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "quotes_summary.md",
+                "aliases": ["quotes_summary.md"],
+                "status": "ok",
+                "body_state": "bounded",
+            }
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "High, low, open, volume, and one-year historical data are not available (Stooq CSV 404 error)",
+                "evidence_id": "quotes_summary.md 'Missing Data' section",
+                "support_type": "unavailability",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": read_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "quotes_summary.md",
+                "aliases": ["quotes_summary.md"],
+                "status": "ok",
+                "body_state": "bounded",
+                "body": (
+                    "## Missing Data\n"
+                    "High, low, open, volume, and one-year historical data are not available "
+                    "because the Stooq CSV endpoint returned a 404 error."
+                ),
+            }
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "High, low, open, volume, and one-year historical data are not available (Stooq CSV 404 error)",
+            "evidence_ids": [read_file_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_evidence_binding_repair_refuses_cross_file_body_match_for_file_locator():
+    # A file-locator reference names report.md, but the only ref whose body happens to
+    # contain the claim text is a *different* file (data.csv). Body-text fallback must
+    # not cross files: with no path/anchor agreement the locator stays unbound rather
+    # than silently binding the claim to the wrong file's evidence.
+    other_file_id = "agent_task_action_result:read_file:read-data-csv"
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "project-a throughput is 42 units",
+                "evidence_ids": ["report.md table row for project-a"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "id": other_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "data.csv",
+                "aliases": ["data.csv"],
+                "status": "ok",
+                "body_state": "bounded",
+            }
+        ],
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.invalid_evidence_id",
+                "blocking": True,
+                "index": 0,
+                "claim": "project-a throughput is 42 units",
+                "evidence_id": "report.md table row for project-a",
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {
+        "items": [
+            {
+                "id": other_file_id,
+                "kind": "agent_task.action.result",
+                "action_id": "read_file",
+                "path": "data.csv",
+                "aliases": ["data.csv"],
+                "status": "ok",
+                "body_state": "bounded",
+                # body coincidentally contains the claim text, but this is data.csv.
+                "body": "project-a throughput is 42 units (raw export row)",
+            }
+        ]
+    }
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == []
+
+
 def test_evidence_binding_repair_attempt_gate_only_limits_model_repair():
     write_result_id = "agent_task_action_result:write_file:act_call_write"
     guard = {

@@ -312,7 +312,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "evidence": ([str], "Evidence produced or used by this card", False),
                 "evidence_use": (
                     [dict],
-                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
                     False,
                 ),
                 "acceptance_points": (
@@ -752,7 +752,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "evidence": ([str], "Evidence used by this control card", False),
             "evidence_use": (
                 [dict],
-                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
                 False,
             ),
             "acceptance_points": (

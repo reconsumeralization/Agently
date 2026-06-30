@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
@@ -128,6 +129,11 @@ def evidence_ledger_view(
                 "failed_empty": "status=failed or status=empty supports unavailability/missingness claims only.",
                 "truncated": "body_state=truncated cannot by itself support whole-document or exhaustive claims.",
             },
+            "reference_rule": (
+                "Cite evidence by its cite_as (eN) or canonical id from this ledger. For a file or "
+                "section claim, cite the bounded readback evidence id whose path/heading matches; do not "
+                "invent free-text locator labels and do not reuse a verification or record id as evidence."
+            ),
         }
     )
 
@@ -287,18 +293,61 @@ def validate_evidence_use(evidence_use: Any, ledger_value: Any) -> dict[str, Any
                 )
             item = items_by_id.get(canonical_id)
             if item is None:
+                # Exact-alias resolution failed. Before declaring the id invalid, try
+                # structure-aware anchor resolution so a composite/locator reference
+                # ("quotes_summary.md table row for AMD", "final.md Data Boundary
+                # section") binds to the ledger item whose anchor it names. Anchor
+                # resolution never inspects bodies and never crosses files.
+                anchor_resolution = _resolve_evidence_anchor(evidence_id, raw_item_sequence, claim=claim)
+                anchor_id = str(anchor_resolution.get("id") or "").strip()
+                anchor_item = items_by_id.get(anchor_id)
+                if canonical_id in normalized_ids:
+                    normalized_ids.remove(canonical_id)
+                if anchor_resolution.get("ambiguous"):
+                    diagnostics.append(
+                        _guard_diagnostic(
+                            "evidence_ledger.ambiguous_evidence_alias",
+                            "evidence_use references an alias that matches multiple evidence ledger items.",
+                            evidence_id=evidence_id,
+                            candidates=anchor_resolution.get("candidates"),
+                            claim=claim,
+                            support_type=support_type,
+                            index=index,
+                            blocking=True,
+                        )
+                    )
+                    continue
+                if anchor_item is None:
+                    diagnostics.append(
+                        _guard_diagnostic(
+                            "evidence_ledger.invalid_evidence_id",
+                            "evidence_use references an id that is not present in the evidence ledger.",
+                            evidence_id=evidence_id,
+                            claim=claim,
+                            support_type=support_type,
+                            index=index,
+                            blocking=True,
+                        )
+                    )
+                    continue
+                if anchor_id not in normalized_ids:
+                    normalized_ids.append(anchor_id)
                 diagnostics.append(
                     _guard_diagnostic(
-                        "evidence_ledger.invalid_evidence_id",
-                        "evidence_use references an id that is not present in the evidence ledger.",
+                        "evidence_ledger.alias_resolved",
+                        "evidence_use reference was canonicalized to a ledger evidence id by anchor.",
                         evidence_id=evidence_id,
+                        canonical_id=anchor_id,
+                        alias=anchor_resolution.get("alias"),
+                        basis=anchor_resolution.get("basis") or "anchor",
                         claim=claim,
                         support_type=support_type,
                         index=index,
-                        blocking=True,
+                        blocking=False,
                     )
                 )
-                continue
+                canonical_id = anchor_id
+                item = anchor_item
             status = str(item.get("status") or "")
             body_state = str(item.get("body_state") or "")
             if status in {"failed", "empty"} and support_type != "unavailability":
@@ -452,11 +501,16 @@ def _compact_ledger_item(
         else {},
         "supports": dict(item.get("supports") or {}) if isinstance(item.get("supports"), Mapping) else {},
     }
+    # The rendered view owns cite_as: a freshly assigned, position-based handle is
+    # authoritative so a single view never exposes duplicate handles. Inherited
+    # cite_as from a sub-render is only a fallback when the view does not assign one
+    # (the cumulative merge re-renders sub-ledger items that each carried their own
+    # e1..eN, which would otherwise collide and read as ambiguous aliases).
     existing_cite_as = str(item.get("cite_as") or "").strip()
-    if existing_cite_as:
-        compact["cite_as"] = existing_cite_as
-    elif cite_as:
+    if cite_as:
         compact["cite_as"] = cite_as
+    elif existing_cite_as:
+        compact["cite_as"] = existing_cite_as
     diagnostics = item.get("diagnostics")
     if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
         compact["diagnostics"] = [DataFormatter.sanitize(entry) for entry in diagnostics[:8]]
@@ -470,9 +524,15 @@ def _compact_ledger_item(
     elif isinstance(aliases, str) and aliases.strip():
         compact["aliases"] = [aliases.strip()]
     for field in _ALIAS_FIELDS:
+        # cite_as is owned by the rendered view (assigned above); never inherit a
+        # sub-render's cite_as here or the cumulative merge re-exposes duplicate
+        # handles that read as ambiguous aliases.
+        if field == "cite_as":
+            continue
         if field in item and item.get(field) not in (None, "", [], {}):
             compact[field] = DataFormatter.sanitize(item.get(field))
-    if str(item.get("kind") or "") == ACCEPTANCE_LOCATOR_KIND:
+    kind = str(item.get("kind") or "")
+    if kind == ACCEPTANCE_LOCATOR_KIND:
         for field in (
             "artifact_path",
             "criterion_id",
@@ -489,6 +549,13 @@ def _compact_ledger_item(
             "content_fingerprint",
             "source_evidence_ids",
         ):
+            if item.get(field) not in (None, "", [], {}):
+                compact[field] = DataFormatter.sanitize(item.get(field))
+    elif "readback" in kind or "locator" in kind:
+        # Preserve the sub-locator anchors (heading/anchor_text/criterion_id) on
+        # readback items so a composite "<file> <section>" reference can be narrowed
+        # to the matching section, and so the model sees the acceptable handles.
+        for field in ("heading", "anchor_text", "criterion_id"):
             if item.get(field) not in (None, "", [], {}):
                 compact[field] = DataFormatter.sanitize(item.get(field))
     if include_body:
@@ -681,6 +748,220 @@ def _alias_variants(value: Any) -> set[str]:
     if text.startswith("file://"):
         variants.add(text.removeprefix("file://"))
     return {variant for variant in variants if variant}
+
+
+# --- Structure-aware evidence reference resolution -------------------------------
+#
+# Models reference evidence the way humans do: "<file> <sub-locator>" (e.g.
+# "quotes_summary.md table row for AMD"), a section heading, or a content snippet --
+# not the opaque canonical ledger id. Exact-alias resolution (_resolve_evidence_alias)
+# only matches a reference that, after path normalization, equals a precomputed item
+# alias, so it cannot canonicalize these composite/locator references.
+#
+# The anchor resolver decomposes a reference and binds it to a ledger item by its
+# *anchor* first (path/basename/url/artifact id/action id/declared alias/locator
+# heading), then narrows by an optional sub-locator (heading/anchor_text). It never
+# inspects bodies, so it is safe inside the always-on guard. Body-text matching is a
+# separate, anchor-gated last resort that only the repair path performs.
+#
+# Invariant: a reference that carries a file/path/locator token can only bind to an
+# item whose own anchor appears in the reference -- cross-file binding is impossible
+# at this stage, which is the protocol guarantee the grounding guard needs.
+
+_ANCHOR_LOCATOR_FIELDS = ("heading", "anchor_text", "criterion_id")
+_ANCHOR_REF_FIELDS = (
+    "path",
+    "artifact_id",
+    "action_id",
+    "action_call_id",
+    "record_id",
+    "source_url",
+    "selected_url",
+    "requested_url",
+    "canonical_url",
+    "url",
+    "href",
+)
+_FILE_LOCATOR_TERMS = (
+    " line ",
+    " lines ",
+    " row ",
+    " rows ",
+    " table ",
+    " section ",
+    " heading ",
+    " paragraph ",
+    " cell ",
+)
+
+
+def _anchor_normalize(value: Any) -> str:
+    text = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    return f" {text} " if text else ""
+
+
+def _anchor_token_in(anchor_norm: str, reference_norm: str) -> bool:
+    candidate = anchor_norm.strip()
+    if len(candidate) < 3:
+        return False
+    return f" {candidate} " in reference_norm
+
+
+def reference_has_file_locator(reference: str) -> bool:
+    text = str(reference or "").strip().lower().replace("\\", "/")
+    if not text:
+        return False
+    if re.search(r"(?:^|[/\s'\"`])[\w-]+\.[a-z0-9]{1,12}(?:\b|[:#/'\"`])", text):
+        return True
+    padded = f" {text} "
+    return any(term in padded for term in _FILE_LOCATOR_TERMS)
+
+
+def _evidence_item_anchor_tokens(item: Mapping[str, Any]) -> list[str]:
+    tokens: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        if text not in tokens:
+            tokens.append(text)
+        basename = PurePosixPath(text.replace("\\", "/")).name
+        if basename and basename != text and basename not in tokens:
+            tokens.append(basename)
+
+    for field in _ANCHOR_REF_FIELDS:
+        add(_first_ref_value(item, (field,)))
+    aliases = item.get("aliases")
+    if isinstance(aliases, Sequence) and not isinstance(aliases, str | bytes | bytearray):
+        for alias in aliases:
+            add(alias)
+    elif isinstance(aliases, str):
+        add(aliases)
+    kind = str(item.get("kind") or "")
+    if kind == ACCEPTANCE_LOCATOR_KIND or "readback" in kind or "locator" in kind:
+        for field in _ANCHOR_LOCATOR_FIELDS:
+            add(item.get(field))
+        provenance = item.get("provenance")
+        if isinstance(provenance, Mapping):
+            for field in _ANCHOR_LOCATOR_FIELDS:
+                add(provenance.get(field))
+    return tokens
+
+
+def _item_is_content_bearing(item: Mapping[str, Any]) -> bool:
+    return (
+        str(item.get("status") or "").strip().lower() == "ok"
+        and str(item.get("body_state") or "").strip().lower() in {"full", "bounded", "truncated"}
+    )
+
+
+def _narrow_anchor_hits_by_sublocator(
+    reference: str,
+    claim: str,
+    hits: Sequence[tuple[str, Mapping[str, Any]]],
+) -> list[str]:
+    reference_norm = _anchor_normalize(f"{reference} {claim}")
+    content_pool = [(item_id, item) for item_id, item in hits if _item_is_content_bearing(item)]
+    pool = content_pool or list(hits)
+    heading_matches: list[str] = []
+    for item_id, item in pool:
+        for field in _ANCHOR_LOCATOR_FIELDS:
+            value = _anchor_normalize(item.get(field))
+            if value and _anchor_token_in(value, reference_norm):
+                if item_id not in heading_matches:
+                    heading_matches.append(item_id)
+                break
+    if len(heading_matches) == 1:
+        return heading_matches
+    pool_ids: list[str] = []
+    for item_id, _ in pool:
+        if item_id not in pool_ids:
+            pool_ids.append(item_id)
+    return pool_ids
+
+
+def _resolve_evidence_anchor(reference: str, raw_items: Sequence[Any], *, claim: str = "") -> dict[str, Any]:
+    reference_norm = _anchor_normalize(reference)
+    if not reference_norm:
+        return {}
+    hits: list[tuple[str, Mapping[str, Any]]] = []
+    matched_alias = ""
+    for item in raw_items:
+        if not isinstance(item, Mapping):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        if not item_id:
+            continue
+        for anchor in _evidence_item_anchor_tokens(item):
+            if _anchor_token_in(_anchor_normalize(anchor), reference_norm):
+                hits.append((item_id, item))
+                if not matched_alias:
+                    matched_alias = anchor
+                break
+    if not hits:
+        return {}
+    unique_ids: list[str] = []
+    for item_id, _ in hits:
+        if item_id not in unique_ids:
+            unique_ids.append(item_id)
+    if len(unique_ids) == 1:
+        return {"id": unique_ids[0], "alias": matched_alias, "basis": "anchor"}
+    narrowed = _narrow_anchor_hits_by_sublocator(reference, claim, hits)
+    if len(narrowed) == 1:
+        return {"id": narrowed[0], "alias": matched_alias, "basis": "anchor_sublocator"}
+    return {"ambiguous": True, "candidates": sorted(narrowed or unique_ids), "basis": "anchor"}
+
+
+def resolve_evidence_reference(
+    reference: str,
+    ledger_value: Any,
+    *,
+    claim: str = "",
+) -> dict[str, Any]:
+    """Single structure-aware resolution of a free-text evidence reference to a
+    canonical ledger id. Tiers: exact id/alias -> anchor (+ sub-locator). Body-text
+    matching is intentionally excluded here (the guard runs on a body-less ledger);
+    the repair path layers an anchor-gated body tier on top of this. Returns a dict
+    with ``status`` in {"resolved", "ambiguous", "unresolved"}."""
+    ledger = (
+        ledger_value
+        if isinstance(ledger_value, Mapping) and ledger_value.get("schema_version") == EVIDENCE_LEDGER_VIEW_SCHEMA_VERSION
+        else evidence_ledger_view(ledger_value, include_body=False)
+    )
+    raw_items = ledger.get("items") if isinstance(ledger, Mapping) else ()
+    raw_item_sequence = (
+        raw_items if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray) else ()
+    )
+    items_by_id = {
+        str(item.get("id")): item
+        for item in raw_item_sequence
+        if isinstance(item, Mapping) and str(item.get("id") or "").strip()
+    }
+    alias_index = _build_evidence_alias_index(raw_item_sequence)
+    alias_resolution = _resolve_evidence_alias(reference, alias_index)
+    if alias_resolution.get("ambiguous"):
+        return {
+            "status": "ambiguous",
+            "id": "",
+            "candidates": list(alias_resolution.get("candidates") or []),
+            "basis": "alias",
+        }
+    canonical_id = str(alias_resolution.get("id") or reference).strip()
+    if canonical_id in items_by_id:
+        return {"status": "resolved", "id": canonical_id, "basis": "alias"}
+    anchor_resolution = _resolve_evidence_anchor(reference, raw_item_sequence, claim=claim)
+    if anchor_resolution.get("ambiguous"):
+        return {
+            "status": "ambiguous",
+            "id": "",
+            "candidates": list(anchor_resolution.get("candidates") or []),
+            "basis": anchor_resolution.get("basis") or "anchor",
+        }
+    anchor_id = str(anchor_resolution.get("id") or "").strip()
+    if anchor_id in items_by_id:
+        return {"status": "resolved", "id": anchor_id, "basis": anchor_resolution.get("basis") or "anchor"}
+    return {"status": "unresolved", "id": "", "basis": "none"}
 
 
 def _available_evidence_refs(raw_items: Sequence[Any], *, max_items: int = 80) -> list[dict[str, Any]]:

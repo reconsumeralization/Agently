@@ -157,11 +157,38 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             repair_context=self._active_repair_context(),
             allow_stream_draft=not execution_failed,
         )
+        cumulative_evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
         flat_evidence_guard = validate_evidence_use(
             collect_evidence_use(execution_result),
-            self._cumulative_evidence_ledger(execution_meta),
+            cumulative_evidence_ledger,
         )
+        flat_evidence_repair_diagnostic: dict[str, Any] | None = None
         if isinstance(execution_result, Mapping):
+            # Apply the same deterministic anchor-aware binding repair the TaskBoard
+            # card and verifier paths use, so a flat step that referenced evidence by
+            # a human-readable locator label gets canonicalized here instead of being
+            # deferred to verify-time repair only.
+            original_blocking = self._taskboard_evidence_guard_blocking_count(flat_evidence_guard)
+            if original_blocking > 0:
+                repaired_evidence_use = self._deterministic_evidence_binding_repair(
+                    flat_evidence_guard, cumulative_evidence_ledger
+                )
+                if repaired_evidence_use:
+                    repaired_result = value_with_normalized_evidence_use(execution_result, repaired_evidence_use)
+                    repaired_guard = validate_evidence_use(
+                        collect_evidence_use(repaired_result), cumulative_evidence_ledger
+                    )
+                    repaired_blocking = self._taskboard_evidence_guard_blocking_count(repaired_guard)
+                    if repaired_blocking < original_blocking:
+                        execution_result = repaired_result
+                        flat_evidence_guard = repaired_guard
+                        flat_evidence_repair_diagnostic = {
+                            "code": "agent_task.flat.evidence_binding_repair",
+                            "status": "completed" if repaired_blocking == 0 else "partial",
+                            "original_blocking_count": original_blocking,
+                            "repaired_blocking_count": repaired_blocking,
+                            "repaired_claim_count": len(repaired_evidence_use),
+                        }
             execution_result = value_with_normalized_evidence_use(
                 execution_result,
                 flat_evidence_guard.get("normalized_evidence_use"),
@@ -169,6 +196,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         execution_meta.setdefault("diagnostics", {})
         if isinstance(execution_meta.get("diagnostics"), dict):
             execution_meta["diagnostics"]["evidence_use_guard"] = DataFormatter.sanitize(flat_evidence_guard)
+            if flat_evidence_repair_diagnostic is not None:
+                execution_meta["diagnostics"]["evidence_binding_repair"] = DataFormatter.sanitize(
+                    flat_evidence_repair_diagnostic
+                )
         await self._emit_process_progress_from_output(
             execution_result,
             stage="execution",
@@ -1648,7 +1679,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 ),
                 "evidence_use": (
                     [dict],
-                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
                     False,
                 ),
                 "acceptance_points": (
@@ -1706,7 +1737,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             ),
             "evidence_use": (
                 [dict],
-                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
                 False,
             ),
             "acceptance_points": (
