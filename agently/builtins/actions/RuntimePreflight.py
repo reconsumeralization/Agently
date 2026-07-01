@@ -125,9 +125,8 @@ class RuntimePreflight:
         inspected = [self._inspect_candidate(candidate) for candidate in self.candidates]
         visible = inspected if include_unavailable else [candidate for candidate in inspected if candidate["available"]]
         available = [candidate for candidate in inspected if candidate["available"]]
-        return {
+        payload = {
             "schema_version": "code_runtime_environment/v1",
-            "status": "success",
             "install_policy": self.install_policy,
             "package_manager_policy": self.package_manager_policy,
             "candidate_order": [str(candidate.get("runtime_id") or "") for candidate in inspected],
@@ -139,6 +138,14 @@ class RuntimePreflight:
                 "Do not install runtimes, compilers, package managers, or third-party packages from this action.",
                 "If no candidate is available, report environment_capability_gap instead of fabricating execution evidence.",
             ],
+        }
+        return {
+            **payload,
+            "ok": True,
+            "success": True,
+            "status": "success",
+            "data": payload,
+            "result": payload,
         }
 
     def _inspect_candidate(self, candidate: Mapping[str, Any]) -> dict[str, Any]:

@@ -40,6 +40,8 @@ def test_runtime_preflight_registers_structured_code_runtime_action():
     result = agent.action.execute_action("inspect_runtimes", {})
     assert result.get("status") == "success"
     assert result.get("schema_version") == "code_runtime_environment/v1"
+    assert result.get("data", {}).get("schema_version") == "code_runtime_environment/v1"
+    assert result.get("result", {}).get("schema_version") == "code_runtime_environment/v1"
     assert result.get("install_policy") == "not_allowed"
     assert result.get("package_manager_policy") == "not_allowed"
     assert "python_current" in result.get("candidate_order", [])
