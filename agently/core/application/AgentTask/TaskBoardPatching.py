@@ -69,7 +69,11 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         "requested_action": str(raw_patch.get("action") or ""),
                     }
                 )
-                if cls._taskboard_patch_proposal_requests_readback(raw_patch):
+                next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
+                if (
+                    cls._taskboard_patch_proposal_requests_readback(raw_patch)
+                    or next_action in {"readback", "needs_readback"}
+                ):
                     target_refs = cls._taskboard_patch_proposal_target_refs(raw_patch)
                     if not target_refs:
                         target_refs = cls._taskboard_control_output_target_refs(card_output)
