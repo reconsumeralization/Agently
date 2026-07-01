@@ -145,13 +145,13 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         )
         return DataFormatter.sanitize(patched_output)
 
-    @staticmethod
-    def _taskboard_patch_proposal_is_workspace_patch(patch_proposal: Mapping[str, Any]) -> bool:
+    @classmethod
+    def _taskboard_patch_proposal_is_workspace_patch(cls, patch_proposal: Mapping[str, Any]) -> bool:
         if not isinstance(patch_proposal, Mapping):
             return False
         if any(str(patch_proposal.get(key) or "").strip() for key in ("file", "path", "target_file", "target_path")):
             return True
-        raw_operations = patch_proposal.get("operations") or patch_proposal.get("edits")
+        raw_operations = cls._taskboard_workspace_patch_raw_operations(patch_proposal)
         if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes | bytearray):
             return False
         workspace_ops = {"replace", "insert", "delete", "append", "write"}
@@ -175,6 +175,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 return False
             if op in workspace_ops:
                 has_workspace_op = True
+            elif cls._taskboard_workspace_patch_operation_has_replace_fields(operation):
+                has_workspace_op = True
         return has_workspace_op
 
     @classmethod
@@ -196,7 +198,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         *,
         card_id: str,
     ) -> dict[str, Any]:
-        raw_operations = patch_proposal.get("operations") or patch_proposal.get("edits")
+        raw_operations = self._taskboard_workspace_patch_raw_operations(patch_proposal)
         if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes | bytearray):
             write_content = self._taskboard_workspace_patch_content(patch_proposal)
             if not write_content:
@@ -300,6 +302,14 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 return value
         return ""
 
+    @staticmethod
+    def _taskboard_workspace_patch_raw_operations(patch_proposal: Mapping[str, Any]) -> Any:
+        for key in ("operations", "edits", "patches"):
+            value = patch_proposal.get(key)
+            if value is not None:
+                return value
+        return None
+
     async def _read_workspace_patch_text(self, path: str) -> str:
         target = self.workspace.resolve_file_path(path)
         max_bytes = max(int(target.stat().st_size) + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
@@ -322,6 +332,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         index: int,
     ) -> tuple[str, dict[str, Any]]:
         op = str(operation.get("type") or operation.get("op") or operation.get("operation") or "").strip().lower()
+        if not op and cls._taskboard_workspace_patch_operation_has_replace_fields(operation):
+            op = "replace"
         if op in {"write", "overwrite", "replace_file"}:
             new_content = cls._taskboard_workspace_patch_content(operation)
             if not new_content:
@@ -333,15 +345,17 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             }
         if op != "replace":
             raise ValueError(f"Unsupported Workspace patch operation '{ op or '<empty>' }'.")
-        old = str(operation.get("old") or operation.get("from") or operation.get("search") or "")
+        old = cls._first_present_patch_string(
+            operation,
+            ("old", "from", "search", "old_text", "from_text", "search_text", "find", "find_text"),
+        )
         if not old:
             raise ValueError("Workspace replace patch requires non-empty old/from/search text.")
-        if "new" in operation:
-            new = str(operation.get("new") or "")
-        elif "to" in operation:
-            new = str(operation.get("to") or "")
-        else:
-            new = str(operation.get("replacement") or "")
+        new = cls._first_present_patch_string(
+            operation,
+            ("new", "to", "replacement", "new_text", "to_text", "replacement_text"),
+            default="",
+        )
         match_count = content.count(old)
         if match_count <= 0:
             raise ValueError("Workspace replace patch old text was not found.")
@@ -379,6 +393,24 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 return content
             search_from = start + len(old)
         return content[:start] + new + content[start + len(old) :]
+
+    @staticmethod
+    def _first_present_patch_string(
+        operation: Mapping[str, Any],
+        keys: Sequence[str],
+        *,
+        default: str | None = None,
+    ) -> str:
+        for key in keys:
+            if key in operation:
+                return str(operation.get(key) or "")
+        return "" if default is None else default
+
+    @staticmethod
+    def _taskboard_workspace_patch_operation_has_replace_fields(operation: Mapping[str, Any]) -> bool:
+        old_keys = {"old", "from", "search", "old_text", "from_text", "search_text", "find", "find_text"}
+        new_keys = {"new", "to", "replacement", "new_text", "to_text", "replacement_text"}
+        return any(key in operation for key in old_keys) and any(key in operation for key in new_keys)
 
     @staticmethod
     def _taskboard_mapping_sequence(value: Any) -> list[Mapping[str, Any]]:

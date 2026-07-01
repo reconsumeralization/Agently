@@ -3488,6 +3488,92 @@ async def test_taskboard_control_workspace_text_patch_writes_complete_file(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_taskboard_control_workspace_text_patch_patches_alias_applies_replace(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-text-patch-patches-alias").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Repair a Workspace-backed final deliverable by applying a targeted patch.",
+        success_criteria=["The corrected Workspace file is available through trusted readback refs."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    await task.workspace.write_file(
+        "final.md",
+        "# Final\n\n**Covered window:** 2026-02-12 - 2026-06-30\n\n## Source Methodology\n",
+        append=False,
+    )
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
+        work_unit = cast(Any, kwargs["work_unit"])
+        output = {
+            "status": "completed",
+            "sufficient": True,
+            "answer": "Apply the targeted Date Window section patch.",
+            "next_board_action": "patch",
+            "remaining_work": [],
+            "gaps": [],
+            "patch_proposal": {
+                "kind": "workspace_text_patch",
+                "path": "final.md",
+                "patches": [
+                    {
+                        "old_text": "**Covered window:** 2026-02-12 - 2026-06-30",
+                        "new_text": "## Date Window\n\n2026-02-12 - 2026-06-30",
+                    }
+                ],
+            },
+        }
+        return (
+            output,
+            {"status": "completed", "logs": {"action_logs": {}, "route_logs": {}, "errors": []}},
+            WorkUnitResult(id=str(work_unit.id), status="completed"),
+        )
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    context_pack: WorkspaceContextPackage = {
+        "goal": task.goal,
+        "items": [],
+        "profile": "test",
+        "omitted": [],
+        "diagnostics": {},
+    }
+    revision = TaskBoardRevision.create(
+        board_id="workspace-text-patch-patches-alias",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "workspace-text-patch-patches-alias-graph",
+                "cards": [
+                    {
+                        "id": "repair",
+                        "objective": "Apply a targeted final.md patch.",
+                        "allowed_execution_shape": "control",
+                        "metadata": {"final_workspace_deliverables": ["final.md"]},
+                    }
+                ],
+            }
+        ),
+    )
+    card = revision.graph.card_by_id()["repair"]
+
+    result = await task._run_taskboard_control_card(
+        SimpleNamespace(revision=revision, card=card, dependency_results={}, planning_policy=None),
+        context_pack,
+    )
+    readback = await task.workspace.read_file("final.md", max_bytes=4000)
+
+    assert result.status == "completed"
+    assert result.patch_proposal is None
+    assert result.file_refs
+    assert result.file_refs[0]["path"] == "final.md"
+    assert "## Date Window" in readback["content"]
+    assert "**Covered window:**" not in readback["content"]
+    assert result.preview["workspace_patch_delivery"]["status"] == "completed"
+    assert result.preview["workspace_patch_delivery"]["operations"][0]["type"] == "replace"
+
+
+@pytest.mark.asyncio
 async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     agent = _create_agent("execution-taskboard-workspace-file-readback").use_workspace(tmp_path / "workspace")
     task = AgentTask(
