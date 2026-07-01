@@ -3145,6 +3145,8 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
                 assert "trusted_workspace_artifacts" in text
                 assert "source-grounded Workspace artifacts" in text
                 assert "trusted_workspace_artifacts.readback.content" in text
+                assert "acceptance-point evidence review" in text
+                assert "whole-document editorial review" in text
                 assert "evidence_ledger" in text
                 assert "reports/final.md" in text
                 assert "https://example.test/source" in text
