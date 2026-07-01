@@ -190,7 +190,7 @@ class AgentTaskTaskBoardRuntimeOptionsMixin(AgentTaskMixinBase):
 
     def _taskboard_scheduler(self) -> str:
         value = self._taskboard_option("taskboard_scheduler")
-        text = str(value or "batch").strip().lower().replace("-", "_")
+        text = str(value or "frontier").strip().lower().replace("-", "_")
         if text in {"frontier", "event_driven", "evented", "dynamic_frontier"}:
             return "frontier"
         return "batch"

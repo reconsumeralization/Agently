@@ -2029,14 +2029,11 @@ async def test_task_board_tick_runs_through_triggerflow_and_advances_revision():
 
     first_tick = await board.async_run_tick(timeout=1)
     assert first_tick.previous_revision.revision_id == "rev-0"
-    assert first_tick.revision.revision_id == "rev-1"
-    assert first_tick.schedule.runnable_card_ids == ("collect",)
+    assert first_tick.revision.revision_id == "rev-2"
+    assert first_tick.schedule.runnable_card_ids == ()
     assert first_tick.revision.card_results["collect"].preview == "done:collect"
-    assert first_tick.triggerflow_snapshot["revision"]["revision_id"] == "rev-1"
-
-    second_tick = await board.async_run_tick(timeout=1)
-    assert second_tick.revision.revision_id == "rev-2"
-    assert second_tick.schedule.runnable_card_ids == ("final",)
+    assert first_tick.revision.card_results["final"].preview == "done:final"
+    assert first_tick.triggerflow_snapshot["runtime_topology"]["scheduler"] == "frontier"
     assert contexts[-1].dependency_results["collect"].preview == "done:collect"
 
 
@@ -2054,13 +2051,13 @@ async def test_task_board_explicit_simple_task_still_uses_task_board_process():
     )
     tick = await board.async_run_tick(timeout=1)
 
-    assert tick.schedule.runnable_card_ids == ("answer",)
+    assert tick.schedule.runnable_card_ids == ()
     assert tick.revision.revision_id == "rev-1"
     assert tick.revision.card_results["answer"].preview == "simple:Answer directly."
 
 
 @pytest.mark.asyncio
-async def test_task_board_tick_fans_out_independent_cards_by_default():
+async def test_task_board_frontier_tick_fans_out_independent_cards_by_default():
     active = 0
     max_active = 0
 
@@ -2094,13 +2091,14 @@ async def test_task_board_tick_fans_out_independent_cards_by_default():
     assert tick.revision.card_results["a"].preview == "done:a"
     assert tick.revision.card_results["b"].preview == "done:b"
     assert tick.revision.card_results["c"].preview == "done:c"
-    assert tick.triggerflow_snapshot["runtime_topology"]["fanout"] == "signal_net_dynamic_overlay"
+    assert tick.triggerflow_snapshot["runtime_topology"]["scheduler"] == "frontier"
+    assert tick.triggerflow_snapshot["runtime_topology"]["fanout"] == "signal_net_frontier_overlay"
     assert tick.triggerflow_snapshot["runtime_topology"]["card_requested_event"].startswith("task_board.card.requested.")
     assert tick.triggerflow_snapshot["runtime_topology"]["card_run_binding_id"].startswith("task_board.tick.run_card.")
 
 
 @pytest.mark.asyncio
-async def test_task_board_frontier_scheduler_advances_ready_branch_before_tick_barrier():
+async def test_task_board_default_frontier_scheduler_advances_ready_branch_before_tick_barrier():
     seen: list[str] = []
     browse_a_started = asyncio.Event()
 
@@ -2134,7 +2132,6 @@ async def test_task_board_frontier_scheduler_advances_ready_branch_before_tick_b
             },
         ),
         handler=handler,
-        scheduler="frontier",
     )
 
     tick = await board.async_run_tick(timeout=1, concurrency=3)
@@ -2173,7 +2170,7 @@ async def test_task_board_tick_does_not_cancel_independent_card_on_required_fail
     tick = await board.async_run_tick(timeout=1, concurrency=1)
 
     assert set(seen) == {"first", "second"}
-    assert tick.revision.revision_id == "rev-1"
+    assert tick.revision.revision_id == "rev-2"
     assert tick.revision.card_results["first"].status == "failed"
     assert tick.revision.card_results["second"].status == "completed"
     assert tick.card_results["first"].preview == "network timeout"
@@ -2274,7 +2271,7 @@ async def test_task_board_tick_resume_retries_missing_cards_without_repeating_co
 
     assert set(restored_calls) == expected_restored_cards
     assert completed_before_save not in restored_calls
-    assert result.revision.revision_id == "rev-1"
+    assert result.revision.revision_id == "rev-3"
     assert result.revision.card_results[completed_before_save].preview == f"original:{ completed_before_save }"
     for card_id in expected_restored_cards:
         assert result.revision.card_results[card_id].preview == f"restored:{ card_id }"

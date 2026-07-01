@@ -144,6 +144,11 @@ execution carriers. Both lower strategy-owned work units through the internal
 Block carrier into `ExecutionPlan` / Blocks / TriggerFlow evidence. The
 TaskBoard primitive still owns board scheduling, dependency state, and patch
 validation; AgentTask uses the carrier for bounded card execution evidence.
+TaskBoard scheduling now defaults to the event-driven `frontier` mode: each
+completed card can unlock and dispatch its ready successors immediately, while
+fan-in cards still wait for all declared dependencies. Use
+`taskboard_scheduler="batch"` only when you need the historical tick-batch
+behavior for diagnostics or regression comparison.
 
 In the current 4.1.3 line this is a hardened bounded public task-loop strategy,
 not the full future AgentTask system. `agent.create_task_loop(...)` is the explicit spelling

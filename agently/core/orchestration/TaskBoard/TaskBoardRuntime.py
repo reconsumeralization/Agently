@@ -802,7 +802,7 @@ def _coerce_card_result(card_id: str, value: Any) -> TaskBoardCardResult:
 
 
 def _normalize_task_board_scheduler(value: Any) -> str:
-    text = str(value or "batch").strip().lower().replace("-", "_")
+    text = str(value or "frontier").strip().lower().replace("-", "_")
     if text in {"frontier", "event_driven", "evented", "dynamic_frontier"}:
         return "frontier"
     return "batch"

@@ -132,6 +132,10 @@ blocked 结束。
 `ExecutionPlan` / Blocks / TriggerFlow evidence 路径。TaskBoard primitive 仍然
 负责 board schedule、dependency state 和 patch validation；AgentTask 只把 bounded
 card execution evidence 交给 carrier 承载。
+TaskBoard 调度现在默认使用事件驱动的 `frontier` 模式：每张 card 完成后会立即
+解锁并调度已满足依赖的后继 card；fan-in card 仍会等待所有声明的依赖完成。只有在
+诊断或回归对照需要历史 tick-batch 行为时，才显式设置
+`taskboard_scheduler="batch"`。
 
 在当前 4.1.3 线里，这是一个加固后的有边界公开 task-loop strategy，
 不是完整未来版 AgentTask 系统。`agent.create_task_loop(...)` 是同一个长任务

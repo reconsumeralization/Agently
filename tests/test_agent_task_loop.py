@@ -1837,6 +1837,13 @@ def test_agent_task_explicit_resource_caps_remain_effective(tmp_path):
         max_iterations=2,
         options={"agent_task": {"taskboard_max_ticks": 4}},
     )
+    batch_taskboard_task = AgentTask(
+        agent,
+        task_id="explicit-taskboard-batch-scheduler",
+        goal="Complete the batch board task.",
+        success_criteria=["The task is complete."],
+        options={"agent_task": {"taskboard_scheduler": "batch"}},
+    )
     frontier_taskboard_task = AgentTask(
         agent,
         task_id="explicit-taskboard-frontier-scheduler",
@@ -1849,10 +1856,11 @@ def test_agent_task_explicit_resource_caps_remain_effective(tmp_path):
     assert task.limits["max_model_requests"] == 1
     assert task._taskboard_max_ticks() == 2
     assert task._taskboard_max_ticks_source() == "explicit_max_iterations"
-    assert task._taskboard_scheduler() == "batch"
+    assert task._taskboard_scheduler() == "frontier"
     assert taskboard_task._taskboard_max_ticks() == 4
     assert taskboard_task._taskboard_max_ticks_source() == "taskboard_option"
-    assert taskboard_task._taskboard_scheduler() == "batch"
+    assert taskboard_task._taskboard_scheduler() == "frontier"
+    assert batch_taskboard_task._taskboard_scheduler() == "batch"
     assert frontier_taskboard_task._taskboard_scheduler() == "frontier"
 
 

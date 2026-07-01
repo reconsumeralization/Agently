@@ -1135,13 +1135,24 @@ class MockFlatEvidenceCandidateRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+def _is_taskboard_plan_request(text: str) -> bool:
+    return "Plan a TaskBoard for this submitted task" in text or "Plan a card board for this submitted task" in text
+
+
+def _is_taskboard_final_request(text: str) -> bool:
+    return (
+        "Synthesize the final result for this TaskBoard task" in text
+        or "Assemble a verifier-ready final result for this TaskBoard task" in text
+    )
+
+
 class MockTaskBoardRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardRequester"
 
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Complete the task through a board.",
                 "cards": [
@@ -1168,7 +1179,7 @@ class MockTaskBoardRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "completed card evidence satisfies the criterion",
@@ -1188,7 +1199,7 @@ class MockTaskBoardControlRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Complete the task through a control card.",
                 "cards": [
@@ -1225,7 +1236,7 @@ class MockTaskBoardControlRequester(MockAgentExecutionRequester):
                 "answer": "legacy child execution should not run for control cards",
                 "remaining_work": ["unexpected legacy path"],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "control-card deliverable satisfies the criterion",
@@ -1253,7 +1264,7 @@ class MockTaskBoardConsumerDrivenRequester(MockAgentExecutionRequester):
         MockAgentExecutionRequester.requests.append(text)
         if "Verify the task against every success criterion" in text:
             raise AssertionError("TaskBoard intermediate consumer should not call terminal verifier")
-        if "Synthesize the final result for this TaskBoard task" in text:
+        if _is_taskboard_final_request(text):
             raise AssertionError("TaskBoard intermediate consumer should not call terminal synthesis")
         if "Execute one TaskBoard control card with a single structured model request" in text:
             MockTaskBoardConsumerDrivenRequester.seen_dependency_evidence = (
@@ -1294,7 +1305,7 @@ class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Write a sectioned report through a control card.",
                 "cards": [
@@ -1331,7 +1342,7 @@ class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
                 "diagnostics": [{"kind": "control", "message": "sectioned manifest returned"}],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "sectioned Workspace artifact satisfies the criterion",
@@ -1365,7 +1376,7 @@ class MockTaskBoardFinalCandidateRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Write a source-grounded repository report.",
                 "cards": [
@@ -1392,7 +1403,7 @@ class MockTaskBoardFinalCandidateRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "all required sections are present",
@@ -1412,7 +1423,7 @@ class MockTaskBoardSlowCardRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Exercise a bounded card timeout.",
                 "cards": [
@@ -1440,7 +1451,7 @@ class MockTaskBoardSlowCardRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "should not finalize after a card timeout",
@@ -1460,7 +1471,7 @@ class MockTaskBoardControlStallRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Exercise a TaskBoard control-card idle guard.",
                 "cards": [
@@ -1487,7 +1498,7 @@ class MockTaskBoardControlStallRequester(MockAgentExecutionRequester):
                 "sufficient": True,
                 "remaining_work": [],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "should not finalize after a control timeout",
@@ -1513,7 +1524,7 @@ class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Exercise card retry.",
                 "cards": [
@@ -1543,7 +1554,7 @@ class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "retry card evidence satisfies the criterion",
@@ -1569,7 +1580,7 @@ class MockTaskBoardActionPostExecutionPlanningStallRequester(MockAgentExecutionR
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Exercise partial evidence preservation after a card stall.",
                 "cards": [
@@ -1612,7 +1623,7 @@ class MockTaskBoardActionPostExecutionPlanningStallRequester(MockAgentExecutionR
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": False,
                 "reason": "the card should not finalize after a stall",
@@ -1646,7 +1657,7 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Complete the task through evidence readback.",
                 "cards": [
@@ -1743,7 +1754,7 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "dependency evidence was read back",
@@ -1775,7 +1786,7 @@ class MockTaskBoardDependencyReadbackRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Complete the task through automatic dependency readback.",
                 "cards": [
@@ -1864,7 +1875,7 @@ class MockTaskBoardDependencyReadbackRequester(MockAgentExecutionRequester):
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "dependency evidence was read back before the downstream card.",
@@ -1894,7 +1905,7 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Plan a TaskBoard for this submitted task" in text:
+        if _is_taskboard_plan_request(text):
             payload = {
                 "board_goal": "Complete the task through control-card dependency readback.",
                 "cards": [
@@ -1972,7 +1983,7 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
                     "remaining_work": ["Need dependency artifact readback."],
                     "diagnostics": [],
                 }
-        elif "Synthesize the final result for this TaskBoard task" in text:
+        elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
                 "reason": "control-card dependency evidence was read back.",
@@ -5396,7 +5407,7 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
     tick_phase = next(phase for phase in phases if phase["phase"] == "taskboard_tick")
     assert lifecycle_phase["diagnostics"]["runtime_topology"]["driver"] == "triggerflow_taskboard_lifecycle"
     assert tick_phase["diagnostics"]["runtime_topology"]["driver"] == "triggerflow_taskboard_lifecycle"
-    assert tick_phase["diagnostics"]["runtime_topology"]["tick"]["fanout"] == "signal_net_dynamic_overlay"
+    assert tick_phase["diagnostics"]["runtime_topology"]["tick"]["fanout"] == "signal_net_frontier_overlay"
     collect_result = taskboard["revision"]["card_results"]["collect"]
     assert collect_result["status"] == "completed"
     block_carrier = collect_result["metadata"]["block_carrier"]
@@ -5584,9 +5595,9 @@ async def test_taskboard_resume_blocked_snapshot_retries_finalization_without_re
     request_text = "\n".join(MockAgentExecutionRequester.requests)
     assert resumed_result["status"] == "completed"
     assert resumed_result.get("resumed") is not True
-    assert "Plan a TaskBoard for this submitted task" not in request_text
+    assert not _is_taskboard_plan_request(request_text)
     assert "Execute exactly one TaskBoard card" not in request_text
-    assert "Synthesize the final result for this TaskBoard task" not in request_text
+    assert not _is_taskboard_final_request(request_text)
 
 
 @pytest.mark.asyncio
@@ -5636,7 +5647,7 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
     planning_requests = [
         request
         for request in MockAgentExecutionRequester.requests
-        if "Plan a TaskBoard for this submitted task" in request
+        if _is_taskboard_plan_request(request)
     ]
     assert planning_requests
     assert "serial chain of control-only cards" in planning_requests[-1]
@@ -5723,7 +5734,7 @@ async def test_taskboard_control_consumer_requests_readback_without_intermediate
     request_text = "\n".join(MockAgentExecutionRequester.requests)
     assert MockTaskBoardConsumerDrivenRequester.seen_dependency_evidence is True
     assert "Verify the task against every success criterion" not in request_text
-    assert "Synthesize the final result for this TaskBoard task" not in request_text
+    assert not _is_taskboard_final_request(request_text)
     assert result.status == "blocked"
     assert result.patch_proposal is not None
     assert result.metadata["next_board_action"] == "readback"
@@ -5769,7 +5780,7 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
     final_requests = [
         request
         for request in MockAgentExecutionRequester.requests
-        if "Synthesize the final result for this TaskBoard task" in request
+        if _is_taskboard_final_request(request)
     ]
     marker = MockTaskBoardSectionedArtifactRequester.tail_marker
     expected_workspace_body = (
