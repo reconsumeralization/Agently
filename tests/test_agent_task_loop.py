@@ -148,6 +148,8 @@ def test_verifier_prompt_keeps_optional_risk_sections_optional():
     assert "not exact heading-text mandates" in text
     assert "do not reject a " in text
     assert "long artifact solely because an exact locator label missed" in text
+    assert "Precise taxonomies, module lists, item counts" in text
+    assert "verification page, or title-only ref is not enough" in text
 
 
 def test_agent_task_process_progress_delta_uses_only_explicit_progress_event():
@@ -1003,6 +1005,55 @@ def test_execution_meta_action_results_enter_canonical_evidence_ledger():
 
     assert guard["valid"] is True
     assert guard["normalized_evidence_use"][0]["evidence_ids"] == [item["id"]]
+
+
+def test_access_blocked_action_preview_is_unavailability_evidence_only():
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "browse",
+                    "status": "success",
+                    "action_call_id": "call-waf",
+                    "result_preview": (
+                        "为了更好的访问体验，请进行验证。"
+                        "appkey: \"CF_APP_WAF\""
+                    ),
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    ledger = AgentTask._evidence_ledger_from_execution_meta(execution_meta)
+    item = next(
+        evidence
+        for evidence in ledger["items"]
+        if evidence.get("kind") == "agent_task.action.result"
+    )
+
+    assert item["status"] == "failed"
+    assert item["body_state"] == "bounded"
+    assert item["supports"]["content"] is False
+    assert item["supports"]["unavailability"] is True
+    assert item["diagnostics"][0]["code"] == "agent_task.action_result.access_blocked_preview"
+
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The source page contains the requested syllabus.",
+                "evidence_ids": ["action_result_browse"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert guard["blocking_count"] == 1
 
 
 def test_block_carrier_output_policy_selects_schema_and_body_transport():

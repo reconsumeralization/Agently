@@ -527,7 +527,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "For source-grounded tasks, compare the candidate's factual claims, named sections, coverage mappings, "
             "quoted source titles, URLs, and artifact statements against verifier-visible evidence and bounded Action "
             "result previews. A citation, source URL, or file ref alone does not ground a mismatched claim; the claim "
-            "must be supported by the referenced evidence content. source_refs with content_state='ref_only' prove "
+            "must be supported by the referenced evidence content. Precise taxonomies, module lists, item counts, "
+            "syllabus boundaries, coverage tables, exact dates, numeric values, and named source conclusions require "
+            "visible bounded evidence containing those specific labels or values; a broad summary page, navigation "
+            "page, inaccessible document, verification page, or title-only ref is not enough. source_refs with content_state='ref_only' prove "
             "only discovery/materialization and cannot support repository, document, or source-content claims until "
             "a bounded readback/content preview is verifier-visible. When multiple same-site official sources are "
             "available, prefer the most specific source that directly matches the task over broader announcement or "
@@ -2497,11 +2500,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             action_id = str(record.get("id") or record.get("name") or "").strip()
             if not action_id:
                 continue
-            status = cls._action_result_evidence_status(record)
             result_preview = record.get("result_preview")
             error = record.get("error")
             body_value = result_preview if result_preview not in (None, "", [], {}) else error
             body = cls._action_result_evidence_body(body_value)
+            access_blocked = cls._action_result_preview_access_blocked(body)
+            status = cls._action_result_evidence_status(record, body=body)
             body_state = cls._action_result_evidence_body_state(record, status=status, body=body)
             action_call_id = str(record.get("action_call_id") or "").strip()
             evidence_id = cls._action_result_evidence_id(
@@ -2535,6 +2539,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 item["input_preview"] = DataFormatter.sanitize(input_preview)
             if body:
                 item["body"] = body
+            if access_blocked:
+                item["diagnostics"] = [
+                    {
+                        "code": "agent_task.action_result.access_blocked_preview",
+                        "message": (
+                            "Action preview appears to be an access-verification or anti-bot page; "
+                            "it can support unavailability diagnostics only."
+                        ),
+                    }
+                ]
             for ref in cls._collect_source_refs_from_action_records([record]):
                 if not isinstance(ref, Mapping):
                     continue
@@ -2545,14 +2559,44 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             items.append(DataFormatter.sanitize(item))
         return items
 
-    @staticmethod
-    def _action_result_evidence_status(record: Mapping[str, Any]) -> str:
+    @classmethod
+    def _action_result_evidence_status(cls, record: Mapping[str, Any], *, body: str = "") -> str:
         status = str(record.get("status") or "").strip().lower()
         if status in {"failed", "failure", "error", "timed_out", "timeout", "blocked"} or record.get("error"):
             return "failed"
         if record.get("result_preview") in (None, "", [], {}):
             return "empty"
+        if body and cls._action_result_preview_access_blocked(body):
+            return "failed"
         return "ok"
+
+    @staticmethod
+    def _action_result_preview_access_blocked(body: str) -> bool:
+        text = str(body or "").strip().lower()
+        if not text:
+            return False
+        markers = (
+            "cf_app_waf",
+            "为了更好的访问体验",
+            "请进行验证",
+            "verify you are human",
+            "human verification",
+            "are you a human",
+            "captcha challenge",
+            "captcha verification",
+            "complete the captcha",
+            "access denied",
+            "403 forbidden",
+            "request blocked",
+            "blocked by cloudflare",
+            "blocked by security",
+            "checking your browser",
+            "please enable javascript",
+            "enable javascript to continue",
+            "security check to access",
+            "cloudflare ray id",
+        )
+        return any(marker in text for marker in markers)
 
     @classmethod
     def _action_result_evidence_body_state(
