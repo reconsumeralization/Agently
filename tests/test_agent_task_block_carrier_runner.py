@@ -547,6 +547,86 @@ def test_block_carrier_runner_records_model_pool_resource_exhaustion_fact(tmp_pa
     assert "AllocationQuota.FreeTierOnly" in evidence[0]["preview"]
 
 
+def test_block_carrier_runner_marks_early_model_liveness_timeout_retryable(tmp_path):
+    runner = _load_block_carrier_runner()
+    run_dir = tmp_path / "run"
+    record_dir = run_dir / "records" / "taskboard"
+    record_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        json.dumps({"task_outcome": "timed_out"}),
+        encoding="utf-8",
+    )
+    (record_dir / "case.json").write_text(
+        json.dumps(
+            {
+                "artifact_gate": {
+                    "deliverable_refs": [{"path": "artifacts/taskboard/case/final.md", "bytes": 0}],
+                    "passed": False,
+                },
+                "candidate": {
+                    "final": {
+                        "reason": (
+                            "AgentTask taskboard_plan request made no progress before idle deadline: "
+                            "max_no_progress_seconds=300.0."
+                        ),
+                        "status": "timed_out",
+                    }
+                },
+                "framework_terminal_gate": {"status": "timed_out"},
+                "judge": {"accepted": False, "route_runtime_failure": True},
+                "metrics": {"tool_calls": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = runner._run_dir_provider_retry_evidence(run_dir)
+
+    assert evidence["provider_retryable"] is True
+    assert evidence["resource_exhausted"] is False
+    assert evidence["model_request_liveness_evidence"]
+    assert "taskboard_plan request made no progress" in evidence["provider_retry_evidence"][0]["preview"]
+
+
+def test_block_carrier_runner_does_not_retry_timeout_after_material_progress(tmp_path):
+    runner = _load_block_carrier_runner()
+    run_dir = tmp_path / "run"
+    record_dir = run_dir / "records" / "taskboard"
+    record_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        json.dumps({"task_outcome": "timed_out"}),
+        encoding="utf-8",
+    )
+    (record_dir / "case.json").write_text(
+        json.dumps(
+            {
+                "artifact_gate": {
+                    "deliverable_refs": [{"path": "artifacts/taskboard/case/final.md", "bytes": 10}],
+                    "passed": False,
+                },
+                "candidate": {
+                    "final": {
+                        "reason": (
+                            "AgentTask synthesize request made no progress before idle deadline: "
+                            "max_no_progress_seconds=300.0."
+                        ),
+                        "status": "timed_out",
+                    }
+                },
+                "framework_terminal_gate": {"status": "timed_out"},
+                "judge": {"accepted": False, "route_runtime_failure": True},
+                "metrics": {"tool_calls": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = runner._run_dir_provider_retry_evidence(run_dir)
+
+    assert evidence["provider_retryable"] is False
+    assert evidence["model_request_liveness_evidence"] == []
+
+
 def test_block_carrier_runner_omits_provider_request_payload_from_attempt_preview():
     runner = _load_block_carrier_runner()
     preview = runner._compact_attempt_text(
