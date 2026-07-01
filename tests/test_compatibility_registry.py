@@ -93,12 +93,14 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
         "provider_stream_idle_timeout": [
             "OpenAICompatible.stream_idle_timeout",
             "OpenAIResponsesCompatible.stream_idle_timeout",
+            "AnthropicCompatible.stream_idle_timeout",
         ],
         "response_materialization_idle_timeout": "response.materialization_idle_timeout",
         "typed_stall_error": "RuntimeStageStallError",
         "typed_provider_stall_stages": [
             "response_first_event",
             "response_stream",
+            "response_materialization",
         ],
         "action_runtime_stall_stages": [
             "action_planning",

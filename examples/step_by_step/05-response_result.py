@@ -76,6 +76,7 @@ def main() -> None:
     provider = configure_model(temperature=0.0)
     Agently.set_settings("OpenAICompatible.stream_idle_timeout", 45.0)
     Agently.set_settings("OpenAIResponsesCompatible.stream_idle_timeout", 45.0)
+    Agently.set_settings("AnthropicCompatible.stream_idle_timeout", 45.0)
     Agently.set_settings("response.materialization_idle_timeout", 45.0)
     result = build_result_request()
 

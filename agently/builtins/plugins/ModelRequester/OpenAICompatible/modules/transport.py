@@ -114,6 +114,21 @@ class OpenAICompatibleTransportMixin:
         # not opt into a liveness cutoff.
         return self._get_stream_idle_timeout_seconds()
 
+    async def _await_non_streaming_response(self, post_coroutine: Any, *, timeout_seconds: float | None) -> Any:
+        if timeout_seconds is None:
+            return await post_coroutine
+        try:
+            return await asyncio.wait_for(post_coroutine, timeout=timeout_seconds)
+        except asyncio.TimeoutError as e:
+            raise self._build_stream_stall_error(
+                stage="response_materialization",
+                timeout_seconds=timeout_seconds,
+                message=(
+                    f"Non-streaming response made no progress before idle deadline: "
+                    f"stream_idle_timeout={ timeout_seconds } seconds."
+                ),
+            ) from e
+
     def _should_use_first_token_timeout(self, request_data: "AgentlyRequestData") -> bool:
         return (
             self._get_timeout_mode() == "first_token"
@@ -378,20 +393,10 @@ class OpenAICompatibleTransportMixin:
                             json=full_request_data,
                             headers=headers_with_auth,
                         )
-                        if response_timeout is not None:
-                            try:
-                                response = await asyncio.wait_for(post_coroutine, timeout=response_timeout)
-                            except asyncio.TimeoutError as e:
-                                raise self._build_stream_stall_error(
-                                    stage="response_materialization",
-                                    timeout_seconds=response_timeout,
-                                    message=(
-                                        f"Non-streaming response made no progress before idle deadline: "
-                                        f"stream_idle_timeout={ response_timeout } seconds."
-                                    ),
-                                ) from e
-                        else:
-                            response = await post_coroutine
+                        response = await self._await_non_streaming_response(
+                            post_coroutine,
+                            timeout_seconds=response_timeout,
+                        )
                         if response.status_code >= 400:
                             e = RequestError(
                                 f"Status Code: { response.status_code }\n"
@@ -415,10 +420,22 @@ class OpenAICompatibleTransportMixin:
                             yield "message", response.content.decode()
                             yield "message", "[DONE]"
                         break
-                    except RuntimeStageStallError:
+                    except RuntimeStageStallError as e:
+                        failover_headers = self._build_failover_headers(
+                            request_data,
+                            error=e,
+                            status_code=None,
+                            response_text=None,
+                            full_request_data=full_request_data,
+                            stream_started=False,
+                        )
+                        if failover_headers is not None:
+                            headers_with_auth = failover_headers
+                            client.headers.update(headers_with_auth)
+                            continue
                         # Liveness stall must propagate so the framework records it as
                         # model-request liveness evidence and can fall back; do not let
-                        # the generic handler below swallow it into an error event.
+                        # the generic handler below swallow it into an untyped error event.
                         raise
                     except HTTPStatusError as e:
                         failover_headers = self._build_failover_headers(

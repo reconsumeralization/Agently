@@ -87,24 +87,55 @@ class AnthropicCompatibleTransportMixin:
             return float(read_timeout)
         return None
 
+    def _get_stream_idle_timeout_seconds(self) -> float | None:
+        raw_timeout = self.plugin_settings.get("stream_idle_timeout", None)
+        if raw_timeout is None or raw_timeout == -1 or raw_timeout == "-1":
+            return None
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float, str)):
+            return None
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout > 0 else None
+
+    def _get_non_streaming_response_timeout_seconds(self) -> float | None:
+        return self._get_stream_idle_timeout_seconds()
+
     def _should_use_first_token_timeout(self, request_data: "AgentlyRequestData") -> bool:
         return self._get_timeout_mode() == "first_token" and bool(request_data.stream)
 
     def _build_stream_stall_error(
         self,
         *,
+        stage: str,
         timeout_seconds: float,
         message: str,
     ) -> RuntimeStageStallError:
         return RuntimeStageStallError(
             message,
-            stage="response_first_event",
+            stage=stage,
             status="stalled",
             idle_seconds=timeout_seconds,
             timeout_seconds=timeout_seconds,
             provider=self.name,
             model=cast(str | None, self.plugin_settings.get("model", None)),
         )
+
+    async def _await_non_streaming_response(self, post_coroutine: Any, *, timeout_seconds: float | None) -> Any:
+        if timeout_seconds is None:
+            return await post_coroutine
+        try:
+            return await asyncio.wait_for(post_coroutine, timeout=timeout_seconds)
+        except asyncio.TimeoutError as e:
+            raise self._build_stream_stall_error(
+                stage="response_materialization",
+                timeout_seconds=timeout_seconds,
+                message=(
+                    f"Non-streaming response made no progress before idle deadline: "
+                    f"stream_idle_timeout={ timeout_seconds } seconds."
+                ),
+            ) from e
 
     async def _aiter_with_first_token_timeout(
         self,
@@ -122,12 +153,44 @@ class AnthropicCompatibleTransportMixin:
         except asyncio.TimeoutError as e:
             await generator.aclose()
             raise self._build_stream_stall_error(
+                stage="response_first_event",
                 timeout_seconds=timeout_seconds,
                 message=f"First token timeout after { timeout_seconds } seconds.",
             ) from e
 
         yield first_item
         async for item in generator:
+            yield item
+
+    async def _aiter_with_stream_idle_timeout(
+        self,
+        generator: AsyncGenerator[Any, None],
+        *,
+        timeout_seconds: float | None,
+    ) -> AsyncGenerator[Any, None]:
+        if timeout_seconds is None:
+            async for item in generator:
+                yield item
+            return
+
+        try:
+            first_item = await anext(generator)
+        except StopAsyncIteration:
+            return
+
+        yield first_item
+        while True:
+            try:
+                item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError as e:
+                await generator.aclose()
+                raise self._build_stream_stall_error(
+                    stage="response_stream",
+                    timeout_seconds=timeout_seconds,
+                    message=f"Stream idle timeout after { timeout_seconds } seconds.",
+                ) from e
             yield item
 
     async def _aiter_sse_with_retry(
@@ -187,6 +250,10 @@ class AnthropicCompatibleTransportMixin:
                                 sse_generator,
                                 timeout_seconds=self._get_first_token_timeout_seconds(),
                             )
+                        sse_generator = self._aiter_with_stream_idle_timeout(
+                            sse_generator,
+                            timeout_seconds=self._get_stream_idle_timeout_seconds(),
+                        )
                         async for sse in sse_generator:
                             stream_started = True
                             yield sse.event, sse.data
@@ -271,12 +338,16 @@ class AnthropicCompatibleTransportMixin:
 
         async with self._create_async_client(**request_data.client_options) as client:
             client.headers.update(headers_with_auth)
+            response_timeout = self._get_non_streaming_response_timeout_seconds()
             while True:
                 try:
-                    response = await client.post(
-                        request_data.request_url,
-                        json=full_request_data,
-                        headers=headers_with_auth,
+                    response = await self._await_non_streaming_response(
+                        client.post(
+                            request_data.request_url,
+                            json=full_request_data,
+                            headers=headers_with_auth,
+                        ),
+                        timeout_seconds=response_timeout,
                     )
                     if response.status_code >= 400:
                         error = RequestError(
@@ -315,6 +386,20 @@ class AnthropicCompatibleTransportMixin:
                         continue
                     yield "error", e
                     break
+                except RuntimeStageStallError as e:
+                    failover_headers = self._build_failover_headers(
+                        request_data,
+                        error=e,
+                        status_code=None,
+                        response_text=None,
+                        full_request_data=full_request_data,
+                        stream_started=False,
+                    )
+                    if failover_headers is not None:
+                        headers_with_auth = failover_headers
+                        client.headers.update(headers_with_auth)
+                        continue
+                    raise
                 except RequestError as e:
                     failover_headers = self._build_failover_headers(
                         request_data,

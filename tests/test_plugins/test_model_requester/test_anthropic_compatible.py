@@ -1,10 +1,12 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from agently import Agently
+from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.model.Prompt import Prompt
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import (
@@ -225,6 +227,182 @@ async def test_auth_headers_are_preserved_in_outgoing_request(monkeypatch: pytes
     assert captured["headers"]["X-Test"] == "1"
     assert captured["headers"]["anthropic-version"] == "2023-06-01"
     assert captured["headers"]["anthropic-beta"] == "tools-2024-04-04"
+
+
+@pytest.mark.asyncio
+async def test_stream_idle_timeout_returns_timeout_error_event(monkeypatch: pytest.MonkeyPatch):
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aclose(self):
+            return None
+
+    async def fake_aiter_sse_with_retry(self, client, method, url, *, headers, json):
+        del self, client, method, url, headers, json
+
+        async def generator():
+            yield SimpleNamespace(
+                event="content_block_delta",
+                data='{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}',
+            )
+            await asyncio.sleep(0.05)
+            yield SimpleNamespace(
+                event="content_block_delta",
+                data='{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"late"}}',
+            )
+
+        return generator()
+
+    monkeypatch.setattr(anthropic_module, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(AnthropicCompatible, "_aiter_sse_with_retry", fake_aiter_sse_with_retry)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.anthropic.example/v1",
+            "model": "claude-sonnet-4-20250514",
+            "stream": True,
+            "stream_idle_timeout": 0.01,
+            "timeout": {"connect": 1.0, "read": 9.0, "write": 2.0, "pool": 3.0},
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert len(events) == 3
+    assert events[0][0] == "content_block_delta"
+    assert events[1][0] == "status"
+    assert events[1][1]["status"] == "failed"
+    assert events[1][1]["retry"] is False
+    assert events[1][1]["reason"] == "Stream idle timeout after 0.01 seconds."
+    assert events[2][0] == "error"
+    assert isinstance(events[2][1], RuntimeStageStallError)
+    assert events[2][1].stage == "response_stream"
+
+
+@pytest.mark.asyncio
+async def test_non_stream_response_idle_timeout_returns_stall_error(monkeypatch: pytest.MonkeyPatch):
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            del url, json, headers
+            await asyncio.sleep(10)
+            raise AssertionError("post should have been cancelled by the idle deadline")
+
+    monkeypatch.setattr(anthropic_module, "AsyncClient", FakeAsyncClient)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.anthropic.example/v1",
+            "model": "claude-sonnet-4-20250514",
+            "stream": False,
+            "stream_idle_timeout": 0.01,
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    statuses = [payload for event, payload in events if event == "status"]
+    assert statuses
+    assert statuses[-1]["status"] == "failed"
+    assert any(
+        "Non-streaming response made no progress before idle deadline" in str(payload.get("reason") or "")
+        for payload in statuses
+    )
+    assert events[-1][0] == "error"
+    assert isinstance(events[-1][1], RuntimeStageStallError)
+    assert events[-1][1].stage == "response_materialization"
+    assert events[-1][1].timeout_seconds == 0.01
+    assert "stream_idle_timeout=0.01" in str(events[-1][1])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_response_idle_timeout_allows_api_key_failover(monkeypatch: pytest.MonkeyPatch):
+    calls: list[dict[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, content: bytes):
+            self.status_code = status_code
+            self.content = content
+            self.text = content.decode()
+            self.headers = {"Content-Type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            del url, json
+            calls.append(dict(self.headers if headers is None else headers))
+            if len(calls) == 1:
+                await asyncio.sleep(10)
+                raise AssertionError("first post should have been cancelled by the idle deadline")
+            return FakeResponse(
+                200,
+                b'{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}',
+            )
+
+    monkeypatch.setattr(anthropic_module, "AsyncClient", FakeAsyncClient)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.anthropic.example/v1",
+            "model": "claude-sonnet-4-20250514",
+            "api_key": "key-a",
+            "stream": False,
+            "stream_idle_timeout": 0.01,
+            "_api_key_pool_runtime": {
+                "pool_id": "example",
+                "failover": {"handler": lambda _context: "try_next", "max_attempts": 2},
+                "keys": [
+                    {"id": "a", "value": "key-a", "index": 0},
+                    {"id": "b", "value": "key-b", "index": 1},
+                ],
+                "selected_key_id": "a",
+                "attempts": [{"key_id": "a", "action": "initial"}],
+            },
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert [headers.get("x-api-key") for headers in calls] == ["key-a", "key-b"]
+    assert events == [
+        (
+            "message",
+            '{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}',
+        ),
+        ("status", {"status": "completed", "attempt_index": 1, "retry": False}),
+    ]
 
 
 def test_broadcast_response_maps_text_stream_and_meta():
