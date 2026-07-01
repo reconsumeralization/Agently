@@ -1,3 +1,4 @@
+import asyncio
 import json
 import shutil
 import subprocess
@@ -1452,6 +1453,126 @@ async def test_custom_effort_strategy_handler_executes(tmp_path):
         "test.custom_strategy.checkpoint",
         "skills.custom_strategy.done",
     ]
+
+
+@pytest.mark.asyncio
+async def test_skills_execution_emits_abort_diagnostic_on_host_cancellation(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    started = asyncio.Event()
+
+    async def slow_strategy(**kwargs):
+        await started.wait()
+        await asyncio.sleep(30)
+        return {"status": "unexpected"}
+
+    events: list[dict[str, Any]] = []
+
+    async def stream_handler(item: dict[str, Any]):
+        events.append(item)
+        if item.get("type") == "skills.custom_strategy.start":
+            started.set()
+
+    Agently.skills_executor.register_effort_strategy("slow_cancel", slow_strategy, replace=True)
+    try:
+        agent = _create_agent()
+        agent.set_settings("effort_presets", {"slow_cancel": {"strategy": "slow_cancel"}})
+        task = asyncio.create_task(
+            agent.async_run_skills_task(
+                "handle release",
+                skills=["alpha-skill"],
+                mode="required",
+                effort="slow_cancel",
+                stream_handler=stream_handler,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        Agently.skills_executor.unregister_effort_strategy("slow_cancel")
+
+    abort_events = [item for item in events if item.get("type") == "skills.execution.aborted"]
+    assert abort_events
+    payload = abort_events[-1]["payload"]
+    assert payload["reason"] == "host_cancellation"
+    assert payload["strategy"] == "slow_cancel"
+    assert payload["active_event"]["type"] == "skills.custom_strategy.start"
+    assert payload["elapsed_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_react_strategy_emits_budget_exhausted_diagnostic():
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import (
+        run_react_execution,
+    )
+
+    class BudgetContext:
+        def __init__(self):
+            self.events: list[dict[str, Any]] = []
+
+        async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
+            self.events.append(item)
+
+        async def async_request_model(self, **kwargs):  # pragma: no cover - budget 0 should avoid model calls
+            raise AssertionError("budget-exhausted react flow should not call the model")
+
+    context = BudgetContext()
+    result = await run_react_execution(
+        task="handle release",
+        plan={},
+        context=cast(Any, context),
+        settings=Settings(name="ReactBudgetTestSettings", parent=Agently.settings),
+        step_budget=0,
+    )
+
+    assert result["budget_exhausted"] is True
+    budget_events = [item for item in context.events if item.get("type") == "skills.execution.budget_exhausted"]
+    assert budget_events
+    assert budget_events[-1]["payload"] == {
+        "reason": "step_budget_exhausted",
+        "strategy": "react",
+        "active_phase": "reason",
+        "step_count": 0,
+        "step_budget": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_staged_strategy_emits_budget_exhausted_diagnostic():
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.staged import (
+        run_staged_execution,
+    )
+
+    class BudgetContext:
+        def __init__(self):
+            self.events: list[dict[str, Any]] = []
+
+        async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
+            self.events.append(item)
+
+    context = BudgetContext()
+    result = await run_staged_execution(
+        task="handle release",
+        plan={"execution_stages": [{"description": "one"}, {"description": "two"}]},
+        context=cast(Any, context),
+        settings=Settings(name="StagedBudgetTestSettings", parent=Agently.settings),
+        step_budget=0,
+    )
+
+    assert result["steps"] == []
+    budget_events = [item for item in context.events if item.get("type") == "skills.execution.budget_exhausted"]
+    assert budget_events
+    assert budget_events[-1]["payload"] == {
+        "reason": "step_budget_exhausted",
+        "strategy": "staged",
+        "active_phase": "plan",
+        "step_count": 0,
+        "step_budget": 0,
+        "total_steps": 2,
+    }
 
 
 @pytest.mark.asyncio

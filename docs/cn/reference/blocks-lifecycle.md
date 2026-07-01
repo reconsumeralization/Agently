@@ -95,6 +95,10 @@ lowering 路径。一次执行会构造内部 ExecutionPlan：每个 selected Sk
 ExecutionBlockGraph、TriggerFlow close snapshot、ResultAdapter output 和
 EvidenceEnvelope。旧策略名应视为兼容 route labels 和 diagnostics，不是另一套
 Skills-owned lifecycle。
+内置 direct Skills 策略也会在同一条 runtime stream 上发出终态诊断：
+step budget 停止时是 `skills.execution.budget_exhausted`，协作式取消或框架执行失败时是
+`skills.execution.aborted`。这些事件只是 observability records，不会创建单独的
+timeout policy 或 Skills-owned lifecycle。
 
 ## Runtime Blocks
 

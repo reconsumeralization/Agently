@@ -255,10 +255,20 @@ Direct Skills execution streams runtime items through `stream_handler`:
   built-in planner chain compatibility label
 - `skills.staged.*` and `skills.react.*` when those multi-step compatibility
   labels are selected
+- `skills.execution.budget_exhausted` when a built-in `staged` or `react`
+  strategy stops or truncates work because the configured step budget is
+  exhausted
+- `skills.execution.aborted` when host cancellation reaches the Skills runtime
+  or when framework execution fails before a normal Skills result can be
+  returned
 
 The Blocks lowering evidence, ExecutionBlockGraph, ResultAdapter output, and
 TriggerFlow close snapshot are available under
 `execution.close_snapshot["blocks"]`.
+Abort diagnostics include the strategy, effort, elapsed seconds, and the last
+active runtime event when one is available. Wall-clock and no-progress limits
+remain host policy; Skills only records the cancellation or failure once it is
+observed by the runtime.
 
 Annotate direct Skills `stream_handler` callbacks with
 `SkillRuntimeStreamHandler` from `agently.types.data`. If you are writing a

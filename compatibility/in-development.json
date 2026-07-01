@@ -81,6 +81,7 @@
         "search_provider": "Framework Search uses the ddgs package by default, keeps backend configurable through host policy, supports host-approved ddgs refresh before search runs, treats no-result search as a successful empty result, and falls back through configured/default ddgs backends when a selected backend returns no usable parsed result.",
         "workspace_file_action_owner": "Workspace owns file action roots and path boundaries; SkillsExecutor prefers workspace.enable_file_actions(agent, ...) before falling back to agent.enable_workspace_file_actions(...).",
         "policy_approval_surface": "Skills capability approval uses the framework-wide PolicyApproval handler surface: input_timeout_fail by default, fail_closed for pending diagnostics/TriggerFlow gates, auto_approve for tests, input, or registered service-specific handlers.",
+        "skills_abort_diagnostics": "SkillsExecutor emits skills.execution.aborted on cooperative cancellation or framework execution failure with reason, strategy, effort, elapsed_seconds, and the last active runtime event when available. Built-in react/staged strategies emit skills.execution.budget_exhausted when step_budget stops or truncates work. Host wall-clock and no-progress limits remain host policy unless cancellation reaches the Skills runtime.",
         "policy_modes": [
           "allow",
           "approval",

@@ -106,6 +106,11 @@ The resulting `SkillExecution.close_snapshot["blocks"]` contains the
 ExecutionPlan, ExecutionBlockGraph, TriggerFlow close snapshot, ResultAdapter
 output, and EvidenceEnvelope. Treat old strategy names as compatibility route
 labels and diagnostics, not as a separate Skills-owned lifecycle.
+Built-in direct Skills strategies also emit terminal diagnostics on the same
+runtime stream: `skills.execution.budget_exhausted` for step-budget stops and
+`skills.execution.aborted` for cooperative cancellation or framework execution
+failure. These events are observability records; they do not create a separate
+timeout policy or Skills-owned lifecycle.
 
 ## Runtime Blocks
 
