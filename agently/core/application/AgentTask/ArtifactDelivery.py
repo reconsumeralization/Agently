@@ -505,7 +505,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return result, plan
-        if not required_paths or self._taskboard_context_card_is_leaf(context):
+        has_remaining_work = self._has_remaining_work(card_output.get("remaining_work")) or self._has_remaining_work(
+            card_output.get("gaps")
+        )
+        if not required_paths or (self._taskboard_context_card_is_leaf(context) and not has_remaining_work):
             return card_output, plan
 
         manifest = card_output.get("artifact_manifest")
@@ -532,10 +535,11 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         diagnostics.append(
             {
                 "code": "taskboard.workspace_artifact.final_path_relocated_for_intermediate_card",
-                "message": "A non-leaf TaskBoard card cannot write a required final deliverable path.",
+                "message": "A non-terminal TaskBoard card cannot write a required final deliverable path.",
                 "card_id": card_id,
                 "requested_path": requested_path,
                 "relocated_path": relocated_path,
+                "remaining_work_present": has_remaining_work,
             }
         )
         result["diagnostics"] = DataFormatter.sanitize(diagnostics)

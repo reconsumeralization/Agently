@@ -3986,6 +3986,66 @@ async def test_taskboard_intermediate_card_relocates_required_final_deliverable_
 
 
 @pytest.mark.asyncio
+async def test_taskboard_remaining_work_leaf_card_relocates_required_final_deliverable_path(tmp_path):
+    agent = _create_agent("execution-taskboard-leaf-remaining-work-final-path").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Use evidence before the final deliverable.",
+        success_criteria=["Intermediate continuation artifacts do not occupy final.md."],
+        execution="taskboard",
+        max_iterations=None,
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    revision = TaskBoardRevision.create(
+        board_id="leaf-remaining-work-final-path",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "leaf-remaining-work-final-path-graph",
+                "cards": [
+                    {
+                        "id": "continue-evidence",
+                        "objective": "Continue evidence gathering before final synthesis.",
+                    }
+                ],
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        card=revision.graph.card_by_id()["continue-evidence"],
+        revision=revision,
+    )
+    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+        {
+            "artifact_markdown": "# Evidence Continuation\n\nThis is not the final deliverable.",
+            "artifact_manifest": {"path": "final.md"},
+            "remaining_work": ["Use this evidence in the final synthesis card."],
+        },
+        context,
+        deliverable_mode="workspace_artifact",
+    )
+
+    delivered = await task._deliver_workspace_artifact(
+        prepared,
+        plan=plan,
+        execution_meta={"logs": {}},
+        source="test.taskboard.leaf_remaining_work.workspace_artifact",
+        card_context=context,
+    )
+
+    assert delivered["file_refs"][0]["path"] == "working/taskboard/continue-evidence/final.md"
+    assert (task.workspace.files_root / "working/taskboard/continue-evidence/final.md").is_file()
+    assert not (task.workspace.files_root / "final.md").exists()
+    assert any(
+        item.get("code") == "taskboard.workspace_artifact.final_path_relocated_for_intermediate_card"
+        and item.get("remaining_work_present") is True
+        for item in delivered["diagnostics"]
+        if isinstance(item, dict)
+    )
+
+
+@pytest.mark.asyncio
 async def test_taskboard_final_repair_card_keeps_required_final_deliverable_path(tmp_path):
     agent = _create_agent("execution-taskboard-final-repair-final-path").use_workspace(tmp_path / "workspace")
     task = AgentTask(
