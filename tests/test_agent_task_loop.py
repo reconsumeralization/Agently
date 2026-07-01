@@ -2598,6 +2598,60 @@ async def test_verifier_workspace_artifact_readback_uses_acceptance_locator_for_
 
 
 @pytest.mark.asyncio
+async def test_taskboard_final_artifact_readback_reads_small_tail_sections_for_verifier(tmp_path):
+    agent = _create_agent("agent-taskboard-final-small-tail-readback").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-small-tail-readback",
+        goal="Verify a small final artifact with required tail sections.",
+        success_criteria=["The final artifact includes tail sections."],
+        execution="taskboard",
+    )
+    filler = "\n".join(f"Filler {index}: " + ("x" * 80) for index in range(70))
+    body = (
+        "# Final Report\n\n"
+        f"{filler}\n\n"
+        "## Tail Coverage\n\nCoverage table content.\n\n"
+        "## Tail Self Check\n\nSelf-check content.\n"
+    )
+    write_result = await task.workspace.write_file("final.md", body)
+    preview_read = await task.workspace.read_file("final.md", max_bytes=4000)
+    assert preview_read["truncated"] is True
+    ref = {
+        "path": "final.md",
+        "bytes": int(preview_read["bytes"]),
+        "sha256": preview_read["sha256"],
+        "media_type": write_result.get("media_type"),
+        "content_kind": "text",
+        "role": "workspace_artifact",
+        "source": "test",
+        "preview": str(preview_read["content"]),
+        "truncated": True,
+        "read_bytes": int(preview_read["read_bytes"]),
+    }
+
+    items = await task._taskboard_final_artifact_verification_evidence_items(
+        [ref],
+        final={
+            "artifact_manifest": {
+                "path": "final.md",
+                "sections": [
+                    {"title": "Tail Coverage"},
+                    {"title": "Tail Self Check"},
+                ],
+            }
+        },
+    )
+
+    readback = next(item for item in items if item["kind"] == "workspace_artifact.readback")
+    assert readback["body_state"] == "full"
+    assert "Tail Self Check" in readback["body"]
+    targeted = [item for item in items if item["kind"] == "workspace_artifact.targeted_readback"]
+    assert any("Tail Coverage" in item.get("body", "") for item in targeted)
+    assert any("Tail Self Check" in item.get("body", "") for item in targeted)
+
+
+@pytest.mark.asyncio
 async def test_workspace_intermediate_artifact_stays_ref_backed_without_satisfying_final_contract(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-intermediate")
     task = AgentTask.__new__(AgentTask)
@@ -4821,6 +4875,105 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
     ]
     assert len(repair_cards) == 1
     assert "Missing required section." in repair_cards[0].evidence_contract["missing_criteria"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_replaces_stale_rejection_reason_after_verifier_accepts(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-stale-reason").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-stale-reason",
+        goal="Return a complete final report.",
+        success_criteria=["The final report includes all required sections."],
+        execution="taskboard",
+    )
+    cards = [
+        TaskBoardCard.from_value(
+            {
+                "id": "draft-a",
+                "objective": "Draft the first part.",
+                "required_outputs": ["First part"],
+            }
+        ),
+        TaskBoardCard.from_value(
+            {
+                "id": "draft-b",
+                "objective": "Draft the second part.",
+                "required_outputs": ["Second part"],
+            }
+        ),
+    ]
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "taskboard-final-stale-reason",
+            "revision_id": "rev-1",
+            "graph": {
+                "graph_id": "taskboard-final-stale-reason-graph",
+                "cards": [card.to_dict() for card in cards],
+            },
+            "card_results": {
+                "draft-a": TaskBoardCardResult(
+                    card_id="draft-a",
+                    status="completed",
+                    preview={"status": "completed", "final_result": "First part.", "remaining_work": []},
+                ).to_dict(),
+                "draft-b": TaskBoardCardResult(
+                    card_id="draft-b",
+                    status="completed",
+                    preview={"status": "completed", "final_result": "Second part.", "remaining_work": []},
+                ).to_dict(),
+            },
+        }
+    )
+
+    async def stale_rejection_finalizer(*_args, **_kwargs):
+        return {
+            "accepted": False,
+            "reason": "Unable to verify the tail sections from truncated readback.",
+            "final_result": "final.md",
+            "missing_criteria": ["Tail sections need readback."],
+        }
+
+    async def accepting_verifier(*_args, **kwargs):
+        execution_result = kwargs["execution_result"]
+        assert execution_result["reason"] == "Unable to verify the tail sections from truncated readback."
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Final artifact verified all required sections.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": execution_result["final_result"],
+        }
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", stale_rejection_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", accepting_verifier)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert result == {"terminal": True, "status": "completed"}
+    assert task.result["accepted"] is True
+    assert task.result["reason"] == "Final artifact verified all required sections."
+    assert task.result["missing_criteria"] == []
 
 
 @pytest.mark.asyncio

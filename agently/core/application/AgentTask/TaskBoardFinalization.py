@@ -391,8 +391,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                         final["final_result"] = str(verification_final_result).strip()
                     elif verifier_final_result:
                         final["final_result"] = verifier_final_result
-                if not str(final.get("reason") or "").strip():
-                    final["reason"] = final_verification.get("reason") or "TaskBoard final verification accepted."
+                verifier_reason = str(final_verification.get("reason") or "").strip()
+                final["reason"] = verifier_reason or "TaskBoard final verification accepted."
                 final["missing_criteria"] = []
             elif final_verification is not None and not bool(final_verification.get("is_complete")):
                 repair_revision = None
@@ -650,13 +650,23 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             return materialized, "", None
 
         has_preview = bool(str(materialized.get("preview") or ""))
-        needs_readback = not self._workspace_artifact_ref_has_trusted_readback(materialized) or not has_preview
+        needs_readback = (
+            bool(materialized.get("truncated"))
+            or not self._workspace_artifact_ref_has_trusted_readback(materialized)
+            or not has_preview
+        )
         if not needs_readback:
             content = str(materialized.get("preview") or "")
             return materialized, "" if materialized.get("truncated") else content, None
 
+        declared_bytes = self._coerce_non_negative_int(materialized.get("bytes"))
+        if declared_bytes > 0 and declared_bytes < _VERIFIER_PROMPT_VALUE_CHARS:
+            max_read_bytes = declared_bytes + 1
+        else:
+            max_read_bytes = max(_WORKSPACE_ARTIFACT_PREVIEW_BYTES, _VERIFIER_PROMPT_VALUE_CHARS)
+
         try:
-            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+            read_result = await self.workspace.read_file(path, max_bytes=max_read_bytes)
         except Exception as error:
             return (
                 materialized,
