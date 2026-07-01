@@ -1213,6 +1213,30 @@ def test_workspace_artifact_output_contract_sections_are_required_acceptance_poi
     assert {item["requirement_level"] for item in locators} == {"required"}
 
 
+def test_output_contract_sections_apply_only_to_declared_deliverable_path():
+    task = AgentTask.__new__(AgentTask)
+    task.options = {
+        "execution_prompt_snapshot": {
+            "input": {
+                "case": {
+                    "output_contract": {
+                        "deliverables": [{"path": "final.md", "media_type": "text/markdown"}],
+                        "sections": ["Risks or uncertainty", "Source list"],
+                    }
+                }
+            }
+        }
+    }
+
+    final_points = task._workspace_artifact_acceptance_points_from_output_contracts("final.md")
+    working_points = task._workspace_artifact_acceptance_points_from_output_contracts(
+        "working/taskboard/search_frameworks_tools/final.md"
+    )
+
+    assert [point["expected_anchor"] for point in final_points] == ["Risks or uncertainty", "Source list"]
+    assert working_points == []
+
+
 def test_workspace_artifact_targeted_readback_keeps_locator_anchors():
     locator = {
         "id": "workspace_artifact_acceptance_locator:test:final.md:date-window",

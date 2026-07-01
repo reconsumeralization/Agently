@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import html
 import re
+from pathlib import PurePosixPath
 
 from .AcceptanceLocator import build_workspace_artifact_acceptance_locator_items, collect_acceptance_points
 from .TaskShared import *
@@ -702,6 +703,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
 
     def _workspace_artifact_acceptance_points_from_output_contracts(self, path: str) -> list[dict[str, Any]]:
         artifact_path = str(path or "").strip()
+        normalized_artifact_path = PurePosixPath(artifact_path).as_posix() if artifact_path else ""
         options = getattr(self, "options", None)
         if not isinstance(options, Mapping):
             return []
@@ -740,8 +742,30 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 }
             )
 
+        def contract_deliverable_paths(value: Mapping[str, Any]) -> list[str]:
+            paths: list[str] = []
+            raw_deliverables = value.get("deliverables")
+            if not isinstance(raw_deliverables, Sequence) or isinstance(raw_deliverables, str | bytes | bytearray):
+                return paths
+            for deliverable in raw_deliverables:
+                if isinstance(deliverable, str):
+                    candidate = deliverable.strip()
+                elif isinstance(deliverable, Mapping):
+                    candidate = str(deliverable.get("path") or "").strip()
+                else:
+                    candidate = ""
+                if not candidate:
+                    continue
+                normalized = PurePosixPath(candidate).as_posix()
+                if normalized not in paths:
+                    paths.append(normalized)
+            return paths
+
         def collect_contract(value: Any, *, source_key: str) -> None:
             if not isinstance(value, Mapping):
+                return
+            deliverable_paths = contract_deliverable_paths(value)
+            if deliverable_paths and normalized_artifact_path not in deliverable_paths:
                 return
             sections = value.get("sections")
             if not isinstance(sections, Sequence) or isinstance(sections, str | bytes | bytearray):
