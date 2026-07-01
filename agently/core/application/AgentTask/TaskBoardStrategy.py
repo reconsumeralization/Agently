@@ -112,6 +112,7 @@ class AgentTaskTaskBoardStrategyMixin(
             board_revision,
             handler=lambda context: self._run_taskboard_card(context, context_pack),
             planning_policy=planning_policy,
+            scheduler=self._taskboard_scheduler(),
         )
         if resumed_revision is None:
             await self._record_phase(
@@ -169,6 +170,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 revision,
                 handler=lambda context: self._run_taskboard_card(context, context_pack),
                 planning_policy=planning_policy,
+                scheduler=self._taskboard_scheduler(),
             )
 
         def _pack_revision_state(revision: TaskBoardRevision | Mapping[str, Any]) -> str:
@@ -192,7 +194,11 @@ class AgentTaskTaskBoardStrategyMixin(
                 "finalize_requested_event": finalize_requested_event,
                 "max_ticks": max_ticks,
                 "max_ticks_source": max_ticks_source,
-                "tick_fanout": "taskboard_runtime_signal_net",
+                "tick_fanout": (
+                    "taskboard_runtime_frontier_signal_net"
+                    if self._taskboard_scheduler() == "frontier"
+                    else "taskboard_runtime_signal_net"
+                ),
             }
             await data.async_set_state(revision_state_key, _pack_revision_state(board.revision), emit=False)
             await data.async_set_state("tick_index", initial_tick_index, emit=False)

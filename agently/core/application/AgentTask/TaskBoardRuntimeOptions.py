@@ -188,6 +188,13 @@ class AgentTaskTaskBoardRuntimeOptionsMixin(AgentTaskMixinBase):
             return None
         return concurrency if concurrency > 0 else None
 
+    def _taskboard_scheduler(self) -> str:
+        value = self._taskboard_option("taskboard_scheduler")
+        text = str(value or "batch").strip().lower().replace("-", "_")
+        if text in {"frontier", "event_driven", "evented", "dynamic_frontier"}:
+            return "frontier"
+        return "batch"
+
     def _taskboard_option_timeout(self, key: str) -> float | None:
         value = self._taskboard_option(key)
         if value is None:

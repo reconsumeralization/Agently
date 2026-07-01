@@ -2100,6 +2100,53 @@ async def test_task_board_tick_fans_out_independent_cards_by_default():
 
 
 @pytest.mark.asyncio
+async def test_task_board_frontier_scheduler_advances_ready_branch_before_tick_barrier():
+    seen: list[str] = []
+    browse_a_started = asyncio.Event()
+
+    async def handler(context: TaskBoardContext):
+        seen.append(context.card.id)
+        if context.card.id == "search_b":
+            await browse_a_started.wait()
+        if context.card.id == "browse_a":
+            assert context.dependency_results["search_a"].preview == "done:search_a"
+            browse_a_started.set()
+        if context.card.id == "final":
+            assert set(context.dependency_results) == {"browse_a", "browse_b"}
+        return {"status": "completed", "preview": f"done:{ context.card.id }"}
+
+    board = TaskBoard(
+        TaskBoardRevision.create(
+            board_id="frontier-branches",
+            graph={
+                "graph_id": "frontier-branches-graph",
+                "cards": [
+                    {"id": "search_a", "objective": "Search source A."},
+                    {"id": "browse_a", "objective": "Browse source A.", "depends_on": ["search_a"]},
+                    {"id": "search_b", "objective": "Search source B."},
+                    {"id": "browse_b", "objective": "Browse source B.", "depends_on": ["search_b"]},
+                    {
+                        "id": "final",
+                        "objective": "Synthesize both branches.",
+                        "depends_on": ["browse_a", "browse_b"],
+                    },
+                ],
+            },
+        ),
+        handler=handler,
+        scheduler="frontier",
+    )
+
+    tick = await board.async_run_tick(timeout=1, concurrency=3)
+
+    assert set(tick.revision.card_results) == {"search_a", "browse_a", "search_b", "browse_b", "final"}
+    assert tick.revision.status == "completed"
+    assert seen.index("browse_a") < seen.index("browse_b")
+    assert tick.triggerflow_snapshot["runtime_topology"]["scheduler"] == "frontier"
+    assert tick.triggerflow_snapshot["runtime_topology"]["fanout"] == "signal_net_frontier_overlay"
+
+
+@pytest.mark.asyncio
 async def test_task_board_tick_does_not_cancel_independent_card_on_required_failure():
     seen: list[str] = []
 
@@ -2236,6 +2283,53 @@ async def test_task_board_tick_resume_retries_missing_cards_without_repeating_co
         and attempt["status"] == "interrupted"
         for attempt in restored_signal_net["signal_attempts"]
     )
+
+
+@pytest.mark.asyncio
+async def test_task_board_frontier_resume_retries_running_cards_from_json_state():
+    previous_revision = TaskBoardRevision.create(
+        board_id="frontier-resume",
+        graph={
+            "graph_id": "frontier-resume-graph",
+            "cards": [
+                {"id": "a", "objective": "Run A."},
+                {"id": "b", "objective": "Run B."},
+            ],
+        },
+    )
+    original_calls: list[str] = []
+    restored_calls: list[str] = []
+    second_running = asyncio.Event()
+    release_original = asyncio.Event()
+
+    async def original_handler(context: TaskBoardContext):
+        original_calls.append(context.card.id)
+        if len(original_calls) == 2:
+            second_running.set()
+            await release_original.wait()
+        return {"status": "completed", "preview": f"original:{ context.card.id }"}
+
+    async def restored_handler(context: TaskBoardContext):
+        restored_calls.append(context.card.id)
+        return {"status": "completed", "preview": f"restored:{ context.card.id }"}
+
+    original_board = TaskBoard(previous_revision, handler=original_handler, scheduler="frontier")
+    original_tick = await original_board.async_start_tick(concurrency=1)
+    await asyncio.wait_for(second_running.wait(), timeout=1)
+    saved_state = original_tick.save()
+
+    release_original.set()
+    await original_tick.async_close(timeout=1)
+
+    restored_board = TaskBoard(previous_revision, handler=restored_handler, scheduler="frontier")
+    restored_tick = restored_board.create_tick_execution(concurrency=2)
+    restored_tick.load(saved_state)
+    await restored_tick.async_resume_pending()
+    result = await restored_tick.async_close(timeout=1)
+
+    assert restored_calls == ["b"]
+    assert result.revision.card_results["a"].preview == "original:a"
+    assert result.revision.card_results["b"].preview == "restored:b"
 
 
 @pytest.mark.asyncio

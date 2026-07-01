@@ -1837,13 +1837,23 @@ def test_agent_task_explicit_resource_caps_remain_effective(tmp_path):
         max_iterations=2,
         options={"agent_task": {"taskboard_max_ticks": 4}},
     )
+    frontier_taskboard_task = AgentTask(
+        agent,
+        task_id="explicit-taskboard-frontier-scheduler",
+        goal="Complete the frontier board task.",
+        success_criteria=["The task is complete."],
+        options={"agent_task": {"taskboard_scheduler": "frontier"}},
+    )
 
     assert task.max_iterations == 2
     assert task.limits["max_model_requests"] == 1
     assert task._taskboard_max_ticks() == 2
     assert task._taskboard_max_ticks_source() == "explicit_max_iterations"
+    assert task._taskboard_scheduler() == "batch"
     assert taskboard_task._taskboard_max_ticks() == 4
     assert taskboard_task._taskboard_max_ticks_source() == "taskboard_option"
+    assert taskboard_task._taskboard_scheduler() == "batch"
+    assert frontier_taskboard_task._taskboard_scheduler() == "frontier"
 
 
 def test_flat_step_plan_infers_workspace_artifact_mode_from_required_deliverables():
