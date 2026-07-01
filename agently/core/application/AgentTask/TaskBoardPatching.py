@@ -149,6 +149,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
     def _taskboard_patch_proposal_is_workspace_patch(cls, patch_proposal: Mapping[str, Any]) -> bool:
         if not isinstance(patch_proposal, Mapping):
             return False
+        if cls._taskboard_patch_proposal_is_workspace_file_copy(patch_proposal):
+            return True
         if any(str(patch_proposal.get(key) or "").strip() for key in ("file", "path", "target_file", "target_path")):
             return True
         raw_operations = cls._taskboard_workspace_patch_raw_operations(patch_proposal)
@@ -180,6 +182,44 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         return has_workspace_op
 
     @classmethod
+    def _taskboard_patch_proposal_is_workspace_file_copy(cls, patch_proposal: Mapping[str, Any]) -> bool:
+        if not isinstance(patch_proposal, Mapping):
+            return False
+        kind = (
+            str(
+                patch_proposal.get("kind")
+                or patch_proposal.get("type")
+                or patch_proposal.get("operation")
+                or ""
+            )
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        if kind not in {"workspace_file_copy", "file_copy", "copy_file", "copy"}:
+            return False
+        return bool(
+            cls._taskboard_workspace_copy_source_path(patch_proposal)
+            and cls._taskboard_workspace_copy_target_path(patch_proposal)
+        )
+
+    @staticmethod
+    def _taskboard_workspace_copy_source_path(patch_proposal: Mapping[str, Any]) -> str:
+        for key in ("source", "source_path", "source_file", "from", "from_path"):
+            value = str(patch_proposal.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    @classmethod
+    def _taskboard_workspace_copy_target_path(cls, patch_proposal: Mapping[str, Any]) -> str:
+        for key in ("target", "target_path", "target_file", "destination", "destination_path", "to", "to_path"):
+            value = str(patch_proposal.get(key) or "").strip()
+            if value:
+                return value
+        return cls._taskboard_workspace_patch_path(patch_proposal)
+
+    @classmethod
     def _taskboard_workspace_patch_path(
         cls,
         patch_proposal: Mapping[str, Any],
@@ -198,6 +238,9 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         *,
         card_id: str,
     ) -> dict[str, Any]:
+        if self._taskboard_patch_proposal_is_workspace_file_copy(patch_proposal):
+            return await self._apply_taskboard_workspace_file_copy_patch(patch_proposal, card_id=card_id)
+
         raw_operations = self._taskboard_workspace_patch_raw_operations(patch_proposal)
         if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes | bytearray):
             write_content = self._taskboard_workspace_patch_content(patch_proposal)
@@ -280,6 +323,92 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "operations": operation_records,
             "write": {
                 "path": str(write_result.get("path") or path),
+                "bytes": int(write_result.get("bytes") or 0),
+                "sha256": str(write_result.get("sha256") or ""),
+            },
+            "readback": {
+                "path": ref["path"],
+                "bytes": ref["bytes"],
+                "sha256": ref["sha256"],
+                "read_bytes": ref["read_bytes"],
+                "truncated": ref["truncated"],
+                "handler_id": ref["handler_id"],
+            },
+            "file_refs": [ref],
+        }
+
+    async def _apply_taskboard_workspace_file_copy_patch(
+        self,
+        patch_proposal: Mapping[str, Any],
+        *,
+        card_id: str,
+    ) -> dict[str, Any]:
+        source_path = self._taskboard_workspace_copy_source_path(patch_proposal)
+        target_path = self._taskboard_workspace_copy_target_path(patch_proposal)
+        if not source_path or not target_path:
+            return {
+                "status": "failed",
+                "card_id": card_id,
+                "reason": "Workspace file-copy patch requires source and target paths.",
+            }
+        previous_sha = ""
+        try:
+            source_target = self.workspace.resolve_file_path(source_path)
+            max_bytes = max(int(source_target.stat().st_size) + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+            source_read = await self.workspace.read_file(source_path, max_bytes=max_bytes)
+            content = source_read.get("content")
+            if not isinstance(content, str) or bool(source_read.get("truncated")):
+                raise ValueError("Workspace file-copy patch requires complete text readback.")
+            try:
+                previous_read = await self.workspace.read_file(target_path, max_bytes=1)
+                previous_sha = str(previous_read.get("sha256") or "")
+            except FileNotFoundError:
+                previous_sha = ""
+            write_result = await self.workspace.write_file(target_path, content, append=False)
+            read_result = await self.workspace.read_file(target_path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+        except Exception as error:
+            return {
+                "status": "failed",
+                "card_id": card_id,
+                "source_path": source_path,
+                "target_path": target_path,
+                "reason": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                "error": {"type": error.__class__.__name__},
+            }
+
+        ref = {
+            "path": str(read_result.get("path") or target_path),
+            "bytes": int(read_result.get("bytes") or write_result.get("bytes") or 0),
+            "sha256": str(read_result.get("sha256") or write_result.get("sha256") or ""),
+            "media_type": read_result.get("media_type") or source_read.get("media_type"),
+            "content_kind": read_result.get("content_kind", "text"),
+            "encoding": read_result.get("encoding") or source_read.get("encoding"),
+            "handler_id": read_result.get("handler_id"),
+            "role": "workspace_artifact",
+            "source": "agent_task.workspace_artifact.taskboard_patch",
+            "source_path": source_path,
+            "card_id": card_id,
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "truncated": bool(read_result.get("truncated")),
+            "preview": self._truncate_prompt_text(str(read_result.get("content") or ""), _WORKSPACE_ARTIFACT_PREVIEW_BYTES),
+        }
+        return {
+            "status": "completed",
+            "card_id": card_id,
+            "path": target_path,
+            "source_path": source_path,
+            "operation_count": 1,
+            "replacement_count": 0 if previous_sha and previous_sha == ref["sha256"] else 1,
+            "operations": [
+                {
+                    "index": 0,
+                    "type": "copy",
+                    "source": source_path,
+                    "target": target_path,
+                }
+            ],
+            "write": {
+                "path": str(write_result.get("path") or target_path),
                 "bytes": int(write_result.get("bytes") or 0),
                 "sha256": str(write_result.get("sha256") or ""),
             },

@@ -2652,6 +2652,56 @@ async def test_taskboard_final_artifact_readback_reads_small_tail_sections_for_v
 
 
 @pytest.mark.asyncio
+async def test_taskboard_required_final_deliverable_promotion_replaces_stale_target(tmp_path):
+    agent = _create_agent("agent-taskboard-final-deliverable-promotion").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-deliverable-promotion",
+        goal="Produce final.md at the required deliverable path.",
+        success_criteria=["final.md contains the complete deliverable body."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    await task.workspace.write_file("final.md", "Summary only.")
+    await task.workspace.write_file("working/taskboard/design-questions/final.md", "# Draft\n\nShorter draft.")
+    full_body = (
+        "# Complete Deliverable\n\n"
+        + "\n".join(f"Section {index}: " + ("complete body " * 20) for index in range(80))
+    )
+    await task.workspace.write_file("working/taskboard/coverage-and-finalize/final.md", full_body)
+
+    async def ref_for(path: str) -> dict[str, Any]:
+        read_result = await task.workspace.read_file(path, max_bytes=4000)
+        return {
+            "path": path,
+            "bytes": int(read_result["bytes"]),
+            "sha256": str(read_result["sha256"]),
+            "media_type": read_result.get("media_type"),
+            "content_kind": "text",
+            "role": "workspace_artifact",
+            "source": f"test.{path}",
+            "preview": str(read_result.get("content") or ""),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "truncated": bool(read_result.get("truncated")),
+        }
+
+    refs = [
+        await ref_for("final.md"),
+        await ref_for("working/taskboard/design-questions/final.md"),
+        await ref_for("working/taskboard/coverage-and-finalize/final.md"),
+    ]
+
+    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs(refs)
+
+    final_read = await task.workspace.read_file("final.md", max_bytes=len(full_body.encode("utf-8")) + 1)
+    assert final_read["content"] == full_body
+    assert promoted_refs[0]["path"] == "final.md"
+    assert promoted_refs[0]["source_path"] == "working/taskboard/coverage-and-finalize/final.md"
+    assert promoted_refs[0]["sha256"] == final_read["sha256"]
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
 async def test_workspace_intermediate_artifact_stays_ref_backed_without_satisfying_final_contract(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-intermediate")
     task = AgentTask.__new__(AgentTask)
@@ -4616,6 +4666,44 @@ async def test_taskboard_action_card_retries_retryable_result_protocol_failure(t
     assert result.metadata["attempt_index"] == 2
     readback = await task.workspace.read_file("final.md")
     assert readback["content"] == "# Final Report\n\nRecovered body."
+
+
+@pytest.mark.asyncio
+async def test_taskboard_workspace_file_copy_patch_materializes_target_ref(tmp_path):
+    agent = _create_agent("agent-taskboard-file-copy-patch").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-file-copy-patch",
+        goal="Copy a trusted workspace artifact to final.md.",
+        success_criteria=["final.md matches the source artifact."],
+        execution="taskboard",
+    )
+    source_path = "working/taskboard/coverage-and-finalize/final.md"
+    source_body = "# Final\n\n" + "\n".join(f"Paragraph {index}: " + ("body " * 30) for index in range(40))
+    await task.workspace.write_file(source_path, source_body)
+    await task.workspace.write_file("final.md", "Summary only.")
+    context = SimpleNamespace(card=SimpleNamespace(id="final-verification-repair"))
+
+    patched = await task._materialize_taskboard_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "patch_proposal": {
+                "kind": "workspace_file_copy",
+                "source": source_path,
+                "target": "final.md",
+            },
+        },
+    )
+
+    final_read = await task.workspace.read_file("final.md", max_bytes=len(source_body.encode("utf-8")) + 1)
+    assert final_read["content"] == source_body
+    assert "patch_proposal" not in patched
+    assert patched["workspace_patch_delivery"]["status"] == "completed"
+    assert patched["workspace_patch_delivery"]["source_path"] == source_path
+    assert patched["workspace_patch_delivery"]["file_refs"][0]["path"] == "final.md"
+    assert patched["file_refs"][0]["path"] == "final.md"
+    assert patched["diagnostics"][0]["code"] == "taskboard.control.workspace_patch_applied"
 
 
 @pytest.mark.asyncio

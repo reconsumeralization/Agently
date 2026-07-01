@@ -73,6 +73,81 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             return ""
         return PurePosixPath(text).as_posix()
 
+    @classmethod
+    def _taskboard_workspace_path_name(cls, path: Any) -> str:
+        path_key = cls._taskboard_workspace_path_key(path)
+        if not path_key:
+            return ""
+        return PurePosixPath(path_key).name
+
+    def _taskboard_select_required_final_deliverable_source_ref(
+        self,
+        *,
+        target_path_key: str,
+        current_refs: Sequence[Mapping[str, Any]],
+        target_refs: Sequence[Mapping[str, Any]],
+        missing_required: bool,
+    ) -> dict[str, Any] | None:
+        target_name = self._taskboard_workspace_path_name(target_path_key)
+        if not target_name:
+            return None
+        if not target_refs and not missing_required:
+            return None
+        target_bytes = max((self._coerce_non_negative_int(ref.get("bytes")) for ref in target_refs), default=0)
+        target_sha_values = {
+            str(ref.get("sha256") or "").strip()
+            for ref in target_refs
+            if str(ref.get("sha256") or "").strip()
+        }
+        candidates: list[tuple[int, str, str, Mapping[str, Any]]] = []
+        for ref in current_refs:
+            if not self._is_trusted_workspace_artifact_ref(ref):
+                continue
+            path_key = self._taskboard_workspace_path_key(ref.get("path"))
+            if not path_key or path_key == target_path_key:
+                continue
+            if self._taskboard_workspace_path_name(path_key) != target_name:
+                continue
+            byte_count = self._coerce_non_negative_int(ref.get("bytes"))
+            sha256 = str(ref.get("sha256") or "").strip()
+            if byte_count <= 0 or not sha256:
+                continue
+            candidates.append((byte_count, sha256, path_key, ref))
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (-item[0], item[2]))
+        best_bytes = candidates[0][0]
+        best_candidates = [item for item in candidates if item[0] == best_bytes]
+        best_sha_values = {item[1] for item in best_candidates}
+        if len(best_sha_values) > 1:
+            self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
+                DataFormatter.sanitize(
+                    {
+                        "status": "skipped",
+                        "reason": "same_size_source_ref_ambiguous",
+                        "target_path": target_path_key,
+                        "candidate_paths": [item[2] for item in best_candidates],
+                        "bytes": best_bytes,
+                    }
+                )
+            )
+            return None
+
+        best = best_candidates[0]
+        if best[1] in target_sha_values:
+            return None
+        if target_refs and target_bytes >= best[0]:
+            return None
+        if (
+            target_refs
+            and not missing_required
+            and target_bytes >= _WORKSPACE_ARTIFACT_PREVIEW_BYTES
+            and best[0] - target_bytes < _WORKSPACE_ARTIFACT_PREVIEW_BYTES
+        ):
+            return None
+        return dict(best[3])
+
     async def _taskboard_materialize_required_final_deliverable_refs(
         self,
         refs: Sequence[Mapping[str, Any]],
@@ -93,38 +168,58 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         if not required_by_key:
             return self._prioritize_taskboard_final_refs(current_refs)
 
-        ref_path_keys = {self._taskboard_workspace_path_key(ref.get("path")) for ref in current_refs}
         missing_required_keys = {
             self._taskboard_workspace_path_key(path)
             for path in await self._missing_required_workspace_deliverables()
         }
-        if any(path_key in ref_path_keys for path_key in required_by_key) and not any(
-            path_key in missing_required_keys for path_key in required_by_key
-        ):
-            return self._prioritize_taskboard_final_refs(current_refs)
-
-        trusted_refs = [
-            ref
-            for ref in current_refs
-            if self._is_trusted_workspace_artifact_ref(ref)
-            and self._taskboard_workspace_path_key(ref.get("path"))
-            and self._taskboard_workspace_path_key(ref.get("path")) not in required_by_key
-        ]
-        if len(required_by_key) != 1 or len(trusted_refs) != 1:
+        if len(required_by_key) != 1:
             self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
                 DataFormatter.sanitize(
                     {
                         "status": "skipped",
-                        "reason": "required_deliverable_or_source_ref_ambiguous",
+                        "reason": "required_deliverable_ambiguous",
                         "required_deliverables": list(required_by_key.values()),
-                        "trusted_ref_count": len(trusted_refs),
                     }
                 )
             )
             return self._prioritize_taskboard_final_refs(current_refs)
 
-        target_path = next(iter(required_by_key.values()))
-        source_ref = dict(trusted_refs[0])
+        target_path_key, target_path = next(iter(required_by_key.items()))
+        target_refs = [
+            ref
+            for ref in current_refs
+            if self._taskboard_workspace_path_key(ref.get("path")) == target_path_key
+        ]
+        source_ref = self._taskboard_select_required_final_deliverable_source_ref(
+            target_path_key=target_path_key,
+            current_refs=current_refs,
+            target_refs=target_refs,
+            missing_required=target_path_key in missing_required_keys,
+        )
+        if source_ref is None:
+            if target_refs and target_path_key not in missing_required_keys:
+                return self._prioritize_taskboard_final_refs(current_refs)
+            trusted_ref_count = len(
+                [
+                    ref
+                    for ref in current_refs
+                    if self._is_trusted_workspace_artifact_ref(ref)
+                    and self._taskboard_workspace_path_key(ref.get("path"))
+                    and self._taskboard_workspace_path_key(ref.get("path")) != target_path_key
+                ]
+            )
+            self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
+                DataFormatter.sanitize(
+                    {
+                        "status": "skipped",
+                        "reason": "required_deliverable_source_ref_unavailable",
+                        "required_deliverables": list(required_by_key.values()),
+                        "trusted_ref_count": trusted_ref_count,
+                    }
+                )
+            )
+            return self._prioritize_taskboard_final_refs(current_refs)
+
         source_path = str(source_ref.get("path") or "").strip()
         if self._taskboard_workspace_path_key(source_path) == self._taskboard_workspace_path_key(target_path):
             return self._prioritize_taskboard_final_refs(current_refs)
