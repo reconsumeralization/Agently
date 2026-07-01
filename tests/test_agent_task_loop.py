@@ -4509,6 +4509,103 @@ async def test_taskboard_action_card_retries_retryable_result_protocol_failure(t
     assert readback["content"] == "# Final Report\n\nRecovered body."
 
 
+@pytest.mark.asyncio
+async def test_taskboard_action_card_retries_blocking_evidence_use_guard(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-card-evidence-use-retry").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-card-evidence-use-retry",
+        goal="Collect source evidence.",
+        success_criteria=["The card reports collected evidence without invalid evidence bindings."],
+        execution="taskboard",
+        options={"agent_task": {"taskboard_card_max_attempts": 2}},
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "collect",
+            "objective": "Collect source evidence for the final answer.",
+            "allowed_execution_shape": "actions",
+            "required_outputs": ["Collected source evidence summary"],
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-card-evidence-use-retry",
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": "taskboard-card-evidence-use-retry-graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    attempts: list[int] = []
+
+    async def fake_run_work_unit_through_blocks(*_args, **kwargs):
+        attempt_index = kwargs["start_payload"]["attempt_index"]
+        attempts.append(attempt_index)
+        meta = {
+            "execution_id": f"exec-{attempt_index}",
+            "status": "success",
+            "route": {"selected_route": "model_request", "status": "completed"},
+            "logs": {"action_logs": {}, "route_logs": {}, "errors": []},
+            "diagnostics": [],
+        }
+        if attempt_index == 1:
+            return (
+                {
+                    "status": "completed",
+                    "answer": "Collected source evidence.",
+                    "evidence_use": [
+                        {
+                            "claim": "Collected source evidence.",
+                            "evidence_ids": ["missing-evidence-id"],
+                            "support_type": "content",
+                        }
+                    ],
+                    "remaining_work": [],
+                },
+                meta,
+                {},
+            )
+        return (
+            {
+                "status": "completed",
+                "answer": "Collected source evidence; no unsupported evidence binding remains.",
+                "evidence_use": [],
+                "remaining_work": [],
+            },
+            meta,
+            {},
+        )
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_run_work_unit_through_blocks", fake_run_work_unit_through_blocks)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit_action_observation_events", noop)
+
+    result = await task._run_taskboard_agent_card(
+        context,
+        {
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert attempts == [1, 2]
+    assert result.status == "completed"
+    retry_diagnostics = task.diagnostics["taskboard_card_retries"]
+    assert retry_diagnostics[0]["code"] == "taskboard.card.result_protocol_retry"
+    assert "taskboard.card.evidence_use_guard_blocking" in retry_diagnostics[0]["retryable_codes"]
+    assert result.metadata["attempt_index"] == 2
+
+
 def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     agent = _create_agent("agent-taskboard-final-repair").use_workspace(tmp_path / "workspace")
     task = AgentTask(

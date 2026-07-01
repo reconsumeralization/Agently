@@ -23,6 +23,7 @@ _TASKBOARD_CARD_RETRYABLE_RESULT_CODES = {
     "agent_task.workspace_artifact.readback_insufficient",
     "agent_task.workspace_artifact.structured_wrapper_body",
     "agent_task.workspace_artifact.structured_wrapper_draft",
+    "taskboard.card.evidence_use_guard_blocking",
 }
 
 

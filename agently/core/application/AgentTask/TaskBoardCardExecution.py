@@ -530,6 +530,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     )
             if evidence_repair_diagnostic is not None:
                 diagnostics.append(evidence_repair_diagnostic)
+            evidence_guard_blocking_count = self._taskboard_evidence_guard_blocking_count(evidence_use_guard)
+            if evidence_guard_blocking_count > 0:
+                diagnostics.append(
+                    self._taskboard_card_evidence_use_guard_diagnostic(
+                        evidence_use_guard,
+                        blocking_count=evidence_guard_blocking_count,
+                    )
+                )
             output_file_refs: list[Any] = []
             if isinstance(card_output, Mapping):
                 raw_file_refs = card_output.get("file_refs")
@@ -1310,6 +1318,39 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             return int(evidence_use_guard.get("blocking_count") or 0)
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _taskboard_card_evidence_use_guard_diagnostic(
+        evidence_use_guard: Mapping[str, Any],
+        *,
+        blocking_count: int,
+    ) -> dict[str, Any]:
+        guard_diagnostics: list[dict[str, Any]] = []
+        raw_diagnostics = evidence_use_guard.get("diagnostics")
+        if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
+            for item in raw_diagnostics:
+                if not isinstance(item, Mapping):
+                    continue
+                compact: dict[str, Any] = {}
+                for key in ("code", "claim", "evidence_id", "support_type", "message"):
+                    value = item.get(key)
+                    if value in (None, "", [], {}):
+                        continue
+                    compact[key] = str(value)[:500] if key in {"claim", "message"} else DataFormatter.sanitize(value)
+                if compact:
+                    guard_diagnostics.append(compact)
+                if len(guard_diagnostics) >= 6:
+                    break
+        return {
+            "code": "taskboard.card.evidence_use_guard_blocking",
+            "status": "blocked",
+            "message": (
+                "TaskBoard card evidence_use contains invalid or unbound evidence refs; retry using "
+                "evidence_ledger item ids or cite_as values from the available evidence."
+            ),
+            "blocking_count": blocking_count,
+            "guard_diagnostics": guard_diagnostics,
+        }
 
     @staticmethod
     def _taskboard_card_status(
