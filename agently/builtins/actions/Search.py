@@ -36,6 +36,18 @@ SearchBackend = Literal[
 NewsSearchBackend = Literal["auto", "all", "bing", "duckduckgo", "yahoo"]
 
 
+_DEFAULT_REGION_BY_LANGUAGE = {
+    "zh-CN": "cn-zh",
+    "zh-TW": "tw-tzh",
+    "en": "us-en",
+    "ja": "jp-jp",
+    "ko": "kr-kr",
+    "fr": "fr-fr",
+    "de": "de-de",
+    "es": "es-es",
+}
+
+
 class Search:
     DEFAULT_TEXT_FALLBACK_BACKENDS = ("yahoo", "brave", "duckduckgo", "google", "startpage", "mojeek")
     DEFAULT_NEWS_FALLBACK_BACKENDS = ("yahoo", "duckduckgo", "bing")
@@ -116,7 +128,7 @@ class Search:
             "ue-es",
             "ve-es",
             "vn-vi",
-        ] = "us-en",
+        ] | None = None,
         fallback_backends: list[str] | tuple[str, ...] | str | None = None,
         search_fallback_backends: list[str] | tuple[str, ...] | str | None = None,
         news_fallback_backends: list[str] | tuple[str, ...] | str | None = None,
@@ -131,7 +143,8 @@ class Search:
             "search": search_backend if search_backend is not None else backend,
             "news": news_backend if news_backend is not None else backend,
         }
-        self.region = region
+        self.region = region or "us-en"
+        self._region_explicit = region is not None
         self.fallback_backends = {
             "search": search_fallback_backends if search_fallback_backends is not None else fallback_backends,
             "news": news_fallback_backends if news_fallback_backends is not None else fallback_backends,
@@ -143,8 +156,11 @@ class Search:
         self._extra_options = options or {}
 
     def apply_language_policy(self, policy: Mapping[str, Any]) -> None:
-        region = policy.get("search_region") if isinstance(policy, Mapping) else None
-        if region is not None and str(region).strip() and self.region == "us-en":
+        if not isinstance(policy, Mapping):
+            return
+        language = str(policy.get("output_language") or policy.get("language") or "").strip()
+        region = _DEFAULT_REGION_BY_LANGUAGE.get(language)
+        if region is not None and str(region).strip() and not self._region_explicit:
             self.region = str(region).strip()  # type: ignore[assignment]
 
     def _get_ddgs(self):

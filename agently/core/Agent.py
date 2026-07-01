@@ -206,7 +206,6 @@ class BaseAgent:
         output: Any = None,
         process: Any = None,
         progress: Any = None,
-        search_region: Any = None,
         accept_language: Any = None,
     ) -> Self:
         policy = resolve_language_policy(
@@ -214,7 +213,6 @@ class BaseAgent:
             output_language=output,
             process_language=process,
             progress_language=progress,
-            search_region=search_region,
             accept_language=accept_language,
         )
         self.settings.set("agent.language_policy", cast(Any, dict(policy)))

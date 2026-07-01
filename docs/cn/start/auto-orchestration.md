@@ -230,7 +230,7 @@ snapshot 和任务元数据总结进展。模型生成的进度会先以
 `stream_kind="progress_delta"` 的 delta 事件边生成边输出，然后再以完整的
 `stream_kind="progress"` item 发出，便于日志和 UI 收敛状态。推荐用
 `agent.language("zh-CN")` 设置 Agent 级语言策略，它会影响最终输出、关键过程文本、
-progress 文本，以及 Search/Browse 的 locale hint；也可以用
+progress 文本，以及 Search/Browse 的 locale 默认值；也可以用
 `execution.language("zh-CN")` 只作用于单次 AgentExecution draft。单次执行仍可用
 `options={"agent_task": {"progress_language": "zh-CN"}}` 作为兼容别名只控制 progress
 语言，也可以用 `Agently.set_settings("agent_task.progress.language", "zh-CN")`

@@ -250,7 +250,6 @@ class AgentExecutionPromptDraft:
         output: Any = None,
         process: Any = None,
         progress: Any = None,
-        search_region: Any = None,
         accept_language: Any = None,
         always: bool = False,
     ):
@@ -260,7 +259,6 @@ class AgentExecutionPromptDraft:
                 output=output,
                 process=process,
                 progress=progress,
-                search_region=search_region,
                 accept_language=accept_language,
             )
         else:
@@ -269,7 +267,6 @@ class AgentExecutionPromptDraft:
                 output_language=output,
                 process_language=process,
                 progress_language=progress,
-                search_region=search_region,
                 accept_language=accept_language,
             )
             apply_language_policy_to_prompt(self.request.prompt, policy)

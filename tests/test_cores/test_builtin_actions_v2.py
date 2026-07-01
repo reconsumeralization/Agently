@@ -338,6 +338,16 @@ def test_agent_language_policy_updates_builtin_search_default_region():
     assert search.region == "cn-zh"
 
 
+def test_agent_language_policy_does_not_override_explicit_builtin_search_region():
+    agent = Agently.create_agent()
+    agent.language("中文")
+    search = Search(timeout=1, region="us-en")
+
+    agent.use_actions(search, always=True)
+
+    assert search.region == "us-en"
+
+
 def test_agent_use_actions_accepts_browse_package():
     agent = Agently.create_agent()
     browse = Browse(enable_playwright=False, enable_bs4=False)

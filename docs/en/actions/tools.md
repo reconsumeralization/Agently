@@ -124,10 +124,10 @@ exposed as a shell action.
 
 When an Agent-level language policy is set with `agent.language("zh-CN")`,
 registered Search/Browse packages receive compatible locale defaults unless the
-package was configured explicitly. Search uses the policy as a default
-`region` hint such as `cn-zh`; Browse uses it as an `Accept-Language` header.
-The policy is guidance for query/source recall and process text, not a
-replacement for task-specific source requirements.
+package was configured explicitly. Search derives its provider-specific default
+`region` inside the Search package; Browse uses the policy as an
+`Accept-Language` header. The policy is guidance for query/source recall and
+process text, not a replacement for task-specific source requirements.
 
 Browse preserves direct `Browse.browse(url)` compatibility by returning text,
 but the registered `browse` Action uses structured results. If all Browse

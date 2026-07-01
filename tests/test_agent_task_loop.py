@@ -3964,8 +3964,9 @@ def test_agent_language_policy_normalizes_and_reaches_execution_prompt():
     assert agent_policy is not None
     assert execution_policy is not None
     assert agent_policy["language"] == "zh-CN"
-    assert agent_policy["search_region"] == "cn-zh"
+    assert "search_region" not in agent_policy
     assert execution_policy["language"] == "zh-CN"
+    assert "search_region" not in execution_policy
     assert execution_policy["accept_language"].startswith("zh-CN")
     assert "Language policy" in execution.request.prompt.to_text()
 
@@ -5867,7 +5868,8 @@ async def test_agent_task_loop_uses_agent_language_policy(tmp_path):
     stream_items = [item async for item in task.get_async_generator(type="instant")]
     progress_items = [item for item in stream_items if (item.meta or {}).get("stream_kind") == "progress"]
 
-    assert any("language_policy" in call and "search_region: cn-zh" in call for call in MockAgentTaskRequester.calls)
+    assert any("language_policy" in call and "output_language: zh-CN" in call for call in MockAgentTaskRequester.calls)
+    assert all("search_region" not in call for call in MockAgentTaskRequester.calls)
     assert progress_items
     assert all((item.meta or {}).get("progress_language") == "zh-CN" for item in progress_items)
 

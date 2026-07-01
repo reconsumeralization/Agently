@@ -117,9 +117,9 @@ Browse 默认 backend 顺序是 Playwright -> restricted curl -> BS4。curl back
 Browse 规范化后的 URL candidate，不会作为 shell action 暴露给模型。
 
 当 Agent 通过 `agent.language("zh-CN")` 设置语言策略后，注册后的 Search/Browse package
-会在未显式配置时接收兼容的 locale 默认值。Search 会把策略作为默认 `region` hint
-（例如 `cn-zh`）；Browse 会把策略作为 `Accept-Language` header。这个策略用于查询、
-来源召回和过程文本引导，不替代任务自己的来源要求。
+会在未显式配置时接收兼容的 locale 默认值。Search 会在 Search package 内部派生
+provider-specific 默认 `region`；Browse 会把策略作为 `Accept-Language` header。这个
+策略用于查询、来源召回和过程文本引导，不替代任务自己的来源要求。
 
 `Browse.browse(url)` 直接调用仍保持返回文本的兼容行为，但注册后的 `browse` Action
 使用结构化结果。如果所有 Browse backend 都失败，Action result 会是

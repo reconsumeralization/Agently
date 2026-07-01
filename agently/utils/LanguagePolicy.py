@@ -23,7 +23,6 @@ class LanguagePolicy(TypedDict, total=False):
     output_language: str
     process_language: str
     progress_language: str
-    search_region: str
     accept_language: str
 
 
@@ -36,7 +35,6 @@ _LANGUAGE_ALIASES = {
     "zh-hans": "zh-CN",
     "zh_hans": "zh-CN",
     "cn": "zh-CN",
-    "cn-zh": "zh-CN",
     "chinese": "zh-CN",
     "simplified chinese": "zh-CN",
     "simplified_chinese": "zh-CN",
@@ -46,18 +44,6 @@ _LANGUAGE_ALIASES = {
     "english": "en",
     "en-us": "en",
     "en_us": "en",
-    "us-en": "en",
-}
-
-_SEARCH_REGION_BY_LANGUAGE = {
-    "zh-CN": "cn-zh",
-    "zh-TW": "tw-tzh",
-    "en": "us-en",
-    "ja": "jp-jp",
-    "ko": "kr-kr",
-    "fr": "fr-fr",
-    "de": "de-de",
-    "es": "es-es",
 }
 
 _ACCEPT_LANGUAGE_BY_LANGUAGE = {
@@ -84,7 +70,6 @@ def resolve_language_policy(
     output_language: Any = None,
     process_language: Any = None,
     progress_language: Any = None,
-    search_region: Any = None,
     accept_language: Any = None,
     base: Mapping[str, Any] | None = None,
 ) -> LanguagePolicy:
@@ -106,11 +91,6 @@ def resolve_language_policy(
         "process_language": process,
         "progress_language": progress,
     }
-    region = search_region if search_region is not None else base_policy.get("search_region")
-    if region is None:
-        region = _SEARCH_REGION_BY_LANGUAGE.get(output)
-    if region is not None and str(region).strip():
-        policy["search_region"] = str(region).strip()
 
     accept = accept_language if accept_language is not None else base_policy.get("accept_language")
     if accept is None:
@@ -154,12 +134,8 @@ def language_policy_prompt(policy: Mapping[str, Any] | None) -> str:
         f"- Write final user-facing answers and deliverables in {output}.",
         f"- Write important process text, progress, verification notes, and task status text in {process}.",
         "- Keep citations, URLs, code identifiers, file paths, command output, error text, and direct source quotes in their original form when accuracy requires it.",
+        "- When forming Search queries or locale-sensitive requests, prefer the policy language unless the task or source requires another locale.",
     ]
-    search_region = resolved.get("search_region")
-    if search_region:
-        lines.append(
-            f"- When forming Search queries or locale-sensitive requests, prefer the policy language and region hint {search_region} unless the task or source requires another locale."
-        )
     return "\n".join(lines)
 
 
