@@ -1091,6 +1091,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
     ) -> AgentExecutionStreamData:
         raw_path = str(getattr(item, "path", "") or "stream")
         delta = None if self._is_process_summary_stream_path(raw_path) else getattr(item, "delta", None)
+        display_meta = self._taskboard_control_stream_display_meta(raw_path)
         return await self._emit(
             f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.control.{raw_path}",
             getattr(item, "value", None),
@@ -1104,8 +1105,64 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "card_id": card_id,
                 "stream_kind": "taskboard_control_request",
                 "control_path": raw_path,
+                **display_meta,
             },
         )
+
+    @staticmethod
+    def _taskboard_control_stream_display_meta(raw_path: str) -> dict[str, Any]:
+        primary = str(raw_path or "").split(".", 1)[0].split("[", 1)[0].strip()
+        natural_language_titles = {
+            "answer": "Repair answer",
+            "candidate_final_result": "Candidate final result",
+            "final_result": "Final result",
+            "progress_message": "Progress message",
+            "self_check": "Self-check",
+            "short_summary": "Short summary",
+        }
+        structured_titles = {
+            "acceptance_points": ("[Acceptance: Criteria]", "acceptance"),
+            "diagnostics": ("[Diagnostic: Execution diagnostics]", "diagnostic"),
+            "evidence": ("[Evidence: Evidence summary]", "evidence"),
+            "evidence_use": ("[Evidence: Evidence binding]", "evidence"),
+            "file_refs": ("[Artifact: File references]", "artifact"),
+            "gaps": ("[Diagnostic: Gaps]", "diagnostic"),
+            "next_board_action": ("[Action: Next step]", "action"),
+            "patch_proposal": ("[Action: Patch proposal]", "action"),
+            "remaining_work": ("[Action: Remaining work]", "action"),
+            "source_refs": ("[Evidence: Source references]", "evidence"),
+            "status": ("[Status: Card status]", "status"),
+            "sufficient": ("[Status: Evidence sufficiency]", "status"),
+            "target_refs": ("[Action: Target refs]", "action"),
+            "$status": ("[Status: Model request status]", "status"),
+        }
+        title_key = f"agent_task.taskboard.control.{primary or 'stream'}"
+        if primary in natural_language_titles:
+            title = natural_language_titles[primary]
+            return {
+                "display_title": title,
+                "display_title_default": title,
+                "display_title_key": title_key,
+                "display_category": "model_natural_language",
+                "display_is_intermediate": False,
+            }
+        if primary in structured_titles:
+            title, category = structured_titles[primary]
+            return {
+                "display_title": title,
+                "display_title_default": title,
+                "display_title_key": title_key,
+                "display_category": category,
+                "display_is_intermediate": True,
+            }
+        title = f"[Intermediate: {primary or 'stream'}]"
+        return {
+            "display_title": title,
+            "display_title_default": title,
+            "display_title_key": title_key,
+            "display_category": "intermediate",
+            "display_is_intermediate": True,
+        }
 
     async def _bridge_taskboard_card_execution_stream(self, card_id: str, execution: Any) -> None:
         try:

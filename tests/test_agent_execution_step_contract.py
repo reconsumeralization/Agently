@@ -2586,6 +2586,23 @@ def test_taskboard_control_empty_model_patch_does_not_swallow_readback_intent():
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
 
 
+def test_taskboard_control_stream_display_meta_uses_locale_keys_not_hardcoded_labels():
+    answer_meta = AgentTask._taskboard_control_stream_display_meta("answer")
+    action_meta = AgentTask._taskboard_control_stream_display_meta("target_refs[0]")
+    nested_meta = AgentTask._taskboard_control_stream_display_meta("evidence_use[0].claim")
+
+    assert answer_meta["display_title_key"] == "agent_task.taskboard.control.answer"
+    assert answer_meta["display_title_default"] == "Repair answer"
+    assert answer_meta["display_category"] == "model_natural_language"
+    assert answer_meta["display_is_intermediate"] is False
+    assert action_meta["display_title_key"] == "agent_task.taskboard.control.target_refs"
+    assert action_meta["display_title_default"] == "[Action: Target refs]"
+    assert action_meta["display_category"] == "action"
+    assert action_meta["display_is_intermediate"] is True
+    assert nested_meta["display_title_key"] == "agent_task.taskboard.control.evidence_use"
+    assert nested_meta["display_category"] == "evidence"
+
+
 def test_taskboard_control_workspace_target_refs_become_readback_patch():
     validator = TaskBoardValidator()
     revision = TaskBoardRevision.create(
