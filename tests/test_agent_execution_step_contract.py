@@ -4496,6 +4496,116 @@ async def test_taskboard_finalization_materializes_final_artifact_evidence_befor
 
 
 @pytest.mark.asyncio
+async def test_taskboard_finalization_promotes_working_artifact_to_required_deliverable(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("execution-taskboard-final-artifact-promotion").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Produce a final Workspace report.",
+        success_criteria=["The final report contains a verifier-visible required evidence section."],
+        execution="taskboard",
+        options={
+            "agent_task": {
+                "output_contract": {
+                    "deliverables": [{"path": "final.md", "media_type": "text/markdown"}],
+                    "sections": ["Required Evidence Section"],
+                }
+            }
+        },
+    )
+    source_path = "working/taskboard/synthesize/final.md"
+    source_content = (
+        "# Final Report\n\n"
+        "## Required Evidence Section\n\n"
+        "The report is complete.\n\n"
+        + ("long body line\n" * 500)
+        + "TAIL-MARKER-PROMOTED-FROM-WORKING-ARTIFACT"
+    )
+    await task.workspace.write_file(source_path, source_content)
+    revision = TaskBoardRevision.create(
+        board_id="final-artifact-promotion",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "final-artifact-promotion-graph",
+                "cards": [{"id": "synthesize", "objective": "Write the final report."}],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "synthesize",
+                        "status": "completed",
+                        "preview": {
+                            "artifact_manifest": {"path": source_path},
+                            "acceptance_points": [
+                                {
+                                    "criterion": "Required evidence section is present.",
+                                    "expected_anchor": "Required Evidence Section",
+                                    "artifact_path": "final.md",
+                                }
+                            ],
+                            "remaining_work": [],
+                        },
+                        "artifact_refs": [{"path": source_path, "role": "workspace_artifact"}],
+                    },
+                }
+            ],
+        },
+    )
+    verification_calls: list[dict[str, Any]] = []
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        verification_calls.append(DataFormatter.sanitize(kwargs))
+        file_refs = kwargs["execution_result"]["file_refs"]
+        assert file_refs[0]["path"] == "final.md"
+        evidence_items = kwargs["execution_meta"]["blocks"]["evidence"]["evidence_items"]
+        assert any(
+            item.get("kind") == "workspace_artifact.readback" and item.get("path") == "final.md"
+            for item in evidence_items
+        )
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Final artifact evidence is verifier-visible.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": "",
+        }
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+    final_target = task.workspace.resolve_file_path("final.md")
+    readback = await task.workspace.read_file("final.md", max_bytes=int(final_target.stat().st_size) + 1)
+
+    assert verification_calls
+    assert terminal == {"terminal": True, "status": "completed"}
+    assert task.result["accepted"] is True
+    assert readback["content"] == source_content
+    assert "TAIL-MARKER-PROMOTED-FROM-WORKING-ARTIFACT" in str(readback["content"])
+
+
+@pytest.mark.asyncio
 async def test_taskboard_final_artifact_evidence_supports_targeted_readback(tmp_path):
     from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
 
