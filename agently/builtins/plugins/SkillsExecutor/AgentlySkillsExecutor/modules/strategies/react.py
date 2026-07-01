@@ -109,7 +109,23 @@ async def run_react_execution(
 
         # Check budget before making a model call
         budget = data.get_state("step_budget", step_budget)
-        if _required_actions_satisfied(required_actions, succeeded_required_actions) or step_count >= budget:
+        if step_count >= budget:
+            await context.async_emit_runtime_stream(
+                {
+                    "type": "skills.execution.budget_exhausted",
+                    "action": "abort",
+                    "payload": {
+                        "reason": "step_budget_exhausted",
+                        "strategy": "react",
+                        "active_phase": "reason",
+                        "step_count": step_count,
+                        "step_budget": budget,
+                    },
+                }
+            )
+            await data.async_emit("FINALIZE")
+            return
+        if _required_actions_satisfied(required_actions, succeeded_required_actions):
             await data.async_emit("FINALIZE")
             return
 
@@ -316,6 +332,20 @@ async def run_react_execution(
         required_satisfied = _required_actions_satisfied(required_actions, succeeded_required_actions)
 
         if is_final or required_satisfied or budget_exhausted:
+            if budget_exhausted and not required_satisfied and not is_final:
+                await context.async_emit_runtime_stream(
+                    {
+                        "type": "skills.execution.budget_exhausted",
+                        "action": "abort",
+                        "payload": {
+                            "reason": "step_budget_exhausted",
+                            "strategy": "react",
+                            "active_phase": "observe",
+                            "step_count": step_count,
+                            "step_budget": budget,
+                        },
+                    }
+                )
             await data.async_emit("FINALIZE")
         else:
             await data.async_emit("REASON")

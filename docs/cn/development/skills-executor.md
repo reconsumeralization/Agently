@@ -228,9 +228,16 @@ judge。
 - `effort="normal"` 或 `effort="max"` 选中内置 planner chain 时，会收到
   `skills.runtime_chain.*`
 - 选中多步兼容 label 时，还会收到 `skills.staged.*` 和 `skills.react.*`
+- 内置 `staged` 或 `react` 策略因 step budget 耗尽而停止或截断工作时，会收到
+  `skills.execution.budget_exhausted`
+- host cancellation 传入 Skills runtime，或框架执行在正常 Skills result
+  返回前失败时，会收到 `skills.execution.aborted`
 
 Blocks lowering evidence、ExecutionBlockGraph、ResultAdapter output 和
 TriggerFlow close snapshot 可从 `execution.close_snapshot["blocks"]` 读取。
+Abort diagnostics 会包含 strategy、effort、elapsed seconds，以及可用时的最后一个
+active runtime event。Wall-clock 和 no-progress 限制仍属于 host policy；Skills
+只在 runtime 观察到取消或失败后记录诊断。
 
 直接 Skills `stream_handler` 回调可用 `agently.types.data` 里的
 `SkillRuntimeStreamHandler` 标注。如果你在自定义 Skills effort strategy 里调用

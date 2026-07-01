@@ -14,8 +14,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import ipaddress
 import socket
+import time
 import uuid
 from inspect import isawaitable
 from pathlib import Path
@@ -353,10 +356,33 @@ class SkillExecutor:
             workspace=workspace,
             runtime_resources=runtime_resources,
         )
+        started_at = time.monotonic()
         try:
             await execution.async_start({"task": task, "plan_id": str(plan.get("plan_id", ""))})
             blocks_close_snapshot = await execution.async_close()
+        except asyncio.CancelledError as error:
+            await self._emit_abort_diagnostic(
+                context=context,
+                runtime_stream=runtime_stream,
+                execution_id=execution_id,
+                strategy_name=strategy_name,
+                effort=effort,
+                reason="host_cancellation",
+                started_at=started_at,
+                error=error,
+            )
+            raise
         except Exception as error:
+            await self._emit_abort_diagnostic(
+                context=context,
+                runtime_stream=runtime_stream,
+                execution_id=execution_id,
+                strategy_name=strategy_name,
+                effort=effort,
+                reason="execution_error",
+                started_at=started_at,
+                error=error,
+            )
             return self._build_execution(
                 execution_id=execution_id,
                 status="error",
@@ -1312,6 +1338,56 @@ class SkillExecutor:
     ) -> None:
         runtime_stream.append(item)
         await context.async_emit_runtime_stream(item)
+
+    @staticmethod
+    def _last_active_runtime_item(runtime_stream: list[dict[str, Any]]) -> dict[str, Any] | None:
+        terminal_types = {
+            "skills.execution.aborted",
+            "skills.execution.budget_exhausted",
+            "skills.custom_strategy.done",
+            "skills.react.done",
+            "skills.staged.done",
+        }
+        for item in reversed(runtime_stream):
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type in terminal_types:
+                continue
+            return _copy_public(item)
+        return None
+
+    async def _emit_abort_diagnostic(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        runtime_stream: list[dict[str, Any]],
+        execution_id: str,
+        strategy_name: str,
+        effort: str | None,
+        reason: str,
+        started_at: float,
+        error: BaseException | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "reason": reason,
+            "strategy": strategy_name,
+            "effort": effort,
+            "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 6),
+            "active_event": self._last_active_runtime_item(runtime_stream),
+        }
+        if error is not None:
+            payload["exception_type"] = type(error).__name__
+            payload["exception_message"] = str(error)
+        item = {
+            "type": "skills.execution.aborted",
+            "action": "abort",
+            "execution_id": execution_id,
+            "payload": payload,
+        }
+        runtime_stream.append(item)
+        with contextlib.suppress(BaseException):
+            await context.async_emit_runtime_stream(item)
 
     def _build_execution(
         self,
