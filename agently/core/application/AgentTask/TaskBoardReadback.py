@@ -290,11 +290,17 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     remaining_work.append(f"{ failed_count } artifact refs could not be read.")
                 if file_failed_count:
                     remaining_work.append(f"{ file_failed_count } Workspace file refs could not be read.")
-                readback_evidence_items = self._taskboard_action_artifact_readback_evidence_items(
-                    readbacks,
-                    source="taskboard_readback_card",
-                    card_id=context.card.id,
-                )
+                readback_evidence_items = [
+                    *self._taskboard_action_artifact_readback_evidence_items(
+                        readbacks,
+                        source="taskboard_readback_card",
+                        card_id=context.card.id,
+                    ),
+                    *self._taskboard_workspace_file_readback_evidence_items(
+                        file_readbacks,
+                        card_id=context.card.id,
+                    ),
+                ]
                 payload = {
                     "status": status,
                     "answer": (
@@ -410,6 +416,25 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         file_success_count = 0
         if isinstance(file_readbacks, Sequence) and not isinstance(file_readbacks, str | bytes | bytearray):
             file_success_count = sum(1 for item in file_readbacks if isinstance(item, Mapping) and item.get("ok"))
+        file_readback_evidence_items = self._taskboard_workspace_file_readback_evidence_items(
+            [item for item in file_readbacks if isinstance(item, Mapping)],
+            card_id=context.card.id,
+        )
+        if file_readback_evidence_items:
+            existing_items = payload.get("evidence_items")
+            existing_sequence = (
+                list(existing_items)
+                if isinstance(existing_items, Sequence) and not isinstance(existing_items, str | bytes | bytearray)
+                else []
+            )
+            payload["evidence_items"] = DataFormatter.sanitize(
+                self._dedupe_taskboard_readback_evidence_items(
+                    [
+                        *[item for item in existing_sequence if isinstance(item, Mapping)],
+                        *file_readback_evidence_items,
+                    ]
+                )
+            )
         result_file_refs = [dict(ref) for ref in file_refs if isinstance(ref, Mapping)]
         raw_result_file_refs = payload.get("file_refs")
         if isinstance(raw_result_file_refs, Sequence) and not isinstance(
@@ -626,6 +651,93 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             if isinstance(readback, Mapping):
                 collect(readback, source_ref=readback)
         return refs
+
+    @classmethod
+    def _taskboard_workspace_readback_evidence_id(cls, prefix: str, path: str, source: str) -> str:
+        raw = f"{ prefix }:{ source }:{ path }"
+        return "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in raw)[:240]
+
+    @classmethod
+    def _dedupe_taskboard_readback_evidence_items(
+        cls,
+        items: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            evidence_id = str(item.get("id") or "").strip()
+            if evidence_id and evidence_id in seen:
+                continue
+            if evidence_id:
+                seen.add(evidence_id)
+            deduped.append(dict(DataFormatter.sanitize(item)))
+        return deduped
+
+    def _taskboard_workspace_file_readback_evidence_items(
+        self,
+        file_readbacks: Sequence[Mapping[str, Any]],
+        *,
+        card_id: str,
+    ) -> list[dict[str, Any]]:
+        required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
+        items: list[dict[str, Any]] = []
+        for index, readback in enumerate(file_readbacks):
+            if not isinstance(readback, Mapping):
+                continue
+            path = str(readback.get("path") or "").strip()
+            if not path:
+                continue
+            ref = readback.get("ref")
+            ref = ref if isinstance(ref, Mapping) else {}
+            is_workspace_artifact = path in required_paths or self._is_trusted_workspace_artifact_ref(ref)
+            source_suffix = "workspace_artifact" if is_workspace_artifact else "workspace_file"
+            source = f"agent_task.taskboard.card.{ card_id }.{ source_suffix }"
+            prefix = "workspace_artifact_readback" if is_workspace_artifact else "workspace_file_readback"
+            evidence_id = self._taskboard_workspace_readback_evidence_id(prefix, path, source)
+            ok = bool(readback.get("ok"))
+            preview = str(readback.get("content_preview") or "")
+            preview_meta = readback.get("content_preview_meta")
+            preview_meta = preview_meta if isinstance(preview_meta, Mapping) else {}
+            truncated = bool(readback.get("truncated")) or bool(preview_meta.get("truncated"))
+            item: dict[str, Any] = {
+                "id": evidence_id,
+                "kind": "workspace_artifact.readback" if is_workspace_artifact else "workspace_file.readback",
+                "status": "ok" if ok else "failed",
+                "raw_status": readback.get("status") or ("read" if ok else "failed"),
+                "body_state": "truncated" if truncated else ("full" if preview else "ref_only"),
+                "path": path,
+                "source": source,
+                "read_bytes": readback.get("read_bytes"),
+                "offset": readback.get("offset"),
+                "truncated": truncated,
+                "aliases": [
+                    path,
+                    f"{ card_id }:{ path }",
+                    f"{ source }:{ path }",
+                ],
+                "provenance": {
+                    "source": source,
+                    "taskboard_card_id": card_id,
+                    "path": path,
+                    "readback_index": index,
+                },
+                "supports": {
+                    "content": bool(ok and preview),
+                    "unavailability": not ok,
+                    "ref_pointer": False,
+                },
+            }
+            if preview:
+                item["body"] = preview
+            if preview_meta:
+                item["preview_meta"] = dict(DataFormatter.sanitize(preview_meta))
+            error = readback.get("error")
+            if error:
+                item["diagnostics"] = [{"code": "taskboard.readback.file_failed", "message": str(error)}]
+            items.append(DataFormatter.sanitize(item))
+        return self._dedupe_taskboard_readback_evidence_items(items)
 
     @staticmethod
     def _taskboard_dependency_ref_needs_readback(ref: Mapping[str, Any]) -> bool:

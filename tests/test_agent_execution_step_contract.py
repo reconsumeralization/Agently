@@ -3553,6 +3553,27 @@ async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     assert "Workspace-only detail" in payload["file_readbacks"][0]["content_preview"]
     assert result.metadata["execution_kind"] == "taskboard_artifact_readback"
     assert result.metadata["file_ref_count"] == 1
+    ledger_items = result.metadata["evidence_ledger"]["items"]
+    readback_items = [item for item in ledger_items if item.get("kind") == "workspace_file.readback"]
+    assert readback_items
+    assert readback_items[0]["path"] == "sources/source.md"
+    assert readback_items[0]["status"] == "ok"
+    assert readback_items[0]["supports"]["content"] is True
+    assert "Workspace-only detail" in readback_items[0]["body"]
+
+    updated_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": result.to_dict()}],
+        },
+    )
+    evidence_view = build_task_board_evidence_view(updated_revision).to_dict()
+    projected_items = [
+        item for item in evidence_view["evidence_items"] if item.get("kind") == "workspace_file.readback"
+    ]
+    assert projected_items
+    assert "Workspace-only detail" in projected_items[0]["body"]
 
 
 @pytest.mark.asyncio
@@ -3691,6 +3712,89 @@ async def test_taskboard_readback_card_reads_workspace_file_refs_from_artifact_r
     assert result.file_refs[0]["path"] == "deliverables/final.md"
     assert result.preview["file_readbacks"][0]["ok"] is True
     assert "complete Workspace-backed deliverable body" in result.preview["file_readbacks"][0]["content_preview"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_readback_card_projects_required_final_deliverable_as_artifact_readback(tmp_path):
+    agent = _create_agent("execution-taskboard-final-artifact-readback-evidence").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Verify a final Workspace deliverable through readback evidence.",
+        success_criteria=["The final deliverable body is verifier-visible."],
+        execution="taskboard",
+        max_iterations=None,
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    write_result = await task.workspace.write_file(
+        "final.md",
+        "# Final Report\n\nThe final Workspace artifact body is verifier-visible.",
+    )
+    file_ref = dict(write_result["file_refs"][0])
+    revision = TaskBoardRevision.create(
+        board_id="workspace-final-readback-artifact-evidence",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "workspace-final-readback-artifact-evidence-graph",
+                "cards": [
+                    {"id": "draft", "objective": "Write final.md."},
+                    {
+                        "id": "readback",
+                        "objective": "Read the final Workspace artifact.",
+                        "depends_on": ["draft"],
+                        "allowed_execution_shape": "readback",
+                        "required_outputs": ["Workspace artifact body readback evidence."],
+                    },
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": "Workspace artifact delivered at final.md",
+                        "artifact_refs": [file_ref],
+                    },
+                }
+            ],
+        },
+    )
+
+    card = revision.graph.card_by_id()["readback"]
+    result = await task._run_taskboard_readback_card(
+        SimpleNamespace(card=card, revision=revision),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    ledger_items = result.metadata["evidence_ledger"]["items"]
+    artifact_items = [item for item in ledger_items if item.get("kind") == "workspace_artifact.readback"]
+    assert artifact_items
+    assert artifact_items[0]["path"] == "final.md"
+    assert artifact_items[0]["supports"]["content"] is True
+    assert "final Workspace artifact body" in artifact_items[0]["body"]
+
+    updated_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": result.to_dict()}],
+        },
+    )
+    evidence_view = build_task_board_evidence_view(updated_revision).to_dict()
+    projected_items = [
+        item for item in evidence_view["evidence_items"] if item.get("kind") == "workspace_artifact.readback"
+    ]
+    assert projected_items
+    assert "final Workspace artifact body" in projected_items[0]["body"]
 
 
 @pytest.mark.asyncio
