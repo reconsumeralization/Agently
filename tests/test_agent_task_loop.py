@@ -144,6 +144,10 @@ def test_verifier_prompt_keeps_optional_risk_sections_optional():
     assert "Do not require risk, uncertainty, limitation, or caveat sections" in text
     assert "unless the user task, output contract," in text
     assert "verifier-visible evidence limitations explicitly require them" in text
+    assert "Output-contract section labels are content" in text
+    assert "not exact heading-text mandates" in text
+    assert "do not reject a " in text
+    assert "long artifact solely because an exact locator label missed" in text
 
 
 def test_agent_task_process_progress_delta_uses_only_explicit_progress_event():
