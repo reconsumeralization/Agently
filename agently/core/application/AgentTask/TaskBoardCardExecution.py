@@ -1150,7 +1150,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         stage: str,
     ) -> Any:
         timeout = self._taskboard_card_timeout()
-        no_progress_timeout = self._task_no_progress_timeout() if stage == "control" else None
+        no_progress_timeout = self._task_no_progress_timeout()
         if timeout is None and no_progress_timeout is None:
             return await awaitable
         task = asyncio.ensure_future(awaitable)

@@ -6077,6 +6077,34 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
 
 
 @pytest.mark.asyncio
+async def test_taskboard_agent_card_data_wait_uses_no_progress_timeout(tmp_path):
+    agent = _create_agent("execution-taskboard-agent-card-data-no-progress").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Run a stalled TaskBoard agent card data wait.",
+        success_criteria=["The data wait reports no progress instead of waiting forever."],
+        execution="taskboard",
+        limits={"max_no_progress_seconds": 0.05},
+    )
+
+    async def never_finishes() -> None:
+        await asyncio.sleep(5)
+
+    started_at = asyncio.get_running_loop().time()
+    with pytest.raises(TimeoutError, match="TaskBoard card 'agent-card' data request made no progress"):
+        await task._await_taskboard_card_execution(
+            never_finishes(),
+            card_id="agent-card",
+            stage="data",
+        )
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert elapsed < 0.5
+
+
+@pytest.mark.asyncio
 async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
     agent = _create_taskboard_retry_card_agent("execution-taskboard-card-retry").use_workspace(tmp_path / "workspace")
 
