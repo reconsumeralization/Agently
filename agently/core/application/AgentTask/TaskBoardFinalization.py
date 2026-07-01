@@ -98,6 +98,17 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             await self._emit("agent_task.blocked", self.result)
             return {"terminal": True, "status": self.status}
 
+        final_artifact_evidence_items = await self._taskboard_final_artifact_verification_evidence_items(
+            trusted_final_refs,
+            final={},
+        )
+        if final_artifact_evidence_items:
+            evidence_view = self._taskboard_evidence_view_with_additional_items(
+                evidence_view,
+                final_artifact_evidence_items,
+            )
+            evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
+
         finalization_source = "model_finalizer"
         final = self._promote_taskboard_final_candidate(
             revision,
@@ -137,6 +148,21 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 candidate_final_result,
                 fallback_final_result=self._workspace_artifact_final_result_from_refs(trusted_final_refs),
             )
+        final_artifact_evidence_items = self._dedupe_taskboard_final_evidence_items(
+            [
+                *final_artifact_evidence_items,
+                *await self._taskboard_final_artifact_verification_evidence_items(
+                    trusted_final_refs,
+                    final=final,
+                ),
+            ]
+        )
+        if final_artifact_evidence_items:
+            evidence_view = self._taskboard_evidence_view_with_additional_items(
+                evidence_view,
+                final_artifact_evidence_items,
+            )
+            evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
         final_evidence_guard = validate_evidence_use(collect_evidence_use(final), evidence_ledger)
         final = value_with_normalized_evidence_use(final, final_evidence_guard.get("normalized_evidence_use"))
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
@@ -322,6 +348,156 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         )
         await self._emit("agent_task.completed" if accepted else "agent_task.blocked", self.result)
         return {"terminal": True, "status": self.status}
+
+    @classmethod
+    def _dedupe_taskboard_final_evidence_items(
+        cls,
+        items: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            evidence_id = str(item.get("id") or "").strip()
+            if evidence_id and evidence_id in seen:
+                continue
+            if evidence_id:
+                seen.add(evidence_id)
+            deduped.append(dict(DataFormatter.sanitize(item)))
+        return deduped
+
+    @classmethod
+    def _taskboard_evidence_view_with_additional_items(
+        cls,
+        evidence_view: Mapping[str, Any],
+        evidence_items: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        additional = [item for item in evidence_items if isinstance(item, Mapping)]
+        if not additional:
+            return dict(DataFormatter.sanitize(evidence_view))
+        updated = dict(DataFormatter.sanitize(evidence_view))
+        raw_items = updated.get("evidence_items")
+        existing = (
+            [item for item in raw_items if isinstance(item, Mapping)]
+            if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray)
+            else []
+        )
+        updated["evidence_items"] = cls._dedupe_taskboard_final_evidence_items([*existing, *additional])
+        return DataFormatter.sanitize(updated)
+
+    async def _taskboard_final_artifact_verification_evidence_items(
+        self,
+        refs: Sequence[Mapping[str, Any]],
+        *,
+        final: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for ref in self._dedupe_ref_records([dict(item) for item in refs if isinstance(item, Mapping)])[:4]:
+            path = str(ref.get("path") or "").strip()
+            if not path:
+                continue
+            source = str(ref.get("source") or "agent_task.taskboard.final_verification.workspace_artifact").strip()
+            materialized_ref, content_for_locator, failure_item = await self._taskboard_materialize_final_artifact_ref(
+                ref,
+                source=source,
+            )
+            if failure_item is not None:
+                items.append(failure_item)
+                continue
+            items.append(self._workspace_artifact_readback_evidence_item(materialized_ref))
+            manifest = self._taskboard_final_artifact_manifest(
+                materialized_ref,
+                final=final,
+                source=source,
+            )
+            locator_items = await self._workspace_artifact_acceptance_locator_evidence_items(
+                ref=materialized_ref,
+                result=final,
+                manifest=manifest,
+                source=source,
+                content=content_for_locator,
+            )
+            items.extend(locator_items)
+        return self._dedupe_taskboard_final_evidence_items(items)
+
+    async def _taskboard_materialize_final_artifact_ref(
+        self,
+        ref: Mapping[str, Any],
+        *,
+        source: str,
+    ) -> tuple[dict[str, Any], str, dict[str, Any] | None]:
+        path = str(ref.get("path") or "").strip()
+        materialized = dict(DataFormatter.sanitize(ref))
+        materialized.setdefault("role", "workspace_artifact")
+        materialized["source"] = source
+        if not path:
+            return materialized, "", None
+
+        has_preview = bool(str(materialized.get("preview") or ""))
+        needs_readback = not self._workspace_artifact_ref_has_trusted_readback(materialized) or not has_preview
+        if not needs_readback:
+            content = str(materialized.get("preview") or "")
+            return materialized, "" if materialized.get("truncated") else content, None
+
+        try:
+            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+        except Exception as error:
+            return (
+                materialized,
+                "",
+                self._workspace_artifact_failure_evidence_item(
+                    path=path,
+                    source=source,
+                    code="agent_task.taskboard.final_artifact_readback_failed",
+                    message="TaskBoard final artifact readback failed before final verification.",
+                    readback={
+                        "error": {
+                            "type": error.__class__.__name__,
+                            "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                        }
+                    },
+                ),
+            )
+
+        content = str(read_result.get("content") or "")
+        materialized.update(
+            {
+                "path": str(read_result.get("path") or path),
+                "bytes": int(read_result.get("bytes") or materialized.get("bytes") or 0),
+                "sha256": str(read_result.get("sha256") or materialized.get("sha256") or ""),
+                "media_type": read_result.get("media_type") or materialized.get("media_type"),
+                "content_kind": str(read_result.get("content_kind") or materialized.get("content_kind") or "text"),
+                "preview": content,
+                "truncated": bool(read_result.get("truncated")),
+                "read_bytes": int(read_result.get("read_bytes") or 0),
+                "handler_id": read_result.get("handler_id") or materialized.get("handler_id"),
+            }
+        )
+        return materialized, "" if materialized.get("truncated") else content, None
+
+    @staticmethod
+    def _taskboard_final_artifact_manifest(
+        ref: Mapping[str, Any],
+        *,
+        final: Mapping[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        path = str(ref.get("path") or "").strip()
+        manifest: dict[str, Any] = {}
+        raw_manifest = final.get("artifact_manifest") if isinstance(final, Mapping) else None
+        if isinstance(raw_manifest, Mapping):
+            manifest_path = str(raw_manifest.get("path") or "").strip()
+            if not manifest_path or manifest_path == path:
+                manifest.update(dict(DataFormatter.sanitize(raw_manifest)))
+        if path:
+            manifest["path"] = path
+        manifest["source"] = source
+        manifest["file_refs"] = [DataFormatter.sanitize(dict(ref))]
+        for key in ("bytes", "sha256", "media_type", "content_kind"):
+            if ref.get(key) not in (None, "", [], {}):
+                manifest[key] = DataFormatter.sanitize(ref.get(key))
+        return DataFormatter.sanitize(manifest)
 
     async def _request_taskboard_final(
         self,

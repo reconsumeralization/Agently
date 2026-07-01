@@ -4204,6 +4204,147 @@ async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_taskboard_finalization_materializes_final_artifact_evidence_before_verifier(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("execution-taskboard-final-artifact-verifier-evidence").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Produce a final Workspace report.",
+        success_criteria=["The final report contains the verifier-visible required evidence section."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    await task.workspace.write_file(
+        "final.md",
+        "# Final Report\n\n## Required Evidence Section\n\nThe final artifact has verifier-visible evidence.",
+    )
+    revision = TaskBoardRevision.create(
+        board_id="final-artifact-verifier-evidence",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "final-artifact-verifier-evidence-graph",
+                "cards": [{"id": "final", "objective": "Write final.md."}],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final",
+                        "status": "completed",
+                        "preview": {
+                            "artifact_manifest": {"path": "final.md"},
+                            "acceptance_points": [
+                                {
+                                    "criterion": "Required evidence section is present.",
+                                    "expected_anchor": "Required Evidence Section",
+                                    "artifact_path": "final.md",
+                                }
+                            ],
+                            "remaining_work": [],
+                        },
+                        "artifact_refs": [{"path": "final.md", "role": "workspace_artifact"}],
+                    },
+                }
+            ],
+        },
+    )
+    verification_calls: list[dict[str, Any]] = []
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        verification_calls.append(DataFormatter.sanitize(kwargs))
+        evidence_items = kwargs["execution_meta"]["blocks"]["evidence"]["evidence_items"]
+        assert any(item.get("kind") == "workspace_artifact.readback" for item in evidence_items)
+        assert any(item.get("kind") == "workspace_artifact.acceptance_locator" for item in evidence_items)
+        assert any("final artifact has verifier-visible evidence" in str(item.get("body") or "") for item in evidence_items)
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Final artifact evidence is verifier-visible.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": "",
+        }
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+
+    assert verification_calls
+    assert terminal == {"terminal": True, "status": "completed"}
+    assert task.result["accepted"] is True
+    assert "final.md" in task.result["final_result"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_final_artifact_evidence_supports_targeted_readback(tmp_path):
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+
+    agent = _create_agent("execution-taskboard-final-targeted-readback").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Produce a sectioned final Workspace report.",
+        success_criteria=["The final report includes a required section."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    await task.workspace.write_file(
+        "final.md",
+        "# Final Report\n\n## Required Evidence Section\n\nTARGETED-READBACK-MARKER proves scoped verification.",
+    )
+
+    evidence_items = await task._taskboard_final_artifact_verification_evidence_items(
+        [{"path": "final.md", "role": "workspace_artifact"}],
+        final={
+            "accepted": True,
+            "acceptance_points": [
+                {
+                    "criterion": "Required evidence section is present.",
+                    "expected_anchor": "Required Evidence Section",
+                    "artifact_path": "final.md",
+                }
+            ],
+        },
+    )
+    execution_meta = {"blocks": {"evidence": {"evidence_items": evidence_items}}}
+    ledger = evidence_ledger_view({"evidence_items": evidence_items}, max_items=120, body_chars=2400)
+
+    await task._ensure_workspace_artifact_targeted_readback_evidence(
+        execution_meta,
+        ledger,
+        evidence_use=[],
+    )
+
+    final_ledger = task._evidence_ledger_from_execution_meta(execution_meta)
+    targeted = [
+        item for item in final_ledger["items"] if item.get("kind") == "workspace_artifact.targeted_readback"
+    ]
+    assert targeted
+    assert any("TARGETED-READBACK-MARKER" in str(item.get("body") or "") for item in targeted)
+
+
+@pytest.mark.asyncio
 async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate(tmp_path):
     agent = _create_flat_replan_agent("execution-flat-strategy").use_workspace(tmp_path / "workspace")
 
