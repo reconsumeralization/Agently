@@ -15,6 +15,7 @@
 from .ACP import ACP
 from .Browse import Browse
 from .Cmd import Cmd
+from .RuntimePreflight import RuntimePreflight
 from .Search import Search
 
-__all__ = ["ACP", "Browse", "Cmd", "Search"]
+__all__ = ["ACP", "Browse", "Cmd", "RuntimePreflight", "Search"]

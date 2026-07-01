@@ -6,7 +6,7 @@ import importlib
 import pytest
 
 from agently import Agently
-from agently.builtins.actions import ACP, Browse, Cmd, Search
+from agently.builtins.actions import ACP, Browse, Cmd, RuntimePreflight, Search
 from agently.builtins.actions.ACP import LocalACPProvider
 from agently.builtins.tools import Browse as LegacyBrowse
 from agently.builtins.tools import Cmd as LegacyCmd
@@ -26,6 +26,51 @@ def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():
     assert hasattr(LegacyBrowse(), "tool_info_list")
     assert not hasattr(Cmd(), "tool_info_list")
     assert hasattr(LegacyCmd(), "tool_info_list")
+
+
+def test_runtime_preflight_registers_structured_code_runtime_action():
+    agent = Agently.create_agent()
+    RuntimePreflight().register_actions(agent.action, action_id="inspect_runtimes")
+
+    spec = agent.action.action_registry.get_spec("inspect_runtimes")
+    assert spec is not None
+    assert spec.get("side_effect_level") == "read"
+    assert "without installing software" in str(spec.get("desc", ""))
+
+    result = agent.action.execute_action("inspect_runtimes", {})
+    assert result.get("status") == "success"
+    assert result.get("schema_version") == "code_runtime_environment/v1"
+    assert result.get("install_policy") == "not_allowed"
+    assert result.get("package_manager_policy") == "not_allowed"
+    assert "python_current" in result.get("candidate_order", [])
+    assert "python_current" in result.get("available_runtime_ids", [])
+    current = next(item for item in result.get("candidates", []) if item.get("runtime_id") == "python_current")
+    assert current.get("available") is True
+    assert current.get("source_file") == "reconcile.py"
+    assert current.get("run_commands")
+
+
+def test_runtime_preflight_can_hide_unavailable_candidates():
+    agent = Agently.create_agent()
+    RuntimePreflight(
+        candidates=[
+            {
+                "runtime_id": "missing_runtime",
+                "language": "NopeLang",
+                "commands": ["definitely-missing-runtime-for-agently-test"],
+                "source_file": "main.nope",
+                "run_commands": ["definitely-missing-runtime-for-agently-test main.nope"],
+            }
+        ]
+    ).register_actions(agent.action, action_id="inspect_custom_runtimes")
+
+    with_unavailable = agent.action.execute_action("inspect_custom_runtimes", {"include_unavailable": True})
+    assert with_unavailable.get("available_runtime_ids") == []
+    assert with_unavailable.get("selected_runtime_hint") == ""
+    assert with_unavailable.get("candidates", [])[0].get("available") is False
+
+    without_unavailable = agent.action.execute_action("inspect_custom_runtimes", {"include_unavailable": False})
+    assert without_unavailable.get("candidates") == []
 
 
 def test_mcp_and_acp_optional_dependencies_wait_for_explicit_use(monkeypatch):
