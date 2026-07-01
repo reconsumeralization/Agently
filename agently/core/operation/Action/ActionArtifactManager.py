@@ -294,6 +294,123 @@ class ActionArtifactManager:
             "meta": meta or {},
         }
 
+    def register_external_artifact_ref(
+        self,
+        *,
+        action_call_id: str,
+        artifact_type: str,
+        label: str,
+        ref: dict[str, Any],
+        media_type: str = "application/json",
+        meta: dict[str, Any] | None = None,
+    ) -> ActionArtifact:
+        artifact_id = str(ref.get("artifact_id") or f"act_art_{uuid.uuid4().hex}")
+        role = self._artifact_role(artifact_type)
+        preview = self._compact_value(ref, limit=4000)
+        preview_size = self._safe_json_size(preview)
+        path = ref.get("path") or ref.get("uri") or ref.get("url")
+        stored = {
+            "artifact_id": artifact_id,
+            "action_call_id": action_call_id,
+            "artifact_type": artifact_type,
+            "role": role,
+            "label": label,
+            "media_type": media_type,
+            "value": self._redact_value(ref),
+            "meta": meta or {},
+            "size": int(ref.get("size", ref.get("bytes", 0)) or 0),
+            "bytes": int(ref.get("bytes", ref.get("size", 0)) or 0),
+            "sha256": str(ref.get("sha256", "")),
+        }
+        if path is not None:
+            stored["path"] = str(path)
+        self._artifacts[artifact_id] = stored
+
+        artifact_ref: ActionArtifact = {
+            "artifact_id": artifact_id,
+            "action_call_id": action_call_id,
+            "artifact_type": artifact_type,
+            "role": role,
+            "label": label,
+            "media_type": media_type,
+            "preview": preview,
+            "preview_size": preview_size,
+            "truncated": False,
+            "full_value_available": False,
+            "available": True,
+            "size": stored["size"],
+            "bytes": stored["bytes"],
+            "meta": meta or {},
+        }
+        if path is not None:
+            artifact_ref["path"] = str(path)
+        if stored["sha256"]:
+            artifact_ref["sha256"] = stored["sha256"]
+        return artifact_ref
+
+    def _normalize_explicit_artifacts(
+        self,
+        *,
+        action_call_id: str,
+        artifact_refs: Any,
+        artifacts: Any,
+    ) -> list[ActionArtifact]:
+        normalized: list[ActionArtifact] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        def append_ref(ref: dict[str, Any], *, prefer_existing: bool = False):
+            if not isinstance(ref, dict):
+                return
+            item = dict(ref)
+            if not item.get("action_call_id"):
+                item["action_call_id"] = action_call_id
+            key = (
+                str(item.get("artifact_id", "")),
+                str(item.get("path") or item.get("uri") or item.get("url") or ""),
+                str(item.get("sha256", "")),
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            if prefer_existing or item.get("artifact_id"):
+                normalized.append(cast(ActionArtifact, item))
+                return
+            if "value" in item:
+                registered = self.register_execution_artifact(
+                    action_call_id=action_call_id,
+                    artifact_type=str(item.get("artifact_type", "artifact")),
+                    label=str(item.get("label", item.get("artifact_type", "artifact"))),
+                    value=item.get("value"),
+                    media_type=str(item.get("media_type", "application/json")),
+                    meta=cast(dict[str, Any], item.get("meta", {})) if isinstance(item.get("meta"), dict) else {},
+                )
+                path = item.get("path") or item.get("uri") or item.get("url")
+                if path is not None:
+                    registered["path"] = str(path)
+                normalized.append(registered)
+                return
+            if any(key in item for key in ("path", "uri", "url")):
+                normalized.append(
+                    self.register_external_artifact_ref(
+                        action_call_id=action_call_id,
+                        artifact_type=str(item.get("artifact_type", "artifact_ref")),
+                        label=str(item.get("label", item.get("name", item.get("path", item.get("uri", "artifact"))))),
+                        ref=item,
+                        media_type=str(item.get("media_type", item.get("mime_type", "application/json"))),
+                        meta=cast(dict[str, Any], item.get("meta", {})) if isinstance(item.get("meta"), dict) else {},
+                    )
+                )
+
+        if isinstance(artifact_refs, list):
+            for ref in artifact_refs:
+                if isinstance(ref, dict):
+                    append_ref(ref, prefer_existing=True)
+        if isinstance(artifacts, list):
+            for artifact in artifacts:
+                if isinstance(artifact, dict):
+                    append_ref(artifact)
+        return normalized
+
     # ── instruction-heavy detection ────────────────────────────────────────
 
     def _is_instruction_heavy_record(self, record: ActionResult) -> bool:
@@ -383,6 +500,12 @@ class ActionArtifactManager:
         meta = record.get("meta", {})
         if not isinstance(meta, dict):
             meta = {}
+        explicit_artifact_refs = self._normalize_explicit_artifacts(
+            action_call_id=action_call_id,
+            artifact_refs=record.get("artifact_refs", []),
+            artifacts=record.get("artifacts", []),
+        )
+
         should_externalize = (
             self._is_instruction_heavy_record(record)
             or self._safe_json_size(data) > 8000
@@ -392,11 +515,22 @@ class ActionArtifactManager:
         if file_refs:
             record["file_refs"] = file_refs
 
+        if explicit_artifact_refs and not should_externalize:
+            meta["execution_recall"] = {
+                "finalized": True,
+                "digest_version": 1,
+                "artifact_count": len(explicit_artifact_refs),
+            }
+            record["meta"] = meta
+            record["artifact_refs"] = explicit_artifact_refs
+            record["artifacts"] = explicit_artifact_refs
+            return record
+
         if not should_externalize:
             return record
 
         kwargs = record.get("kwargs", {})
-        artifact_refs: list[ActionArtifact] = []
+        artifact_refs: list[ActionArtifact] = list(explicit_artifact_refs)
         if isinstance(kwargs, dict) and kwargs:
             artifact_refs.append(
                 self.register_execution_artifact(
@@ -415,26 +549,6 @@ class ActionArtifactManager:
                     value=data,
                 )
             )
-
-        existing_artifacts = record.get("artifacts", [])
-        if isinstance(existing_artifacts, list):
-            for artifact in existing_artifacts:
-                if not isinstance(artifact, dict):
-                    continue
-                if artifact.get("artifact_id"):
-                    artifact_refs.append(cast(ActionArtifact, artifact))
-                    continue
-                if "value" in artifact:
-                    artifact_refs.append(
-                        self.register_execution_artifact(
-                            action_call_id=action_call_id,
-                            artifact_type=str(artifact.get("artifact_type", "artifact")),
-                            label=str(artifact.get("label", artifact.get("artifact_type", "artifact"))),
-                            value=artifact.get("value"),
-                            media_type=str(artifact.get("media_type", "application/json")),
-                            meta=cast(dict[str, Any], artifact.get("meta", {})) if isinstance(artifact.get("meta"), dict) else {},
-                        )
-                    )
 
         redaction_report = self._redaction_report_for_value(kwargs) if isinstance(kwargs, dict) else []
         meta["execution_recall"] = {

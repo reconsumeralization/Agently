@@ -223,6 +223,10 @@ code, shell output, SQL rows, page HTML, screenshots, or logs is retained as a
 redacted artifact instead of being inserted into every prompt. Artifact refs
 include role, media type, size/bytes, preview size, SHA-256, and truncation
 flags so consumers can tell that a preview is not complete evidence.
+Actions that explicitly return `artifacts` or `artifact_refs` use the same
+contract even when the output is small. This includes MCP resource/content
+blocks surfaced by `MCPActionExecutor`; Agently records the declared artifact
+metadata, but it does not infer undeclared file writes by scanning directories.
 When the digest is still too large for later planning or reply hot paths,
 Agently compacts the model-visible digest again: `result` keeps the bounded
 digest, duplicate `data` / `model_digest` fields may become `same_as="result"`

@@ -341,6 +341,44 @@ def test_max_output_bytes_preserves_full_output_in_artifact():
     assert recalled["value"] == output
 
 
+def test_explicit_action_artifacts_are_preserved_without_large_output():
+    action = Agently.create_agent().action
+    action_id = f"explicit_artifact_{ uuid.uuid4().hex[:8] }"
+
+    action.register_action(
+        action_id=action_id,
+        desc="Return an explicit artifact reference.",
+        kwargs={},
+        func=lambda: {
+            "status": "success",
+            "data": {"summary": "created"},
+            "artifacts": [
+                {
+                    "artifact_type": "mcp_resource_link",
+                    "label": "report.md",
+                    "path": "artifacts/report.md",
+                    "media_type": "text/markdown",
+                    "meta": {"source": "mcp"},
+                }
+            ],
+        },
+        expose_to_model=False,
+    )
+
+    record = action.execute_action(action_id, {})
+
+    assert record.get("status") == "success"
+    artifact_refs = record.get("artifact_refs")
+    assert isinstance(artifact_refs, list)
+    assert len(artifact_refs) == 1
+    artifact_ref = artifact_refs[0]
+    assert artifact_ref["artifact_type"] == "mcp_resource_link"
+    assert artifact_ref["path"] == "artifacts/report.md"
+    assert artifact_ref["media_type"] == "text/markdown"
+    assert artifact_ref["meta"]["source"] == "mcp"
+    assert record.get("artifacts") == artifact_refs
+
+
 def test_action_execution_record_dedupes_same_action_call_id():
     action = Agently.create_agent().action
     records = [
