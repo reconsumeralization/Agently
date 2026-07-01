@@ -1454,6 +1454,53 @@ class MockTaskBoardSlowCardRequester(MockAgentExecutionRequester):
         yield "message", json.dumps(payload, ensure_ascii=False)
 
 
+class MockTaskBoardControlStallRequester(MockAgentExecutionRequester):
+    name = "MockTaskBoardControlStallRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Plan a TaskBoard for this submitted task" in text:
+            payload = {
+                "board_goal": "Exercise a TaskBoard control-card idle guard.",
+                "cards": [
+                    {
+                        "id": "control-stall",
+                        "action_block": "Run a stalled control card.",
+                        "objective": "Synthesize a control result, but the model request stalls.",
+                        "depends_on": [],
+                        "evidence_to_use": [],
+                        "done_when": "The control result is available.",
+                        "allowed_execution_shape": "control",
+                    }
+                ],
+                "reflection_points": [],
+                "completion_gate": "The control card completes.",
+                "why_this_effort_shape": "One control card is enough for this liveness probe.",
+                "risk_notes": [],
+            }
+        elif "Execute one TaskBoard control card" in text:
+            await asyncio.sleep(5)
+            payload = {
+                "status": "completed",
+                "answer": "unexpected late control result",
+                "sufficient": True,
+                "remaining_work": [],
+            }
+        elif "Synthesize the final result for this TaskBoard task" in text:
+            payload = {
+                "accepted": True,
+                "reason": "should not finalize after a control timeout",
+                "final_result": "unexpected final",
+                "missing_criteria": [],
+            }
+        elif "Verify the task against every success criterion" in text:
+            payload = _taskboard_verification_payload("unexpected final")
+        else:
+            payload = {"answer": "ok", "status": "ready"}
+        yield "message", json.dumps(payload, ensure_ascii=False)
+
+
 class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardRetryCardRequester"
     card_calls = 0
@@ -2071,6 +2118,13 @@ def _create_taskboard_slow_card_agent(name: str = "agent-execution-taskboard-slo
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockTaskBoardSlowCardRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_taskboard_control_stall_agent(name: str = "agent-execution-taskboard-control-stall"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockTaskBoardControlStallRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -5876,6 +5930,40 @@ async def test_taskboard_tick_timeout_does_not_cancel_running_cards(tmp_path):
         isinstance(diagnostic, dict) and diagnostic.get("code") == "taskboard.tick.card_interrupted"
         for diagnostic in revision.get("diagnostics", [])
     )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_no_progress_timeout_returns_structured_card_failure(tmp_path):
+    agent = _create_taskboard_control_stall_agent("execution-taskboard-control-no-progress-timeout").use_workspace(
+        tmp_path / "workspace"
+    )
+
+    execution = agent.create_task(
+        goal="Run a stalled TaskBoard control card.",
+        success_criteria=["The control card reports a no-progress failure instead of heartbeating forever."],
+        execution="taskboard",
+        max_iterations=1,
+        limits={"max_no_progress_seconds": 0.2},
+        options={"request_timeout_seconds": 5.0, "agent_task": {"taskboard_card_max_attempts": 1}},
+    )
+
+    started_at = asyncio.get_running_loop().time()
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    elapsed = asyncio.get_running_loop().time() - started_at
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+    taskboard = task_meta["result"]["taskboard"]
+    card_result = taskboard["revision"]["card_results"]["control-stall"]
+    diagnostic = card_result["diagnostics"][0]
+
+    assert elapsed < 1.5
+    assert result["status"] == "error"
+    assert result["accepted"] is False
+    assert result["artifact_status"] == "partial"
+    assert card_result["status"] == "failed"
+    assert diagnostic["code"] == "taskboard.card.timeout"
+    assert diagnostic["card_id"] == "control-stall"
+    assert "max_no_progress_seconds=0.2" in diagnostic["message"]
 
 
 @pytest.mark.asyncio

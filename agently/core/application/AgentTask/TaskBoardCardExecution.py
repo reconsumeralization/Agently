@@ -1150,13 +1150,47 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         stage: str,
     ) -> Any:
         timeout = self._taskboard_card_timeout()
-        if timeout is None:
+        no_progress_timeout = self._task_no_progress_timeout() if stage == "control" else None
+        if timeout is None and no_progress_timeout is None:
             return await awaitable
+        task = asyncio.ensure_future(awaitable)
         try:
-            return await asyncio.wait_for(awaitable, timeout=timeout)
+            timeout_at = time.monotonic() + timeout if timeout is not None else None
+            while True:
+                if task.done():
+                    return await task
+                wait_candidates: list[float] = []
+                if timeout_at is not None:
+                    remaining = timeout_at - time.monotonic()
+                    if remaining <= 0:
+                        task.cancel()
+                        with suppress(asyncio.CancelledError, Exception):
+                            await task
+                        raise TimeoutError(
+                            f"TaskBoard card '{card_id}' {stage} request timed out after {timeout} seconds."
+                        )
+                    wait_candidates.append(remaining)
+                if no_progress_timeout is not None:
+                    quiet_for = time.monotonic() - self._last_stream_emit_monotonic
+                    remaining = no_progress_timeout - quiet_for
+                    if remaining <= 0:
+                        task.cancel()
+                        with suppress(asyncio.CancelledError, Exception):
+                            await task
+                        raise TimeoutError(
+                            f"TaskBoard card '{card_id}' {stage} request made no progress before idle deadline: "
+                            f"max_no_progress_seconds={no_progress_timeout}."
+                        )
+                    wait_candidates.append(remaining)
+                done, _pending = await asyncio.wait({task}, timeout=min(wait_candidates))
+                if done:
+                    return await task
         except (asyncio.TimeoutError, TimeoutError) as error:
             raise TimeoutError(
-                f"TaskBoard card '{card_id}' {stage} request timed out after {timeout} seconds."
+                _compact_agent_task_error_message(
+                    error,
+                    fallback=f"TaskBoard card '{card_id}' {stage} request timed out.",
+                )
             ) from error
 
     def _failed_taskboard_card_result(
