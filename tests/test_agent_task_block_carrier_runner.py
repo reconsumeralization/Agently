@@ -588,7 +588,7 @@ def test_block_carrier_runner_marks_early_model_liveness_timeout_retryable(tmp_p
     assert "taskboard_plan request made no progress" in evidence["provider_retry_evidence"][0]["preview"]
 
 
-def test_block_carrier_runner_does_not_retry_timeout_after_material_progress(tmp_path):
+def test_block_carrier_runner_retries_model_liveness_timeout_after_material_progress(tmp_path):
     runner = _load_block_carrier_runner()
     run_dir = tmp_path / "run"
     record_dir = run_dir / "records" / "taskboard"
@@ -623,8 +623,10 @@ def test_block_carrier_runner_does_not_retry_timeout_after_material_progress(tmp
 
     evidence = runner._run_dir_provider_retry_evidence(run_dir)
 
-    assert evidence["provider_retryable"] is False
-    assert evidence["model_request_liveness_evidence"] == []
+    assert evidence["provider_retryable"] is True
+    assert evidence["resource_exhausted"] is False
+    assert evidence["model_request_liveness_evidence"]
+    assert "synthesize request made no progress" in evidence["provider_retry_evidence"][0]["preview"]
 
 
 def test_block_carrier_runner_omits_provider_request_payload_from_attempt_preview():
