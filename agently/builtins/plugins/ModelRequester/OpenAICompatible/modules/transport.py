@@ -102,6 +102,18 @@ class OpenAICompatibleTransportMixin:
             return None
         return timeout if timeout > 0 else None
 
+    def _get_non_streaming_response_timeout_seconds(self) -> float | None:
+        # Non-streaming requests await one blocking response, so there is no
+        # inter-chunk idle to measure and the streaming first_token/stream_idle
+        # guards never apply. Reuse the configured stream_idle_timeout as a
+        # whole-response liveness deadline: if the single response does not return
+        # within it, treat the request as stalled so the framework can capture
+        # liveness evidence and fall back, instead of hanging until the coarse
+        # task-level no-progress budget (or a human) stops it. Returns None when
+        # unset, preserving the previous unbounded behavior for callers that did
+        # not opt into a liveness cutoff.
+        return self._get_stream_idle_timeout_seconds()
+
     def _should_use_first_token_timeout(self, request_data: "AgentlyRequestData") -> bool:
         return (
             self._get_timeout_mode() == "first_token"
@@ -358,13 +370,28 @@ class OpenAICompatibleTransportMixin:
                     default_value={},
                 )
                 full_request_data.update(request_data.request_options)
+                response_timeout = self._get_non_streaming_response_timeout_seconds()
                 while True:
                     try:
-                        response = await client.post(
+                        post_coroutine = client.post(
                             request_data.request_url,
                             json=full_request_data,
                             headers=headers_with_auth,
                         )
+                        if response_timeout is not None:
+                            try:
+                                response = await asyncio.wait_for(post_coroutine, timeout=response_timeout)
+                            except asyncio.TimeoutError as e:
+                                raise self._build_stream_stall_error(
+                                    stage="response_materialization",
+                                    timeout_seconds=response_timeout,
+                                    message=(
+                                        f"Non-streaming response made no progress before idle deadline: "
+                                        f"stream_idle_timeout={ response_timeout } seconds."
+                                    ),
+                                ) from e
+                        else:
+                            response = await post_coroutine
                         if response.status_code >= 400:
                             e = RequestError(
                                 f"Status Code: { response.status_code }\n"
@@ -388,6 +415,11 @@ class OpenAICompatibleTransportMixin:
                             yield "message", response.content.decode()
                             yield "message", "[DONE]"
                         break
+                    except RuntimeStageStallError:
+                        # Liveness stall must propagate so the framework records it as
+                        # model-request liveness evidence and can fall back; do not let
+                        # the generic handler below swallow it into an error event.
+                        raise
                     except HTTPStatusError as e:
                         failover_headers = self._build_failover_headers(
                             request_data,
