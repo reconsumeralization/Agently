@@ -1237,6 +1237,30 @@ def test_output_contract_sections_apply_only_to_declared_deliverable_path():
     assert working_points == []
 
 
+def test_acceptance_locator_matches_equivalent_heading_connectors():
+    from agently.core.application.AgentTask.AcceptanceLocator import build_workspace_artifact_acceptance_locator_items
+
+    locators = build_workspace_artifact_acceptance_locator_items(
+        path="final.md",
+        source="test.final",
+        text="# Report\n\n## Risks & Uncertainty\n\n- Some sources were unavailable.\n",
+        acceptance_points=[
+            {
+                "criterion_id": "output_contract:case:section:4:risks-or-uncertainty",
+                "criterion": "Output contract section present: Risks or uncertainty",
+                "expected_anchor": "Risks or uncertainty",
+                "artifact_path": "final.md",
+                "source": "output_contract",
+            }
+        ],
+    )
+
+    assert len(locators) == 1
+    assert locators[0]["status"] == "ok"
+    assert locators[0]["heading"] == "Risks & Uncertainty"
+    assert locators[0]["requirement_level"] == "required"
+
+
 def test_workspace_artifact_targeted_readback_keeps_locator_anchors():
     locator = {
         "id": "workspace_artifact_acceptance_locator:test:final.md:date-window",
