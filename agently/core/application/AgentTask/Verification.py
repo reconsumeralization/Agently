@@ -549,6 +549,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "missing. Treat long Workspace artifact verification as an acceptance-point evidence review, not a "
             "whole-document editorial review: judge whether verifier-visible bounded snippets, required locators, "
             "targeted readbacks, and cited source/action evidence cover the required structure and material claims. "
+            "Do not require risk, uncertainty, limitation, or caveat sections unless the user task, output contract, "
+            "success criteria, or verifier-visible evidence limitations explicitly require them. "
             "Do not require full-artifact reading merely to assert general overall quality unless the success criteria "
             "explicitly require whole-document proofreading, style review, or exhaustive line-by-line audit. If all "
             "required acceptance points and material claims are supported by verifier-visible evidence, accept without "

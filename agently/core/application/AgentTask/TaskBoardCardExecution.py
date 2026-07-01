@@ -229,15 +229,15 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "language_policy": language_policy,
             }
             card_instruction = (
-                "Execute exactly one TaskBoard card as a bounded AgentExecution step. "
+                "Execute exactly one TaskBoard card. "
                 "Provide short card_intent and decision_basis fields before the card result fields to frame this "
                 "card-local decision; do not include raw chain-of-thought or hidden reasoning. "
                 "Use task_context_contract.current_time when the card needs current/latest/as-of evidence; label older "
                 "or historical source material with its time boundary. "
-                "Use TaskBoard evidence view as the hot summary; request full content only through available "
+                "taskboard_evidence_view is the compact evidence summary; request full content only through available "
                 "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
                 "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
-                "contains framework-prefetched bounded readback previews for dependency Action artifacts that were "
+                "contains bounded readback previews for dependency Action artifacts that were "
                 "structurally truncated or marked full_value_available; inspect those before declaring dependency "
                 "evidence missing. If available_readback lists Action artifact refs and the prefetched previews are "
                 "still insufficient, call read_action_artifact with the artifact_id and action_call_id before blocking "
@@ -268,8 +268,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "verification cards must not put review notes in those deliverable fields unless they include the "
                 "full corrected deliverable body. After the main card result fields, include short self_check, "
                 "short_summary, and progress_message for downstream card/finalizer context and human progress. "
-                "These process fields are not evidence. Do not claim the whole task is complete; TaskBoard and AgentTask "
-                "own lifecycle completion."
+                "These process fields are not evidence. Do not claim the whole task is complete; report only this "
+                "card's local status."
             )
             card_output_schema = {
                 "card_intent": (
@@ -306,7 +306,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 ),
                 "file_refs": (
                     [dict],
-                    "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
+                    "Existing evidence refs only; deliverable refs are trusted only when backed by verifier-visible Workspace/readback evidence",
                     False,
                 ),
                 "evidence": ([str], "Evidence produced or used by this card", False),
@@ -683,16 +683,16 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "language_policy": language_policy,
         }
         control_instruction = (
-            "Execute one TaskBoard control card with a single structured model request. "
+            "Complete one TaskBoard control card. "
             "This card is for synthesis, verification, finalization, or deciding the next board action; "
             "provide short card_intent and decision_basis fields before the control result fields; do not include raw "
             "chain-of-thought or hidden reasoning. "
             "Use task_context_contract.current_time when current/latest/as-of evidence matters, and label older "
             "or historical source material with its time boundary. "
-            "do not plan or call tools from this request. Use TaskBoardEvidenceView as the hot evidence summary "
+            "do not plan or call tools from this request. taskboard_evidence_view is the compact evidence summary "
             "and preserve cold refs as pointers. Treat evidence_ledger as the authoritative grounding ledger and "
             "bind factual claims through evidence_use ids. failed/empty items support unavailability only; ref_only "
-            "items support only discovery/ref-pointer claims until readback evidence exists. dependency_readbacks contains framework-prefetched bounded "
+            "items support only discovery/ref-pointer claims until readback evidence exists. dependency_readbacks contains bounded "
             "readback previews for dependency Action artifacts that were structurally truncated or marked "
             "full_value_available; inspect those before declaring dependency evidence missing. If bounded previews "
             "and dependency_readbacks are insufficient, set next_board_action to 'readback' or 'repair' and explain "
@@ -751,7 +751,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ),
             "file_refs": (
                 [dict],
-                "Existing evidence refs only; model-declared deliverable refs are untrusted until framework write/readback",
+                "Existing evidence refs only; model-declared deliverable refs are untrusted without verifier-visible Workspace/readback evidence",
                 False,
             ),
             "sufficient": (bool, "True when this card has enough evidence to satisfy its objective", False),

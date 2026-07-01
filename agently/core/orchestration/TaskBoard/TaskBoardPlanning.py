@@ -142,11 +142,10 @@ def resolve_task_board_planning_policy(
         ),
         task_complexity_basis=tuple(task_complexity_basis or _default_task_complexity_basis()),
         owner_boundaries=(
-            "AgentExecution or an explicit caller decides whether the task enters TaskBoard.",
-            "TaskBoard owns board-internal planning shape after submission.",
+            "Plan only the submitted board shape; do not discuss route selection.",
+            "Use the provided task facts, success criteria, evidence, and capability summary.",
             "TaskBoard policy may shape orchestration complexity, reflection density, evidence depth, and repair tendency.",
             "TaskBoard policy must not grant permissions, hide capabilities, or define hard budgets.",
-            "TriggerFlow owns framework-visible lifecycle; TaskBoard does not own ModelRequest or ActionRuntime.",
         ),
         control_card_guidance=(
             "Use allowed_execution_shape='control' for synthesis, verification, finalization, or board-continuation decisions that do not need tools.",
@@ -183,14 +182,14 @@ def task_board_planning_output_schema() -> dict[str, Any]:
             {
                 "id": (
                     str,
-                    "Optional short card id hint. The framework canonicalizes, deduplicates, or generates stable ids.",
+                    "Optional short readable card id hint.",
                     False,
                 ),
                 "action_block": (str, "Card-level work block in the model's own words.", True),
                 "objective": (str, "Objective for this card.", True),
                 "depends_on": (
                     [str],
-                    "Upstream card id hints or canonical ids this card depends on; framework remaps them to canonical ids.",
+                    "Upstream card ids or id hints this card depends on.",
                     True,
                 ),
                 "evidence_to_use": ([str], "Evidence sources or upstream refs this card expects to use.", False),

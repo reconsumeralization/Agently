@@ -763,8 +763,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             }
         )
         request.instruct(
-            "Synthesize the final result for this TaskBoard task from completed card evidence. "
-            "Verify every success criterion. Use evidence_ledger as the authoritative grounding ledger and bind "
+            "Assemble a verifier-ready final result for this TaskBoard task from completed card evidence. "
+            "Self-check obvious success-criteria gaps, but do not act as the terminal verifier. "
+            "Use evidence_ledger as the authoritative grounding ledger and bind "
             "factual claims through evidence_use ids. Use the hot evidence view for summaries and preserve cold refs "
             "as evidence pointers; do not invent unsupported facts. failed/empty ledger items support only missing "
             "or unavailable-data claims; ref_only items support only URL/path/ref discovery until readback exists. "

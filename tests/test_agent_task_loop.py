@@ -90,6 +90,7 @@ def test_agent_task_prompts_do_not_expose_workspace_streaming_mechanics():
         "agently/core/application/AgentTask/TaskBoardCardExecution.py",
         "agently/core/application/AgentTask/ArtifactDelivery.py",
         "agently/core/application/AgentTask/FlatStrategy.py",
+        "agently/core/application/AgentTask/TaskBoardFinalization.py",
     ]
     forbidden_phrases = [
         "AgentTask will stream",
@@ -97,6 +98,7 @@ def test_agent_task_prompts_do_not_expose_workspace_streaming_mechanics():
         "will write/read back",
         "The framework will stream",
         "produce trusted file_refs",
+        "Verify every success criterion",
     ]
     repo_root = Path(__file__).resolve().parents[1]
     offenders: list[str] = []
@@ -106,6 +108,42 @@ def test_agent_task_prompts_do_not_expose_workspace_streaming_mechanics():
             if phrase in text:
                 offenders.append(f"{relative_path}: {phrase}")
     assert offenders == []
+
+
+def test_taskboard_prompts_keep_model_contract_surface_simple():
+    source_files = [
+        "agently/core/application/AgentTask/TaskBoardCardExecution.py",
+        "agently/core/application/AgentTask/TaskBoardStrategy.py",
+        "agently/core/orchestration/TaskBoard/TaskBoardPlanning.py",
+        "agently/core/application/AgentTask/ArtifactDelivery.py",
+    ]
+    forbidden_phrases = [
+        "AgentExecution step",
+        "bounded AgentExecution",
+        "framework-prefetched",
+        "TaskBoardEvidenceView",
+        "TaskBoard and AgentTask",
+        "framework canonicalizes",
+        "framework remaps",
+        "for the AgentTask",
+    ]
+    repo_root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+    for relative_path in source_files:
+        text = (repo_root / relative_path).read_text(encoding="utf-8")
+        for phrase in forbidden_phrases:
+            if phrase in text:
+                offenders.append(f"{relative_path}: {phrase}")
+    assert offenders == []
+
+
+def test_verifier_prompt_keeps_optional_risk_sections_optional():
+    source_path = Path(__file__).resolve().parents[1] / "agently/core/application/AgentTask/Verification.py"
+    text = source_path.read_text(encoding="utf-8")
+
+    assert "Do not require risk, uncertainty, limitation, or caveat sections" in text
+    assert "unless the user task, output contract," in text
+    assert "verifier-visible evidence limitations explicitly require them" in text
 
 
 def test_agent_task_process_progress_delta_uses_only_explicit_progress_event():
@@ -3340,7 +3378,7 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
 
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
-            if "Write only the final Markdown artifact body for the AgentTask" in text:
+            if "Write only the final Markdown artifact body." in text:
                 yield "message", "# Partial attempt that must be discarded\n\n"
                 yield "status", {
                     "status": "failed",
@@ -3447,7 +3485,7 @@ async def test_workspace_artifact_stream_draft_consumes_public_retry_marker_with
 
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
-            if "Write only the final Markdown artifact body for the AgentTask" in text:
+            if "Write only the final Markdown artifact body." in text:
                 yield "message", "# Partial attempt that must be discarded\n\n"
                 yield "message", "<$retry>transient provider disconnect</$retry>"
                 yield "message", "# Streamed Report\n\n"
@@ -3505,7 +3543,7 @@ async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anch
 
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
-            if "Write only the final Markdown artifact body for the AgentTask" in text:
+            if "Write only the final Markdown artifact body." in text:
                 self.__class__.draft_text = text
                 assert "cumulative_evidence_anchors" in text
                 assert "https://example.test/exact-source" in text
@@ -3586,7 +3624,7 @@ async def test_workspace_artifact_stream_draft_disables_action_loop(tmp_path, mo
 
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
-            if "Write only the final Markdown artifact body for the AgentTask" in text:
+            if "Write only the final Markdown artifact body." in text:
                 yield "message", "# Draft Without Actions\n\nThe draft used existing evidence only.\n"
                 return
             yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
@@ -3652,7 +3690,7 @@ async def test_workspace_artifact_stream_draft_receives_active_repair_context(tm
 
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
-            if "Write only the final Markdown artifact body for the AgentTask" in text:
+            if "Write only the final Markdown artifact body." in text:
                 self.__class__.draft_text = text
                 assert "repair_context" in text
                 assert "Replace the unsupported legacy claim." in text

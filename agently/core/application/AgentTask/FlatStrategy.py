@@ -1749,7 +1749,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             ),
             "file_refs": (
                 [dict],
-                "Existing evidence refs only; deliverable refs become trusted only after AgentTask Workspace write/readback",
+                "Existing evidence refs only; deliverable refs are trusted only when backed by verifier-visible Workspace/readback evidence",
                 False,
             ),
             "evidence": ([str], "Evidence produced by the step", True),

@@ -2055,7 +2055,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         draft_execution.input(draft_input)
         draft_execution.instruct(
             (
-                "Write only the final Markdown artifact body for the AgentTask. "
+                "Write only the final Markdown artifact body. "
                 "Do not output JSON, YAML, XML, code fences, file_refs, or a wrapper object. "
                 "Use only the provided task context, execution result, dependency results, and evidence summaries. "
                 "For source-grounded artifacts, cite exact URLs, file paths, or refs from cumulative_evidence_anchors; "
