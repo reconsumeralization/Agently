@@ -570,6 +570,24 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 stage="taskboard_card",
                 card_id=context.card.id,
             )
+            if attempt_index < max_attempts and self._taskboard_card_result_retryable(
+                status=card_status,
+                diagnostics=diagnostics,
+            ):
+                retry_diagnostic = self._taskboard_card_result_retry_diagnostic(
+                    card_id=context.card.id,
+                    status=card_status,
+                    diagnostics=diagnostics,
+                    attempt_index=attempt_index,
+                    max_attempts=max_attempts,
+                )
+                previous_errors.append(retry_diagnostic)
+                self.diagnostics.setdefault("taskboard_card_retries", []).append(retry_diagnostic)
+                await self._emit(
+                    f"agent_task.taskboard.card.{ self._stream_path_token(context.card.id) }.execution.retry",
+                    retry_diagnostic,
+                )
+                continue
             return TaskBoardCardResult(
                 card_id=context.card.id,
                 status=card_status,

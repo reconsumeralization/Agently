@@ -17,6 +17,15 @@ from __future__ import annotations
 from .TaskShared import *
 
 
+_TASKBOARD_CARD_RETRYABLE_RESULT_CODES = {
+    "agent_task.workspace_artifact.draft_empty",
+    "agent_task.workspace_artifact.empty_body",
+    "agent_task.workspace_artifact.readback_insufficient",
+    "agent_task.workspace_artifact.structured_wrapper_body",
+    "agent_task.workspace_artifact.structured_wrapper_draft",
+}
+
+
 class AgentTaskTaskBoardRuntimeOptionsMixin(AgentTaskMixinBase):
     def _taskboard_effort(self) -> Any:
         agent_task_options = self.options.get("agent_task")
@@ -59,6 +68,72 @@ class AgentTaskTaskBoardRuntimeOptionsMixin(AgentTaskMixinBase):
             "tls",
         )
         return any(marker in text for marker in retry_markers)
+
+    def _taskboard_card_result_retryable(
+        self,
+        *,
+        status: str,
+        diagnostics: Sequence[Any],
+    ) -> bool:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"blocked", "failed"}:
+            return False
+        return bool(self._taskboard_card_retryable_result_codes(diagnostics))
+
+    @staticmethod
+    def _taskboard_card_retryable_result_codes(diagnostics: Sequence[Any]) -> list[str]:
+        codes: list[str] = []
+        for item in diagnostics:
+            if not isinstance(item, Mapping):
+                continue
+            code = str(item.get("code") or "").strip()
+            if code in _TASKBOARD_CARD_RETRYABLE_RESULT_CODES and code not in codes:
+                codes.append(code)
+        return codes
+
+    @staticmethod
+    def _taskboard_card_result_diagnostic_preview(diagnostics: Sequence[Any]) -> list[dict[str, Any]]:
+        preview: list[dict[str, Any]] = []
+        for item in diagnostics:
+            if not isinstance(item, Mapping):
+                continue
+            compact: dict[str, Any] = {}
+            for key in ("code", "status", "message", "path", "source", "result_status"):
+                value = item.get(key)
+                if value in (None, "", [], {}):
+                    continue
+                compact[key] = str(value)[:800] if key == "message" else DataFormatter.sanitize(value)
+            if compact:
+                preview.append(compact)
+            if len(preview) >= 8:
+                break
+        return preview
+
+    def _taskboard_card_result_retry_diagnostic(
+        self,
+        *,
+        card_id: str,
+        status: str,
+        diagnostics: Sequence[Any],
+        attempt_index: int,
+        max_attempts: int,
+    ) -> dict[str, Any]:
+        retryable_codes = self._taskboard_card_retryable_result_codes(diagnostics)
+        return {
+            "type": "TaskBoardCardResultProtocolError",
+            "code": "taskboard.card.result_protocol_retry",
+            "message": "TaskBoard card result was blocked by retryable framework protocol diagnostics.",
+            "card_id": card_id,
+            "execution_strategy": self.execution_strategy,
+            "stage": "taskboard_card",
+            "result_status": str(status or "").strip().lower(),
+            "retryable_codes": retryable_codes,
+            "diagnostics": self._taskboard_card_result_diagnostic_preview(diagnostics),
+            "attempt_index": attempt_index,
+            "max_attempts": max_attempts,
+            "retry_scheduled": attempt_index < max_attempts,
+            "status": "retrying" if attempt_index < max_attempts else "failed",
+        }
 
     def _taskboard_card_retry_diagnostic(
         self,

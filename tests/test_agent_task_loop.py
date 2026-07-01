@@ -4352,6 +4352,102 @@ async def test_taskboard_card_failure_uses_acp_recovery_after_card_attempts(tmp_
     assert task.workspace_refs["acp_recovery"]
 
 
+@pytest.mark.asyncio
+async def test_taskboard_action_card_retries_retryable_result_protocol_failure(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-card-result-retry").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-card-result-retry",
+        goal="Write the final report.",
+        success_criteria=["final.md is written."],
+        execution="taskboard",
+        options={
+            "agent_task": {
+                "required_deliverables": [{"path": "final.md", "media_type": "text/markdown"}],
+                "taskboard_card_max_attempts": 2,
+            }
+        },
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft final.md.",
+            "allowed_execution_shape": "actions",
+            "required_outputs": ["final.md exists with a non-empty body"],
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-card-result-retry",
+        graph=TaskBoardGraph.from_value({"graph_id": "taskboard-card-result-retry-graph", "cards": [card.to_dict()]}),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    attempts: list[int] = []
+
+    async def fake_run_work_unit_through_blocks(*_args, **kwargs):
+        attempt_index = kwargs["start_payload"]["attempt_index"]
+        attempts.append(attempt_index)
+        meta = {
+            "execution_id": f"exec-{attempt_index}",
+            "status": "success",
+            "route": {"selected_route": "model_request", "status": "completed"},
+            "logs": {"action_logs": {}, "route_logs": {}, "errors": []},
+            "diagnostics": [],
+        }
+        if attempt_index == 1:
+            return (
+                {
+                    "status": "completed",
+                    "answer": "A final.md artifact was produced.",
+                    "artifact_manifest": {"path": "final.md", "sections": [{}]},
+                    "remaining_work": [],
+                },
+                meta,
+                {},
+            )
+        return (
+            {
+                "status": "completed",
+                "artifact_markdown": "# Final Report\n\nRecovered body.",
+                "artifact_manifest": {"path": "final.md", "sections": [{"title": "Final Report"}]},
+                "remaining_work": [],
+            },
+            meta,
+            {},
+        )
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_run_work_unit_through_blocks", fake_run_work_unit_through_blocks)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit_action_observation_events", noop)
+
+    result = await task._run_taskboard_agent_card(
+        context,
+        {
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert attempts == [1, 2]
+    assert result.status == "completed"
+    retry_diagnostics = task.diagnostics["taskboard_card_retries"]
+    assert retry_diagnostics[0]["code"] == "taskboard.card.result_protocol_retry"
+    assert "agent_task.workspace_artifact.empty_body" in retry_diagnostics[0]["retryable_codes"]
+    assert result.metadata["attempt_index"] == 2
+    readback = await task.workspace.read_file("final.md")
+    assert readback["content"] == "# Final Report\n\nRecovered body."
+
+
 def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     agent = _create_agent("agent-taskboard-final-repair").use_workspace(tmp_path / "workspace")
     task = AgentTask(
