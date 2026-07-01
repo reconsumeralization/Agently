@@ -1125,6 +1125,122 @@ def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readbac
     ]
 
 
+def test_evidence_binding_repair_prefers_acceptance_coverage_for_aggregate_artifact_claim():
+    coverage_id = "workspace_artifact_acceptance_coverage:agent_task.taskboard.final:final.md"
+    section_ids = [
+        "workspace_artifact_targeted_readback:final.md:date-window",
+        "workspace_artifact_targeted_readback:final.md:source-methodology",
+        "workspace_artifact_targeted_readback:final.md:risks",
+    ]
+    available_refs = [
+        {
+            "id": coverage_id,
+            "kind": "workspace_artifact.acceptance_coverage",
+            "status": "ok",
+            "body_state": "bounded",
+            "path": "final.md",
+            "aliases": ["final.md acceptance coverage", "all required output contract sections"],
+        },
+        *[
+            {
+                "id": section_id,
+                "kind": "workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+            }
+            for section_id in section_ids
+        ],
+    ]
+    guard = {
+        "normalized_evidence_use": [
+            {
+                "claim": "Final deliverable final.md has all required output-contract sections verified.",
+                "evidence_ids": ["final.md"],
+                "support_type": "content",
+            }
+        ],
+        "available_evidence_refs": available_refs,
+        "diagnostics": [
+            {
+                "code": "evidence_ledger.ambiguous_evidence_alias",
+                "blocking": True,
+                "index": 0,
+                "claim": "Final deliverable final.md has all required output-contract sections verified.",
+                "evidence_id": "final.md",
+                "candidates": [coverage_id, *section_ids],
+                "support_type": "content",
+            }
+        ],
+    }
+    ledger = {"items": available_refs}
+
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == [
+        {
+            "claim_index": 0,
+            "claim": "Final deliverable final.md has all required output-contract sections verified.",
+            "evidence_ids": [coverage_id],
+            "support_type": "content",
+        }
+    ]
+
+
+def test_workspace_artifact_output_contract_sections_are_required_acceptance_points():
+    from agently.core.application.AgentTask.AcceptanceLocator import build_workspace_artifact_acceptance_locator_items
+
+    task = AgentTask.__new__(AgentTask)
+    task.options = {
+        "execution_prompt_snapshot": {
+            "input": {
+                "case": {
+                    "output_contract": {
+                        "sections": ["Date window", {"title": "Source list"}],
+                    }
+                }
+            }
+        }
+    }
+
+    points = task._workspace_artifact_acceptance_points_from_output_contracts("final.md")
+    locators = build_workspace_artifact_acceptance_locator_items(
+        path="final.md",
+        source="test.final",
+        text="# Report\n\n## Date window\n\nToday.\n\n## Source list\n\n- https://example.test\n",
+        acceptance_points=points,
+    )
+
+    assert [item["heading"] for item in locators] == ["Date window", "Source list"]
+    assert {item["requirement_level"] for item in locators} == {"required"}
+
+
+def test_workspace_artifact_targeted_readback_keeps_locator_anchors():
+    locator = {
+        "id": "workspace_artifact_acceptance_locator:test:final.md:date-window",
+        "kind": "workspace_artifact.acceptance_locator",
+        "status": "ok",
+        "path": "final.md",
+        "criterion_id": "output_contract:case:section:0:date-window",
+        "heading": "Date window",
+        "anchor_text": "Date window",
+    }
+
+    item = AgentTask._workspace_artifact_targeted_readback_evidence_item(
+        locator,
+        {
+            "kind": "acceptance_locator_readback",
+            "path": "final.md",
+            "status": "read",
+            "source_evidence_id": locator["id"],
+            "query": "Date window",
+            "content": "## Date window\n\nCovered period.",
+        },
+    )
+
+    assert item["criterion_id"] == "output_contract:case:section:0:date-window"
+    assert item["heading"] == "Date window"
+    assert locator["id"] in item["aliases"]
+
+
 def test_evidence_binding_repair_maps_file_row_label_to_matching_read_file_result():
     read_file_id = "agent_task_action_result:read_file:read-quotes-summary"
     guard = {

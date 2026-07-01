@@ -418,7 +418,33 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 source=source,
                 content=content_for_locator,
             )
+            targeted_readback_items = await self._taskboard_acceptance_locator_targeted_readback_items(locator_items)
+            coverage_item = self._workspace_artifact_acceptance_coverage_evidence_item(
+                path=path,
+                source=source,
+                locator_items=locator_items,
+                targeted_readback_items=targeted_readback_items,
+            )
+            if coverage_item:
+                items.append(coverage_item)
+            items.extend(targeted_readback_items)
             items.extend(locator_items)
+        return self._dedupe_taskboard_final_evidence_items(items)
+
+    async def _taskboard_acceptance_locator_targeted_readback_items(
+        self,
+        locator_items: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for locator in locator_items:
+            if not isinstance(locator, Mapping):
+                continue
+            if str(locator.get("status") or "").strip().lower() != "ok":
+                continue
+            readback = await self._workspace_artifact_acceptance_locator_readback(locator)
+            if readback is None:
+                continue
+            items.append(self._workspace_artifact_targeted_readback_evidence_item(locator, readback))
         return self._dedupe_taskboard_final_evidence_items(items)
 
     async def _taskboard_materialize_final_artifact_ref(

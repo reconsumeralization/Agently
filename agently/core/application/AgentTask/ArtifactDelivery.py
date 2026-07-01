@@ -654,6 +654,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         acceptance_points = [
             *collect_acceptance_points(result),
             *self._workspace_artifact_acceptance_points_from_taskboard_context(card_context),
+            *self._workspace_artifact_acceptance_points_from_output_contracts(path),
         ]
         artifact_evidence_id = self._workspace_artifact_readback_evidence_item(ref).get("id", "")
         return build_workspace_artifact_acceptance_locator_items(
@@ -699,6 +700,66 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             points.extend(collect_acceptance_points(evidence_contract))
         return DataFormatter.sanitize(points)
 
+    def _workspace_artifact_acceptance_points_from_output_contracts(self, path: str) -> list[dict[str, Any]]:
+        artifact_path = str(path or "").strip()
+        options = getattr(self, "options", None)
+        if not isinstance(options, Mapping):
+            return []
+        points: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def slug(value: str) -> str:
+            text = "-".join(re.findall(r"[a-z0-9]+", value.casefold()))
+            return text[:80] or "section"
+
+        def add_section(section: Any, *, source_key: str, index: int) -> None:
+            if isinstance(section, str):
+                title = section.strip()
+            elif isinstance(section, Mapping):
+                title = ""
+                for key in ("title", "name", "heading", "id"):
+                    value = str(section.get(key) or "").strip()
+                    if value:
+                        title = value
+                        break
+            else:
+                title = ""
+            if not title:
+                return
+            key = (artifact_path, title.casefold())
+            if key in seen:
+                return
+            seen.add(key)
+            points.append(
+                {
+                    "criterion_id": f"output_contract:{source_key}:section:{index}:{slug(title)}",
+                    "criterion": f"Output contract section present: {title}",
+                    "expected_anchor": title,
+                    "artifact_path": artifact_path,
+                    "source": "output_contract",
+                }
+            )
+
+        def collect_contract(value: Any, *, source_key: str) -> None:
+            if not isinstance(value, Mapping):
+                return
+            sections = value.get("sections")
+            if not isinstance(sections, Sequence) or isinstance(sections, str | bytes | bytearray):
+                return
+            for index, section in enumerate(sections):
+                add_section(section, source_key=source_key, index=index)
+
+        collect_contract(self._agent_task_option("output_contract", None), source_key="task_options")
+        execution_prompt = self._execution_prompt_context()
+        collect_contract(execution_prompt.get("output_contract"), source_key="execution_prompt")
+        prompt_input = execution_prompt.get("input")
+        if isinstance(prompt_input, Mapping):
+            collect_contract(prompt_input.get("output_contract"), source_key="prompt_input")
+            case = prompt_input.get("case")
+            if isinstance(case, Mapping):
+                collect_contract(case.get("output_contract"), source_key="case")
+        return DataFormatter.sanitize(points)
+
     @classmethod
     def _workspace_artifact_readback_evidence_item(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
         path = str(ref.get("path") or "").strip()
@@ -733,6 +794,116 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         }
         if preview:
             item["body"] = preview
+        return DataFormatter.sanitize(item)
+
+    @classmethod
+    def _workspace_artifact_acceptance_coverage_evidence_item(
+        cls,
+        *,
+        path: str,
+        source: str,
+        locator_items: Sequence[Mapping[str, Any]],
+        targeted_readback_items: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
+        artifact_path = str(path or "").strip()
+        if not artifact_path or not locator_items:
+            return {}
+        readbacks_by_locator = {
+            str((item.get("provenance") or {}).get("source_evidence_id") or "").strip(): item
+            for item in targeted_readback_items
+            if isinstance(item, Mapping) and isinstance(item.get("provenance"), Mapping)
+        }
+        required_locators = [
+            item
+            for item in locator_items
+            if isinstance(item, Mapping) and str(item.get("requirement_level") or "").strip() == "required"
+        ]
+        effective_locators = required_locators or [item for item in locator_items if isinstance(item, Mapping)]
+        ok_locators = [
+            item for item in effective_locators if str(item.get("status") or "").strip().lower() == "ok"
+        ]
+        missing_locators = [
+            item for item in effective_locators if str(item.get("status") or "").strip().lower() != "ok"
+        ]
+        readback_covered = [
+            item
+            for item in ok_locators
+            if str(item.get("id") or "").strip() in readbacks_by_locator
+            and str(readbacks_by_locator[str(item.get("id") or "").strip()].get("status") or "") == "ok"
+        ]
+        status = "ok" if ok_locators and not missing_locators and len(readback_covered) == len(ok_locators) else "empty"
+        source_evidence_ids: list[str] = []
+        lines = [
+            f"Acceptance coverage for {artifact_path}.",
+            f"Required acceptance points: {len(required_locators)}.",
+            f"Located acceptance points: {len(ok_locators)}.",
+            f"Targeted readbacks: {len(readback_covered)}.",
+        ]
+        if status == "ok":
+            lines.append("All required acceptance points for this artifact have bounded targeted readback evidence.")
+        else:
+            lines.append("Required acceptance coverage is incomplete for this artifact.")
+        for locator in effective_locators[:32]:
+            locator_id = str(locator.get("id") or "").strip()
+            readback = readbacks_by_locator.get(locator_id)
+            readback_id = str(readback.get("id") or "").strip() if isinstance(readback, Mapping) else ""
+            if locator_id:
+                source_evidence_ids.append(locator_id)
+            if readback_id:
+                source_evidence_ids.append(readback_id)
+            label = str(
+                locator.get("heading")
+                or locator.get("anchor_text")
+                or locator.get("claim")
+                or locator.get("criterion_id")
+                or ""
+            ).strip()
+            if label:
+                lines.append(
+                    f"- {label}: locator_status={locator.get('status')}; "
+                    f"readback_evidence_id={readback_id or 'missing'}"
+                )
+        basename = artifact_path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        evidence_id = cls._workspace_artifact_evidence_id("workspace_artifact_acceptance_coverage", artifact_path, source)
+        item = {
+            "id": evidence_id,
+            "kind": "workspace_artifact.acceptance_coverage",
+            "status": status,
+            "raw_status": "covered" if status == "ok" else "incomplete",
+            "body_state": "bounded" if status == "ok" else "ref_only",
+            "path": artifact_path,
+            "aliases": [
+                artifact_path,
+                basename,
+                f"{artifact_path} acceptance coverage",
+                f"{artifact_path} required acceptance points",
+                "workspace artifact acceptance coverage",
+                "all required acceptance points",
+                "all required output contract sections",
+            ],
+            "source": source,
+            "provenance": {
+                "source": source,
+                "path": artifact_path,
+                "source_evidence_ids": list(dict.fromkeys(source_evidence_ids)),
+            },
+            "supports": {
+                "content": status == "ok",
+                "unavailability": status != "ok",
+                "ref_pointer": False,
+            },
+            "body": "\n".join(lines),
+        }
+        if status != "ok":
+            item["diagnostics"] = [
+                {
+                    "code": "agent_task.workspace_artifact.acceptance_coverage_incomplete",
+                    "message": "Workspace artifact acceptance locators or targeted readbacks are incomplete.",
+                    "missing_locator_count": len(missing_locators),
+                    "located_count": len(ok_locators),
+                    "targeted_readback_count": len(readback_covered),
+                }
+            ]
         return DataFormatter.sanitize(item)
 
     @classmethod

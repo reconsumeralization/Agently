@@ -768,6 +768,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "ref_pointer": False,
             },
         }
+        for field in ("criterion_id", "heading", "anchor_text", "claim", "topic", "requirement_level", "point_source"):
+            value = readback.get(field) if readback.get(field) not in (None, "", [], {}) else artifact.get(field)
+            if value not in (None, "", [], {}):
+                item[field] = DataFormatter.sanitize(value)
         if content:
             item["body"] = content
         if status == "failed":
@@ -805,6 +809,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         add(readback.get("matched_query"))
         add(readback.get("source_evidence_id"))
         add(artifact.get("id"))
+        for field in ("criterion_id", "heading", "anchor_text", "claim", "topic"):
+            add(readback.get(field))
+            add(artifact.get(field))
         return aliases[:24]
 
     @staticmethod
@@ -1185,12 +1192,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             )
             if len(unique_matches) == 1 and not requires_content_replacement:
                 return unique_matches
+            coverage_matches = cls._deterministic_acceptance_coverage_candidates(diagnostic, available_refs)
+            if len(coverage_matches) == 1:
+                return coverage_matches
             artifact_ref_matches = cls._deterministic_artifact_ref_candidates(diagnostic, available_refs)
             if len(artifact_ref_matches) == 1:
                 return artifact_ref_matches
             action_result_matches = cls._deterministic_action_result_candidates(diagnostic, available_refs)
             if len(action_result_matches) == 1:
                 return action_result_matches
+        coverage_matches = cls._deterministic_acceptance_coverage_candidates(diagnostic, available_refs)
+        if len(coverage_matches) == 1:
+            return coverage_matches
         body_text_matches = cls._deterministic_body_text_candidates(diagnostic, available_refs)
         if len(body_text_matches) == 1:
             return body_text_matches
@@ -1302,6 +1315,44 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if support_type == "unavailability":
             return unique_action_refs
         return []
+
+    @staticmethod
+    def _deterministic_acceptance_coverage_candidates(
+        diagnostic: Mapping[str, Any],
+        available_refs: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        if str(diagnostic.get("support_type") or "").strip().lower() != "content":
+            return []
+        text = " ".join(str(diagnostic.get(key) or "") for key in ("claim", "evidence_id")).lower()
+        raw_candidates = diagnostic.get("candidates")
+        candidate_ids = {
+            str(candidate).strip()
+            for candidate in raw_candidates
+            if str(candidate or "").strip()
+        } if isinstance(raw_candidates, Sequence) and not isinstance(raw_candidates, str | bytes | bytearray) else set()
+        matches: list[str] = []
+        for ref in available_refs:
+            if not isinstance(ref, Mapping):
+                continue
+            evidence_id = str(ref.get("id") or "").strip()
+            if not evidence_id or (candidate_ids and evidence_id not in candidate_ids):
+                continue
+            if str(ref.get("kind") or "").strip().lower() != "workspace_artifact.acceptance_coverage":
+                continue
+            if str(ref.get("status") or "").strip().lower() != "ok":
+                continue
+            if str(ref.get("body_state") or "").strip().lower() not in {"full", "bounded", "truncated"}:
+                continue
+            path = str(ref.get("path") or "").strip().lower()
+            basename = PurePosixPath(path.replace("\\", "/")).name if path else ""
+            aliases = {path, basename, evidence_id.lower()}
+            raw_aliases = ref.get("aliases")
+            if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
+                aliases.update(str(alias or "").strip().lower() for alias in raw_aliases)
+            aliases.discard("")
+            if any(alias and alias in text for alias in aliases):
+                matches.append(evidence_id)
+        return sorted(set(matches))
 
     @classmethod
     def _deterministic_body_text_candidates(
@@ -2415,6 +2466,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _verifier_evidence_item_priority(item: Mapping[str, Any]) -> int:
         kind = str(item.get("kind") or "").strip().lower()
         if kind == "workspace_artifact.targeted_readback":
+            return 0
+        if kind == "workspace_artifact.acceptance_coverage":
             return 0
         if kind == "workspace_artifact.readback":
             return 1

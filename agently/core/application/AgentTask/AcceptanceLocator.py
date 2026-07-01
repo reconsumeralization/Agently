@@ -638,7 +638,7 @@ def _normalized_anchor(value: str) -> str:
 
 
 def _requirement_level_for_point(point_source: str) -> str:
-    if point_source in {"artifact_manifest", "success_criteria"}:
+    if point_source in {"artifact_manifest", "output_contract", "success_criteria"}:
         return "required"
     if point_source == "artifact_structure":
         return "informational"
