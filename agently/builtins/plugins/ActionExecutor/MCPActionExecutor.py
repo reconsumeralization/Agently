@@ -37,6 +37,80 @@ class MCPActionExecutor:
     def _on_unregister():
         pass
 
+    @staticmethod
+    def _dump_content_block(block: Any) -> dict[str, Any]:
+        if hasattr(block, "model_dump"):
+            dumped = block.model_dump()
+            return dumped if isinstance(dumped, dict) else {"value": dumped}
+        if isinstance(block, dict):
+            return dict(block)
+        return {"value": block}
+
+    @classmethod
+    def _artifact_from_content_block(cls, block: Any) -> dict[str, Any] | None:
+        dumped = cls._dump_content_block(block)
+        block_type = str(dumped.get("type") or type(block).__name__)
+        if block_type.lower() in {"text", "textcontent"}:
+            return None
+        path = dumped.get("uri") or dumped.get("url") or dumped.get("path")
+        media_type = str(
+            dumped.get("mimeType")
+            or dumped.get("mime_type")
+            or dumped.get("media_type")
+            or "application/json"
+        )
+        label = str(
+            dumped.get("name")
+            or dumped.get("title")
+            or path
+            or f"MCP {block_type} output"
+        )
+        artifact: dict[str, Any] = {
+            "artifact_type": f"mcp_{block_type.lower()}",
+            "label": label,
+            "media_type": media_type,
+            "value": dumped,
+            "meta": {
+                "source": "mcp",
+                "mcp_content_type": block_type,
+            },
+        }
+        if path is not None:
+            artifact["path"] = str(path)
+        return artifact
+
+    @staticmethod
+    def _has_explicit_artifacts(value: Any) -> bool:
+        return (
+            isinstance(value, dict)
+            and (
+                isinstance(value.get("artifact_refs"), list)
+                or isinstance(value.get("artifacts"), list)
+                or isinstance(value.get("file_refs"), list)
+            )
+        )
+
+    @classmethod
+    def _result_with_artifacts(cls, data: Any, artifacts: list[dict[str, Any]]) -> Any:
+        if not artifacts and not cls._has_explicit_artifacts(data):
+            return data
+        result: dict[str, Any] = {
+            "ok": True,
+            "status": "success",
+            "data": data,
+            "result": data,
+            "meta": {"source": "mcp"},
+        }
+        if artifacts:
+            result["artifacts"] = artifacts
+        if isinstance(data, dict):
+            for key in ("artifact_refs", "file_refs"):
+                if isinstance(data.get(key), list):
+                    result[key] = data[key]
+            if isinstance(data.get("artifacts"), list):
+                result["artifacts"] = [*artifacts, *data["artifacts"]]
+        return result
+
     async def execute(self, *, spec, action_call, policy, settings) -> Any:
         _ = (spec, policy, settings)
         LazyImport.import_package("fastmcp", version_constraint=">=3", auto_install=False)
@@ -60,16 +134,29 @@ class MCPActionExecutor:
             )
             if mcp_result.is_error:
                 return {"error": mcp_result.content[0].text}  # type: ignore[index]
+            artifacts = [
+                artifact
+                for artifact in (
+                    self._artifact_from_content_block(block)
+                    for block in list(mcp_result.content or [])
+                )
+                if artifact is not None
+            ]
             if mcp_result.structured_content:
-                return mcp_result.structured_content
+                return self._result_with_artifacts(mcp_result.structured_content, artifacts)
             try:
-                result = mcp_result.content[0]
+                content = list(mcp_result.content or [])
+                if not content:
+                    return self._result_with_artifacts(None, artifacts)
+                result = content[0]
                 if isinstance(result, TextContent):
                     try:
-                        return json.loads(result.text)
+                        parsed = json.loads(result.text)
+                        return self._result_with_artifacts(parsed, artifacts)
                     except json.JSONDecodeError:
-                        return result.text
+                        return self._result_with_artifacts(result.text, artifacts)
                 if isinstance(result, (ImageContent, AudioContent, ResourceLink, EmbeddedResource)):
-                    return result.model_dump()
+                    data = result.model_dump()
+                    return self._result_with_artifacts(data, artifacts)
             except Exception:
                 return None

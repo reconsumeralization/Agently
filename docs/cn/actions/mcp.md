@@ -109,6 +109,11 @@ for r in records:
 
 action 记录也写到 `extra.action_logs`（兼容入口下是 `extra.tool_logs`）。
 
+当 MCP tool 返回 resource/content block，或结构化
+`artifact_refs` / `artifacts` / `file_refs` 时，Agently 会把这些声明保留在
+Action record 上，host 可以读取 `record["artifact_refs"]`，不需要轮询输出目录。
+MCP server 必须显式声明 artifact metadata；Agently 不通过扫描文件系统推断未声明写入。
+
 ## 常见错误
 
 - **忘 `await`**：`use_mcp(...)` 是 async 因为要从服务列工具。忘 `await` 返回协程，注册悄悄不发生。

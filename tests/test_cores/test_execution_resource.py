@@ -1,6 +1,8 @@
 import pytest
 from typing import Any, cast
 import importlib
+import sys
+import types
 
 from agently import Agently
 from agently.core import (
@@ -361,6 +363,13 @@ async def test_mcp_executor_transport_routing():
         ctx.__aexit__ = mock.AsyncMock(return_value=False)
         return ctx
 
+    fake_fastmcp = types.ModuleType("fastmcp")
+    fake_fastmcp.Client = fake_client  # type: ignore[attr-defined]
+    fake_mcp = types.ModuleType("mcp")
+    fake_mcp_types = types.ModuleType("mcp.types")
+    for name in ("AudioContent", "EmbeddedResource", "ImageContent", "ResourceLink", "TextContent"):
+        setattr(fake_mcp_types, name, type(name, (), {}))
+
     spec = {"action_id": "my_tool"}
     policy: dict[str, Any] = {}
     settings = mock.MagicMock()
@@ -369,6 +378,7 @@ async def test_mcp_executor_transport_routing():
     )
 
     with (
+        mock.patch.dict(sys.modules, {"fastmcp": fake_fastmcp, "mcp": fake_mcp, "mcp.types": fake_mcp_types}),
         mock.patch.object(mcp_executor_module.LazyImport, "import_package") as lazy_import,
         mock.patch("fastmcp.Client", fake_client),
     ):
@@ -401,6 +411,57 @@ async def test_mcp_executor_transport_routing():
             mock.call("fastmcp", version_constraint=">=3", auto_install=False),
             mock.call("mcp", auto_install=False),
         ]
+
+
+def test_mcp_executor_resource_blocks_use_action_artifact_contract():
+    from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
+
+    class FakeTextContent:
+        def model_dump(self):
+            return {"type": "text", "text": "plain result"}
+
+    class FakeResourceLink:
+        def model_dump(self):
+            return {
+                "type": "resource_link",
+                "uri": "file:///tmp/agently/report.md",
+                "name": "report.md",
+                "mimeType": "text/markdown",
+            }
+
+    assert MCPActionExecutor._artifact_from_content_block(FakeTextContent()) is None
+
+    artifact = MCPActionExecutor._artifact_from_content_block(FakeResourceLink())
+    assert artifact is not None
+    assert artifact["artifact_type"] == "mcp_resource_link"
+    assert artifact["path"] == "file:///tmp/agently/report.md"
+    assert artifact["media_type"] == "text/markdown"
+    assert artifact["meta"]["source"] == "mcp"
+
+    result = MCPActionExecutor._result_with_artifacts({"summary": "written"}, [artifact])
+    assert result["status"] == "success"
+    assert result["data"] == {"summary": "written"}
+    assert result["artifacts"][0]["label"] == "report.md"
+
+
+def test_mcp_executor_preserves_structured_explicit_artifact_refs():
+    from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
+
+    structured = {
+        "summary": "written",
+        "artifact_refs": [
+            {
+                "path": "artifacts/report.md",
+                "label": "report.md",
+                "media_type": "text/markdown",
+            }
+        ],
+    }
+
+    result = MCPActionExecutor._result_with_artifacts(structured, [])
+    assert result["status"] == "success"
+    assert result["artifact_refs"] == structured["artifact_refs"]
+    assert result["data"] is structured
 
 
 def test_mcp_transport_normalization_supports_url_headers_and_configs():
