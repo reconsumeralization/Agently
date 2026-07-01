@@ -2375,14 +2375,48 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if isinstance(blocks, Mapping):
             evidence = blocks.get("evidence")
             if isinstance(evidence, Mapping):
-                block_ledger = evidence_ledger_view(evidence, max_items=80, body_chars=2400)
+                block_evidence = dict(evidence)
+                raw_block_items = block_evidence.get("evidence_items")
+                if isinstance(raw_block_items, Sequence) and not isinstance(
+                    raw_block_items, str | bytes | bytearray
+                ):
+                    block_evidence["evidence_items"] = cls._prioritized_verifier_evidence_items(raw_block_items)
+                block_ledger = evidence_ledger_view(block_evidence, max_items=80, body_chars=2400)
                 evidence_items.extend(
                     dict(item)
                     for item in block_ledger.get("items", [])
                     if isinstance(item, Mapping)
                 )
         evidence_items.extend(cls._action_result_evidence_items_from_execution_meta(execution_meta))
-        return evidence_ledger_view({"evidence_items": evidence_items}, max_items=120, body_chars=2400)
+        return evidence_ledger_view(
+            {"evidence_items": cls._prioritized_verifier_evidence_items(evidence_items)},
+            max_items=120,
+            body_chars=2400,
+        )
+
+    @classmethod
+    def _prioritized_verifier_evidence_items(cls, items: Sequence[Any]) -> list[dict[str, Any]]:
+        ordered: list[tuple[int, int, dict[str, Any]]] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                continue
+            sanitized = dict(DataFormatter.sanitize(item))
+            ordered.append((cls._verifier_evidence_item_priority(sanitized), index, sanitized))
+        ordered.sort(key=lambda entry: (entry[0], entry[1]))
+        return [item for _, _, item in ordered]
+
+    @staticmethod
+    def _verifier_evidence_item_priority(item: Mapping[str, Any]) -> int:
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind == "workspace_artifact.targeted_readback":
+            return 0
+        if kind == "workspace_artifact.readback":
+            return 1
+        if kind == "workspace_artifact.acceptance_locator":
+            return 2
+        if kind.startswith("workspace_artifact."):
+            return 3
+        return 10
 
     @classmethod
     def _action_result_evidence_items_from_execution_meta(

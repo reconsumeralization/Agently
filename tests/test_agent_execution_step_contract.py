@@ -4344,6 +4344,98 @@ async def test_taskboard_final_artifact_evidence_supports_targeted_readback(tmp_
     assert any("TARGETED-READBACK-MARKER" in str(item.get("body") or "") for item in targeted)
 
 
+def test_taskboard_final_artifact_evidence_survives_taskboard_view_cap():
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+
+    existing_items = [
+        {
+            "id": f"action-evidence-{index}",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": f"previous evidence {index}",
+        }
+        for index in range(140)
+    ]
+    final_item = {
+        "id": "workspace_artifact_readback:agent_task.taskboard.final:final.md",
+        "kind": "workspace_artifact.readback",
+        "status": "ok",
+        "body_state": "bounded",
+        "path": "final.md",
+        "body": "# Final\n\nVerifier-visible final artifact body.",
+    }
+
+    evidence_view = AgentTask._taskboard_evidence_view_with_additional_items(
+        {"evidence_items": existing_items},
+        [final_item],
+    )
+    ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
+    ids = {str(item.get("id") or "") for item in ledger["items"]}
+
+    assert final_item["id"] in ids
+    assert "action-evidence-139" not in ids
+
+
+def test_verifier_evidence_ledger_prioritizes_workspace_artifact_readback_when_capped():
+    generic_items = [
+        {
+            "id": f"generic-evidence-{index}",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": f"generic evidence {index}",
+        }
+        for index in range(100)
+    ]
+    targeted_item = {
+        "id": "workspace_artifact_targeted_readback:final.md:source-list",
+        "kind": "workspace_artifact.targeted_readback",
+        "status": "ok",
+        "body_state": "bounded",
+        "path": "final.md",
+        "body": "## Source List\n\nVerifier-visible source list.",
+    }
+    readback_item = {
+        "id": "workspace_artifact_readback:agent_task.taskboard.final:final.md",
+        "kind": "workspace_artifact.readback",
+        "status": "ok",
+        "body_state": "truncated",
+        "path": "final.md",
+        "body": "# Final\n\nInitial bounded body.",
+    }
+    locator_item = {
+        "id": "workspace_artifact_acceptance_locator:final.md:source-list",
+        "kind": "workspace_artifact.acceptance_locator",
+        "status": "ok",
+        "body_state": "ref_only",
+        "path": "final.md",
+        "heading": "Source List",
+    }
+
+    ledger = AgentTask._evidence_ledger_from_execution_meta(
+        {
+            "blocks": {
+                "evidence": {
+                    "evidence_items": [
+                        *generic_items,
+                        readback_item,
+                        locator_item,
+                        targeted_item,
+                    ]
+                }
+            }
+        }
+    )
+    ids = [str(item.get("id") or "") for item in ledger["items"]]
+
+    assert ids[:3] == [targeted_item["id"], readback_item["id"], locator_item["id"]]
+    assert targeted_item["id"] in ids
+    assert readback_item["id"] in ids
+    assert locator_item["id"] in ids
+    assert "generic-evidence-99" not in ids
+
+
 @pytest.mark.asyncio
 async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate(tmp_path):
     agent = _create_flat_replan_agent("execution-flat-strategy").use_workspace(tmp_path / "workspace")

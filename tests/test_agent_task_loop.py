@@ -5781,6 +5781,57 @@ def test_agent_task_verifier_block_continues_when_untried_read_action_exists(tmp
     assert task.diagnostics["verification_continuations"][0]["untried_action_ids"] == ["browse"]
 
 
+def test_agent_task_verifier_block_does_not_expand_artifact_readback_into_all_read_actions(tmp_path):
+    agent = _create_agent("agent-task-artifact-block-no-generic-continuation").use_workspace(
+        tmp_path / "task-workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Verify the final Workspace artifact.",
+        success_criteria=["The final report has verifier-readable evidence."],
+        execution="taskboard",
+        max_iterations=2,
+        options={
+            "planner_capabilities": [
+                {"id": "read_file", "kind": "action", "side_effect_level": "read", "replay_safe": True},
+                {"id": "search_files", "kind": "action", "side_effect_level": "read", "replay_safe": True},
+                {"id": "write_file", "kind": "action", "side_effect_level": "write", "replay_safe": True},
+            ]
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": False,
+            "requires_block": True,
+            "reason": "The artifact evidence is still insufficient.",
+            "failure_analysis": "A specific section needs scoped readback.",
+            "acceptance_delta": ["Scoped artifact evidence is missing."],
+            "missing_criteria": ["Scoped artifact evidence is missing."],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "Workspace artifact delivered at final.md",
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "action_ids": [],
+            "failed_actions": [],
+            "blocked_actions": [],
+            "approval_required_actions": [],
+            "missing_required_actions": [],
+            "capability_evidence": {
+                "actions": {"succeeded": [], "failed": []},
+                "artifacts": {"readback": ["workspace_artifact_readback:test:final.md"]},
+            },
+        },
+    )
+
+    assert verification["requires_block"] is True
+    assert "untried_read_action_available" not in verification.get("guard_reasons", [])
+    assert "continuation_opportunities" not in verification
+    assert "write_file" not in " ".join(verification.get("missing_criteria", []))
+
+
 def test_optional_failed_read_action_does_not_force_execution_risk_guard(tmp_path):
     agent = _create_agent("agent-task-optional-read-action").use_workspace(tmp_path / "task-workspace")
     task = AgentTask(

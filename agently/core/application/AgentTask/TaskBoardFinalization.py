@@ -383,7 +383,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray)
             else []
         )
-        updated["evidence_items"] = cls._dedupe_taskboard_final_evidence_items([*existing, *additional])
+        updated["evidence_items"] = cls._dedupe_taskboard_final_evidence_items([*additional, *existing])
         return DataFormatter.sanitize(updated)
 
     async def _taskboard_final_artifact_verification_evidence_items(

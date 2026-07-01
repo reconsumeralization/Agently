@@ -1189,10 +1189,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             if isinstance(item, Mapping)
             and str(item.get("kind") or "").strip() == "action"
             and str(item.get("id") or "").strip()
-            and (
-                str(item.get("side_effect_level") or "").strip().lower() == "read"
-                or bool(item.get("replay_safe")) is True
-            )
+            and str(item.get("side_effect_level") or "").strip().lower() == "read"
         }
         if not read_action_ids:
             return {}
@@ -1211,9 +1208,22 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         unsafe_failed_actions = [action_id for action_id in failed_actions if action_id not in read_action_ids]
         if unsafe_failed_actions:
             return {}
+        artifact_evidence = execution_evidence_summary.get("capability_evidence")
+        artifact_readbacks: list[str] = []
+        if isinstance(artifact_evidence, Mapping):
+            artifacts = artifact_evidence.get("artifacts")
+            if isinstance(artifacts, Mapping):
+                artifact_readbacks = self._normalize_string_list(artifacts.get("readback"))
+        missing_required_read_actions = [
+            action_id
+            for action_id in self._normalize_string_list(execution_evidence_summary.get("missing_required_actions"))
+            if action_id in read_action_ids
+        ]
+        if artifact_readbacks and not failed_actions and not missing_required_read_actions:
+            return {}
         return {
             "reason": "read_action_continuation_available",
-            "untried_action_ids": untried_action_ids,
+            "untried_action_ids": missing_required_read_actions or untried_action_ids,
             "failed_read_action_ids": sorted(action_id for action_id in failed_actions if action_id in read_action_ids),
         }
 
