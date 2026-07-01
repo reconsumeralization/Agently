@@ -396,7 +396,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 final["missing_criteria"] = []
             elif final_verification is not None and not bool(final_verification.get("is_complete")):
                 repair_revision = None
-                if not bool(final_verification.get("requires_block")):
+                if self._taskboard_final_verification_allows_repair(
+                    final_verification,
+                    blocking_state_facts=blocking_state_facts,
+                ):
                     repair_revision = self._taskboard_final_verification_repair_revision(
                         revision,
                         final=final,
@@ -467,6 +470,73 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         )
         await self._emit("agent_task.completed" if accepted else "agent_task.blocked", self.result)
         return {"terminal": True, "status": self.status}
+
+    @staticmethod
+    def _taskboard_final_verification_allows_repair(
+        final_verification: Mapping[str, Any],
+        *,
+        blocking_state_facts: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        if not isinstance(final_verification, Mapping) or bool(final_verification.get("is_complete")):
+            return False
+        if blocking_state_facts:
+            return False
+        if not bool(final_verification.get("requires_block")):
+            return True
+        if isinstance(final_verification.get("error"), Mapping):
+            return False
+
+        def strings(value: Any) -> list[str]:
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, Mapping):
+                return [str(item) for item in value.values() if item not in (None, "", [], {})]
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+                return [str(item) for item in value if item not in (None, "", [], {})]
+            return []
+
+        text = " ".join(
+            [
+                *strings(final_verification.get("reason")),
+                *strings(final_verification.get("failure_analysis")),
+                *strings(final_verification.get("missing_criteria")),
+                *strings(final_verification.get("acceptance_delta")),
+                *strings(final_verification.get("repair_constraints")),
+                *strings(final_verification.get("next_step_requirements")),
+                *strings(final_verification.get("replan_instruction")),
+            ]
+        ).lower()
+        if not text.strip():
+            return False
+        hard_block_markers = (
+            "approval required",
+            "capability unavailable",
+            "cannot continue without",
+            "denied",
+            "external input",
+            "missing required capability",
+            "permission",
+            "unavailable required capability",
+        )
+        if any(marker in text for marker in hard_block_markers):
+            return False
+        repairable_markers = (
+            "artifact",
+            "citation",
+            "deliverable",
+            "evidence",
+            "final",
+            "insufficient",
+            "missing",
+            "readback",
+            "repair",
+            "rewrite",
+            "section",
+            "source",
+            "unsupported",
+            "weak",
+        )
+        return any(marker in text for marker in repairable_markers)
 
     @classmethod
     def _dedupe_taskboard_final_evidence_items(

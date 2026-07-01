@@ -85,6 +85,29 @@ def test_agent_task_process_summary_is_compact_and_not_evidence():
     assert next_step["execution"]["short_summary"]
 
 
+def test_agent_task_prompts_do_not_expose_workspace_streaming_mechanics():
+    source_files = [
+        "agently/core/application/AgentTask/TaskBoardCardExecution.py",
+        "agently/core/application/AgentTask/ArtifactDelivery.py",
+        "agently/core/application/AgentTask/FlatStrategy.py",
+    ]
+    forbidden_phrases = [
+        "AgentTask will stream",
+        "will stream the long body",
+        "will write/read back",
+        "The framework will stream",
+        "produce trusted file_refs",
+    ]
+    repo_root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+    for relative_path in source_files:
+        text = (repo_root / relative_path).read_text(encoding="utf-8")
+        for phrase in forbidden_phrases:
+            if phrase in text:
+                offenders.append(f"{relative_path}: {phrase}")
+    assert offenders == []
+
+
 def test_agent_task_process_progress_delta_uses_only_explicit_progress_event():
     assert AgentTask._is_process_summary_stream_path("self_check")
     assert AgentTask._is_process_summary_stream_path("artifact.progress_message")
@@ -4521,6 +4544,93 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     schedule = TaskBoard(repaired, handler=lambda _context: None).schedule()
     assert schedule.runnable_card_ids == (repair.id,)
     assert task.diagnostics["taskboard_final_repair_patches"][0]["repair_card_id"] == repair.id
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-repairable-block").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-repairable-block",
+        goal="Return a complete final report.",
+        success_criteria=["The final report includes required sections."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the final report.",
+            "required_outputs": ["Final report"],
+            "allowed_execution_shape": "control",
+        }
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "taskboard-final-repairable-block",
+            "revision_id": "rev-1",
+            "graph": {"graph_id": "taskboard-final-repairable-block-graph", "cards": [card.to_dict()]},
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "final_result": "Draft body missing a required section.",
+                        "remaining_work": [],
+                    },
+                ).to_dict()
+            },
+        }
+    )
+
+    async def verifier_requires_block_for_repairable_gap(*_args, **_kwargs):
+        return {
+            "is_complete": False,
+            "requires_block": True,
+            "reason": "The final deliverable is missing a required section.",
+            "failure_analysis": "This is a repairable artifact gap.",
+            "acceptance_delta": ["Add the missing required section."],
+            "missing_criteria": ["Missing required section."],
+            "replan_instruction": "Repair final.md by adding the missing section.",
+            "repair_constraints": ["Preserve existing evidence."],
+            "next_step_requirements": ["Return verifier-visible readback for final.md."],
+            "final_result_required": True,
+            "final_result": "",
+        }
+
+    async def fail_finalizer(*_args, **_kwargs):
+        raise AssertionError("Promotable terminal candidate should skip the model finalizer.")
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", verifier_requires_block_for_repairable_gap)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert result["terminal"] is False
+    assert result["status"] == "repair_requested"
+    repair_revision = TaskBoardRevision.from_value(result["revision"])
+    repair_cards = [
+        card
+        for card in repair_revision.graph.cards
+        if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
+    ]
+    assert len(repair_cards) == 1
+    assert "Missing required section." in repair_cards[0].evidence_contract["missing_criteria"]
 
 
 @pytest.mark.asyncio

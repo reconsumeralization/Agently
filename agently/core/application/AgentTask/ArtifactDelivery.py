@@ -2065,7 +2065,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "active correction contract for the Markdown body. Rewrite affected artifact sections instead of only "
                 "stating that they were fixed. "
                 "If the source evidence is incomplete, write a clear source-boundary section instead of fabricating facts. "
-                "The framework will stream your Markdown into the Workspace artifact path and read it back."
+                "Your output is the Markdown artifact body only."
             )
         )
 
