@@ -76,6 +76,20 @@ bridge.watch(agent)
 
 TriggerFlow 场景下，用 `data.async_put_into_stream(...)` 推进度；wrapper 消费 runtime stream，最后展示 close snapshot。
 
+## AgentTask action observation
+
+AgentTask 可能会从 bounded execution 的 Action logs 投影 `agent_task.action.started`、`agent_task.action.completed` 和 `agent_task.action.failed` RuntimeEvent。DevTools 应把它们作为 AgentTask timeline 里的事实型 action observation 消费；当事件带有 iteration 元数据时，按任务轮次归组展示。
+
+已恢复的 `success` 和 `partial_success` 记录应展示为 completed observation，即使它们携带 backend diagnostics。failed observation 只保留给失败、blocked、timeout 或未恢复 error 记录。
+
+这些记录只用于展示、日志和运行后分析。不要把它们当作 route 决策、verifier 结果、质量评分、语义相关性判断或任务完成验收依据。未知字段应宽容忽略，大 payload 应保持摘要化或 ref-backed。
+
+## Model request usage
+
+DevTools 应优先从 `payload.model_request_telemetry.usage_summary` 消费 model request usage；兼容情况下可回退到 model meta 或终态事件里的 provider `usage` 元数据。展示范围分两层：单次 model request，以及当前选中 run 分支向下聚合的 descendant model requests。
+
+当 provider token 计数不可得时，token 字段展示为未知，例如 `NaN`，同时把输入/输出字符长度估算作为诊断信息展示。Usage telemetry 只属于 observation，不应成为框架预算卡控、retry 规则、route 决策、质量评分、verifier 结果或任务完成验收依据。
+
 ## 兼容边界
 
 DevTools 消费端应 fail open（宽容失败）：

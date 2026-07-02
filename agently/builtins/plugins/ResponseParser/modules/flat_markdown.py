@@ -22,66 +22,8 @@ from __future__ import annotations
 import re
 from typing import Any, AsyncGenerator, Mapping
 
-from agently.types.data.prompt import _classify_field_spec
 from agently.types.data.response import StreamingData
-
-from .section_value import (
-    normalize_complex_section_value,
-    normalize_scalar_section_value,
-)
-
-
-def parse_flat_markdown_output(text: str, output_schema: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Parse a flat_markdown model response into a dict keyed by output schema fields.
-
-    Splits the response text by ``### field_name`` section headers. Content
-    between each header and the next header (or end of text) is assigned to
-    the corresponding field.
-
-    Args:
-        text: The raw model response text.
-        output_schema: The output dict schema (field_name -> field_spec tuple).
-
-    Returns:
-        Parsed dict, or ``None`` if no sections are found.
-    """
-    if not isinstance(output_schema, Mapping) or not output_schema:
-        return None
-
-    result: dict[str, Any] = {}
-    # Split on "### field_name" at start of line
-    # Pattern: ^###  (optional spaces) field_name $ (end of line)
-    field_names = list(output_schema.keys())
-    # Build a pattern that only matches known field names
-    if not field_names:
-        return None
-    escaped_names = "|".join(re.escape(name) for name in field_names)
-    pattern = rf"^###\s+({escaped_names})\s*(?:\[(?:text|JSON)\])?\s*$"
-
-    sections = re.split(pattern, text, flags=re.MULTILINE)
-    # sections[0] = preamble (before first header)
-    # sections[1] = first field_name, sections[2] = first content
-    # sections[3] = second field_name, sections[4] = second content, etc.
-
-    for i in range(1, len(sections), 2):
-        field_name = sections[i].strip()
-        content = sections[i + 1].strip() if i + 1 < len(sections) else ""
-        field_spec = output_schema.get(field_name)
-        if _classify_field_spec(field_spec) == "complex":
-            ok, value = normalize_complex_section_value(
-                content,
-                field_name=field_name,
-            )
-        else:
-            ok, value = normalize_scalar_section_value(
-                content,
-                field_name=field_name,
-            )
-        if not ok:
-            return None
-        result[field_name] = value
-
-    return result if result else None
+from agently.core.model.StructuredOutputParser import parse_flat_markdown_output
 
 
 class FlatMarkdownStreamingParser:
@@ -110,6 +52,15 @@ class FlatMarkdownStreamingParser:
         self._current_field: str | None = None
         self._field_started: set[str] = set()
         self._field_completed: set[str] = set()
+        self._field_values: dict[str, list[str]] = {}
+
+    def _append_current_field_delta(self, chunk: str) -> None:
+        if self._current_field is None or not chunk:
+            return
+        self._field_values.setdefault(self._current_field, []).append(chunk)
+
+    def _field_done_value(self, field_name: str) -> str:
+        return "".join(self._field_values.get(field_name, [])).strip()
 
     async def parse_chunk(self, chunk: str) -> AsyncGenerator[StreamingData, None]:
         """Feed a text chunk and yield any new :class:`StreamingData` events.
@@ -137,6 +88,7 @@ class FlatMarkdownStreamingParser:
                         safe = self._buffer[: last_nl + 1]
                         self._buffer = self._buffer[last_nl + 1 :]
                         if safe.strip():
+                            self._append_current_field_delta(safe)
                             yield StreamingData(
                                 path=self._current_field,
                                 value=safe,
@@ -157,6 +109,7 @@ class FlatMarkdownStreamingParser:
 
             if self._current_field is not None:
                 if pre_content:
+                    self._append_current_field_delta(pre_content)
                     yield StreamingData(
                         path=self._current_field,
                         value=pre_content,
@@ -168,7 +121,7 @@ class FlatMarkdownStreamingParser:
                 self._field_completed.add(self._current_field)
                 yield StreamingData(
                     path=self._current_field,
-                    value="",
+                    value=self._field_done_value(self._current_field),
                     delta="",
                     is_complete=True,
                     event_type="done",
@@ -177,6 +130,7 @@ class FlatMarkdownStreamingParser:
             # Start new field
             self._current_field = new_field_name
             self._field_started.add(new_field_name)
+            self._field_values.setdefault(new_field_name, [])
             yield StreamingData(
                 path=new_field_name,
                 value="",
@@ -201,6 +155,7 @@ class FlatMarkdownStreamingParser:
         if self._current_field is not None:
             remaining = self._buffer.strip()
             if remaining:
+                self._append_current_field_delta(remaining)
                 yield StreamingData(
                     path=self._current_field,
                     value=remaining,
@@ -211,7 +166,7 @@ class FlatMarkdownStreamingParser:
             if self._current_field not in self._field_completed:
                 yield StreamingData(
                     path=self._current_field,
-                    value="",
+                    value=self._field_done_value(self._current_field),
                     delta="",
                     is_complete=True,
                     event_type="done",
@@ -228,3 +183,32 @@ class FlatMarkdownStreamingParser:
                     is_complete=True,
                     event_type="done",
                 )
+
+    async def flush_final_data(self, final_data: Any) -> AsyncGenerator[StreamingData, None]:
+        """Flush streaming events from trusted final parsed data when no deltas arrived."""
+        if isinstance(final_data, Mapping):
+            for name in self._field_names:
+                if name in self._field_started or name not in final_data:
+                    continue
+                value = final_data.get(name)
+                value_text = "" if value is None else str(value)
+                self._field_started.add(name)
+                self._field_values[name] = [value_text] if value_text else []
+                if value_text:
+                    yield StreamingData(
+                        path=name,
+                        value=value_text,
+                        delta=value_text,
+                        is_complete=False,
+                        event_type="delta",
+                    )
+                self._field_completed.add(name)
+                yield StreamingData(
+                    path=name,
+                    value=value_text,
+                    delta="",
+                    is_complete=True,
+                    event_type="done",
+                )
+        async for event in self.flush():
+            yield event

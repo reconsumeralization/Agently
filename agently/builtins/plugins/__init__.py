@@ -20,13 +20,15 @@ from .ActionExecutor import (
     PythonSandboxActionExecutor,
 )
 from .ActionRuntime import AgentlyActionRuntime
-from .ExecutionEnvironmentProvider import (
-    BashExecutionEnvironmentProvider,
-    MCPExecutionEnvironmentProvider,
-    PythonExecutionEnvironmentProvider,
+from .ExecutionResourceProvider import (
+    ACPExecutionResourceProvider,
+    BashExecutionResourceProvider,
+    MCPExecutionResourceProvider,
+    PythonExecutionResourceProvider,
 )
 from .PromptGenerator.AgentlyPromptGenerator import AgentlyPromptGenerator
 from .TaskDAGPlanner import AgentlyTaskDAGPlanner
+from .Blocks import AgentlyBlocks
 from .AgentOrchestrator import AgentlyAgentOrchestrator
 from .ModelRequester.AnthropicCompatible import AnthropicCompatible
 from .ModelRequester.OpenAICompatible import OpenAICompatible

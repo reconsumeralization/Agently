@@ -20,6 +20,7 @@ Agently.set_settings("AnthropicCompatible", {
     "api_key": "${ENV.ANTHROPIC_API_KEY}",
     "model": "${ENV.ANTHROPIC_MODEL}",
     "max_tokens": 4096,
+    "stream_idle_timeout": 45.0,
 })
 ```
 
@@ -31,6 +32,7 @@ Agently.set_settings("AnthropicCompatible", {
 | `max_tokens` | Anthropic API **必填**；有合理默认但建议显式 pin 以可预期成本 |
 | `anthropic_version` | API 版本 header（默认近期稳定版本） |
 | `anthropic_beta` | 可选 beta-feature header（字符串或字符串列表） |
+| `stream_idle_timeout` | 可选 liveness deadline，约束流式事件间隔和非流式响应生成等待 |
 | `request_options` | 转给底层 HTTP client 的额外 dict |
 
 公开 coordinator 在 [agently/builtins/plugins/ModelRequester/AnthropicCompatible/plugin.py](../../../agently/builtins/plugins/ModelRequester/AnthropicCompatible/plugin.py)，私有实现模块放在 `modules/` 下。

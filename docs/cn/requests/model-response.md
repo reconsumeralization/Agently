@@ -1,5 +1,5 @@
 ---
-title: 模型响应
+title: 模型结果
 description: 从一次 result 里读 text / data / metadata 与流式事件。
 keywords: Agently, result, get_result, get_data, get_text, get_meta, generator, streaming
 ---
@@ -11,7 +11,9 @@ keywords: Agently, result, get_result, get_data, get_text, get_meta, generator, 
 `agent.input(...).start()` 是便捷写法 —— 创建 `AgentExecution`、执行它并直接返回
 解析后的 data。其他更有意思的事（text、metadata、流式、复用、status 或 task
 refs）都走 `get_result()`。quick prompt 链返回 `AgentExecutionResult`；直接
-`agent.create_request(...).get_result()` 仍返回 `ModelResponseResult`。
+`agent.create_request(...).get_result()` 返回 `ModelRequestResult`。
+`ModelResponseResult` 不再作为公开 result facade；直接构造 `ModelResponse` 也仍然
+deprecated。
 
 ## 两种消费方式
 
@@ -56,7 +58,7 @@ meta = result.get_meta()        # 已缓存
 
 | `type` | 你拿到的 | 适合 |
 |---|---|---|
-| `"delta"` | 原始 token delta | 终端打字机 UX |
+| `"delta"` | 文本 delta；重放替换前额外输出 `"<$retry>{reason}</$retry>"` | 终端打字机 UX |
 | `"instant"` | 带 `path`、`delta`、`value`、`is_complete` 的结构化 `StreamingData` 事件 | 字段级 UI 更新 |
 | `"streaming_parse"` | 与 `instant` 使用同一个结构化流式 parser 的兼容别名 | 兼容 / 增量 dict 读取 |
 | `"specific"` | `(event, data)` 元组，按事件过滤（`delta`、`reasoning_delta`、`tool_calls` 等） | 精确订阅特定事件 |
@@ -71,6 +73,9 @@ meta = result.get_meta()        # 已缓存
 旧的 `AgentlySpecificResponseMessage`、`AgentlyModelResponseMessage` 以及相关
 `Response` 别名会继续在 `agently.types.data` 里兼容，但不会从 `agently`
 根入口重新导出。推荐使用 `Result` 命名。
+
+`ModelRequestResult` 是 canonical result class。不要再导入或用历史的
+`ModelResponseResult` 名称做类型注解。
 
 ### Delta 例子
 
@@ -102,6 +107,29 @@ for item in gen:
 `.value`、`.delta`、`.is_complete` 和 `.event_type`。用 `.delta` 更新正在增长
 的字段；只有下游动作必须等字段关闭时，才用 `.is_complete` /
 `event_type=="done"` 做触发条件。
+
+### AgentExecution 投影
+
+`AgentExecutionStreamData` 是 execution 层的结构化投影，不是
+`ModelRequestResult`。一个 execution 持有模型请求时，`instant` / `all` 流会把模型
+attempt 的事实作为结构化 stream item 保留下来：`$status` 表达 retry、失败和
+完成状态，`meta` 带有 `response_id`、`request_run_id`、`model_run_id` 与
+`attempt_index`。`type="delta"` 是纯文本投影，产出字符串，并用
+`"<$retry>{reason}</$retry>"` 标记重放边界。
+
+```python
+execution = agent.input("总结这份事故更新。")
+async for item in execution.get_async_generator(type="instant"):
+    if item.path == "$status":
+        print(item.value["status"], item.meta["response_id"])
+    elif item.path == "model.delta" and item.delta:
+        print(item.delta, end="", flush=True)
+```
+
+无参 execution generator 默认也是同一个 `delta` 投影，所以
+`execution.get_generator()` 和 `execution.get_async_generator()` 都产出字符串。
+consumer 需要结构化 `$status` 而不是文本标记时，使用 `type="instant"` 或
+`type="all"`。
 
 如果多个字段共用一个 CLI 输出区域，不要把 `.is_complete` 当成全局展示顺序屏障。
 结构化 parser 往往是因为已经看到下一个 path 开始，才确认上一个 path 已关闭，
@@ -206,6 +234,67 @@ asyncio.run(main())
 
 服务和 TriggerFlow 场景应走 async —— 见 [Async First](../start/async-first.md)。
 
+### Attempt 状态
+
+`$status` 是框架保留的 stream path，不是模型输出字段。当显式允许 provider 在已经有
+partial 输出后重放时，它用于通知 UI/SSE 消费者：
+
+```python
+result = agent.create_request().input("总结这次事故。").get_result()
+
+async for item in result.get_async_generator(type="instant"):
+    if item.path == "$status" and item.value["status"] == "failed" and item.value["retry"]:
+        clear_provisional_answer()
+        continue
+    render_field_update(item)
+```
+
+最终的 `get_data()` 不含 `$status`。需要原始状态事件时，用 `type="all"` 或
+`type="specific", specific="status"`。`reason` 给出有界的 transport/provider 实际说明；
+`cancelled` 与失败请求不同。
+
+纯文本 `delta` 消费者会在替代 attempt 的正文前收到独立的
+`"<$retry>{reason}</$retry>"` 标记。它是重放边界，不是模型正文：
+
+```python
+import html
+
+provisional_text = ""
+for chunk in result.get_generator(type="delta"):
+    if "<$retry>" in chunk:
+        retry_reason = html.unescape(
+            chunk.removeprefix("<$retry>").removesuffix("</$retry>")
+        )
+        provisional_text = ""
+        clear_provisional_answer(retry_reason)
+        continue
+    provisional_text += chunk
+    render_delta(chunk)
+```
+
+标记里的 reason 会对 provider 错误消息中的 `<`、`>`、`&` 做 XML text 转义。
+当结构化事件可用时，`$status` 是优先使用的 retry 控制记录；当消费侧选择纯
+`delta` 时，这个 marker 就是对应的公开 replay boundary。纯文本流无法让 sentinel
+完全无碰撞；必须保留模型输出中包含 `"<$retry>"` 的文本 chunk 时，应改用
+`instant`、`specific` 或 `all`。
+
+AgentExecution 会把同一状态投影成结构化 process item，并在 `item.meta` 中加入来源
+request/run lineage。消费侧需要结构化 retry 事实时，使用 `instant` 或 `specific`：
+
+```python
+execution = agent.input("总结这次事故。")
+
+async for item in execution.get_async_generator(type="instant"):
+    if item.path == "$status" and item.value["retry"]:
+        clear_provisional_output(item.meta["response_id"])
+        continue
+    render_execution_item(item)
+```
+
+它的公开 `type="delta"` 投影可能用文本发出同一个 `<$retry>...</$retry>` replay
+marker。持久化 artifact writer 或 SSE/UI 消费者选择纯文本 stream 时，应在消费边界处理
+这个 marker；不要为了拿到 instant 字段而把自由文档正文强行塞进 `.output()`。
+
 ## 并发
 
 因为 `get_result()` 只在你消费时才发请求，可以先建多个 result，再并发消费：
@@ -224,6 +313,26 @@ results = await asyncio.gather(
 ```
 
 这是标准 async 模式，Agently 没有特别封装。
+
+### 可选的请求调度
+
+当大量并发请求（或长程任务）有触发供应商并发/速率上限的风险时，可以按 provider
+限制模型请求的下发。调度是可选的；不配置时请求立即下发、重试立即重发（行为不变）。
+
+```python
+# 限制所有 provider 的在途并发与每秒下发数，可对单个 provider 覆盖。
+agent.set_settings("model_request.scheduler.max_concurrency", 8)
+agent.set_settings("model_request.scheduler.rate_per_second", 5)
+agent.set_settings("model_request.scheduler.providers",
+                   {"OpenAICompatible": {"max_concurrency": 2}})
+
+# 重试之间退避而非立即重发（指数 + 抖动）。
+agent.set_settings("model_request.retry_backoff_base", 0.5)  # 秒
+agent.set_settings("model_request.retry_backoff_max", 30)
+```
+
+由于重试也走同一个 per-provider 槽位，速率限制同样会拉开重试调用的间隔，从而抑制
+供应商错误风暴。
 
 ## 能复用就别重发
 

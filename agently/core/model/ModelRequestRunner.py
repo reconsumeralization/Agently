@@ -1,0 +1,966 @@
+# Copyright 2023-2026 AgentEra(Agently.Tech)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import asyncio
+import inspect
+import json
+import time
+import uuid
+
+from typing import Any, AsyncGenerator, Generator, Literal, Mapping, TYPE_CHECKING, cast, overload
+
+from agently.core.extension import ExtensionHandlers
+from agently.core.runtime import bind_runtime_context, get_current_agent_execution_context
+from agently.utils import Settings, DataFormatter
+
+from .Prompt import Prompt
+from .ModelRequestResult import DEFAULT_SPECIFIC_EVENTS, ModelRequestResult
+
+_MODEL_REQUEST_ESTIMATED_INPUT_CHARS_META = "_model_request_estimated_input_chars"
+_MODEL_REQUEST_ESTIMATED_INPUT_SOURCE_META = "_model_request_estimated_input_source"
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
+
+    from agently.core import PluginManager
+    from agently.types.data import (
+        AgentlyModelResultMessage,
+        AgentlyOriginalResultPayload,
+        AgentlySpecificResultMessage,
+        InstantStreamingContentType,
+        OutputValidateHandler,
+        ResultContentType,
+        RunContext,
+        SpecificEvents,
+        StreamingData,
+    )
+    from agently.types.plugins import ModelRequester
+
+
+class ModelRequestRunner:
+    def __init__(
+        self,
+        agent_name: str,
+        plugin_manager: "PluginManager",
+        settings: Settings,
+        prompt: Prompt,
+        extension_handlers: ExtensionHandlers,
+        *,
+        run_context: "RunContext | None" = None,
+        parent_run_context: "RunContext | None" = None,
+        agent_execution_run_context: "RunContext | None" = None,
+        attempt_index: int = 1,
+    ):
+        self.agent_name = agent_name
+        self.id = uuid.uuid4().hex
+        self.attempt_index = attempt_index
+        if run_context is not None:
+            self.request_run_context = run_context
+        else:
+            from agently.types.data import RunContext
+
+            self.request_run_context = RunContext.create(
+                run_kind="request",
+                parent=parent_run_context,
+                agent_name=self.agent_name,
+                response_id=self.id,
+            )
+        if self.request_run_context.response_id is None:
+            self.request_run_context.response_id = self.id
+        if self.request_run_context.agent_name is None:
+            self.request_run_context.agent_name = self.agent_name
+        self.run_context = self.request_run_context
+        self.agent_execution_run_context = agent_execution_run_context
+        self.model_run_context = self.request_run_context.create_child(
+            run_kind="model_request",
+            response_id=self.id,
+            meta={
+                "attempt_index": self.attempt_index,
+            },
+        )
+        self.plugin_manager = plugin_manager
+        settings_snapshot = settings.get()
+        self.settings = Settings(settings_snapshot if isinstance(settings_snapshot, dict) else {})
+        self.settings.set("$log.cancel_logs", False)
+        prompt_snapshot = prompt.get()
+        self.prompt = Prompt(
+            self.plugin_manager,
+            self.settings,
+            prompt_dict=prompt_snapshot if isinstance(prompt_snapshot, dict) else {},
+        )
+        extension_handlers_snapshot = extension_handlers.get()
+        self.extension_handlers = ExtensionHandlers(
+            extension_handlers_snapshot if isinstance(extension_handlers_snapshot, dict) else {}
+        )
+        self.result = ModelRequestResult(
+            self.agent_name,
+            self.id,
+            self.prompt,
+            self._get_response_generator(),
+            self.plugin_manager,
+            self.settings,
+            self.extension_handlers,
+            request_run_context=self.request_run_context,
+            model_run_context=self.model_run_context,
+            attempt_index=self.attempt_index,
+        )
+
+    def cancel_logs(self):
+        self.settings.set("$log.cancel_logs", True)
+
+    @staticmethod
+    def _status_from_error(error: BaseException, *, status: Literal["failed", "cancelled"]) -> dict[str, Any]:
+        reason = str(error).strip() or error.__class__.__name__
+        if "\nRequest Data:" in reason:
+            reason = reason.split("\nRequest Data:", 1)[0].rstrip()
+        return {
+            "status": status,
+            "retry": False,
+            "reason": reason[:4096],
+            "error_type": error.__class__.__name__,
+        }
+
+    async def _emit_status_runtime(
+        self,
+        status_data: Mapping[str, Any],
+        *,
+        provider_family: str,
+    ) -> dict[str, Any]:
+        """Add ModelRequest lineage to a reserved stream status and observe it."""
+
+        from agently.base import async_emit_runtime
+        from agently.core.runtime.RuntimeEvents import attach_model_request_telemetry
+
+        payload = {
+            "response_id": self.id,
+            "request_run_id": self.request_run_context.run_id,
+            "model_run_id": self.model_run_context.run_id,
+            "provider_family": provider_family,
+            **dict(status_data),
+        }
+        self._attach_status_estimated_lengths(payload)
+        status = str(payload.get("status", ""))
+        retry = bool(payload.get("retry", False))
+        attempt_index = payload.get("attempt_index", self.attempt_index)
+        payload.setdefault("attempt_index", attempt_index)
+        level = "INFO"
+        if status == "failed":
+            level = "WARNING" if retry else "ERROR"
+        elif status == "cancelled":
+            level = "WARNING"
+        suffix = " Retry scheduled." if retry else ""
+        attach_model_request_telemetry(
+            payload,
+            event_kind="model.status",
+            run=self.model_run_context,
+            source="ModelRequest",
+        )
+        await async_emit_runtime(
+            {
+                "event_type": "model.status",
+                "source": "ModelRequest",
+                "level": level,
+                "message": f"Model request attempt #{ attempt_index } { status }.{ suffix }",
+                "payload": dict(payload),
+                "run": self.model_run_context,
+            }
+        )
+        return payload
+
+    @staticmethod
+    def _safe_payload_length(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return len(value)
+        try:
+            return len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+        except Exception:
+            return len(str(value))
+
+    def _response_output_length(self) -> tuple[int | None, str | None]:
+        full_result_data = getattr(self.result, "full_result_data", None)
+        if not isinstance(full_result_data, Mapping):
+            return None, None
+        for source, value in (
+            ("text_result", full_result_data.get("text_result")),
+            ("cleaned_result", full_result_data.get("cleaned_result")),
+            ("parsed_result", full_result_data.get("parsed_result")),
+            ("original_done", full_result_data.get("original_done")),
+        ):
+            if value in (None, "", {}, []):
+                continue
+            length = self._safe_payload_length(value)
+            if length is not None:
+                return length, source
+        return None, None
+
+    def _attach_status_estimated_lengths(self, payload: dict[str, Any]) -> None:
+        run_meta = getattr(self.model_run_context, "meta", None)
+        if isinstance(run_meta, Mapping) and payload.get("estimated_input_chars") is None:
+            input_chars = run_meta.get(_MODEL_REQUEST_ESTIMATED_INPUT_CHARS_META)
+            if isinstance(input_chars, int):
+                payload["estimated_input_chars"] = input_chars
+                payload["estimated_input_source"] = str(
+                    run_meta.get(_MODEL_REQUEST_ESTIMATED_INPUT_SOURCE_META) or "request_text"
+                )
+        if str(payload.get("status") or "") == "completed" and payload.get("estimated_output_chars") is None:
+            output_chars, output_source = self._response_output_length()
+            if output_chars is not None:
+                payload["estimated_output_chars"] = output_chars
+                payload["estimated_output_source"] = output_source or "model_result"
+
+    def get_meta(self):
+        return self.result.get_meta()
+
+    async def async_get_meta(self):
+        return await self.result.async_get_meta()
+
+    def get_text(self) -> str:
+        return self.result.get_text()
+
+    async def async_get_text(self) -> str:
+        return await self.result.async_get_text()
+
+    @overload
+    def get_data(
+        self,
+        *,
+        type: Literal['parsed'],
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    def get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any: ...
+
+    def get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any:
+        return self.result.get_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            _retry_count=_retry_count,
+        )
+
+    @overload
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['parsed'],
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any: ...
+
+    async def async_get_data(
+        self,
+        *,
+        type: Literal['original', 'parsed', 'all'] = "parsed",
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        _retry_count: int = 0,
+    ) -> Any:
+        return await self.result.async_get_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            _retry_count=_retry_count,
+        )
+
+    @overload
+    def get_data_object(self) -> "BaseModel | None": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel | None": ...
+
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ):
+        return self.result.get_data_object(
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
+
+    @overload
+    async def async_get_data_object(self) -> "BaseModel | None": ...
+
+    @overload
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel": ...
+
+    @overload
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ) -> "BaseModel | None": ...
+
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+    ):
+        return await self.result.async_get_data_object(
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
+
+    @overload
+    def get_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["StreamingData", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["all"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlyModelResultMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlySpecificResultMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["original"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator["AgentlyOriginalResultPayload", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator: ...
+
+    def get_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> Generator:
+        return cast(Any, self.result).get_generator(type=type, content=content, specific=specific)
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "InstantStreamingContentType",
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["StreamingData", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["all"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlyModelResultMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["specific"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlySpecificResultMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["delta"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["original"],
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator["AgentlyOriginalResultPayload", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator: ...
+
+    def get_async_generator(
+        self,
+        type: "ResultContentType | None" = None,
+        content: "ResultContentType | None" = None,
+        *,
+        specific: "SpecificEvents" = DEFAULT_SPECIFIC_EVENTS,
+    ) -> AsyncGenerator:
+        return cast(Any, self.result).get_async_generator(type=type, content=content, specific=specific)
+
+    def _build_prompt_payload(self) -> dict[str, Any]:
+        prompt_snapshot = self.prompt.to_serializable_prompt_data()
+        prompt_object = self.prompt.to_prompt_object()
+        prompt_messages = self.prompt.to_messages(rich_content=bool(prompt_object.attachment))
+        prompt_text = self.prompt.to_text()
+        return {
+            "prompt": prompt_snapshot,
+            "prompt_messages": DataFormatter.sanitize(prompt_messages),
+            "prompt_text": prompt_text,
+            "output_format": prompt_object.output_format,
+            "ensure_all_keys": getattr(prompt_object, "ensure_all_keys", False),
+            "has_tools": bool(prompt_object.tools),
+            "chat_history_length": len(prompt_object.chat_history),
+            "attachment_count": len(prompt_object.attachment),
+        }
+
+    def _build_request_payload(self, request_data: Any):
+        request_data_dict = DataFormatter.sanitize(request_data.model_dump())
+        request_detail = {
+            "data": request_data_dict["data"] if "data" in request_data_dict else None,
+            "request_options": request_data_dict["request_options"] if "request_options" in request_data_dict else None,
+            "request_url": request_data_dict["request_url"] if "request_url" in request_data_dict else None,
+            "stream": request_data_dict["stream"] if "stream" in request_data_dict else None,
+        }
+        return {
+            "request": request_detail,
+            "request_text": json.dumps(request_detail, indent=2, ensure_ascii=False)
+            .replace("\\n", "\n")
+            .replace("\\\"", "\""),
+        }
+
+    def _scheduler_slot(self, provider: str):
+        """Return the model request scheduling slot for this provider.
+
+        Reads ``model_request.scheduler`` config into the process scheduler and
+        returns its ``slot(provider)`` context manager. When no concurrency or
+        rate limit is configured the slot is a no-op and behavior is unchanged.
+        """
+        from agently.base import request_scheduler
+
+        request_scheduler.configure_from_settings(provider, self.settings)
+        return request_scheduler.slot(provider)
+
+    def _build_full_provider_request_data(self, request_data: Any) -> dict[str, Any]:
+        data = DataFormatter.to_str_key_dict(
+            getattr(request_data, "data", {}),
+            value_format="serializable",
+            default_value={},
+        )
+        options = DataFormatter.to_str_key_dict(
+            getattr(request_data, "request_options", {}),
+            value_format="serializable",
+            default_value={},
+        )
+        data.update(options)
+        return data
+
+    async def _get_response_generator(self) -> AsyncGenerator["AgentlyModelResultMessage", None]:
+        from agently.base import async_emit_runtime
+        from agently.core.runtime.RuntimeEvents import attach_model_request_telemetry
+
+        with bind_runtime_context(
+            parent_run_context=self.request_run_context,
+            request_run_context=self.request_run_context,
+            model_run_context=self.model_run_context,
+            agent_execution_run_context=self.agent_execution_run_context,
+            settings=self.settings,
+        ):
+            await async_emit_runtime(
+                {
+                    "event_type": "request.started",
+                    "source": "ModelRequest",
+                    "message": f"Starting request for agent '{ self.agent_name }'.",
+                    "payload": {
+                        "agent_name": self.agent_name,
+                        "response_id": self.id,
+                        "attempt_index": self.attempt_index,
+                    },
+                    "run": self.request_run_context,
+                }
+            )
+            provider_name = str(self.settings.get("plugins.ModelRequester.activate", ""))
+            scheduler_slot = self._scheduler_slot(provider_name)
+            scheduler_slot_entered = False
+            terminal_status: str | None = None
+            try:
+                await scheduler_slot.__aenter__()
+                scheduler_slot_entered = True
+                ModelRequester = cast(
+                    type["ModelRequester"],
+                    self.plugin_manager.get_plugin(
+                        "ModelRequester",
+                        str(self.settings["plugins.ModelRequester.activate"]),
+                    ),
+                )
+                request_prefixes = self.extension_handlers.get("request_prefixes", [])
+                for prefix in request_prefixes:
+                    if inspect.iscoroutinefunction(prefix):
+                        await prefix(self.prompt, self.settings)
+                    elif inspect.isfunction(prefix):
+                        prefix(self.prompt, self.settings)
+                self.model_run_context.meta["_model_request_started_at"] = time.perf_counter()
+                request_started_payload = {
+                    "agent_name": self.agent_name,
+                    "response_id": self.id,
+                    "request_run_id": self.request_run_context.run_id,
+                    "model_run_id": self.model_run_context.run_id,
+                    "attempt_index": self.attempt_index,
+                    "provider_family": provider_name,
+                }
+                attach_model_request_telemetry(
+                    request_started_payload,
+                    event_kind="model.request_started",
+                    run=self.model_run_context,
+                    source="ModelRequest",
+                )
+                await async_emit_runtime(
+                    {
+                        "event_type": "model.request_started",
+                        "source": "ModelRequest",
+                        "message": f"Starting model request attempt #{ self.attempt_index } for agent '{ self.agent_name }'.",
+                        "payload": request_started_payload,
+                        "run": self.model_run_context,
+                    }
+                )
+                prompt_payload = self._build_prompt_payload()
+                await async_emit_runtime(
+                    {
+                        "event_type": "prompt.built",
+                        "source": "ModelRequest",
+                        "message": f"Prompt built for model request attempt #{ self.attempt_index }.",
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.id,
+                            "attempt_index": self.attempt_index,
+                            **prompt_payload,
+                        },
+                        "run": self.model_run_context,
+                    }
+                )
+                model_requester = ModelRequester(self.prompt, self.settings)
+                request_data = model_requester.generate_request_data()
+                request_payload = self._build_request_payload(request_data)
+                request_text = request_payload.get("request_text")
+                if isinstance(request_text, str):
+                    self.model_run_context.meta[_MODEL_REQUEST_ESTIMATED_INPUT_CHARS_META] = len(request_text)
+                    self.model_run_context.meta[_MODEL_REQUEST_ESTIMATED_INPUT_SOURCE_META] = "request_text"
+                model_requesting_payload = {
+                    "agent_name": self.agent_name,
+                    "response_id": self.id,
+                    "attempt_index": self.attempt_index,
+                    "request_run_id": self.request_run_context.run_id,
+                    "model_run_id": self.model_run_context.run_id,
+                    "provider_family": provider_name,
+                    **request_payload,
+                }
+                attach_model_request_telemetry(
+                    model_requesting_payload,
+                    event_kind="model.requesting",
+                    run=self.model_run_context,
+                    source="ModelRequest",
+                )
+                await async_emit_runtime(
+                    {
+                        "event_type": "model.requesting",
+                        "source": "ModelRequest",
+                        "message": f"Sending model request for agent '{ self.agent_name }'.",
+                        "payload": model_requesting_payload,
+                        "run": self.model_run_context,
+                    }
+                )
+                consume_model_request = getattr(
+                    get_current_agent_execution_context(),
+                    "consume_model_request",
+                    None,
+                )
+                if callable(consume_model_request):
+                    consume_model_request(
+                        response_id=self.id,
+                        run_id=self.model_run_context.run_id,
+                    )
+                build_request_handlers = getattr(model_requester, "build_request_handlers", None)
+                if callable(build_request_handlers):
+                    from agently.core.model.AttemptRunner import AttemptRunner, is_core_attempt_runner_entrypoint
+                    from agently.types.data import AttemptHandlers, AttemptObservation, AttemptState
+
+                    if is_core_attempt_runner_entrypoint(getattr(model_requester, "request_model", None)):
+                        handlers = cast(AttemptHandlers, build_request_handlers(request_data))
+                        full_request_data = self._build_full_provider_request_data(request_data)
+
+                        async def observe_attempt(observation: AttemptObservation, state: AttemptState) -> None:
+                            if handlers.on_observation is not None:
+                                result = handlers.on_observation(observation, state)
+                                if inspect.isawaitable(result):
+                                    await result
+                            if observation.kind == "error_yielded":
+                                from agently.core.runtime.RuntimeEvents import async_emit_model_requester_error
+
+                                await async_emit_model_requester_error(
+                                    observation.data.get("error"),
+                                    source=str(getattr(model_requester, "name", ModelRequester.name)),
+                                    request_data=full_request_data,
+                                    payload={
+                                        "agent_name": self.agent_name,
+                                        "response_id": self.id,
+                                        "attempt_index": self.attempt_index,
+                                        "request_run_id": self.request_run_context.run_id,
+                                        "model_run_id": self.model_run_context.run_id,
+                                        "provider_family": provider_name,
+                                        "request_url": getattr(request_data, "request_url", None),
+                                    },
+                                    run=self.model_run_context,
+                                )
+
+                        response_generator = AttemptRunner(
+                            AttemptHandlers(
+                                execute=handlers.execute,
+                                handle_error=handlers.handle_error,
+                                on_observation=observe_attempt,
+                                is_output_started=handlers.is_output_started,
+                            )
+                        ).run_stream()
+                    else:
+                        response_generator = model_requester.request_model(request_data)
+                else:
+                    response_generator = model_requester.request_model(request_data)
+                broadcast_generator = model_requester.broadcast_response(response_generator)
+                broadcast_prefixes = self.extension_handlers.get("broadcast_prefixes", [])
+                broadcast_suffixes = self.extension_handlers.get("broadcast_suffixes", {})
+                for prefix in broadcast_prefixes:
+                    if inspect.iscoroutinefunction(prefix):
+                        result = await prefix(
+                            self.result.full_result_data,
+                            self.settings,
+                        )
+                        if result is not None:
+                            yield result
+                    elif inspect.isgeneratorfunction(prefix):
+                        for result in prefix(
+                            self.result.full_result_data,
+                            self.settings,
+                        ):
+                            if result is not None:
+                                yield result
+                    elif inspect.isasyncgenfunction(prefix):
+                        async for result in prefix(
+                            self.result.full_result_data,
+                            self.settings,
+                        ):
+                            if result is not None:
+                                yield result
+                    elif inspect.isfunction(prefix):
+                        result = prefix(
+                            self.result.full_result_data,
+                            self.settings,
+                        )
+                        if result is not None:
+                            yield result
+                async for event, data in broadcast_generator:
+                    if event == "status" and isinstance(data, Mapping):
+                        data = await self._emit_status_runtime(data, provider_family=provider_name)
+                        status = str(data.get("status", ""))
+                        if status in {"completed", "cancelled"} or (status == "failed" and not data.get("retry")):
+                            terminal_status = status
+                    yield event, data
+                    suffixes = broadcast_suffixes[event] if event in broadcast_suffixes else []
+                    for suffix in suffixes:
+                        if inspect.iscoroutinefunction(suffix):
+                            result = await suffix(
+                                event,
+                                data,
+                                self.result.full_result_data,
+                                self.settings,
+                            )
+                            if result is not None:
+                                yield result
+                        elif inspect.isgeneratorfunction(suffix):
+                            for result in suffix(
+                                event,
+                                data,
+                                self.result.full_result_data,
+                                self.settings,
+                            ):
+                                if result is not None:
+                                    yield result
+                        elif inspect.isasyncgenfunction(suffix):
+                            async for result in suffix(
+                                event,
+                                data,
+                                self.result.full_result_data,
+                                self.settings,
+                            ):
+                                if result is not None:
+                                    yield result
+                        elif inspect.isfunction(suffix):
+                            result = suffix(
+                                event,
+                                data,
+                                self.result.full_result_data,
+                                self.settings,
+                            )
+                            if result is not None:
+                                yield result
+                await async_emit_runtime(
+                    {
+                        "event_type": "request.completed",
+                        "source": "ModelRequest",
+                        "message": f"Request completed for agent '{ self.agent_name }'.",
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.id,
+                            "attempt_index": self.attempt_index,
+                        },
+                        "run": self.request_run_context,
+                    }
+                )
+                if self.agent_execution_run_context is not None:
+                    await async_emit_runtime(
+                        {
+                            "event_type": "agent_execution.completed",
+                            "source": "ModelRequest",
+                            "message": f"AgentExecution completed for '{ self.agent_name }'.",
+                            "payload": {
+                                "agent_name": self.agent_name,
+                                "response_id": self.id,
+                                "request_run_id": self.request_run_context.run_id,
+                                "attempt_count": self.attempt_index,
+                            },
+                            "run": self.agent_execution_run_context,
+                        }
+                    )
+            except BaseException as error:
+                if isinstance(error, (GeneratorExit, SystemExit)):
+                    raise
+                if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt)):
+                    if terminal_status != "cancelled":
+                        status_data = self._status_from_error(error, status="cancelled")
+                        status_data["attempt_index"] = self.attempt_index
+                        yield "status", await self._emit_status_runtime(status_data, provider_family=provider_name)
+                    raise
+                if terminal_status != "failed":
+                    status_data = self._status_from_error(error, status="failed")
+                    status_data["attempt_index"] = self.attempt_index
+                    yield "status", await self._emit_status_runtime(status_data, provider_family=provider_name)
+                is_side_channel = bool(
+                    self.settings.get("runtime.side_channel", False)
+                    or self.settings.get("model_request.side_channel", False)
+                )
+                failure_level = "WARNING" if is_side_channel else "ERROR"
+                model_failure_event = (
+                    "model.side_channel_request_failed" if is_side_channel else "model.request_failed"
+                )
+                request_failure_event = (
+                    "request.side_channel_failed" if is_side_channel else "request.failed"
+                )
+                model_failure_payload = {
+                    "agent_name": self.agent_name,
+                    "response_id": self.id,
+                    "attempt_index": self.attempt_index,
+                    "request_run_id": self.request_run_context.run_id,
+                    "model_run_id": self.model_run_context.run_id,
+                    "provider_family": provider_name,
+                    "side_channel": is_side_channel,
+                }
+                attach_model_request_telemetry(
+                    model_failure_payload,
+                    event_kind=model_failure_event,
+                    run=self.model_run_context,
+                    source="ModelRequest",
+                    error=error,
+                )
+                await async_emit_runtime(
+                    {
+                        "event_type": model_failure_event,
+                        "source": "ModelRequest",
+                        "level": failure_level,
+                        "message": (
+                            f"Side-channel model request failed for agent '{ self.agent_name }'."
+                            if is_side_channel
+                            else f"Model request failed for agent '{ self.agent_name }'."
+                        ),
+                        "payload": model_failure_payload,
+                        "error": error,
+                        "run": self.model_run_context,
+                    }
+                )
+                await async_emit_runtime(
+                    {
+                        "event_type": request_failure_event,
+                        "source": "ModelRequest",
+                        "level": failure_level,
+                        "message": (
+                            f"Side-channel request failed for agent '{ self.agent_name }'."
+                            if is_side_channel
+                            else f"Request failed for agent '{ self.agent_name }'."
+                        ),
+                        "payload": {
+                            "agent_name": self.agent_name,
+                            "response_id": self.id,
+                            "attempt_index": self.attempt_index,
+                            "side_channel": is_side_channel,
+                        },
+                        "error": error,
+                        "run": self.request_run_context,
+                    }
+                )
+                if self.agent_execution_run_context is not None:
+                    await async_emit_runtime(
+                        {
+                            "event_type": "agent_execution.failed",
+                            "source": "ModelRequest",
+                            "level": "ERROR",
+                            "message": f"AgentExecution failed for '{ self.agent_name }'.",
+                            "payload": {
+                                "agent_name": self.agent_name,
+                                "response_id": self.id,
+                                "request_run_id": self.request_run_context.run_id,
+                                "attempt_count": self.attempt_index,
+                            },
+                            "error": error,
+                            "run": self.agent_execution_run_context,
+                        }
+                    )
+                raise
+            finally:
+                if scheduler_slot_entered:
+                    await scheduler_slot.__aexit__(None, None, None)

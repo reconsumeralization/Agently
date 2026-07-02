@@ -49,6 +49,7 @@ if str(ROOT) not in sys.path:
 
 from agently import Agently
 from agently.core import AgentExecutionResult
+from agently.types.data import AgentExecutionMeta
 from examples.dynamic_task._shared import configure_model
 
 
@@ -67,14 +68,14 @@ ACCOUNT_SIGNAL: dict[str, Any] = {
 
 async def collect_stream_paths(execution: Any) -> list[str]:
     paths: list[str] = []
-    async for item in execution.get_async_generator():
+    async for item in execution.get_async_generator(type="instant"):
         path = str(getattr(item, "path", ""))
         if path:
             paths.append(path)
     return paths
 
 
-async def run_quick_prompt(agent: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+async def run_quick_prompt(agent: Any) -> tuple[dict[str, Any], AgentExecutionMeta]:
     execution = (
         agent
         .input({"account_signal": ACCOUNT_SIGNAL})
@@ -99,7 +100,7 @@ async def run_quick_prompt(agent: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     return data if isinstance(data, dict) else {"raw": data}, meta
 
 
-async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], AgentExecutionMeta, list[str]]:
     workspace = getattr(agent, "workspace", None)
     if workspace is None:
         raise RuntimeError("Workspace is required for task-loop strategy examples.")

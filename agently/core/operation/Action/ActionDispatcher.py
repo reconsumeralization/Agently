@@ -18,20 +18,21 @@ import asyncio
 import json
 from typing import Any, cast
 
-from agently.core.operation.ExecutionEnvironment import (
-    ExecutionEnvironmentApprovalDenied,
-    ExecutionEnvironmentApprovalRequired,
-    ExecutionEnvironmentError,
+from agently.core.operation.ExecutionResource import (
+    ExecutionResourceApprovalDenied,
+    ExecutionResourceApprovalRequired,
+    ExecutionResourceError,
 )
 from agently.types.data import (
     ActionApproval,
     ActionCall,
+    ActionDiagnostic,
     ActionPolicy,
     ActionResult,
     ActionSpec,
-    ExecutionEnvironmentHandle,
-    ExecutionEnvironmentPolicy,
-    ExecutionEnvironmentRequirement,
+    ExecutionResourceHandle,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirement,
 )
 from agently.types.plugins import ActionExecutor
 from agently.utils import FunctionShifter, Settings, SettingsNamespace
@@ -42,6 +43,33 @@ from .ActionRegistry import ActionRegistry
 class ActionDispatcher:
     VALID_STATUSES = {"success", "partial_success", "error", "approval_required", "blocked", "skipped"}
 
+    # Policy keys that only host code may set through a direct
+    # async_execute_action(policy_override=...) call. A model-planned action
+    # command must never carry these: setting them would let model output grant
+    # its own approval or widen sandbox/network/path limits.
+    HOST_ONLY_POLICY_KEYS = frozenset({
+        "policy_approval_granted",
+        "policy_approval_decision",
+        "policy_approval_handler",
+        "approval_mode",
+        "workspace_roots",
+        "path_allowlist",
+        "path_denylist",
+        "allowed_cmd_prefixes",
+        "network_mode",
+        "read_only",
+        "allow_create",
+        "allow_update",
+        "allow_delete",
+        "timeout_seconds",
+        "max_output_bytes",
+        "sandbox_required",
+    })
+
+    # Source protocols whose action commands originate from model output and are
+    # therefore untrusted for host-only policy keys.
+    MODEL_PLANNING_PROTOCOLS = frozenset({"structured_plan", "native_tool_calls"})
+
     def __init__(self, registry: ActionRegistry, settings: Settings):
         self.registry = registry
         self.settings = settings
@@ -49,6 +77,128 @@ class ActionDispatcher:
     @staticmethod
     def _to_dict(value: Any):
         return value if isinstance(value, dict) else {}
+
+    @classmethod
+    def _sanitize_policy_override(
+        cls,
+        policy_override: ActionPolicy | None,
+        *,
+        source_protocol: str,
+    ) -> tuple[ActionPolicy, list[str]]:
+        """Drop host-only policy keys from a model-sourced policy override.
+
+        Returns the sanitized override plus the list of stripped keys so the
+        caller can surface a diagnostic. Host-sourced protocols (direct/dry_run)
+        keep their override untouched.
+        """
+        if not isinstance(policy_override, dict):
+            return cast(ActionPolicy, {}), []
+        if source_protocol not in cls.MODEL_PLANNING_PROTOCOLS:
+            return cast(ActionPolicy, dict(policy_override)), []
+        sanitized: dict[str, Any] = {}
+        stripped: list[str] = []
+        for key, value in policy_override.items():
+            if key in cls.HOST_ONLY_POLICY_KEYS:
+                stripped.append(str(key))
+            else:
+                sanitized[key] = value
+        return cast(ActionPolicy, sanitized), stripped
+
+    @staticmethod
+    def _compact_diagnostic_value(value: Any, *, limit: int = 800) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}... [truncated {len(text) - limit} chars]"
+
+    @classmethod
+    def _declared_action_input_keys(cls, spec: ActionSpec) -> set[str] | None:
+        kwargs = spec.get("kwargs", {})
+        if not isinstance(kwargs, dict):
+            return None
+        return {str(key) for key in kwargs.keys()}
+
+    @classmethod
+    def _sanitize_action_input(
+        cls,
+        spec: ActionSpec,
+        action_input: dict[str, Any],
+        *,
+        source_protocol: str,
+    ) -> tuple[dict[str, Any], list[str]]:
+        if source_protocol not in cls.MODEL_PLANNING_PROTOCOLS:
+            return dict(action_input), []
+        declared_keys = cls._declared_action_input_keys(spec)
+        if declared_keys is None:
+            return dict(action_input), []
+        sanitized: dict[str, Any] = {}
+        stripped: list[str] = []
+        for key, value in action_input.items():
+            key_text = str(key)
+            if key_text in declared_keys:
+                sanitized[key_text] = value
+            else:
+                stripped.append(key_text)
+        return sanitized, sorted(stripped)
+
+    @classmethod
+    def _input_stripped_diagnostic(
+        cls,
+        *,
+        source_protocol: str,
+        stripped_keys: list[str],
+        original_input: dict[str, Any],
+        sanitized_input: dict[str, Any],
+    ) -> ActionDiagnostic:
+        return cast(ActionDiagnostic, {
+            "source": "ActionDispatcher",
+            "severity": "warning",
+            "code": "action.input.unexpected_keys_stripped",
+            "message": (
+                "Ignored undeclared action input keys from a model-planned action command: "
+                f"{ ', '.join(stripped_keys) }."
+            ),
+            "meta": {
+                "source_protocol": source_protocol,
+                "stripped_keys": stripped_keys,
+                "original_kwargs_preview": cls._compact_diagnostic_value(original_input),
+                "executed_kwargs_preview": cls._compact_diagnostic_value(sanitized_input),
+            },
+        })
+
+    @classmethod
+    def _exception_diagnostic(
+        cls,
+        *,
+        code: str,
+        message: str,
+        error: BaseException | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> ActionDiagnostic:
+        diagnostic_meta: dict[str, Any] = dict(meta or {})
+        if error is not None:
+            diagnostic_meta.setdefault("exception_type", type(error).__name__)
+            diagnostic_meta.setdefault("exception_message", cls._compact_diagnostic_value(str(error)))
+        return cast(ActionDiagnostic, {
+            "source": "ActionDispatcher",
+            "severity": "error",
+            "code": code,
+            "message": message,
+            "meta": diagnostic_meta,
+        })
+
+    @classmethod
+    def _call_diagnostics(
+        cls,
+        action_call: ActionCall,
+        *extra_diagnostics: ActionDiagnostic,
+    ) -> list[ActionDiagnostic]:
+        diagnostics = action_call.get("diagnostics")
+        base = cast(list[ActionDiagnostic], list(diagnostics)) if isinstance(diagnostics, list) else []
+        return [*base, *extra_diagnostics]
 
     def _merge_policy(
         self,
@@ -234,10 +384,15 @@ class ActionDispatcher:
         result.setdefault("expose_to_model", bool(spec.get("expose_to_model", True)))
         result.setdefault("side_effect_level", cast(Any, spec.get("side_effect_level", "read")))
         result.setdefault("executor_type", str(spec.get("executor_type", "")))
+        call_diagnostics = action_call.get("diagnostics")
+        if isinstance(call_diagnostics, list) and call_diagnostics:
+            existing_diagnostics = result.get("diagnostics")
+            existing_diagnostics = existing_diagnostics if isinstance(existing_diagnostics, list) else []
+            result["diagnostics"] = [*call_diagnostics, *existing_diagnostics]
         return cast(ActionResult, result)
 
     @staticmethod
-    def _to_execution_environment_policy(policy: ActionPolicy) -> ExecutionEnvironmentPolicy:
+    def _to_execution_resource_policy(policy: ActionPolicy) -> ExecutionResourcePolicy:
         keys = {
             "approval_mode",
             "policy_approval_handler",
@@ -253,16 +408,16 @@ class ActionDispatcher:
             "allow_update",
             "allow_delete",
         }
-        return cast(ExecutionEnvironmentPolicy, {key: policy[key] for key in keys if key in policy})
+        return cast(ExecutionResourcePolicy, {key: policy[key] for key in keys if key in policy})
 
-    def _resolve_execution_environment_owner_id(
+    def _resolve_execution_resource_owner_id(
         self,
         settings: Settings,
-        requirement: ExecutionEnvironmentRequirement,
+        requirement: ExecutionResourceRequirement,
     ):
         if requirement.get("owner_id"):
             return str(requirement.get("owner_id", ""))
-        configured = settings.get("execution_environment.owner_id", None)
+        configured = settings.get("execution_resource.owner_id", None)
         if isinstance(configured, str) and configured:
             return configured
         session_id = settings.get("runtime.session_id", None)
@@ -270,32 +425,32 @@ class ActionDispatcher:
             return session_id
         return self.registry.name or "Action"
 
-    def _prepare_execution_environment_requirements(
+    def _prepare_execution_resource_requirements(
         self,
         *,
         spec: ActionSpec,
         settings: Settings,
         policy: ActionPolicy,
     ):
-        requirements = spec.get("execution_environments", [])
+        requirements = spec.get("execution_resources", [])
         if not isinstance(requirements, list):
             return []
-        prepared: list[ExecutionEnvironmentRequirement] = []
-        action_policy = self._to_execution_environment_policy(policy)
+        prepared: list[ExecutionResourceRequirement] = []
+        action_policy = self._to_execution_resource_policy(policy)
         for requirement in requirements:
             if not isinstance(requirement, dict):
                 continue
-            prepared_requirement = cast(ExecutionEnvironmentRequirement, dict(requirement))
+            prepared_requirement = cast(ExecutionResourceRequirement, dict(requirement))
             requirement_policy = dict(prepared_requirement.get("policy", {}))
             requirement_policy.update(action_policy)
-            prepared_requirement["policy"] = cast(ExecutionEnvironmentPolicy, requirement_policy)
+            prepared_requirement["policy"] = cast(ExecutionResourcePolicy, requirement_policy)
             prepared_requirement.setdefault("scope", "action_call")
-            prepared_requirement.setdefault("owner_id", self._resolve_execution_environment_owner_id(settings, prepared_requirement))
+            prepared_requirement.setdefault("owner_id", self._resolve_execution_resource_owner_id(settings, prepared_requirement))
             prepared_requirement.setdefault("resource_key", str(spec.get("action_id", prepared_requirement.get("kind", ""))))
             prepared.append(prepared_requirement)
         return prepared
 
-    def _execution_environment_error_result(
+    def _execution_resource_error_result(
         self,
         *,
         spec: ActionSpec,
@@ -308,7 +463,7 @@ class ActionDispatcher:
         action_input = action_call.get("action_input", {})
         if not isinstance(action_input, dict):
             action_input = {}
-        return cast(ActionResult, {
+        result = {
             "ok": False,
             "status": status,
             "purpose": str(action_call.get("purpose", f"Use { action_id }")),
@@ -325,7 +480,9 @@ class ActionDispatcher:
             "expose_to_model": bool(spec.get("expose_to_model", True)),
             "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
             "executor_type": str(spec.get("executor_type", "")),
-        })
+            "diagnostics": self._call_diagnostics(action_call),
+        }
+        return cast(ActionResult, result)
 
     async def async_execute(
         self,
@@ -381,18 +538,53 @@ class ActionDispatcher:
                 "executor_type": str(spec.get("executor_type", "")),
             }
 
+        original_action_input = dict(action_input)
+        sanitized_override, stripped_policy_keys = self._sanitize_policy_override(
+            policy_override,
+            source_protocol=source_protocol,
+        )
+        sanitized_action_input, stripped_input_keys = self._sanitize_action_input(
+            spec,
+            original_action_input,
+            source_protocol=source_protocol,
+        )
+        action_input = sanitized_action_input
+        call_diagnostics: list[ActionDiagnostic] = []
+        if stripped_policy_keys:
+            call_diagnostics.append(
+                cast(ActionDiagnostic, {
+                    "source": "ActionDispatcher",
+                    "severity": "warning",
+                    "code": "action.policy_override.host_only_keys_stripped",
+                    "message": (
+                        "Ignored host-only policy override keys from a model-planned action command: "
+                        f"{ ', '.join(sorted(stripped_policy_keys)) }."
+                    ),
+                    "meta": {"source_protocol": source_protocol, "stripped_keys": sorted(stripped_policy_keys)},
+                })
+            )
+        if stripped_input_keys:
+            call_diagnostics.append(
+                self._input_stripped_diagnostic(
+                    source_protocol=source_protocol,
+                    stripped_keys=stripped_input_keys,
+                    original_input=original_action_input,
+                    sanitized_input=sanitized_action_input,
+                )
+            )
         action_call: ActionCall = {
             "purpose": purpose or f"Use { action_id }",
             "action_id": action_id,
             "action_input": dict(action_input),
-            "policy_override": policy_override or {},
+            "policy_override": sanitized_override,
             "source_protocol": source_protocol,
             "todo_suggestion": todo_suggestion,
             "next": next_value or todo_suggestion,
             "tool_name": str(spec.get("name", action_id)),
             "tool_kwargs": dict(action_input),
+            "diagnostics": call_diagnostics,
         }
-        policy = self._merge_policy(execution_settings, spec, policy_override)
+        policy = self._merge_policy(execution_settings, spec, sanitized_override)
         policy_approval_handler = execution_settings.get("policy_approval.handler", None)
         if policy_approval_handler is not None and not policy.get("policy_approval_handler"):
             policy["policy_approval_handler"] = str(policy_approval_handler)
@@ -411,7 +603,7 @@ class ActionDispatcher:
             return {
                 "ok": False,
                 "status": "blocked",
-                "purpose": str(action_call["purpose"]),
+                "purpose": str(action_call.get("purpose", f"Use { action_id }")),
                 "action_id": action_id,
                 "tool_name": str(spec.get("name", action_id)),
                 "kwargs": dict(action_input),
@@ -421,23 +613,30 @@ class ActionDispatcher:
                 "result": None,
                 "data": None,
                 "error": f"Action '{ action_id }' requires a sandboxed executor.",
+                "diagnostics": self._call_diagnostics(
+                    action_call,
+                    self._exception_diagnostic(
+                        code="action.execution.sandbox_required",
+                        message=f"Action '{ action_id }' requires a sandboxed executor.",
+                    ),
+                ),
                 "expose_to_model": bool(spec.get("expose_to_model", True)),
                 "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
                 "executor_type": str(spec.get("executor_type", "")),
             }
 
-        from agently.base import execution_environment
+        from agently.base import execution_resource
 
-        ensured_handles: list[ExecutionEnvironmentHandle] = []
+        ensured_handles: list[ExecutionResourceHandle] = []
         environment_resources: dict[str, Any] = {}
-        environment_handles: dict[str, ExecutionEnvironmentHandle] = {}
+        environment_handles: dict[str, ExecutionResourceHandle] = {}
         try:
-            for requirement in self._prepare_execution_environment_requirements(
+            for requirement in self._prepare_execution_resource_requirements(
                 spec=spec,
                 settings=execution_settings,
                 policy=policy,
             ):
-                handle = await execution_environment.async_ensure(
+                handle = await execution_resource.async_ensure(
                     requirement,
                     owner_id=str(requirement.get("owner_id", "")),
                 )
@@ -447,11 +646,11 @@ class ActionDispatcher:
                     environment_handles[resource_key] = handle
                     environment_resources[resource_key] = handle.get("resource")
             if environment_handles:
-                action_call["execution_environment_handles"] = environment_handles
-                action_call["execution_environment_resources"] = environment_resources
-        except ExecutionEnvironmentApprovalRequired as error:
+                action_call["execution_resource_handles"] = environment_handles
+                action_call["execution_resource_resources"] = environment_resources
+        except ExecutionResourceApprovalRequired as error:
             for handle in ensured_handles:
-                await execution_environment.async_release(handle)
+                await execution_resource.async_release(handle)
             approval: ActionApproval = {
                 "required": True,
                 "reason": error.code,
@@ -460,26 +659,26 @@ class ActionDispatcher:
                 "suggested_policy": cast(ActionPolicy, error.payload.get("policy", {})),
                 "message": str(error),
             }
-            return self._execution_environment_error_result(
+            return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
                 status="approval_required",
                 error=str(error),
                 approval=approval,
             )
-        except ExecutionEnvironmentApprovalDenied as error:
+        except ExecutionResourceApprovalDenied as error:
             for handle in ensured_handles:
-                await execution_environment.async_release(handle)
-            return self._execution_environment_error_result(
+                await execution_resource.async_release(handle)
+            return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
                 status="blocked",
                 error=str(error),
             )
-        except ExecutionEnvironmentError as error:
+        except ExecutionResourceError as error:
             for handle in ensured_handles:
-                await execution_environment.async_release(handle)
-            return self._execution_environment_error_result(
+                await execution_resource.async_release(handle)
+            return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
                 status="error",
@@ -487,8 +686,8 @@ class ActionDispatcher:
             )
         except Exception as error:
             for handle in ensured_handles:
-                await execution_environment.async_release(handle)
-            return self._execution_environment_error_result(
+                await execution_resource.async_release(handle)
+            return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
                 status="error",
@@ -518,11 +717,16 @@ class ActionDispatcher:
         except asyncio.TimeoutError:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":
-                    await execution_environment.async_release(handle)
+                    await execution_resource.async_release(handle)
+            timeout_diagnostic = self._exception_diagnostic(
+                code="action.execution.timeout",
+                message=f"Action '{ action_id }' timed out after { timeout_seconds } seconds.",
+                meta={"timeout_seconds": timeout_seconds, "source_protocol": source_protocol},
+            )
             return {
                 "ok": False,
                 "status": "error",
-                "purpose": str(action_call["purpose"]),
+                "purpose": str(action_call.get("purpose", f"Use { action_id }")),
                 "action_id": action_id,
                 "tool_name": str(spec.get("name", action_id)),
                 "kwargs": dict(action_input),
@@ -532,6 +736,8 @@ class ActionDispatcher:
                 "result": None,
                 "data": None,
                 "error": f"Action '{ action_id }' timed out after { timeout_seconds } seconds.",
+                "diagnostics": self._call_diagnostics(action_call, timeout_diagnostic),
+                "meta": {"timeout_seconds": timeout_seconds},
                 "expose_to_model": bool(spec.get("expose_to_model", True)),
                 "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
                 "executor_type": str(spec.get("executor_type", "")),
@@ -539,11 +745,18 @@ class ActionDispatcher:
         except Exception as error:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":
-                    await execution_environment.async_release(handle)
+                    await execution_resource.async_release(handle)
+            diagnostic_code = "action.input.type_error" if isinstance(error, TypeError) else "action.execution.exception"
+            exception_diagnostic = self._exception_diagnostic(
+                code=diagnostic_code,
+                message=str(error) or f"Action '{ action_id }' raised { type(error).__name__ }.",
+                error=error,
+                meta={"source_protocol": source_protocol},
+            )
             return {
                 "ok": False,
                 "status": "error",
-                "purpose": str(action_call["purpose"]),
+                "purpose": str(action_call.get("purpose", f"Use { action_id }")),
                 "action_id": action_id,
                 "tool_name": str(spec.get("name", action_id)),
                 "kwargs": dict(action_input),
@@ -553,6 +766,11 @@ class ActionDispatcher:
                 "result": None,
                 "data": None,
                 "error": str(error),
+                "diagnostics": self._call_diagnostics(action_call, exception_diagnostic),
+                "meta": {
+                    "exception_type": type(error).__name__,
+                    "exception_message": self._compact_diagnostic_value(str(error)),
+                },
                 "expose_to_model": bool(spec.get("expose_to_model", True)),
                 "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
                 "executor_type": str(spec.get("executor_type", "")),
@@ -560,7 +778,7 @@ class ActionDispatcher:
         finally:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":
-                    await execution_environment.async_release(handle)
+                    await execution_resource.async_release(handle)
 
         result = self._normalize_executor_output(
             spec=spec,
@@ -572,14 +790,29 @@ class ActionDispatcher:
         if isinstance(max_output_bytes, int) and max_output_bytes > 0:
             serialized = json.dumps(result.get("data"), ensure_ascii=False, default=str)
             if len(serialized.encode("utf-8")) > max_output_bytes:
-                truncated = serialized.encode("utf-8")[:max_output_bytes].decode("utf-8", errors="ignore")
-                result["data"] = truncated
-                result["result"] = truncated
                 result_meta = result.get("meta")
                 if not isinstance(result_meta, dict):
                     result_meta = {}
-                result_meta["truncated"] = True
+                result_meta["max_output_bytes_exceeded"] = True
+                result_meta["max_output_bytes"] = max_output_bytes
+                result_meta["original_output_bytes"] = len(serialized.encode("utf-8"))
                 result["meta"] = result_meta
+                diagnostics = result.get("diagnostics")
+                diagnostics = diagnostics if isinstance(diagnostics, list) else []
+                diagnostics.append(
+                    self._exception_diagnostic(
+                        code="action.output.max_output_bytes_exceeded",
+                        message=(
+                            "Action output exceeded policy max_output_bytes; full output is preserved for "
+                            "Action artifact finalization while model-visible paths should use bounded previews."
+                        ),
+                        meta={
+                            "max_output_bytes": max_output_bytes,
+                            "original_output_bytes": len(serialized.encode("utf-8")),
+                        },
+                    )
+                )
+                result["diagnostics"] = diagnostics
         return result
 
     def execute(self, action_id: str, action_input: dict[str, Any], **kwargs):

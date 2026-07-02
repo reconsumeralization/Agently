@@ -1,12 +1,19 @@
 import asyncio
+import base64
+import hashlib
+from importlib import import_module
 from numbers import Real
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from agently import Agently
-from agently.core import LazyWorkspace, WorkspaceConfigurationError, WorkspacePolicyError
+from agently.core import LazyWorkspace, WorkspaceConfigurationError, WorkspaceManager, WorkspacePolicyError
+from agently.core.application import AgentTask
+from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME, script_scope
 from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
-from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPack, WorkspaceRecallPlan, WorkspaceRecordRef
+from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPackage, WorkspaceContextPlan, WorkspaceRecordRef
 
 
 @pytest.mark.asyncio
@@ -17,7 +24,11 @@ async def test_agent_has_lazy_workspace_by_default(tmp_path, monkeypatch):
 
     assert isinstance(workspace, LazyWorkspace)
     assert workspace.is_materialized is False
-    assert workspace.root == (tmp_path / ".agently" / "workspaces" / f"lazy-workspace-{agent.id[:8]}").resolve()
+    expected_root = tmp_path / ".agently" / "workspaces" / "scripts" / script_scope(agent.settings)
+    assert workspace.root == expected_root.resolve()
+    assert workspace.files_root == (
+        expected_root / "files" / "lineage" / "agents" / "lazy-workspace" / "files"
+    ).resolve()
     assert agent.settings.get("workspace.lazy") is True
     assert agent.settings.get("workspace.root") == str(workspace.root)
     assert not workspace.root.exists()
@@ -33,6 +44,144 @@ async def test_agent_has_lazy_workspace_by_default(tmp_path, monkeypatch):
     assert workspace.root.exists()
     assert (workspace.root / "workspace.db").is_file()
     assert agent.settings.get("workspace.lazy") is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_writes_layout_guides(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "guided")
+
+    root_guide = workspace.root / WORKSPACE_GUIDE_FILENAME
+    files_guide = workspace.files_root / WORKSPACE_GUIDE_FILENAME
+
+    assert root_guide.is_file()
+    assert files_guide.is_file()
+    root_text = root_guide.read_text(encoding="utf-8")
+    files_text = files_guide.read_text(encoding="utf-8")
+    assert "workspace.db" in root_text
+    assert "content/" in root_text
+    assert "files/" in root_text
+    assert "Standard file areas" in root_text
+    assert "downloads/" in root_text
+    assert "artifacts/" in root_text
+    assert "reports/" in root_text
+    assert "editable file working tree" in files_text
+    assert "Standard file areas" in files_text
+    assert "downloads/" in files_text
+    assert "artifacts/" in files_text
+    assert "reports/" in files_text
+    assert "Workspace.open_scratch" in files_text
+    assert str(workspace.files_root) in files_text
+
+    child = workspace.with_scope_node("tasks", "task-one")
+    child_guide = child.files_root / WORKSPACE_GUIDE_FILENAME
+    assert child_guide.is_file()
+    child_text = child_guide.read_text(encoding="utf-8")
+    assert "tasks/task-one" in child_text
+    assert "task_id" in child_text
+
+
+def test_workspace_standard_file_area_paths_are_scoped(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "areas")
+
+    assert set(workspace.standard_file_areas()) == {"downloads", "artifacts", "reports"}
+    assert workspace.file_area_path("download", "remote.pdf") == workspace.files_root / "downloads" / "remote.pdf"
+    reports_path = workspace.file_area_path("output", "daily", "brief.md", create=True)
+    assert reports_path == workspace.files_root / "reports" / "daily" / "brief.md"
+    assert reports_path.parent.is_dir()
+
+    with pytest.raises(ValueError):
+        workspace.file_area_path("unknown", "x.txt")
+    with pytest.raises(ValueError):
+        workspace.file_area_path("downloads", "../escape.txt")
+    with pytest.raises(ValueError):
+        workspace.file_area_path("downloads", tmp_path / "outside.txt")
+
+    read_only = Agently.create_workspace(tmp_path / "areas", mode="read")
+    with pytest.raises(PermissionError):
+        read_only.file_area_path("reports", create=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_default_workspace_rebinds_to_session_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    first = Agently.create_agent("session-worker")
+    second = Agently.create_agent("session-worker")
+
+    first.activate_session(session_id="issue-123")
+    second.activate_session(session_id="issue-123")
+
+    assert first.workspace.root == second.workspace.root
+    assert first.workspace.root == (tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123").resolve()
+    assert first.workspace.files_root == (
+        tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123"
+        / "files" / "lineage" / "agents" / "session-worker" / "files"
+    ).resolve()
+
+    await first.workspace.put("first", collection="observations", kind="probe")
+    await second.workspace.put("second", collection="observations", kind="probe")
+
+    assert (first.workspace.root / "workspace.db").is_file()
+    assert first.workspace.root == second.workspace.root
+    assert len(list((tmp_path / ".agently" / "workspaces" / "sessions").glob("**/workspace.db"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_defaults_to_session_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    first = Agently.create_agent("scope-a").activate_session(session_id="scope-a")
+    second = Agently.create_agent("scope-b").activate_session(session_id="scope-b")
+
+    await first.workspace.ingest(
+        content="visible only to session a",
+        collection="observations",
+        kind="scoped",
+        summary="shared keyword",
+    )
+    await second.workspace.ingest(
+        content="visible only to session b",
+        collection="observations",
+        kind="scoped",
+        summary="shared keyword",
+    )
+
+    first_results = await first.workspace.search("shared keyword")
+    second_results = await second.workspace.search("shared keyword")
+
+    assert [item["scope"]["session_id"] for item in first_results] == ["scope-a"]
+    assert [item["scope"]["session_id"] for item in second_results] == ["scope-b"]
+
+
+@pytest.mark.asyncio
+async def test_agent_tasks_share_script_workspace_db_and_isolate_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    agent = Agently.create_agent("task-worker")
+
+    first = AgentTask(
+        agent,
+        goal="Handle the first task.",
+        success_criteria=["The first task has a durable observation."],
+        task_id="task-one",
+    )
+    second = AgentTask(
+        agent,
+        goal="Handle the second task.",
+        success_criteria=["The second task has a durable observation."],
+        task_id="task-two",
+    )
+
+    assert first.workspace.root == second.workspace.root
+    assert first.workspace.files_root == (
+        first.workspace.root / "files" / "lineage" / "agents" / "task-worker" / "tasks" / "task-one" / "files"
+    ).resolve()
+    assert second.workspace.files_root == (
+        second.workspace.root / "files" / "lineage" / "agents" / "task-worker" / "tasks" / "task-two" / "files"
+    ).resolve()
+    assert first.workspace.files_root != second.workspace.files_root
+
+    await first.workspace.put("first task", collection="observations", kind="task_probe")
+    await second.workspace.put("second task", collection="observations", kind="task_probe")
+
+    assert len(list((tmp_path / ".agently" / "workspaces" / "scripts").glob("**/workspace.db"))) == 1
 
 
 @pytest.mark.asyncio
@@ -74,6 +223,10 @@ async def test_workspace_local_ingest_search_link_and_get(tmp_path):
         filters={"collection": "observations", "kind": "test_output"},
     )
     assert [item["id"] for item in results] == [ref["id"]]
+    by_id = await workspace.search("route fallback", filters={"id": ref["id"]})
+    by_path = await workspace.search("route fallback", filters={"path": ref["path"]})
+    assert [item["id"] for item in by_id] == [ref["id"]]
+    assert [item["id"] for item in by_path] == [ref["id"]]
     assert (tmp_path / "run" / "workspace.meta.json").is_file()
     assert (tmp_path / "run" / "workspace.db").is_file()
     assert (tmp_path / "run" / "files").is_dir()
@@ -141,7 +294,7 @@ async def test_workspace_checkpoint_cas_lease_and_artifact_refs(tmp_path):
         {"large": "payload"},
         metadata={"kind": "checkpoint_payload", "summary": "large Workspace record payload"},
     )
-    lease = await workspace.claim_lease("run-cas", "worker-1", ttl=0.02, expected_state_version=2)
+    lease = await workspace.claim_lease("run-cas", "worker-1", ttl=0.2, expected_state_version=2)
 
     assert second["id"] != first["id"]
     assert artifact_ref["collection"] == "artifacts"
@@ -196,7 +349,280 @@ async def test_workspace_rejects_path_traversal_and_read_only_writes(tmp_path):
 def test_workspace_manager_registers_builtin_profiles():
     assert "fast" in Agently.workspace.list_profiles()
     assert "checkpoint" in Agently.workspace.list_profiles()
-    assert "auto" in Agently.workspace.list_recall_profiles()
+    assert "auto" in Agently.workspace.list_context_profiles()
+    assert "text" in Agently.workspace.list_file_io_handlers()
+    assert "pdf" in Agently.workspace.list_file_io_handlers()
+
+
+@pytest.mark.asyncio
+async def test_workspace_file_io_text_read_write_binary_and_policy(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "file-io")
+
+    written = await workspace.write_file("notes/todo.txt", "hello world")
+    assert written["ok"] is True
+    assert written["path"] == "notes/todo.txt"
+    assert written["bytes"] == len("hello world".encode("utf-8"))
+    assert written["sha256"] == hashlib.sha256(b"hello world").hexdigest()
+
+    read = await workspace.read_file("notes/todo.txt", max_bytes=5, offset=6)
+    assert read["ok"] is True
+    assert read["readable"] is True
+    assert read["content"] == "world"
+    assert read["offset"] == 6
+    assert read["read_bytes"] == 5
+    assert read["truncated"] is False
+    assert read["sha256"] == hashlib.sha256(b"hello world").hexdigest()
+    assert read["file_refs"][0]["path"] == "notes/todo.txt"
+
+    materialized = await workspace.materialize_file(
+        "downloads/remote.txt",
+        b"downloaded official syllabus",
+        source={"kind": "test_download", "url": "https://example.com/syllabus.txt"},
+        media_type="text/plain",
+    )
+    assert materialized["ok"] is True
+    assert materialized["path"] == "downloads/remote.txt"
+    assert materialized["bytes"] == len(b"downloaded official syllabus")
+    assert materialized["sha256"] == hashlib.sha256(b"downloaded official syllabus").hexdigest()
+    assert materialized["file_refs"][0]["role"] == "download"
+    materialized_read = await workspace.read_file("downloads/remote.txt")
+    assert materialized_read["ok"] is True
+    assert materialized_read["content"] == "downloaded official syllabus"
+
+    (workspace.files_root / "payload.bin").write_bytes(b"\x00\xffbinary")
+    binary = await workspace.read_file("payload.bin")
+    assert binary["ok"] is False
+    assert binary["readable"] is False
+    assert binary["diagnostics"][0]["code"] == "workspace.file.no_read_handler"
+
+    with pytest.raises(ValueError, match="outside workspace file root"):
+        await workspace.read_file("../outside.txt")
+
+    read_only = WorkspaceManager().create(tmp_path / "readonly", mode="read_only")
+    with pytest.raises(PermissionError, match="read-only"):
+        await read_only.write_file("blocked.txt", "nope")
+    with pytest.raises(PermissionError, match="read-only"):
+        await read_only.materialize_file("blocked.bin", b"nope")
+
+
+@pytest.mark.asyncio
+async def test_workspace_file_io_handler_registry_and_dispatch(tmp_path):
+    manager = WorkspaceManager()
+    workspace = manager.create(tmp_path / "dispatch")
+    await workspace.write_file("note.upper", "mixed case")
+    events: list[str] = []
+
+    class UpperHandler:
+        name = "upper"
+        priority = 10
+        DEFAULT_SETTINGS: dict[str, Any] = {}
+
+        @staticmethod
+        def _on_register():
+            events.append("upper.register")
+
+        @staticmethod
+        def _on_unregister():
+            events.append("upper.unregister")
+
+        def supports(self, *, operation, file_info, export_kind=None):
+            _ = export_kind
+            return operation == "read" and file_info.get("extension") == ".upper"
+
+        async def read(self, *, path, file_info, max_bytes=20000, offset=0, options=None):
+            _ = (max_bytes, offset, options)
+            return {
+                "ok": True,
+                "readable": True,
+                "path": file_info["path"],
+                "content": path.read_text(encoding="utf-8").upper(),
+                "truncated": False,
+                "bytes": file_info["bytes"],
+                "offset": 0,
+                "read_bytes": file_info["bytes"],
+                "sha256": file_info["sha256"],
+                "media_type": file_info.get("media_type"),
+                "content_kind": file_info["content_kind"],
+                "encoding": "utf-8",
+                "handler_id": self.name,
+                "extraction_method": "test.upper",
+                "diagnostics": [],
+                "file_refs": [],
+            }
+
+        async def write(self, *, path, file_info, content, append=False, options=None):
+            _ = (path, file_info, content, append, options)
+            raise AssertionError("UpperHandler is read-only in this test.")
+
+        async def export(self, *, source_path, output_path, source_info, output_info, export_kind, options=None):
+            _ = (source_path, output_path, source_info, output_info, export_kind, options)
+            raise AssertionError("UpperHandler does not export in this test.")
+
+    manager.register_file_io_handler(cast(Any, UpperHandler()))
+    assert events == ["upper.register"]
+    assert "upper" in manager.list_file_io_handlers()
+    with pytest.raises(WorkspaceConfigurationError, match="already registered"):
+        manager.register_file_io_handler(cast(Any, UpperHandler()))
+    assert events == ["upper.register"]
+
+    result = await workspace.read_file("note.upper")
+    assert result["handler_id"] == "upper"
+    assert result["content"] == "MIXED CASE"
+
+    class ReplacementUpperHandler(UpperHandler):
+        @staticmethod
+        def _on_register():
+            events.append("replacement.register")
+
+        @staticmethod
+        def _on_unregister():
+            events.append("replacement.unregister")
+
+        async def read(self, *, path, file_info, max_bytes=20000, offset=0, options=None):
+            result = await super().read(
+                path=path,
+                file_info=file_info,
+                max_bytes=max_bytes,
+                offset=offset,
+                options=options,
+            )
+            result["content"] = str(result["content"]).lower()
+            return result
+
+    manager.register_file_io_handler(cast(Any, ReplacementUpperHandler()), replace=True)
+    assert events == ["upper.register", "replacement.register", "upper.unregister"]
+    replaced = await workspace.read_file("note.upper")
+    assert replaced["handler_id"] == "upper"
+    assert replaced["content"] == "mixed case"
+
+    manager.unregister_file_io_handler("upper")
+    assert events == ["upper.register", "replacement.register", "upper.unregister", "replacement.unregister"]
+    assert "upper" not in manager.list_file_io_handlers()
+
+
+@pytest.mark.asyncio
+async def test_workspace_file_io_optional_dependencies_fail_closed(tmp_path, monkeypatch):
+    workspace = Agently.create_workspace(tmp_path / "optional-deps")
+
+    def missing_dependency(name: str, *args: Any, **kwargs: Any):
+        _ = (args, kwargs)
+        raise ImportError(name)
+
+    monkeypatch.setattr("agently.core.workspace.FileIO.LazyImport.import_package", missing_dependency)
+
+    (workspace.files_root / "scan.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    pdf = await workspace.read_file("scan.pdf")
+    assert pdf["ok"] is False
+    assert pdf["readable"] is False
+    assert pdf["diagnostics"][0]["code"] == "workspace.file.pdf_dependency_missing"
+
+    (workspace.files_root / "sheet.xlsx").write_bytes(b"PK\x03\x04placeholder")
+    office = await workspace.read_file("sheet.xlsx")
+    assert office["ok"] is False
+    assert office["diagnostics"][0]["code"] == "workspace.file.xlsx_dependency_missing"
+
+    await workspace.write_file("page.html", "<h1>Hello</h1>")
+    exported = await workspace.export_file("page.html", "page.pdf", export_kind="html_pdf")
+    assert exported["ok"] is False
+    assert exported["exported"] is False
+    assert exported["diagnostics"][0]["code"] == "workspace.file.export_dependency_missing"
+
+
+@pytest.mark.asyncio
+async def test_workspace_file_io_image_prepares_model_attachment(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "image-vlm")
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    (workspace.files_root / "pixel.png").write_bytes(png_bytes)
+
+    result = await workspace.read_file("pixel.png")
+
+    assert result["ok"] is True
+    assert result["readable"] is False
+    assert result["content"] == ""
+    assert result["handler_id"] == "image_vlm"
+    assert result["extraction_method"] == "model.image_attachment.prepare"
+    attachments = result.get("attachments", [])
+    assert attachments[0]["type"] == "image_url"
+    assert attachments[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_workspace_file_io_optional_handlers_success_when_dependencies_available(tmp_path):
+    pytest.importorskip("pypdf")
+    pytest.importorskip("reportlab")
+    pytest.importorskip("docx")
+    pytest.importorskip("openpyxl")
+    pytest.importorskip("pptx")
+    pytest.importorskip("markdown")
+    pytest.importorskip("playwright.async_api")
+
+    workspace = Agently.create_workspace(tmp_path / "optional-success")
+    root = workspace.files_root
+
+    canvas_module = import_module("reportlab.pdfgen.canvas")
+    canvas = canvas_module.Canvas(str(root / "sample.pdf"))
+    canvas.drawString(72, 720, "workspace pdf success")
+    canvas.save()
+
+    docx_module = import_module("docx")
+    document = docx_module.Document()
+    document.add_paragraph("workspace docx success")
+    document.save(str(root / "sample.docx"))
+
+    openpyxl = import_module("openpyxl")
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["kind", "status"])
+    sheet.append(["workspace xlsx", "success"])
+    workbook.save(str(root / "sample.xlsx"))
+
+    pptx_module = import_module("pptx")
+    presentation = pptx_module.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    textbox = slide.shapes.add_textbox(1000000, 1000000, 6000000, 1000000)
+    textbox.text = "workspace pptx success"
+    presentation.save(str(root / "sample.pptx"))
+
+    await workspace.write_file("sample.html", "<html><body><h1>workspace html export success</h1></body></html>")
+    await workspace.write_file("sample.md", "# workspace markdown export success\n")
+
+    pdf = await workspace.read_file("sample.pdf")
+    docx = await workspace.read_file("sample.docx")
+    xlsx = await workspace.read_file("sample.xlsx")
+    pptx_result = await workspace.read_file("sample.pptx")
+
+    assert pdf["ok"] is True
+    assert pdf["extraction_method"] == "pypdf.extract_text"
+    assert "workspace pdf success" in pdf["content"]
+    assert docx["ok"] is True
+    assert docx["extraction_method"] == "python-docx"
+    assert "workspace docx success" in docx["content"]
+    assert xlsx["ok"] is True
+    assert xlsx["extraction_method"] == "openpyxl"
+    assert "workspace xlsx\tsuccess" in xlsx["content"]
+    assert pptx_result["ok"] is True
+    assert pptx_result["extraction_method"] == "python-pptx"
+    assert "workspace pptx success" in pptx_result["content"]
+
+    async def assert_exported(source: str, output: str, export_kind: str):
+        result = await workspace.export_file(source, output, export_kind=export_kind)
+        diagnostics = result["diagnostics"]
+        if diagnostics and diagnostics[0]["code"] == "workspace.file.export_failed":
+            message = diagnostics[0]["message"]
+            if "Executable doesn't exist" in message or "playwright install" in message:
+                pytest.skip("Playwright browser runtime is not installed.")
+        assert result["ok"] is True
+        assert result["exported"] is True
+        assert result["bytes"] > 0
+        assert result["file_refs"][1]["role"] == "output"
+        assert (workspace.files_root / output).is_file()
+
+    await assert_exported("sample.html", "sample.html.pdf", "html_pdf")
+    await assert_exported("sample.md", "sample.md.pdf", "markdown_pdf")
+    await assert_exported("sample.html", "sample.png", "html_screenshot")
 
 
 @pytest.mark.asyncio
@@ -296,11 +722,11 @@ async def test_workspace_build_context_returns_refs_and_budget_diagnostics(tmp_p
         goal="route fallback failure",
         scope={"task_id": "issue-123"},
         budget={"chars": 600},
-        profile="software_dev",
+        profile="auto",
     )
 
     assert context_pack["goal"] == "route fallback failure"
-    assert context_pack["profile"] == "software_dev"
+    assert context_pack["profile"] == "auto"
     assert [item["ref"]["id"] for item in context_pack["items"]] == [failure_ref["id"]]
     content = context_pack["items"][0]["content"]
     assert isinstance(content, str)
@@ -342,7 +768,7 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
         goal="fix 4.1.3.4 foo.bar question",
         scope={"task_id": "fts-safe"},
         budget={"chars": 1000},
-        profile="software_dev",
+        profile="auto",
     )
 
     assert version_ref["id"] in [item["id"] for item in version_results]
@@ -350,6 +776,145 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
     assert question_ref["id"] in [item["id"] for item in question_results]
     assert context_pack["items"]
     assert "fallback_reason" not in context_pack["diagnostics"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_files_returns_bounded_retrieval_roles(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-search-files")
+    await workspace.write_file("notes/todo.txt", "alpha\nrelease deadline is 2026-07-01\n")
+    await workspace.write_file("notes/skip.txt", f"{'x' * 100}\ndeadline appears in a skipped large file\n")
+
+    results = await workspace.search_files(
+        "deadline",
+        path="notes",
+        pattern="*.txt",
+        max_results=5,
+        max_file_bytes=64,
+    )
+
+    assert [item["path"] for item in results] == ["notes/todo.txt"]
+    assert results[0]["line"] == 2
+    assert results[0]["text"] == "release deadline is 2026-07-01"
+    assert results[0]["role"] == "evidence_snippet"
+    assert results[0]["content_state"] == "bounded_readback_available"
+    assert results[0]["snippet_bytes"] == len(results[0]["text"].encode("utf-8"))
+    assert results[0]["locator_ref"]["role"] == "locator_ref"
+    assert results[0]["locator_ref"]["content_state"] == "ref_only"
+    assert results[0]["locator_ref"]["path"] == "notes/todo.txt"
+    assert results[0]["search_engine"] in {"workspace_file_grep", "workspace_file_scan"}
+    assert results[0]["scope"]["search_engine"] == results[0]["search_engine"]
+    assert results[0]["truncated"] is False
+    assert not {"useful", "accepted", "semantically_relevant"}.intersection(results[0])
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_files_marks_truncated_snippets(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-search-files-truncated")
+    await workspace.write_file("notes/todo.txt", "alpha deadline " + ("details " * 20) + "\n")
+
+    results = await workspace.search_files(
+        "deadline",
+        path="notes",
+        pattern="*.txt",
+        max_results=5,
+        max_snippet_bytes=24,
+    )
+
+    assert results[0]["path"] == "notes/todo.txt"
+    assert results[0]["snippet_bytes"] <= 24
+    assert results[0]["truncated"] is True
+    assert results[0]["locator_ref"]["content_state"] == "ref_only"
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_files_treats_double_star_as_recursive_files(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-search-files-recursive")
+    await workspace.write_file("retained/nested/ops-note.md", "Project Atlas evidence code ATLAS-RENEWAL-77\n")
+
+    results = await workspace.search_files(
+        "Project Atlas",
+        path="retained",
+        pattern="**",
+        max_results=5,
+    )
+
+    assert [item["path"] for item in results] == ["retained/nested/ops-note.md"]
+    assert results[0]["scope"]["pattern"] == "**"
+    assert results[0]["scope"]["effective_pattern"] == "**/*"
+    assert results[0]["locator_ref"]["path"] == "retained/nested/ops-note.md"
+
+
+@pytest.mark.asyncio
+async def test_workspace_coding_file_operations_edit_glob_grep_and_patch(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-coding-files")
+    await workspace.write_file("src/app.py", "print('old')\nprint('old')\n")
+    await workspace.write_file("src/readme.md", "Project Atlas\n")
+
+    globbed = await workspace.glob_files("*.py", path="src")
+    assert globbed["matches"] == ["src/app.py"]
+
+    grep = await workspace.grep_files(r"Project\s+Atlas", path="src", glob="*.md", regex=True)
+    assert grep["matches"][0]["path"] == "src/readme.md"
+    assert grep["matches"][0]["line"] == 1
+
+    with pytest.raises(ValueError, match="multiple"):
+        await workspace.edit_file("src/app.py", "print('old')", "print('new')")
+
+    edited = await workspace.edit_file("src/app.py", "print('old')", "print('new')", replace_all=True)
+    assert edited.get("replacements") == 2
+    readback = await workspace.read_file("src/app.py")
+    assert readback["content"] == "print('new')\nprint('new')\n"
+
+    patch = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,2 +1,2 @@
+-print('new')
++print('patched')
+ print('new')
+"""
+    applied = await workspace.apply_patch(patch, expected_files=["src/app.py"])
+    assert applied["paths"] == ["src/app.py"]
+    readback = await workspace.read_file("src/app.py")
+    assert "print('patched')" in readback["content"]
+
+    with pytest.raises(ValueError, match="expected_files"):
+        await workspace.apply_patch(patch, expected_files=["src/other.py"])
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_files_action_returns_retrieval_roles(tmp_path):
+    agent = Agently.create_agent("workspace-search-files-roles").use_workspace(tmp_path / "run")
+    workspace = agent.workspace
+    assert workspace is not None
+    await workspace.write_file("notes/todo.txt", "alpha\nrelease deadline is 2026-07-01\n")
+    agent.enable_workspace_file_actions(read=True, write=False, search=True)
+
+    result = await agent.action.async_execute_action(
+        "search_files",
+        {
+            "query": "deadline",
+            "path": "notes",
+            "pattern": "*.txt",
+            "max_results": 5,
+        },
+    )
+
+    assert result.get("status") == "success"
+    data = result.get("data")
+    assert isinstance(data, list)
+    assert data[0]["path"] == "notes/todo.txt"
+    assert data[0]["line"] == 2
+    assert data[0]["text"] == "release deadline is 2026-07-01"
+    assert data[0]["role"] == "evidence_snippet"
+    assert data[0]["content_state"] == "bounded_readback_available"
+    assert data[0]["query"] == "deadline"
+    assert data[0]["scope"]["path"] == "notes"
+    assert data[0]["snippet_chars"] == len(data[0]["text"])
+    assert data[0]["locator_ref"]["role"] == "locator_ref"
+    assert data[0]["locator_ref"]["content_state"] == "ref_only"
+    assert data[0]["locator_ref"]["path"] == "notes/todo.txt"
+    assert not {"useful", "accepted", "semantically_relevant"}.intersection(data[0])
 
 
 @pytest.mark.asyncio
@@ -519,6 +1084,99 @@ async def test_workspace_runtime_event_store_is_idempotent_and_bounded(tmp_path)
     assert [item["id"] for item in by_event_id] == [first["id"]]
 
 
+@pytest.mark.asyncio
+async def test_workspace_prune_scope_removes_only_matching_lineage_subtree(tmp_path):
+    workspace = Agently.create_workspace(
+        tmp_path / "shared",
+        default_scope={"session_id": "issue-123"},
+        default_search_scope={"session_id": "issue-123"},
+    )
+    # Lineage-aware execution partitions, contained under files/lineage so a
+    # scoped prune removes only the matching subtree (spec sections 8.2 / 9).
+    first = workspace.with_scope_node("executions", "exec-1")
+    second = workspace.with_scope_node("executions", "exec-2")
+    (first.files_root / "notes").mkdir(parents=True)
+    (first.files_root / "notes" / "result.txt").write_text("temporary execution file", encoding="utf-8")
+    (second.files_root / "keep").mkdir(parents=True)
+    (second.files_root / "keep" / "result.txt").write_text("durable execution file", encoding="utf-8")
+
+    first_ref = await first.ingest(content="first execution", collection="observations", kind="partition")
+    second_ref = await second.ingest(content="second execution", collection="observations", kind="partition")
+    await first.put_checkpoint("exec-1", {"status": "first"}, step_id="phase-1")
+    second_checkpoint = await second.put_checkpoint("exec-2", {"status": "second"}, step_id="phase-1")
+    await first.append_runtime_event("exec-1", {"event_type": "first"})
+    await second.append_runtime_event("exec-2", {"event_type": "second"})
+
+    result = await first.prune_scope({"execution_id": "exec-1"})
+
+    assert result["records_deleted"] == 2
+    assert result["runtime_events_deleted"] == 1
+    assert result["removed_files"] is True
+    # Only the matching execution subtree is removed; the sibling is preserved.
+    assert not first.files_root.exists()
+    assert second.files_root.exists()
+    assert (second.files_root / "keep" / "result.txt").read_text(encoding="utf-8") == "durable execution file"
+    backend = cast(Any, workspace.backend)
+    assert await backend.get_record(second_ref["id"]) == second_ref
+    assert await backend.get_record(first_ref["id"]) is None
+    assert await workspace.latest_checkpoint("exec-1") is None
+    assert await workspace.latest_checkpoint("exec-2") == second_checkpoint
+    assert await workspace.query_runtime_events("exec-1") == []
+    assert [event["event_type"] for event in await workspace.query_runtime_events("exec-2")] == ["second"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_scratch_lease_is_durable_and_recoverable(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "scratch-ws")
+    execution = workspace.with_scope_node("executions", "exec-1")
+
+    lease = await execution.open_scratch(purpose="unzip", ttl_seconds=-1)
+    lease_id = lease.get("lease_id")
+    local_path_value = lease.get("local_path")
+    assert isinstance(lease_id, str)
+    assert isinstance(local_path_value, str)
+    local_path = Path(local_path_value)
+    assert local_path.exists()
+    assert lease.get("closed_at") is None
+    assert lease.get("cleanup_policy") == "on_close"
+    # The lease is a durable Workspace fact, not just an in-memory handle.
+    backend = cast(Any, workspace.backend)
+    stored = await backend.get_scratch_lease(lease_id)
+    assert stored is not None
+    assert stored.get("local_path") == local_path_value
+
+    (local_path / "tmp.txt").write_text("scratch", encoding="utf-8")
+
+    # Crash recovery: TTL/startup cleanup uses the durable lease record, not mtime.
+    result = await execution.cleanup_scratch_leases()
+    assert lease_id in result["recovered_leases"]
+    assert not local_path.exists()
+    closed = await backend.get_scratch_lease(lease_id)
+    assert closed is not None
+    assert closed.get("closed_at") is not None
+
+
+@pytest.mark.asyncio
+async def test_workspace_scratch_lease_removed_with_scope_prune(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "scratch-prune-ws")
+    execution = workspace.with_scope_node("executions", "exec-1")
+
+    lease = await execution.open_scratch(purpose="hold", cleanup_policy="on_scope_prune")
+    lease_id = lease.get("lease_id")
+    local_path_value = lease.get("local_path")
+    assert isinstance(lease_id, str)
+    assert isinstance(local_path_value, str)
+    local_path = Path(local_path_value)
+    assert local_path.exists()
+
+    await execution.prune_scope({"execution_id": "exec-1"})
+
+    assert not local_path.exists()
+    backend = cast(Any, workspace.backend)
+    # Pruning the owning scope also removes the durable lease record.
+    assert await backend.get_scratch_lease(lease_id) is None
+
+
 def test_trigger_flow_runtime_event_recovery_diagnostics_and_projection_shape():
     records = [
         {
@@ -675,7 +1333,7 @@ async def test_workspace_file_policy_evidence_links_retention_and_capabilities(t
 
 
 @pytest.mark.asyncio
-async def test_workspace_registers_custom_recall_profile(tmp_path):
+async def test_workspace_registers_custom_context_profile(tmp_path):
     class StaticPlanner:
         name = "static"
 
@@ -687,7 +1345,7 @@ async def test_workspace_registers_custom_recall_profile(tmp_path):
             scope: dict,
             budget: dict,
             profile: str,
-        ) -> WorkspaceRecallPlan:
+        ) -> WorkspaceContextPlan:
             _ = (workspace, budget)
             return {
                 "goal": goal,
@@ -702,7 +1360,7 @@ async def test_workspace_registers_custom_recall_profile(tmp_path):
     class StaticRetriever:
         name = "static"
 
-        async def retrieve(self, *, workspace, plan: WorkspaceRecallPlan) -> list[WorkspaceRecordRef]:
+        async def retrieve(self, *, workspace, plan: WorkspaceContextPlan) -> list[WorkspaceRecordRef]:
             return await workspace.search(None, filters=plan["filters"])
 
     class StaticBuilder:
@@ -717,7 +1375,7 @@ async def test_workspace_registers_custom_recall_profile(tmp_path):
             records: list[WorkspaceRecordRef],
             budget: dict,
             diagnostics: dict,
-        ) -> WorkspaceContextPack:
+        ) -> WorkspaceContextPackage:
             _ = (workspace, budget)
             return {
                 "goal": goal,
@@ -736,7 +1394,7 @@ async def test_workspace_registers_custom_recall_profile(tmp_path):
                 "diagnostics": diagnostics,
             }
 
-    Agently.workspace.register_recall_profile(
+    Agently.workspace.register_context_profile(
         "custom-test",
         planner=StaticPlanner(),
         retriever=StaticRetriever(),

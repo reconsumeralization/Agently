@@ -25,7 +25,7 @@ from agently.utils import DeprecationWarnings, StateData, DataPathBuilder
 if TYPE_CHECKING:
     from agently.types.data import ChatMessage, AgentlyModelResult, PromptStandardSlot
     from agently.core import Prompt
-    from agently.core.model.ModelRequest import ModelResponseResult
+    from agently.core.model import ModelRequestResult
     from agently.utils import Settings
 
 PromptPathArg = str | tuple[str, str | None]
@@ -227,7 +227,7 @@ class ChatSessionExtension(BaseAgent):
             self.chat_session_runtime.set(self._activated_chat_session, self.prompt.get("chat_history"))
         return self
 
-    async def __finally(self, result: "ModelResponseResult", settings: "Settings"):
+    async def __finally(self, result: "ModelRequestResult", settings: "Settings"):
         # Find user chat content to record
         record_input_paths = settings.get("record_input_paths")
         record_input_mode = settings.get("record_input_mode")

@@ -103,6 +103,7 @@ async def record_workspace(
 def workspace_scope(owner: "AgentExecution", scope: dict[str, Any] | None = None) -> dict[str, Any]:
     lineage_scope = owner.lineage.get("scope")
     merged = dict(lineage_scope) if isinstance(lineage_scope, dict) else {}
+    merged.setdefault("execution_id", owner.id)
     for key in ("task_id", "iteration_id", "step_id"):
         value = owner.lineage.get(key)
         if value is not None:

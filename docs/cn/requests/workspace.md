@@ -13,8 +13,38 @@ Workspace V1 是底层能力。它负责存储和索引 record；它不决定模
 也不决定下一步要执行什么。默认 Agent 和 TriggerFlow execution 都内置 lazy Workspace
 binding，因此标准 Agent facade 上始终可以访问 `agent.workspace`，默认
 `flow.create_execution()` 也可以通过 `data.require_resource("workspace")` 使用
-execution 专属 Workspace。默认 local backend 只会在代码第一次写入、读取、
-checkpoint、记录 evidence 或暴露 Workspace 文件区时 materialize。
+Workspace。默认 local backend 只会在代码第一次写入、读取、checkpoint、记录
+evidence 或暴露 Workspace 文件区时 materialize。
+
+默认 local Workspace 绑定到较长生命周期的信息域，而不是每次 execution 都创建一个
+物理 Workspace。有活动的 `runtime.session_id` 时，物理 root 是
+`.agently/workspaces/sessions/<session-id>`；没有 session 时，物理 root 是
+`.agently/workspaces/scripts/<script-scope>`。Agent、task 和 execution records 是这个
+共享 backend 内的逻辑分区，可编辑文件则放在 `files/` 下的作用域子目录里。
+
+local Workspace materialize 时，Agently 会在物理 root 和每个 scoped editable
+`files_root` 写入 `AGENTLY_WORKSPACE.md` 说明文件。root 说明会解释
+`workspace.db`、`workspace.meta.json`、`content/` 和 `files/` 的边界；scoped 文件区
+说明会解释当前 lineage，以及哪些目录可由外部 agent 或 Action 编辑。文件名刻意不叫
+`README.md`，避免和 clone 仓库、任务交付物自己的 README 语义冲突。
+
+scoped `files_root` 的说明文件还会写清标准可编辑文件区：
+
+- `downloads/`：Browse、Action 或外部 provider 物化的远程文件，后续再交给
+  `read_file(...)` / `export_file(...)` 处理；
+- `artifacts/`：生成的支撑制品、结构化输出、证据包和非主交付物；
+- `reports/`：面向用户阅读的长篇、分章节或文件承载交付物。
+
+框架或应用代码需要这些目录下的受控路径时，使用
+`workspace.file_area_path(...)`：
+
+```python
+download_path = agent.workspace.file_area_path("downloads", "syllabus.pdf")
+report_path = agent.workspace.file_area_path("reports", "weekly.md", create=True)
+```
+
+需要恢复或清理的临时工作应使用 `workspace.open_scratch(...)` 或
+`workspace.scratch_root()`，不要在 `files_root` 里另造 `scratch/` 文件夹。
 
 ```python
 agent = Agently.create_agent("repo-worker")
@@ -37,9 +67,14 @@ context_pack = await agent.workspace.build_context(
     goal="Fix the route fallback failure.",
     scope={"task_id": "issue-123"},
     budget={"tokens": 12000},
-    profile="software_dev",
+    profile="auto",
 )
 ```
+
+`workspace.search(...)` 支持 `collection`、`kind`、record `id`、record `path`、
+`scope.<key>` 和 `meta.<key>` 这类结构化过滤。planner 或应用已经知道相关
+collection、record、path 或 task scope 时，应把它们作为过滤条件交给检索层；
+这些过滤只收窄检索范围，不代表本地语义验收。
 
 应用需要稳定显式 root、read-only mode 或已注册 backend provider 时，再使用
 `agent.use_workspace(...)`：
@@ -68,11 +103,13 @@ agent = Agently.create_agent("repo-worker").use_workspace(shared_workspace)
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` 默认创建 execution 专属 lazy Workspace。传
-`workspace=False` 可以显式关闭；传 Workspace 实例、路径或 backend 时，execution
-会使用应用自己管理的共享 Workspace。
+`flow.create_execution()` 默认绑定当前 session/script 的默认 Workspace，并给 execution
+分配
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`
+下的独立文件 root。传 `workspace=False` 可以显式关闭；传 Workspace 实例、路径或
+backend 时，execution 会使用显式选择的 Workspace。
 
-不要依赖多个默认 Workspace 之间自动通讯。如果 TriggerFlow execution 过程中需要在
+不要依赖多个显式隔离的 Workspace 之间自动通讯。如果 TriggerFlow execution 过程中需要在
 隔离 Workspace 之间移动信息，应在业务逻辑里显式完成：从源 Workspace search/read，
 再写入或 ingest 到目标 Workspace，并把生成的 refs link 起来。Workspace 本身不提供
 跨空间 messaging 或 replication 协议。
@@ -233,19 +270,133 @@ index 组件。它也会报告 `supports_event_sequence`、`supports_range_read`
 ## Action 边界
 
 `agent.workspace.files_root` 是给 shell、Node.js 和文件 action 使用的普通可编辑作业区。
-类文件系统的 Action helper 在没有显式 root 或 cwd 时会继承这个边界，包括 Agent 仍在
-使用 lazy default Workspace 时。`agent.workspace.content_root` 仍然是 Workspace records
-使用的受管内容存储。
+在共享默认 Workspace 中，它是
+`files/lineage/<root-kind>/<root-id>/.../agent/<agent-scope>/files`、
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files` 或
+`files/lineage/<root-kind>/<root-id>/.../task/<task-id>/files` 这类带 lineage
+作用域的子目录。类文件系统的 Action helper 在没有显式 root 或 cwd 时会继承这个边界，
+包括 Agent 仍在使用 lazy default Workspace 时。`agent.workspace.content_root`
+仍然是 Workspace records 使用的共享受管内容存储。
 
 ```python
 agent.enable_workspace_file_actions(write=True)
+agent.enable_coding_agent_actions()
 agent.enable_shell(commands=["pwd", "pytest"])
 agent.enable_nodejs()
 ```
 
 `enable_workspace_file_actions(...)` 不创建第二个 Workspace；它只是把当前 Workspace
-文件作业区暴露成 list/search/read/write 文件 actions。只有某个 action 必须使用独立目录时，
+文件作业区暴露成 list/search/read/write 文件 actions。需要把 `export_file` 也暴露给
+Agent 时，同时传 `write=True` 与 `export=True`。只有某个 action 必须使用独立目录时，
 才显式传入 `root=` 或 `cwd=`。
+
+`enable_coding_agent_actions(...)` 是 Workspace owner 暴露给 coding agent 的文件能力
+profile。它在同一个 file boundary 上暴露 `read_file`、`glob_files`、`grep_files`、
+`edit_file`、`apply_patch` 和带 guard 的 `write_file` actions。定点修改优先用
+`edit_file(...)` 或 `apply_patch(...)`；shell 只用于测试、构建、git status/diff/log
+inspection 和只读诊断。coding-agent mode 下，整文件 `write_file(...)` 默认要求已有
+prior read state 或 expected SHA，除非 host 显式关闭这个策略。
+
+## File IO Handlers
+
+Workspace 的文件读、写、导出通过已注册的 `WorkspaceFileIOHandler` 实现完成。
+Workspace 只负责路径围栏、确定性的 file info、handler dispatch、digest 和 file refs；
+格式解析、渲染、MCP、VLM 语义由 handler、Builtins Action、MCP adapter、
+ExecutionResource provider 或 ModelRequest 层承担。Workspace 不会变成 shell executor、
+MCP client、renderer lifecycle owner、OCR engine 或 model requester。
+
+```python
+await agent.workspace.write_file("notes/todo.txt", "ship docs")
+read_result = await agent.workspace.read_file("notes/todo.txt", max_bytes=4096)
+
+materialized = await agent.workspace.materialize_file(
+    "downloads/syllabus.pdf",
+    pdf_bytes,
+    source={"kind": "remote_download", "url": "https://example.com/syllabus.pdf"},
+    media_type="application/pdf",
+)
+
+export_result = await agent.workspace.export_file(
+    "report.md",
+    "report.pdf",
+    export_kind="markdown_pdf",
+)
+```
+
+默认 text handler 支持 UTF-8 / UTF-8-SIG 文本读取、纯文本写入，并返回有界 content、
+`bytes`、`sha256`、`offset`、`read_bytes`、`truncated`、diagnostics 和 file refs。
+未知 binary 文件会返回 `readable=False` 和结构化 diagnostics，不会用 replacement
+character 伪造文本。`search_files` 也只搜索通过同一 handler registry 判定为 readable
+text 的文件。搜索结果保留原有 `path`、`line`、`text` 字段，同时会带
+`role="evidence_snippet"`、有界片段计数、`truncated` 标记，以及嵌套的 `locator_ref`
+（`content_state="ref_only"`）。可见片段只能作为该片段范围内的证据；locator
+只表示后续可以用 `read_file(...)` 或 Blocks `workspace_operation` 做有界读回的目标。
+
+Blocks `workspace_operation` 也可以通过 Workspace SQLite/FTS 索引、有界
+Workspace 文件搜索，以及 `search` / `read_bounded` 操作返回 refs/paths 的有界读回。
+这些操作只返回 typed `locator_ref` 与 `evidence_snippet` 事实，不判断命中是否语义有用，
+也不判断任务是否完成。Flat AgentTask step 中，planner 给出的
+`scoped_retrieval.query_groups` 会先降到这些 Blocks search 事实，再交给有界
+`agent_step` 消费。query group 可以把 `search_surface` 设为 `workspace_index`、
+`workspace_files` 或 `workspace_index_and_files`，并携带结构化过滤
+（`collection`、`kind`、`id`、`path`、`scope` 或 `meta`），让大型 retained records
+和文件在有界 search/readback 真正需要前不进入热 prompt。对于 `workspace_index`，
+record collection 应放在 `filters.collection`；只有明确知道精确 record kind 时才使用
+`filters.kind`，不要把 collection 名写进 `path`。单元素 filter 列表会在执行前归一化为
+标量。对于 `workspace_files`，`query` 是要搜索的内容文本，`path` 是目录或文件 scope，
+`pattern` 是 `*.md`、`*` 或表示递归文件搜索的 `**` 这类文件 glob，不是另一个内容关键词。
+本地 Workspace 文件搜索在可用时使用 `rg` 作为 grep-style 搜索引擎，并在不可用时回退到有界
+文件扫描。Blocks 默认返回命中附近的小型有界上下文片段，让相邻事实可见，但不会读取整份文件。
+当 AgentTask 把 scoped retrieval 结果注入后续 Flat step 或 TaskBoard card 时，会使用
+紧凑的模型热视图：只保留有界片段、截断事实、行/范围事实和可执行 locator 句柄；
+`sha256`、字节数、handler/media 细节、backend/search-engine 事实、execution block id
+和完整 file ref 等可由程序回溯的 provenance 会留在原始 Workspace/Blocks 证据里，
+用于审计、manifest 和后续 readback。
+TaskBoard 的 readback continuation 也遵循同一拆分：HTTP/HTTPS 这类外部
+`target_refs` 会变成 Action evidence 工作；Workspace/content 路径和 retained-note
+ref 会变成有界 Workspace readback card。中间 readback preview 只把正文、path、
+范围和截断事实放进热输入，readback work unit 的热 payload 也使用紧凑 refs 而不是
+完整 provenance refs；SHA、字节数、media/handler 细节、backend 事实、
+execution block id 以及其他可由程序溯源的 provenance 留在冷侧 Workspace/Blocks
+证据、最终 artifact 审计 metadata、DevTools 或 runner 日志中。终局 verifier 的热
+输入使用 path/ref handle、有界内容或 preview、截断状态；为了判断任务充分性不需要
+单独读取 SHA。
+
+`materialize_file(...)` 用于框架或应用拥有的受控 bytes 物化，例如 Browse action
+把远程 PDF 下载到 Workspace 的 `downloads/` 后，再由后续 `read_file(...)` 通过
+handler registry 解析。它记录 `bytes`、`sha256`、`media_type`、diagnostics 和
+file refs，但它本身不解析 PDF/Office/Image 内容，也不改变 `write_file(...)` 的纯文本
+写入契约。
+
+内置可选 handler 覆盖：
+
+- 通过可选 `pypdf` 提取 PDF 文本；
+- 通过可选 Office 包提取 `.docx`、`.xlsx`、`.pptx`；
+- 把图片准备成 ModelRequest-compatible attachment，图片理解仍属于 `.image(...)` 或
+  其他 VLM-capable ModelRequest 路径；
+- 通过可选 renderer dependency 把 HTML/Markdown 导出为 PDF 或截图，默认不允许网络抓取。
+
+可选依赖缺失、不支持的文件类型、不支持的 export kind、扫描版/纯图片 PDF 都返回结构化
+diagnostics。越界路径、缺失路径和权限错误仍是执行错误。
+
+自定义 handler 可以注册到 Workspace manager：
+
+```python
+Agently.workspace.register_file_io_handler(custom_handler)
+Agently.workspace.register_file_io_handler(custom_handler, replace=True)
+Agently.workspace.unregister_file_io_handler("custom-handler")
+```
+
+相关示例：
+
+- `examples/workspace/workspace_file_io_handlers.py` 展示 text read/write、
+  不支持 binary diagnostics，以及确定性的可选 export 依赖缺失；
+- `examples/workspace/workspace_file_io_real_documents.py` 展示真实 text
+  read/write、PDF/Office 提取、HTML/Markdown 导出 E2E；
+- `examples/workspace/workspace_file_io_real_vlm.py` 展示真实 image attachment
+  preparation 加 VLM model request。VLM 示例默认使用 `qwen3-vl-plus`，需要真实
+  provider key，不会 mock 图片理解。key 不在默认 dotenv 路径时，可以用
+  `WORKSPACE_FILE_IO_VLM_ENV_FILE` 显式指定。
 
 文件边界 policy metadata 可以持久化用于审计，但 Workspace 不因此变成 cwd manager：
 
@@ -260,17 +411,18 @@ await agent.workspace.record_file_policy(
 ## 不是记忆策略
 
 Workspace V1 不暴露 `remember(...)`、`observe(...)`、`decide(...)` 这类可被模型调用
-的记忆动词。这些属于未来 Action、Recall 或 WorkLoop 层的高阶接口。V1 中，应用代码
-决定写入什么；Recall 骨架通过可插拔 planner、retriever 和 context-builder profile
-把已存 records 打包成 `ContextPack`。
+的记忆动词。这些属于未来 Action、ContextBuilder 或 WorkLoop 层的高阶接口。V1 中，
+应用代码决定写入什么；`workspace.build_context(...)` 通过可插拔 planner、retriever
+和 packager profile 把已存 records 打包成 `ContextPackage`。
 
 ## 插件边界
 
 Workspace 暴露 content、metadata、checkpoint、RuntimeEvent storage、ref
 resolution、retention、evidence links、text index、policy 和 vector index 等底层
 backend seam。默认本地 backend 是 filesystem content + SQLite metadata/FTS +
-`NoopVectorIndex`。Recall 暴露 `RecallPlanner`、`Retriever` 和 `ContextBuilder`；
-高级模型辅助规划、向量检索、rerank、compression 和 remote backends 预期作为插件叠加在这个底座上。
+`NoopVectorIndex`。ContextBuilder 暴露 `ContextPlanner`、
+`WorkspaceContextRetriever` 和 `ContextPackager`；高级模型辅助规划、向量检索、
+rerank、compression 和 remote backends 预期作为插件叠加在这个底座上。
 
 只要实现 Workspace backend protocol，自定义 backend 可以直接传给
 `agent.use_workspace(...)`，也可以按名称注册：
@@ -290,8 +442,8 @@ agent = (
 
 Provider factory 会收到 `root`、`create`、`mode` 和所有 `provider_options`，
 并返回一个 `WorkspaceBackend`。未注册的 provider name 会 fail fast，而不是回落到
-local backend。没有显式选择 provider 时，Agent 的 lazy default Workspace 会使用
-`.agently/workspaces/<agent-name>-<agent-id>` 下的 local backend。测试套件已经包含一个
+local backend。没有显式选择 provider 时，Agent 的 lazy default Workspace 会使用当前
+session 或 script 作用域的 local backend。测试套件已经包含一个
 协议级 remote audit provider proof，覆盖与本地 backend 相同的 checkpoint、RuntimeEvent、
 evidence link 和 capability 路径。这个 proof 不等于公开 Redis、Postgres 或
 object-storage adapter；生产 provider 仍必须报告真实能力，并在缺少分布式恢复要求时
@@ -303,8 +455,12 @@ workflow control plane。
 
 `examples/workspace/workspace_loop_foundation.py` 展示了一个显式 TriggerFlow
 loop：写入结构化 observations，把 decisions link 到 evidence，checkpoint 紧凑状态，
-并通过 Recall 生成 ContextPack。
+并通过 ContextBuilder 生成 ContextPackage。
+
+`examples/workspace/workspace_shared_default_management.py` 展示默认 session 作用域的
+Workspace 行为：多个 Agent 和 TriggerFlow execution 共享一个物理 `workspace.db`，
+但 execution 文件 root 仍然彼此隔离。
 
 `examples/workspace/workspace_with_action_output.py` 展示 Action 边界：file action
 写入 `workspace.files_root`，shell action 读取该文件，应用代码把 action output 显式
-ingest 为 Workspace observation，再通过 Recall 打包成 ContextPack。
+ingest 为 Workspace observation，再通过 ContextBuilder 打包成 ContextPackage。

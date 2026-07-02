@@ -19,37 +19,14 @@ from __future__ import annotations
 import re
 from typing import Any, AsyncGenerator, Mapping
 
-import yaml
-
 from agently.types.data.response import StreamingData
+from agently.core.model.StructuredOutputParser import extract_yaml_literal_target, parse_yaml_literal_output
 
 
 _YAML_TARGET_RE = re.compile(
     r"<<<BEGIN\s+AGENTLY_YAML>>>\s*(.*?)\s*<<<END\s+AGENTLY_YAML>>>",
     flags=re.DOTALL | re.IGNORECASE,
 )
-
-
-def extract_yaml_literal_target(text: str) -> str | None:
-    match = _YAML_TARGET_RE.search(text)
-    if match:
-        return match.group(1).strip()
-    fence = re.search(r"```(?:yaml|yml)?[ \t]*\n(.*?)\n?```", text, flags=re.DOTALL | re.IGNORECASE)
-    if fence:
-        return fence.group(1).strip()
-    return None
-
-
-def parse_yaml_literal_output(text: str, output_schema: Mapping[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(output_schema, Mapping) or not output_schema:
-        return None
-    target = extract_yaml_literal_target(text)
-    if target is None:
-        return None
-    data = yaml.safe_load(target)
-    if not isinstance(data, dict):
-        return None
-    return data
 
 
 class YamlLiteralStreamingParser:

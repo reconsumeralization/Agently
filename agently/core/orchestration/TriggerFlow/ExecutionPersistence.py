@@ -26,7 +26,7 @@ from typing import Any, TYPE_CHECKING, cast
 
 import yaml
 
-from agently.types.data import ExecutionEnvironmentRequirement
+from agently.types.data import ExecutionResourceRequirement
 from agently.types.data import EMPTY, RunContext
 from agently.types.trigger_flow.contract import TriggerFlowExecutionLoadReport
 from agently.types.trigger_flow.runtime_keys import (
@@ -85,20 +85,21 @@ class TriggerFlowExecutionPersistence:
             "ready": result_ready,
             "value": execution._to_serializable_value(result) if result_ready else None,
         }
+        signal_net = execution._signal_net.to_snapshot()
         resource_keys = sorted(str(key) for key in execution.get_runtime_resources().keys())
         managed_resource_keys = sorted(
             str(handle.get("resource_key", ""))
-            for handle in execution._managed_execution_environment_handles
+            for handle in execution._managed_execution_resource_handles
         )
-        execution_environment_requirement_ids = sorted(
+        execution_resource_requirement_ids = sorted(
             str(requirement.get("requirement_id", ""))
-            for requirement in execution._execution_environment_requirements
+            for requirement in execution._execution_resource_requirements
             if requirement.get("requirement_id")
         )
         resource_requirements = self._build_resource_requirements(
             resource_keys=resource_keys,
             managed_resource_keys=managed_resource_keys,
-            execution_environment_requirement_ids=execution_environment_requirement_ids,
+            execution_resource_requirement_ids=execution_resource_requirement_ids,
         )
         state = self._build_execution_snapshot(
             snapshot_id=snapshot_id,
@@ -112,9 +113,10 @@ class TriggerFlowExecutionPersistence:
             sub_flow_frames=sub_flow_frames,
             last_signal=last_signal,
             result_state=result_state,
+            signal_net=signal_net,
             resource_keys=resource_keys,
             managed_resource_keys=managed_resource_keys,
-            execution_environment_requirement_ids=execution_environment_requirement_ids,
+            execution_resource_requirement_ids=execution_resource_requirement_ids,
             resource_requirements=resource_requirements,
         )
         state.update(
@@ -192,7 +194,7 @@ class TriggerFlowExecutionPersistence:
         *,
         resource_keys: list[str],
         managed_resource_keys: list[str],
-        execution_environment_requirement_ids: list[str],
+        execution_resource_requirement_ids: list[str],
     ):
         execution = self._execution
         resource_requirements: list[dict[str, Any]] = [
@@ -207,12 +209,12 @@ class TriggerFlowExecutionPersistence:
         ]
         requirements_by_id = {
             str(requirement.get("requirement_id")): requirement
-            for requirement in execution._execution_environment_requirements
+            for requirement in execution._execution_resource_requirements
             if requirement.get("requirement_id")
         }
         resource_requirements.extend(
             {
-                "kind": "managed_execution_environment",
+                "kind": "managed_execution_resource",
                 "key": key,
                 "required": True,
                 "source": "managed",
@@ -223,15 +225,15 @@ class TriggerFlowExecutionPersistence:
         )
         resource_requirements.extend(
             {
-                "kind": "execution_environment_requirement",
+                "kind": "execution_resource_requirement",
                 "key": requirement_id,
                 "required": True,
                 "source": "managed",
-                "metadata": self._execution_environment_requirement_metadata(
+                "metadata": self._execution_resource_requirement_metadata(
                     dict(requirements_by_id.get(requirement_id, {})),
                 ),
             }
-            for requirement_id in execution_environment_requirement_ids
+            for requirement_id in execution_resource_requirement_ids
         )
         resource_requirements.extend(
             execution._to_serializable_value(requirement)
@@ -257,7 +259,7 @@ class TriggerFlowExecutionPersistence:
 
     def _managed_environment_metadata(self, resource_key: str):
         execution = self._execution
-        for handle in execution._managed_execution_environment_handles:
+        for handle in execution._managed_execution_resource_handles:
             if str(handle.get("resource_key", "")) != resource_key:
                 continue
             metadata = {
@@ -268,7 +270,7 @@ class TriggerFlowExecutionPersistence:
             return execution._to_serializable_value(metadata)
         return {"resource_key": resource_key}
 
-    def _execution_environment_requirement_metadata(self, requirement: dict[str, Any]):
+    def _execution_resource_requirement_metadata(self, requirement: dict[str, Any]):
         execution = self._execution
         if not requirement:
             return {}
@@ -310,9 +312,10 @@ class TriggerFlowExecutionPersistence:
         sub_flow_frames: dict[str, Any],
         last_signal: dict[str, Any] | None,
         result_state: dict[str, Any],
+        signal_net: dict[str, Any],
         resource_keys: list[str],
         managed_resource_keys: list[str],
-        execution_environment_requirement_ids: list[str],
+        execution_resource_requirement_ids: list[str],
         resource_requirements: list[dict[str, Any]],
     ):
         execution = self._execution
@@ -341,12 +344,13 @@ class TriggerFlowExecutionPersistence:
             "intervention": intervention,
             "sub_flow_frames": sub_flow_frames,
             "last_signal": last_signal,
+            "signal_net": signal_net,
             "result": result_state,
             "durable_system_state": durable_system_state,
             "resource_requirements": resource_requirements,
             "resource_keys": resource_keys,
             "managed_resource_keys": managed_resource_keys,
-            "execution_environment_requirement_ids": execution_environment_requirement_ids,
+            "execution_resource_requirement_ids": execution_resource_requirement_ids,
             "resume_ledger": self._collect_resume_ledger(interrupts),
             "compaction": {
                 "segments": execution._to_serializable_value(execution._compaction_segments),
@@ -365,7 +369,7 @@ class TriggerFlowExecutionPersistence:
         *,
         encoding: str | None = "utf-8",
         runtime_resources: dict[str, Any] | None = None,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None = None,
+        execution_resources: list[ExecutionResourceRequirement] | None = None,
         validate_resources: bool = False,
     ):
         execution = self._execution
@@ -377,7 +381,7 @@ class TriggerFlowExecutionPersistence:
             load = self.inspect_load_state(
                 snapshot_state,
                 runtime_resources=runtime_resources,
-                execution_environments=execution_environments,
+                execution_resources=execution_resources,
             )
             if not load.get("ready", False):
                 raise RuntimeError(
@@ -397,6 +401,7 @@ class TriggerFlowExecutionPersistence:
             durable_system_state = {}
         sub_flow_frames = snapshot_state.get("sub_flow_frames", {})
         last_signal_state = snapshot_state.get("last_signal", None)
+        signal_net_state = snapshot_state.get("signal_net", {})
         result_state = snapshot_state.get("result", {})
         execution_id = snapshot_state.get("execution_id", execution.id)
         run_context_state = snapshot_state.get("run_context", None)
@@ -469,6 +474,7 @@ class TriggerFlowExecutionPersistence:
         execution._runtime_data.set(INTERVENTIONS_STATE_KEY, execution._to_serializable_value(interventions))
         execution._system_runtime_data.set("sub_flow_frames", sub_flow_frames)
         execution._system_runtime_data.set("last_signal", last_signal_state)
+        execution._signal_net.load_snapshot(signal_net_state if isinstance(signal_net_state, dict) else {})
         self._restore_durable_system_state(durable_system_state)
         execution._set_status(status)
         execution._auto_close = bool(snapshot_state.get("auto_close", execution._auto_close))
@@ -487,9 +493,9 @@ class TriggerFlowExecutionPersistence:
         execution._lease_ttl = snapshot_state.get("lease_ttl", execution._lease_ttl)
         execution._lease_until = snapshot_state.get("lease_until", execution._lease_until)
         execution._heartbeat_at = snapshot_state.get("heartbeat_at", execution._heartbeat_at)
-        execution._execution_environment_requirements = self._resolve_execution_environment_requirements(
+        execution._execution_resource_requirements = self._resolve_execution_resource_requirements(
             snapshot_state,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
         )
         compaction_state = self._snapshot_compaction_state(snapshot_state)
         execution._compaction_segments = compaction_state["segments"]
@@ -529,14 +535,14 @@ class TriggerFlowExecutionPersistence:
         *,
         encoding: str | None = "utf-8",
         runtime_resources: dict[str, Any] | None = None,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None = None,
+        execution_resources: list[ExecutionResourceRequirement] | None = None,
     ) -> TriggerFlowExecutionLoadReport:
         state = self._load_state_content(state, encoding=encoding)
         self._validate_state_sections(state)
         return self.inspect_load_state(
             state,
             runtime_resources=runtime_resources,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
         )
 
     def inspect_load_state(
@@ -544,19 +550,19 @@ class TriggerFlowExecutionPersistence:
         state: dict[str, Any],
         *,
         runtime_resources: dict[str, Any] | None = None,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None = None,
+        execution_resources: list[ExecutionResourceRequirement] | None = None,
     ) -> TriggerFlowExecutionLoadReport:
         execution = self._execution
         snapshot_state = state
         resource_requirements = self._snapshot_resource_requirements(snapshot_state)
-        execution_environment_requirements = self._resolve_execution_environment_requirements(
+        execution_resource_requirements = self._resolve_execution_resource_requirements(
             snapshot_state,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
         )
         available_resource_keys = self._available_resource_keys(runtime_resources=runtime_resources)
         environment_resource_keys = {
             str(requirement.get("resource_key"))
-            for requirement in execution_environment_requirements
+            for requirement in execution_resource_requirements
             if requirement.get("resource_key")
         }
         missing_resource_keys: set[str] = set()
@@ -567,6 +573,24 @@ class TriggerFlowExecutionPersistence:
         resolved_resource_keys: set[str] = set()
         diagnostics: list[dict[str, Any]] = self._snapshot_contract_diagnostics(snapshot_state)
         diagnostics.extend(self._resume_ledger_diagnostics(snapshot_state))
+        missing_dynamic_event_handlers = execution._signal_net.snapshot_missing_handler_ids(
+            snapshot_state.get("signal_net", {})
+        )
+        for binding_id in missing_dynamic_event_handlers:
+            resource_key = f"dynamic_event_handler:{ binding_id }"
+            missing_resource_keys.add(resource_key)
+            diagnostics.append(
+                {
+                    "code": "triggerflow.signal_net.missing_dynamic_handler",
+                    "severity": "warning",
+                    "message": (
+                        f"Dynamic event binding '{ binding_id }' requires a registered "
+                        "handler before TriggerFlow load can be ready."
+                    ),
+                    "resource_key": resource_key,
+                    "details": {"binding_id": binding_id},
+                }
+            )
         snapshot_errors = [
             diagnostic
             for diagnostic in diagnostics
@@ -701,8 +725,8 @@ class TriggerFlowExecutionPersistence:
                 "pending_environment_resource_keys": sorted(pending_environment_resource_keys),
                 "policy_blocked_resource_keys": sorted(policy_blocked_resource_keys),
                 "resource_requirements": resource_requirements,
-                "execution_environment_requirements": execution._to_serializable_value(
-                    execution_environment_requirements
+                "execution_resource_requirements": execution._to_serializable_value(
+                    execution_resource_requirements
                 ),
                 "compaction": self._snapshot_compaction_state(snapshot_state),
                 "diagnostics": diagnostics,
@@ -715,21 +739,21 @@ class TriggerFlowExecutionPersistence:
         *,
         encoding: str | None = "utf-8",
         runtime_resources: dict[str, Any] | None = None,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None = None,
+        execution_resources: list[ExecutionResourceRequirement] | None = None,
         require_resources: bool = True,
     ):
         state = self._load_state_content(state, encoding=encoding)
         self._validate_state_sections(state)
         snapshot_state = state
         resource_requirements = self._snapshot_resource_requirements(snapshot_state)
-        execution_environment_requirements = self._resolve_execution_environment_requirements(
+        execution_resource_requirements = self._resolve_execution_resource_requirements(
             snapshot_state,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
         )
         available_resource_keys = self._available_resource_keys(runtime_resources=runtime_resources)
         environment_resource_keys = {
             str(requirement.get("resource_key"))
-            for requirement in execution_environment_requirements
+            for requirement in execution_resource_requirements
             if requirement.get("resource_key")
         }
         resolved_resources: dict[str, Any] = {}
@@ -1536,7 +1560,7 @@ class TriggerFlowExecutionPersistence:
             nested_resource_key = nested_requirement.get("resource_key")
             if isinstance(nested_resource_key, str) and nested_resource_key:
                 return nested_resource_key
-        if kind == "execution_environment_requirement":
+        if kind == "execution_resource_requirement":
             return None
         return key or None
 
@@ -1585,7 +1609,7 @@ class TriggerFlowExecutionPersistence:
         for key in managed_resource_keys:
             legacy_requirements.append(
                 {
-                    "kind": "managed_execution_environment",
+                    "kind": "managed_execution_resource",
                     "key": key,
                     "required": True,
                     "source": "legacy",
@@ -1601,11 +1625,11 @@ class TriggerFlowExecutionPersistence:
             return []
         return [str(item) for item in value if str(item)]
 
-    def _resolve_execution_environment_requirements(
+    def _resolve_execution_resource_requirements(
         self,
         snapshot_state: dict[str, Any],
         *,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None = None,
+        execution_resources: list[ExecutionResourceRequirement] | None = None,
     ):
         resolved: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -1623,9 +1647,9 @@ class TriggerFlowExecutionPersistence:
             seen.add(key)
             resolved.append(dict(requirement))
 
-        for requirement in self._execution._execution_environment_requirements:
+        for requirement in self._execution._execution_resource_requirements:
             add_requirement(dict(requirement))
-        for requirement in execution_environments or []:
+        for requirement in execution_resources or []:
             add_requirement(dict(requirement))
         for resource_requirement in self._coerce_resource_requirements(
             snapshot_state.get("resource_requirements", [])
@@ -1636,7 +1660,7 @@ class TriggerFlowExecutionPersistence:
             nested_requirement = metadata.get("requirement")
             if isinstance(nested_requirement, dict):
                 add_requirement(nested_requirement)
-        return cast(list[ExecutionEnvironmentRequirement], resolved)
+        return cast(list[ExecutionResourceRequirement], resolved)
 
     def _restore_durable_system_state(self, durable_system_state: dict[str, Any]):
         execution = self._execution

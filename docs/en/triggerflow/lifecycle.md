@@ -159,13 +159,13 @@ The execution snapshot records:
 - `durable_system_state`: TriggerFlow-owned progress that must survive
   open/waiting execution load, such as partial `when(mode="and")`
   aggregation state.
-- `resource_requirements`: live resource keys and execution-environment
+- `resource_requirements`: live resource keys and ExecutionResource
   requirements needed before the restored graph can safely continue.
 - `resume_ledger`: accepted `continue_with(..., resume_request_id=...)` requests
   so an external resume retry does not dispatch the graph twice.
 
 Live resource objects are not serialized. `runtime_resources`, managed
-execution-environment handles, clients, callbacks, and other live objects remain
+ExecutionResource handles, clients, callbacks, and other live objects remain
 outside the saved state. `runtime_resources` is only the mount point for live
 objects that the host has already created, restored, and validated.
 
@@ -219,11 +219,11 @@ await restored.async_continue_with(
 )
 ```
 
-`async_load(...)` loads the snapshot, restores declared execution
-environment requirements, re-ensures managed execution environments, and fails
+`async_load(...)` loads the snapshot, restores declared ExecutionResource
+requirements, re-ensures managed execution resources, and fails
 before graph continuation if required resources are still missing. Use
 `load(...)` only when all required resources are already available in the
-current process and no async environment preparation is needed. Pass
+current process and no async resource preparation is needed. Pass
 `validate_resources=True` for the same fail-fast resource check. Use
 `async_load(...)` for restart or worker-handoff paths that may need async
 resource resolution or managed environment setup before graph continuation.
@@ -249,16 +249,19 @@ shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` creates an execution-scoped lazy Workspace by default.
-Pass `workspace=False` to opt out, or pass a Workspace instance, path, or backend
-when the execution should use an application-owned shared Workspace. The
-resolved execution-local Workspace is available to TriggerFlow chunks as
+`flow.create_execution()` binds the current session/script default Workspace by
+default and assigns the execution its own scoped file root under
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`.
+Pass `workspace=False` to opt out, or pass a Workspace instance, path, or
+backend when the execution should use an explicitly selected Workspace. The
+resolved execution-local Workspace facade is available to TriggerFlow chunks as
 `runtime_resources["workspace"]` / `data.require_resource("workspace")`.
 
 It is a live resource, not serialized state. If a chunk needs an Agent to use
-the same information scope, bind that Agent or the single AgentExecution to the
-same Workspace in application code. If a flow needs to move data between two
-isolated Workspaces, do it explicitly in the flow's business logic with
+the same explicit information scope, bind that Agent or the single
+AgentExecution to the same Workspace in application code. If a flow needs to
+move data between two isolated Workspaces, do it explicitly in the flow's
+business logic with
 Workspace `search(...)`, `get(...)`, `get_data(...)`, `put(...)`, `ingest(...)`,
 and `link(...)`. Workspace itself does not provide a cross-space communication
 or replication protocol.

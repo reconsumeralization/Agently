@@ -14,8 +14,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-from typing_extensions import TypedDict
+from typing import Any, Literal
+from typing_extensions import NotRequired, TypedDict
 
 
 class WorkspaceRecordRef(TypedDict):
@@ -76,6 +76,114 @@ class WorkspaceContentSegment(TypedDict):
     content_type: str | None
 
 
+WorkspaceFileOperation = Literal["read", "write", "export"]
+
+
+class WorkspaceFileDiagnostic(TypedDict):
+    code: str
+    message: str
+    handler_id: NotRequired[str | None]
+    dependency: NotRequired[str | None]
+    detail: NotRequired[dict[str, Any]]
+
+
+class WorkspaceFileRef(TypedDict):
+    path: str
+    bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    role: str
+
+
+class WorkspaceFileInfo(TypedDict):
+    path: str
+    extension: str
+    media_type: str | None
+    content_kind: str
+    bytes: int
+    sha256: str
+    signatures: list[str]
+    readable: bool
+    writable: bool
+    exists: bool
+
+
+class WorkspaceFileReadResult(TypedDict):
+    ok: bool
+    readable: bool
+    path: str
+    content: str
+    truncated: bool
+    bytes: int
+    offset: int
+    read_bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    encoding: str | None
+    handler_id: str
+    extraction_method: str
+    diagnostics: list[WorkspaceFileDiagnostic]
+    file_refs: list[WorkspaceFileRef]
+    attachments: NotRequired[list[dict[str, Any]]]
+
+
+class WorkspaceFileSearchResult(TypedDict):
+    path: str
+    line: int
+    text: str
+    role: str
+    content_state: str
+    source: str
+    query: str
+    scope: dict[str, Any]
+    locator_ref: dict[str, Any]
+    snippet: str
+    snippet_chars: int
+    snippet_bytes: int
+    truncated: bool
+    line_start: int
+    line_end: int
+    bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    search_engine: str
+    file_ref: WorkspaceFileRef
+
+
+class WorkspaceFileWriteResult(TypedDict):
+    ok: bool
+    writable: bool
+    path: str
+    bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    encoding: str | None
+    mode: str
+    handler_id: str
+    replacements: NotRequired[int]
+    diagnostics: list[WorkspaceFileDiagnostic]
+    file_refs: list[WorkspaceFileRef]
+
+
+class WorkspaceFileExportResult(TypedDict):
+    ok: bool
+    exported: bool
+    source_path: str
+    output_path: str
+    export_kind: str
+    bytes: int
+    sha256: str
+    media_type: str | None
+    content_kind: str
+    handler_id: str
+    diagnostics: list[WorkspaceFileDiagnostic]
+    file_refs: list[WorkspaceFileRef]
+
+
 class WorkspaceRuntimeEventRecord(TypedDict):
     id: str
     execution_id: str
@@ -114,6 +222,27 @@ class WorkspaceLeaseRef(TypedDict, total=False):
     state_version: int | None
 
 
+class WorkspaceScratchLease(TypedDict, total=False):
+    """Durable record of a scratch lease.
+
+    Scratch leases are persisted as Workspace facts so crashed runs can be
+    recovered by TTL/startup cleanup and scope prune using lease records rather
+    than filesystem heuristics such as mtime (spec sections 8.5 / 11.1).
+    """
+
+    lease_id: str
+    scope: dict[str, Any]
+    local_path: str | None
+    mount: dict[str, Any] | None
+    purpose: str | None
+    cleanup_policy: Literal["on_close", "on_scope_prune", "ttl"]
+    expires_at: str | None
+    read_only: bool
+    policy_labels: list[str]
+    created_at: str
+    closed_at: str | None
+
+
 class WorkspaceFilePolicyMetadata(TypedDict):
     content_root: str
     files_root: str
@@ -145,7 +274,7 @@ class WorkspaceSearchResult(TypedDict, total=False):
     reason: str | None
 
 
-class WorkspaceRecallPlan(TypedDict):
+class WorkspaceContextPlan(TypedDict):
     goal: str
     profile: str
     queries: list[str]
@@ -168,7 +297,7 @@ class WorkspaceContextOmission(TypedDict):
     count: int
 
 
-class WorkspaceContextPack(TypedDict):
+class WorkspaceContextPackage(TypedDict):
     goal: str
     profile: str
     items: list[WorkspaceContextItem]

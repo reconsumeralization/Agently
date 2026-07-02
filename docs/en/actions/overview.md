@@ -30,7 +30,7 @@ Default plugin wiring lives in [`agently/_default_init.py`](../../../agently/_de
 - `ActionRuntime`: `AgentlyActionRuntime`
 - `ActionFlow`: `TriggerFlowActionFlow`
 - `ActionExecutor`: local function, MCP, Search/Browse, Python/Bash sandbox, Node.js, SQLite, Docker
-- `ExecutionEnvironmentProvider`: MCP, Python, Bash, Node.js, Docker, Browser, SQLite
+- `ExecutionResourceProvider`: MCP, Python, Bash, Node.js, Docker, Browser, SQLite
 
 The public facade is [`agently/core/operation/Action/`](../../../agently/core/operation/Action/). Agent-level mounting lives in [`agently/builtins/agent_extensions/ActionExtension.py`](../../../agently/builtins/agent_extensions/ActionExtension.py). The runnable examples are grouped under [`examples/action_runtime/README.md`](../../../examples/action_runtime/README.md), with model-backed cookbook patterns under [`examples/cookbook/`](../../../examples/cookbook/).
 
@@ -40,7 +40,7 @@ The public facade is [`agently/core/operation/Action/`](../../../agently/core/op
 |---|---|
 | New function actions | [Action Runtime](action-runtime.md) |
 | Give an app agent Python, shell, or workspace access | [Action Runtime](action-runtime.md) |
-| Build a backend that needs managed resources | [Execution Environment](execution-environment.md) |
+| Build a backend that needs managed resources | [ExecutionResource](execution-environment.md) |
 | Existing code still uses `tool_func` | [Tools Compatibility](tools.md) |
 | Use a local or HTTP MCP server | [MCP](mcp.md) |
 | Route many actions across steps | [TriggerFlow Patterns](../triggerflow/patterns.md) |

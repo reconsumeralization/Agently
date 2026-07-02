@@ -15,7 +15,7 @@
 """Agent → Plugin context adapter for Skills Executor.
 
 ``AgentSkillsRuntimeContext`` bridges the Agent's internal API (settings, model
-requests, runtime stream emission, ExecutionEnvironment handle) to the
+requests, runtime stream emission, ExecutionResource handle) to the
 ``SkillsExecutor`` plugin protocols (``SkillsPlanningContext`` /
 ``SkillsExecutionContext`` / ``SkillsRuntimeContext``).
 
@@ -153,7 +153,12 @@ class AgentSkillsRuntimeContext:
             max_rounds=1,
             concurrency=concurrency,
         )
-        return [dict(item) for item in results]
+        requested_action_ids = {str(call.get("action_id") or "") for call in action_calls}
+        return [
+            dict(item)
+            for item in results
+            if str(item.get("action_id") or item.get("tool_name") or "") in requested_action_ids
+        ]
 
     async def async_execute_action_round(
         self,
@@ -216,8 +221,8 @@ class AgentSkillsRuntimeContext:
     # ── Execution environment ──
 
     @property
-    def execution_environment(self) -> Any | None:
-        return getattr(self.agent, "execution_environment", None)
+    def execution_resource(self) -> Any | None:
+        return getattr(self.agent, "execution_resource", None)
 
 
 def create_agent_skills_runtime_context(

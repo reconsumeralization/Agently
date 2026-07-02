@@ -18,6 +18,42 @@ available without setup. The default local backend is materialized only when
 code first writes, reads, checkpoints, records evidence, or exposes the
 Workspace file area.
 
+Default local Workspaces are scoped to a longer-lived information domain, not
+to each execution. With an active `runtime.session_id`, the physical root is
+`.agently/workspaces/sessions/<session-id>`; without a session it is
+`.agently/workspaces/scripts/<script-scope>`. Agent, task, and execution
+records are logical partitions inside that shared backend, and editable files
+use scoped subdirectories under `files/`.
+
+When a local Workspace is materialized, Agently writes an
+`AGENTLY_WORKSPACE.md` guide at the physical root and at each scoped editable
+`files_root`. The root guide explains `workspace.db`, `workspace.meta.json`,
+`content/`, and `files/`; the scoped file guide explains the current lineage and
+which directory external agents or Actions may edit. The filename intentionally
+is not `README.md` so cloned repositories and task deliverables can keep their
+own README semantics.
+
+Scoped `files_root` guides also name the standard editable file areas:
+
+- `downloads/`: remote files materialized by Browse, Actions, or external
+  providers before `read_file(...)` / `export_file(...)` handling;
+- `artifacts/`: generated supporting artifacts, structured outputs, evidence
+  bundles, and non-primary deliverables;
+- `reports/`: user-facing readable deliverables, including long, sectioned, or
+  file-backed deliverables.
+
+Use `workspace.file_area_path(...)` when framework or application code needs a
+contained path inside one of those areas:
+
+```python
+download_path = agent.workspace.file_area_path("downloads", "syllabus.pdf")
+report_path = agent.workspace.file_area_path("reports", "weekly.md", create=True)
+```
+
+Temporary work that should be recovered or cleaned as scratch belongs to
+`workspace.open_scratch(...)` or `workspace.scratch_root()`, not a `scratch/`
+folder inside `files_root`.
+
 ```python
 agent = Agently.create_agent("repo-worker")
 
@@ -39,9 +75,15 @@ context_pack = await agent.workspace.build_context(
     goal="Fix the route fallback failure.",
     scope={"task_id": "issue-123"},
     budget={"tokens": 12000},
-    profile="software_dev",
+    profile="auto",
 )
 ```
+
+`workspace.search(...)` supports structural filters such as `collection`,
+`kind`, record `id`, record `path`, `scope.<key>`, and `meta.<key>`. Use these
+filters when the planner or application already knows the relevant collection,
+record, path, or task scope; they narrow retrieval without turning a search hit
+into semantic acceptance.
 
 Use `agent.use_workspace(...)` when the application needs a stable explicit
 root, read-only mode, or a registered backend provider:
@@ -72,15 +114,17 @@ agent = Agently.create_agent("repo-worker").use_workspace(shared_workspace)
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` creates an execution-scoped lazy Workspace by default.
-Pass `workspace=False` to opt out, or pass a Workspace instance, path, or backend
-when the execution should use an application-owned shared Workspace.
+`flow.create_execution()` binds the current session/script default Workspace by
+default and gives the execution its own scoped file root under
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`.
+Pass `workspace=False` to opt out, or pass a Workspace instance, path, or
+backend when the execution should use an explicitly selected Workspace.
 
-Do not rely on separate default Workspaces to communicate with each other. If a
-TriggerFlow execution needs to move information between isolated Workspaces,
-make that transfer explicit in application logic: search or read from the source
-Workspace, write or ingest into the destination Workspace, then link the
-resulting refs. Workspace does not provide a cross-space messaging or
+Do not rely on separate explicitly isolated Workspaces to communicate with each
+other. If a TriggerFlow execution needs to move information between isolated
+Workspaces, make that transfer explicit in application logic: search or read
+from the source Workspace, write or ingest into the destination Workspace, then
+link the resulting refs. Workspace does not provide a cross-space messaging or
 replication protocol.
 
 ## What It Stores
@@ -246,21 +290,156 @@ required flags or the matching provider methods.
 ## Action Boundary
 
 `agent.workspace.files_root` defines an ordinary editable working tree for
-shell, Node.js, and file actions. Filesystem-like action helpers inherit that
-boundary when no explicit root or cwd is passed, including when the Agent is
-still using its lazy default Workspace. `agent.workspace.content_root` remains
-the managed record-content store used by Workspace records.
+shell, Node.js, and file actions. In shared default Workspaces this is a scoped
+lineage subdirectory such as
+`files/lineage/<root-kind>/<root-id>/.../agent/<agent-scope>/files`,
+`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`, or
+`files/lineage/<root-kind>/<root-id>/.../task/<task-id>/files`.
+Filesystem-like action helpers inherit that boundary when no explicit root or
+cwd is passed, including when the Agent is still using its lazy default
+Workspace.
+`agent.workspace.content_root` remains the shared managed record-content store
+used by Workspace records.
 
 ```python
 agent.enable_workspace_file_actions(write=True)
+agent.enable_coding_agent_actions()
 agent.enable_shell(commands=["pwd", "pytest"])
 agent.enable_nodejs()
 ```
 
 `enable_workspace_file_actions(...)` does not create a second Workspace. It
 exposes list/search/read/write file actions over the current Workspace file
-area. Pass an explicit `root=` or `cwd=` only when an action must use an
-independent directory.
+area. Pass `export=True` together with `write=True` when the Agent should also
+receive an `export_file` action. Pass an explicit `root=` or `cwd=` only when an
+action must use an independent directory.
+
+`enable_coding_agent_actions(...)` is the Workspace-owned profile for coding
+agents. It exposes `read_file`, `glob_files`, `grep_files`, `edit_file`,
+`apply_patch`, and guarded `write_file` actions over the same file boundary.
+Use `edit_file(...)` or `apply_patch(...)` for targeted edits, and keep shell
+commands for tests, builds, git status/diff/log inspection, and read-only
+diagnostics. In coding-agent mode, full-file `write_file(...)` is guarded by
+prior read state or an expected SHA unless the host explicitly disables that
+policy.
+
+## File IO Handlers
+
+Workspace file reads, writes, and exports use registered
+`WorkspaceFileIOHandler` implementations. Workspace owns path containment,
+deterministic file info, handler dispatch, digests, and file refs; handlers own
+format-specific parsing or rendering. Workspace does not become a shell
+executor, MCP client, renderer lifecycle owner, OCR engine, or model requester.
+
+```python
+await agent.workspace.write_file("notes/todo.txt", "ship docs")
+read_result = await agent.workspace.read_file("notes/todo.txt", max_bytes=4096)
+
+materialized = await agent.workspace.materialize_file(
+    "downloads/syllabus.pdf",
+    pdf_bytes,
+    source={"kind": "remote_download", "url": "https://example.com/syllabus.pdf"},
+    media_type="application/pdf",
+)
+
+export_result = await agent.workspace.export_file(
+    "report.md",
+    "report.pdf",
+    export_kind="markdown_pdf",
+)
+```
+
+The default text handler reads UTF-8 / UTF-8-SIG text, writes plain text, and
+returns bounded content with `bytes`, `sha256`, `offset`, `read_bytes`,
+`truncated`, diagnostics, and file refs. Unknown binary files return
+`readable=False` with diagnostics instead of replacement-character content.
+`search_files` only searches files that are readable text through the same
+handler registry. Search results keep the original `path`, `line`, and `text`
+fields, and also include `role="evidence_snippet"`, bounded snippet counts, and
+a `truncated` flag plus a nested `locator_ref` with `content_state="ref_only"`.
+Use the visible snippet as evidence only within that excerpt; use the locator
+as a target for a later bounded `read_file(...)` or Blocks
+`workspace_operation` readback.
+
+Blocks `workspace_operation` can also run scoped Workspace searches through the
+Workspace SQLite/FTS index, bounded Workspace file search, and bounded ref/path
+reads through `search` and `read_bounded` operations. These operations return
+typed `locator_ref` and `evidence_snippet` facts; they do not decide whether a
+hit is semantically useful or whether a task is complete. In Flat AgentTask
+steps, planner-provided `scoped_retrieval.query_groups` are lowered to these
+Blocks search facts before the bounded `agent_step` consumes them. Query groups
+may set `search_surface` to `workspace_index`, `workspace_files`, or
+`workspace_index_and_files`, and may carry structural filters (`collection`,
+`kind`, `id`, `path`, `scope`, or `meta`) so large retained records and files
+can stay out of the hot context until a bounded search or readback needs them.
+For `workspace_index`, put record collections in `filters.collection`; use
+`filters.kind` only when the exact record kind is known, and do not use `path`
+for collection names. Singleton filter lists are normalized to scalar values
+before execution.
+When AgentTask injects scoped retrieval results into a later Flat step or
+TaskBoard card, it uses a compact model-hot view: bounded snippets, truncation
+facts, line/range facts, and actionable locator handles stay visible, while
+reconstructable provenance such as `sha256`, byte counts, handler/media details,
+backend/search-engine facts, execution block ids, and full file refs remains in
+the raw Workspace/Blocks evidence for programmatic audit and readback.
+TaskBoard applies the same split to readback continuations: external
+`target_refs` such as HTTP/HTTPS URLs become Action evidence work, while
+Workspace/content paths and retained-note refs become bounded Workspace readback
+cards. Intermediate readback previews keep content, path, range, and truncation
+facts hot, and readback work-unit hot payloads use compact refs rather than full
+provenance refs. SHA, byte counts, media/handler details, backend facts, execution
+block ids, and other programmatically traceable provenance stay in cold
+Workspace/Blocks evidence, final artifact audit metadata, DevTools, or runner
+logs. Final verifier hot input uses path/ref handles, bounded content or
+preview, and truncation status; it does not need SHA only to judge task
+sufficiency.
+For `workspace_files`, `query` is the content text to search, `path` is the
+directory or file scope, and `pattern` is a file glob such as `*.md`, `*`, or
+`**` for recursive file search. Local Workspace file search uses `rg` as a
+grep-style search engine when available and falls back to bounded file scanning.
+Blocks use a small bounded context around file matches by default so related
+nearby facts can be visible without reading the whole file.
+
+`materialize_file(...)` is for framework-owned or application-owned byte
+materialization, such as a Browse action downloading a remote PDF into
+`downloads/` before a later `read_file(...)` parses it through the handler
+registry. It records `bytes`, `sha256`, `media_type`, diagnostics, and file
+refs, but it does not parse PDF/Office/image content itself and does not change
+the plain-text contract of `write_file(...)`.
+
+Built-in optional handlers cover:
+
+- PDF text extraction through optional `pypdf`;
+- `.docx`, `.xlsx`, and `.pptx` extraction through optional Office packages;
+- image preparation as ModelRequest-compatible attachments, with interpretation
+  still owned by `.image(...)` or another VLM-capable ModelRequest path;
+- HTML/Markdown export to PDF or screenshot through optional renderer
+  dependencies, with network fetch disabled by default.
+
+Optional dependency missing, unsupported file type, unsupported export kind, and
+image-only/scanned PDF cases return structured diagnostics. Outside-root,
+missing-path, and permission failures remain execution errors.
+
+Custom handlers can be registered on the Workspace manager:
+
+```python
+Agently.workspace.register_file_io_handler(custom_handler)
+Agently.workspace.register_file_io_handler(custom_handler, replace=True)
+Agently.workspace.unregister_file_io_handler("custom-handler")
+```
+
+See:
+
+- `examples/workspace/workspace_file_io_handlers.py` for text read/write,
+  unsupported binary diagnostics, and deterministic optional export dependency
+  failure;
+- `examples/workspace/workspace_file_io_real_documents.py` for real text
+  read/write, PDF/Office extraction, and HTML/Markdown export E2E;
+- `examples/workspace/workspace_file_io_real_vlm.py` for real image attachment
+  preparation plus a VLM model request. The VLM example defaults to
+  `qwen3-vl-plus`, requires a real provider key, and does not mock image
+  interpretation. Use `WORKSPACE_FILE_IO_VLM_ENV_FILE` when the key lives in a
+  non-default dotenv file.
 
 File boundary policy metadata can be persisted for audit without turning
 Workspace into a cwd manager:
@@ -277,20 +456,20 @@ await agent.workspace.record_file_policy(
 
 Workspace V1 intentionally does not expose model-callable memory verbs such as
 `remember(...)`, `observe(...)`, or `decide(...)`. Those are higher-level
-affordances for future Action, Recall, or WorkLoop layers. In V1, application
-code decides what to write, and the Recall skeleton packages stored records into
-a `ContextPack` through pluggable planner, retriever, and context-builder
-profiles.
+affordances for future Action, ContextBuilder, or WorkLoop layers. In V1,
+application code decides what to write, and `workspace.build_context(...)`
+packages stored records into a `ContextPackage` through pluggable planner,
+retriever, and packager profiles.
 
 ## Plugin Seams
 
 Workspace exposes low-level backend seams for content, metadata, checkpoints,
 RuntimeEvent storage, ref resolution, retention, evidence links, text index,
 policy, and vector index. The default local backend is filesystem content plus
-SQLite metadata/FTS and `NoopVectorIndex`. Recall exposes `RecallPlanner`,
-`Retriever`, and `ContextBuilder`; advanced model-assisted planning, vector
-retrieval, reranking, compression, and remote backends are expected to arrive as
-plugins over this foundation.
+SQLite metadata/FTS and `NoopVectorIndex`. ContextBuilder exposes
+`ContextPlanner`, `WorkspaceContextRetriever`, and `ContextPackager`; advanced
+model-assisted planning, vector retrieval, reranking, compression, and remote
+backends are expected to arrive as plugins over this foundation.
 
 Custom backends can be passed directly to `agent.use_workspace(...)` or
 registered by name when they implement the Workspace backend protocol:
@@ -311,13 +490,13 @@ agent = (
 Provider factories receive `root`, `create`, `mode`, and any
 `provider_options`, then return a `WorkspaceBackend`. Unregistered provider
 names fail fast instead of falling back to the local backend. If no explicit
-provider is selected, the Agent's lazy default Workspace uses the local backend
-under `.agently/workspaces/<agent-name>-<agent-id>`. The test suite includes a
-protocol-level remote audit provider proof that exercises the same checkpoint,
-RuntimeEvent, evidence link, and capability paths as the local backend. That
-proof is not a public Redis, Postgres, or object-storage adapter; production
-providers must still report their real capabilities and fail closed when
-distributed recovery requirements are missing.
+provider is selected, the Agent's lazy default Workspace uses the current
+session or script scoped local backend. The test suite includes a protocol-level
+remote audit provider proof that exercises the same checkpoint, RuntimeEvent,
+evidence link, and capability paths as the local backend. That proof is not a
+public Redis, Postgres, or object-storage adapter; production providers must
+still report their real capabilities and fail closed when distributed recovery
+requirements are missing.
 TriggerFlow tests also read Workspace-backed execution snapshots through the provider and
 load pause/continue, policy-approval waits, and `when(..., mode="and")`
 join progress through TriggerFlow, so Workspace remains storage rather than a
@@ -325,9 +504,13 @@ workflow control plane.
 
 See `examples/workspace/workspace_loop_foundation.py` for an explicit
 TriggerFlow loop that stores structured observations, links decisions to
-evidence, checkpoints compact state, and recalls a ContextPack.
+evidence, checkpoints compact state, and builds a ContextPackage.
+
+See `examples/workspace/workspace_shared_default_management.py` for the default
+session-scoped Workspace behavior: multiple Agents and TriggerFlow executions
+share one physical `workspace.db` while execution file roots stay isolated.
 
 See `examples/workspace/workspace_with_action_output.py` for the Action
 boundary: a file action writes into `workspace.files_root`, a shell action reads
 that file, application code explicitly ingests the action output as a Workspace
-observation, and Recall packages it into a ContextPack.
+observation, and ContextBuilder packages it into a ContextPackage.

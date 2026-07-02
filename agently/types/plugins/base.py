@@ -23,8 +23,9 @@ AgentlyPluginType = Literal[
     "ActionRuntime",
     "ActionFlow",
     "ActionExecutor",
-    "ExecutionEnvironmentProvider",
+    "ExecutionResourceProvider",
     "TaskDAGPlanner",
+    "Blocks",
     "SkillsExecutor",
     "AgentOrchestrator",
     "WorkspaceBackend",
@@ -35,9 +36,10 @@ AgentlyPluginType = Literal[
     "TextIndex",
     "PolicyEngine",
     "VectorIndex",
-    "RecallPlanner",
+    "ContextPlanner",
     "Retriever",
     "ContextBuilder",
+    "WorkspaceFileIOHandler",
 ]
 
 

@@ -95,8 +95,10 @@ class ObserveBlock(FlowBlock):
 
         return {
             "act_type": observation.get("act_type"),
+            "action_id": observation.get("action_id"),
             "name": observation.get("name"),
             "error": observation.get("error"),
+            "status": observation.get("status"),
             "artifact": {
                 "sha256_16": sha,
                 "byte_count": result_bytes,

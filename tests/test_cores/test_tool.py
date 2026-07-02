@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from agently import Agently
 from agently.core import Action, PluginManager
-from agently.types.data import ActionCall, ActionDecision
+from agently.types.data import ActionCall, ActionDecision, ActionPolicy
 from agently.utils import Settings
 
 
@@ -87,6 +87,325 @@ def test_action_dispatcher_requires_approval():
     assert result.get("status") == "blocked"
     legacy = action.call_tool(action_id, {})
     assert legacy["status"] == "blocked"
+
+
+def test_model_policy_override_cannot_grant_approval():
+    """ISSUE-001: a model-planned command must not self-grant approval."""
+    action = Agently.action
+    action_id = f"approval_escalation_{ uuid.uuid4().hex[:8] }"
+    action.register_action(
+        action_id=action_id,
+        desc="Approval gated action.",
+        kwargs={},
+        func=lambda: "ok",
+        approval_required=True,
+        expose_to_model=False,
+    )
+
+    # A structured_plan command (model output) cannot bypass the approval gate by
+    # injecting host-only policy keys.
+    blocked = action.execute_action(
+        action_id,
+        {},
+        policy_override={"policy_approval_granted": True, "approval_mode": "auto"},
+        source_protocol="structured_plan",
+    )
+    assert blocked.get("status") == "blocked"
+
+    # Host code calling directly may still pre-grant approval.
+    granted = action.execute_action(
+        action_id,
+        {},
+        policy_override={"policy_approval_granted": True},
+        source_protocol="direct",
+    )
+    assert granted.get("status") == "success"
+
+
+def test_sanitize_policy_override_strips_host_only_keys_for_model_sources():
+    from agently.core.operation.Action.ActionDispatcher import ActionDispatcher
+
+    override: ActionPolicy = {
+        "policy_approval_granted": True,
+        "allowed_cmd_prefixes": ["rm"],
+    }
+    sanitized, stripped = ActionDispatcher._sanitize_policy_override(
+        override, source_protocol="native_tool_calls"
+    )
+    assert "policy_approval_granted" not in sanitized
+    assert "allowed_cmd_prefixes" not in sanitized
+    assert sanitized == {}
+    assert set(stripped) == {"policy_approval_granted", "allowed_cmd_prefixes"}
+
+    kept, none_stripped = ActionDispatcher._sanitize_policy_override(
+        override, source_protocol="direct"
+    )
+    assert kept == override
+    assert none_stripped == []
+
+
+def test_model_sourced_action_input_strips_undeclared_kwargs():
+    action = Agently.create_agent().action
+    action_id = f"input_safety_{ uuid.uuid4().hex[:8] }"
+    received: list[dict[str, Any]] = []
+
+    def capture(**kwargs):
+        received.append(dict(kwargs))
+        return dict(kwargs)
+
+    action.register_action(
+        action_id=action_id,
+        desc="Capture received kwargs.",
+        kwargs={"value": (int, "")},
+        func=capture,
+        expose_to_model=False,
+    )
+
+    model_result = action.execute_action(
+        action_id,
+        {"value": 3, "admin": True, "policy": {"approval": "self_grant"}},
+        source_protocol="structured_plan",
+    )
+
+    assert model_result.get("status") == "success"
+    assert model_result.get("data") == {"value": 3}
+    assert received[-1] == {"value": 3}
+    assert model_result.get("kwargs") == {"value": 3}
+    diagnostics = model_result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    strip_diagnostic = next(item for item in diagnostics if item.get("code") == "action.input.unexpected_keys_stripped")
+    strip_meta = strip_diagnostic.get("meta", {})
+    assert strip_meta["source_protocol"] == "structured_plan"
+    assert set(strip_meta["stripped_keys"]) == {"admin", "policy"}
+
+    direct_result = action.execute_action(
+        action_id,
+        {"value": 4, "admin": True},
+        source_protocol="direct",
+    )
+    assert direct_result.get("status") == "success"
+    assert received[-1] == {"value": 4, "admin": True}
+    assert not any(
+        item.get("code") == "action.input.unexpected_keys_stripped"
+        for item in direct_result.get("diagnostics", [])
+        if isinstance(item, dict)
+    )
+
+
+def test_action_dispatcher_parameter_error_has_structured_diagnostic():
+    action = Agently.create_agent().action
+    action_id = f"input_type_error_{ uuid.uuid4().hex[:8] }"
+
+    def requires_value(value: int):
+        return value
+
+    action.register_action(
+        action_id=action_id,
+        desc="Require a value.",
+        kwargs={"value": (int, "")},
+        func=requires_value,
+        expose_to_model=False,
+    )
+
+    result = action.execute_action(action_id, {}, source_protocol="structured_plan")
+
+    assert result.get("status") == "error"
+    diagnostics = result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    error_diagnostic = next(item for item in diagnostics if item.get("code") == "action.input.type_error")
+    error_meta = error_diagnostic.get("meta", {})
+    assert error_meta["exception_type"] == "TypeError"
+
+
+def test_action_dispatcher_timeout_has_structured_diagnostic():
+    action = Agently.create_agent().action
+    action_id = f"timeout_diagnostic_{ uuid.uuid4().hex[:8] }"
+
+    async def slow_action():
+        await asyncio.sleep(0.05)
+        return "done"
+
+    action.register_action(
+        action_id=action_id,
+        desc="Sleep briefly.",
+        kwargs={},
+        func=slow_action,
+        default_policy={"timeout_seconds": 0.001},
+        expose_to_model=False,
+    )
+
+    result = action.execute_action(
+        action_id,
+        {},
+        source_protocol="structured_plan",
+    )
+
+    assert result.get("status") == "error"
+    assert result.get("meta", {}).get("timeout_seconds") == 0.001
+    diagnostics = result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    timeout_diagnostic = next(item for item in diagnostics if item.get("code") == "action.execution.timeout")
+    timeout_meta = timeout_diagnostic.get("meta", {})
+    assert timeout_meta["timeout_seconds"] == 0.001
+
+
+def test_large_action_output_uses_digest_and_artifact_ref():
+    action = Agently.create_agent().action
+    action_id = f"large_output_{ uuid.uuid4().hex[:8] }"
+    stdout = "x" * 12000
+    stderr = "y" * 9000
+
+    action.register_action(
+        action_id=action_id,
+        desc="Return large command-like output.",
+        kwargs={},
+        func=lambda: {"stdout": stdout, "stderr": stderr, "exit_code": 0},
+        expose_to_model=False,
+    )
+
+    record = action.execute_action(action_id, {})
+
+    assert record.get("status") == "success"
+    assert record.get("data", {}).get("stdout") == stdout
+    artifact_refs = record.get("artifact_refs")
+    assert isinstance(artifact_refs, list)
+    output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
+    assert output_ref.get("role") == "output"
+    assert output_ref.get("truncated") is True
+    assert output_ref.get("bytes", 0) > output_ref.get("preview_size", 0)
+    assert isinstance(output_ref.get("sha256"), str) and len(str(output_ref.get("sha256"))) == 64
+
+    digest = record.get("model_digest")
+    assert isinstance(digest, dict)
+    preview_meta = digest.get("result_preview_meta")
+    assert isinstance(preview_meta, dict)
+    assert preview_meta["truncated"] is True
+    truncated_paths = preview_meta["truncated_paths"]
+    assert any(item["path"] == "stdout" for item in truncated_paths)
+    assert any(item["path"] == "stderr" for item in truncated_paths)
+
+    visible = Action.to_action_results([record])
+    visible_digest = next(iter(visible.values()))
+    assert visible_digest["result_preview_meta"]["truncated"] is True
+    assert "artifact_refs" in visible_digest
+
+    recalled = action.read_action_artifact(
+        artifact_id=str(output_ref.get("artifact_id", "")),
+        action_call_id=str(output_ref.get("action_call_id", "")),
+    )
+    assert recalled["ok"] is True
+    assert recalled["value"]["stdout"] == stdout
+    assert recalled["value"]["stderr"] == stderr
+
+    dispatched_recall = action.execute_action(
+        "read_action_artifact",
+        {
+            "artifact_id": str(output_ref.get("artifact_id", "")),
+            "action_call_id": str(output_ref.get("action_call_id", "")),
+        },
+        source_protocol="structured_plan",
+    )
+    assert dispatched_recall.get("status") == "success"
+    assert dispatched_recall.get("data", {}).get("stdout") == stdout
+    assert dispatched_recall.get("result", {}).get("stderr") == stderr
+
+
+def test_max_output_bytes_preserves_full_output_in_artifact():
+    action = Agently.create_agent().action
+    action_id = f"max_output_preserve_{ uuid.uuid4().hex[:8] }"
+    output = "z" * 2000
+
+    action.register_action(
+        action_id=action_id,
+        desc="Return output larger than policy preview.",
+        kwargs={},
+        func=lambda: output,
+        default_policy={"max_output_bytes": 20},
+        expose_to_model=False,
+    )
+
+    record = action.execute_action(action_id, {})
+
+    assert record.get("data") == output
+    assert record.get("meta", {}).get("max_output_bytes_exceeded") is True
+    diagnostics = record.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    assert any(item.get("code") == "action.output.max_output_bytes_exceeded" for item in diagnostics)
+    artifact_refs = record.get("artifact_refs")
+    assert isinstance(artifact_refs, list)
+    output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
+    recalled = action.read_action_artifact(
+        artifact_id=str(output_ref.get("artifact_id", "")),
+        action_call_id=str(output_ref.get("action_call_id", "")),
+    )
+    assert recalled["value"] == output
+
+
+def test_explicit_action_artifacts_are_preserved_without_large_output():
+    action = Agently.create_agent().action
+    action_id = f"explicit_artifact_{ uuid.uuid4().hex[:8] }"
+
+    action.register_action(
+        action_id=action_id,
+        desc="Return an explicit artifact reference.",
+        kwargs={},
+        func=lambda: {
+            "status": "success",
+            "data": {"summary": "created"},
+            "artifacts": [
+                {
+                    "artifact_type": "mcp_resource_link",
+                    "label": "report.md",
+                    "path": "artifacts/report.md",
+                    "media_type": "text/markdown",
+                    "meta": {"source": "mcp"},
+                }
+            ],
+        },
+        expose_to_model=False,
+    )
+
+    record = action.execute_action(action_id, {})
+
+    assert record.get("status") == "success"
+    artifact_refs = record.get("artifact_refs")
+    assert isinstance(artifact_refs, list)
+    assert len(artifact_refs) == 1
+    artifact_ref = artifact_refs[0]
+    assert artifact_ref.get("artifact_type") == "mcp_resource_link"
+    assert artifact_ref.get("path") == "artifacts/report.md"
+    assert artifact_ref.get("media_type") == "text/markdown"
+    meta = artifact_ref.get("meta")
+    assert isinstance(meta, dict)
+    assert meta.get("source") == "mcp"
+    assert record.get("artifacts") == artifact_refs
+
+
+def test_action_execution_record_dedupes_same_action_call_id():
+    action = Agently.create_agent().action
+    records = [
+        {
+            "action_call_id": "act_call_same",
+            "status": "success",
+            "success": True,
+            "action_id": "echo",
+            "purpose": "Echo",
+            "data": "first",
+        },
+        {
+            "action_call_id": "act_call_same",
+            "status": "success",
+            "success": True,
+            "action_id": "echo",
+            "purpose": "Echo",
+            "data": "duplicate",
+        },
+    ]
+
+    normalized = action._artifact_manager.normalize_execution_records(records, [])
+
+    assert len(normalized) == 1
+    assert normalized[0].get("data") == "first"
 
 
 def test_action_dispatcher_fail_closed_handler_returns_approval_required():
@@ -446,6 +765,76 @@ async def test_tool_plan_execute_loop_with_trigger_flow():
     assert plan_rounds[0]["done_count"] == 0
     assert plan_rounds[1]["done_count"] == 2
     assert plan_rounds[1]["last_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_action_loop_stops_after_repeated_failed_action_rounds():
+    action = Agently.action
+    tag = f"failed-action-convergence-{ uuid.uuid4().hex }"
+    action_id = f"unstable_search_{ uuid.uuid4().hex[:8] }"
+    action.register_action(
+        action_id=action_id,
+        desc="Unstable search backend.",
+        kwargs={"query": (str, "Search query.")},
+        func=lambda query: query,
+        tags=[tag],
+    )
+    prompt = Agently.create_prompt()
+    prompt.set("input", "find official source")
+    plan_rounds: list[int] = []
+
+    async def plan_handler(context, request):
+        _ = request
+        round_index = int(context["round_index"])
+        plan_rounds.append(round_index)
+        return cast(ActionDecision, {
+            "next_action": "execute",
+            "use_action": True,
+            "action_calls": [
+                {
+                    "purpose": "try unstable search",
+                    "action_id": action_id,
+                    "action_input": {"query": f"query {round_index}"},
+                    "todo_suggestion": "continue",
+                }
+            ],
+        })
+
+    async def execution_handler(context, request):
+        _ = context
+        return [
+            {
+                "purpose": "try unstable search",
+                "action_id": command.get("action_id"),
+                "tool_name": command.get("action_id"),
+                "kwargs": command.get("action_input", {}),
+                "success": False,
+                "status": "error",
+                "result": None,
+                "data": None,
+                "error": "backend unavailable",
+            }
+            for command in request.get("action_calls", [])
+        ]
+
+    try:
+        records = await action.async_plan_and_execute(
+            prompt=prompt,
+            settings=Agently.settings,
+            action_list=action.get_action_list(tags=[tag]),
+            agent_name="failed-action-convergence-test",
+            planning_handler=plan_handler,  # type: ignore[arg-type]
+            action_execution_handler=execution_handler,  # type: ignore[arg-type]
+            max_rounds=5,
+            timeout=5,
+        )
+    finally:
+        action.unregister_action(action_id)
+
+    assert plan_rounds == [0, 1]
+    assert len(records) == 2
+    assert all(record.get("action_id") == action_id for record in records)
+    assert all(record.get("status") == "error" for record in records)
 
 
 @pytest.mark.asyncio

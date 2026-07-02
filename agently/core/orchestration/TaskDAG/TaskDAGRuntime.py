@@ -36,6 +36,8 @@ from .TaskDAGHelpers import (
     _extract_artifact_refs,
     _failed_task_event,
     _fallback_action,
+    _fallback_retry_config,
+    _fallback_terminal_action,
     _graph_fingerprint,
     _graph_signature,
     _is_approval_task,
@@ -278,11 +280,11 @@ def _make_task_runner(
                     runtime_data=data,
                 )
                 handler = resolver.resolve(resolved_task)
-                output = await _execute_handler(handler, context)
+                output = await _execute_node_handler(data, graph, resolved_task, handler, context)
         except Exception as error:
             await _record_task_failure(data, graph, resolved_task, error, result_lock=result_lock)
             await _put_task_event(data, graph, resolved_task, "fail", error=str(error))
-            if _fallback_action(resolved_task) == "skip":
+            if _fallback_terminal_action(resolved_task) == "skip":
                 output = {"status": "skipped", "reason": str(error)}
                 await _record_task_success(data, graph, resolved_task, output, result_lock=result_lock)
                 await _put_task_event(data, graph, resolved_task, "skipped", output=output)
@@ -438,6 +440,48 @@ def _make_finalize_handler(graph: TaskDAG):
     return finalize
 
 
+async def _execute_node_handler(
+    data: TriggerFlowRuntimeData,
+    graph: TaskDAG,
+    task: TaskDAGNode,
+    handler: Any,
+    context: TaskDAGContext,
+):
+    """Run a node handler, retrying on error when fallback.on_error == 'retry'.
+
+    Retries use clamped exponential backoff. When attempts are exhausted the last
+    error propagates to the caller's failure handling (which then applies the
+    terminal action: skip or fail).
+    """
+    retry_config = _fallback_retry_config(task)
+    if retry_config is None:
+        return await _execute_handler(handler, context)
+    max_attempts = retry_config["max_attempts"]
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return await _execute_handler(handler, context)
+        except Exception as error:
+            if attempt >= max_attempts:
+                raise
+            delay = min(
+                retry_config["backoff_max"],
+                retry_config["backoff_base"] * (2 ** (attempt - 1)),
+            )
+            await _put_task_event(
+                data,
+                graph,
+                task,
+                "retry",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                error=str(error),
+                next_delay=delay,
+            )
+            await asyncio.sleep(delay)
+
+
 async def _execute_handler(handler: Any, context: TaskDAGContext):
     from agently.core.orchestration.TriggerFlow import TriggerFlow
 
@@ -510,7 +554,7 @@ async def _put_task_event(
     data: TriggerFlowRuntimeData,
     graph: TaskDAG,
     task: TaskDAGNode,
-    action: Literal["start", "complete", "fail", "skipped", "approval_required"],
+    action: Literal["start", "complete", "fail", "skipped", "approval_required", "retry"],
     **payload: Any,
 ) -> None:
     artifact_refs = payload.get("artifact_refs")

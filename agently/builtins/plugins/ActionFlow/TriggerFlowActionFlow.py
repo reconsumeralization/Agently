@@ -45,6 +45,56 @@ class TriggerFlowActionFlow:
     def _on_unregister():
         pass
 
+    @staticmethod
+    def _record_action_id(record: dict[str, Any]) -> str:
+        return str(record.get("action_id") or record.get("tool_name") or "").strip()
+
+    @staticmethod
+    def _record_has_progress(record: dict[str, Any]) -> bool:
+        status = str(record.get("status") or "").strip().lower()
+        return bool(record.get("success")) or status in {
+            "success",
+            "succeeded",
+            "partial_success",
+            "approval_required",
+            "blocked",
+        }
+
+    @classmethod
+    def _failed_action_ids_without_progress(cls, records: list[dict[str, Any]]) -> set[str]:
+        failed_action_ids: set[str] = set()
+        for record in records:
+            if cls._record_has_progress(record):
+                return set()
+            action_id = cls._record_action_id(record)
+            if action_id:
+                failed_action_ids.add(action_id)
+        return failed_action_ids
+
+    @classmethod
+    def _update_failed_action_counts(
+        cls,
+        data: Any,
+        records: list[dict[str, Any]],
+        *,
+        max_consecutive_failed_rounds_per_action: int,
+    ) -> bool:
+        failed_action_ids = cls._failed_action_ids_without_progress(records)
+        if not failed_action_ids:
+            data.set_state("consecutive_failed_action_counts", {})
+            return False
+        raw_counts = data.get_state("consecutive_failed_action_counts", {})
+        previous_counts = raw_counts if isinstance(raw_counts, dict) else {}
+        next_counts: dict[str, int] = {}
+        for action_id in failed_action_ids:
+            try:
+                previous = int(previous_counts.get(action_id, 0))
+            except Exception:
+                previous = 0
+            next_counts[action_id] = previous + 1
+        data.set_state("consecutive_failed_action_counts", next_counts)
+        return any(count >= max_consecutive_failed_rounds_per_action for count in next_counts.values())
+
     async def async_run(
         self,
         *,
@@ -78,7 +128,10 @@ class TriggerFlowActionFlow:
             return []
 
         if max_rounds is None:
-            max_rounds = action.action_settings.get("loop.max_rounds", action.tool_settings.get("loop.max_rounds", 5))
+            max_rounds = action.action_settings.get(
+                "loop.max_rounds",
+                action.tool_settings.get("loop.max_rounds", None),
+            )
         if concurrency is None:
             concurrency = action.action_settings.get(
                 "loop.concurrency",
@@ -86,13 +139,22 @@ class TriggerFlowActionFlow:
             )
         if timeout is None:
             timeout = action.action_settings.get("loop.timeout", action.tool_settings.get("loop.timeout", None))
+        max_consecutive_failed_rounds_per_action = action.action_settings.get(
+            "loop.max_consecutive_failed_rounds_per_action",
+            action.tool_settings.get("loop.max_consecutive_failed_rounds_per_action", 2),
+        )
 
         if not isinstance(max_rounds, int) or max_rounds < 0:
-            max_rounds = 5
+            max_rounds = None
         if not isinstance(concurrency, int) or concurrency <= 0:
             concurrency = None
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             timeout = None
+        if (
+            not isinstance(max_consecutive_failed_rounds_per_action, int)
+            or max_consecutive_failed_rounds_per_action <= 0
+        ):
+            max_consecutive_failed_rounds_per_action = 2
 
         action_loop_run = RunContext.create(
             run_kind="action_loop",
@@ -158,6 +220,7 @@ class TriggerFlowActionFlow:
         async def initialize_loop(data):
             data.set_state("done_plans", [])
             data.set_state("last_round_records", [])
+            data.set_state("consecutive_failed_action_counts", {})
             data.set_state("round_index", 0)
             await data.async_emit("PLAN", None)
             return None
@@ -174,6 +237,60 @@ class TriggerFlowActionFlow:
                 last_round_records = []
             model_visible_done_plans = action.to_model_visible_records(done_plans)
             model_visible_last_round_records = action.to_model_visible_records(last_round_records)
+
+            def max_rounds_diagnostic_records(
+                *,
+                pending_action_count: int = 0,
+                record_index: int = 0,
+            ) -> list[dict[str, Any]]:
+                diagnostic = {
+                    "source": "ActionFlow",
+                    "severity": "warning",
+                    "code": "action_loop.max_rounds_reached",
+                    "message": "Action loop stopped because max_rounds was reached before the planner converged.",
+                    "meta": {
+                        "round_index": round_index,
+                        "max_rounds": max_rounds,
+                        "pending_action_count": pending_action_count,
+                        "planning_protocol": planning_protocol,
+                    },
+                }
+                return [
+                    action._normalize_execution_record(
+                        {
+                            "ok": False,
+                            "status": "blocked",
+                            "success": False,
+                            "purpose": diagnostic["message"],
+                            "action_id": "action_loop",
+                            "tool_name": "action_loop",
+                            "kwargs": {},
+                            "result": diagnostic,
+                            "data": diagnostic,
+                            "error": diagnostic["message"],
+                            "diagnostics": [diagnostic],
+                            "expose_to_model": True,
+                            "meta": {
+                                "planning_protocol": planning_protocol,
+                                "round_index": round_index,
+                                "max_rounds": max_rounds,
+                            },
+                        },
+                        None,
+                        record_index,
+                    )
+                ]
+
+            if isinstance(max_rounds, int) and max_rounds >= 0 and round_index >= max_rounds:
+                await data.async_emit("DONE", [*done_plans, *max_rounds_diagnostic_records()])
+                return {
+                    "next_action": "response",
+                    "use_action": False,
+                    "next": "",
+                    "action_calls": [],
+                    "diagnostics": [],
+                }
+
             visible_action_list = action._with_action_artifact_recall_action(
                 action_list,
                 model_visible_last_round_records or model_visible_done_plans,
@@ -240,6 +357,26 @@ class TriggerFlowActionFlow:
                             diagnostic_index,
                         )
                     )
+            action_calls = decision.get("action_calls")
+            wants_action = (
+                decision.get("next_action") == "execute"
+                and decision.get("use_action") is True
+                and isinstance(action_calls, list)
+                and len(action_calls) > 0
+            )
+            max_rounds_reached = (
+                wants_action
+                and isinstance(max_rounds, int)
+                and max_rounds >= 0
+                and round_index >= max_rounds
+            )
+            if max_rounds_reached:
+                diagnostic_records.extend(
+                    max_rounds_diagnostic_records(
+                        pending_action_count=len(action_calls) if isinstance(action_calls, list) else 0,
+                        record_index=len(diagnostic_records),
+                    )
+                )
             if action._should_continue(decision, round_index=round_index, max_rounds=max_rounds):
                 await data.async_emit("EXECUTE", decision.get("action_calls", []))
             else:
@@ -438,6 +575,15 @@ class TriggerFlowActionFlow:
                 ),
                 action_calls,
             )
+            agent_execution_context = get_current_agent_execution_context()
+            record_action_records = getattr(agent_execution_context, "record_action_records", None)
+            if callable(record_action_records):
+                record_action_records(records, source="ActionFlow")
+            should_stop_after_failed_actions = self._update_failed_action_counts(
+                data,
+                records,
+                max_consecutive_failed_rounds_per_action=max_consecutive_failed_rounds_per_action,
+            )
 
             for record_index, record in enumerate(records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
@@ -491,13 +637,33 @@ class TriggerFlowActionFlow:
             data.set_state("done_plans", done_plans)
             data.set_state("last_round_records", records)
             data.set_state("round_index", round_index + 1)
+            if should_stop_after_failed_actions:
+                await publish_runtime_observation(
+                    "loop_failed_action_converged",
+                    level="WARNING",
+                    message="Action loop stopped after repeated failed action rounds.",
+                    payload={
+                        "agent_name": agent_name,
+                        "round_index": round_index,
+                        "max_consecutive_failed_rounds_per_action": max_consecutive_failed_rounds_per_action,
+                        "records": records,
+                    },
+                )
+                await data.async_emit("DONE", done_plans)
+                return records
             await data.async_emit("PLAN", None)
             return records
+
+        async def finalize_loop(data):
+            result = data.value if isinstance(data.value, list) else []
+            data.set_state("action_loop_result", result)
+            data.set_state("done_plans", result)
+            return result
 
         flow.to(initialize_loop)
         flow.when("PLAN").to(plan_step)
         flow.when("EXECUTE").to(execute_step)
-        flow.when("DONE").to(lambda data: data.value).end()
+        flow.when("DONE").to(finalize_loop)
 
         execution = flow.create_execution(parent_run_context=action_loop_run, auto_close=False)
         try:
@@ -546,7 +712,7 @@ class TriggerFlowActionFlow:
                 )
             raise
         if isinstance(result, dict):
-            result = result.get("$final_result")
+            result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
             return []
         normalized = [

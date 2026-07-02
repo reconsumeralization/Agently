@@ -70,6 +70,26 @@ class ActionRegistry:
             self._specs[action_id]["tags"] = sorted(self._action_tags[action_id])
         return self
 
+    def unregister(self, action_id: str) -> bool:
+        """Remove an action and all of its registry bookkeeping.
+
+        Returns True when an action was removed. Used to reverse scoped
+        capability mounts so a one-time mount does not persist on the host.
+        """
+        if action_id not in self._specs:
+            return False
+        self._specs.pop(action_id, None)
+        self._executors.pop(action_id, None)
+        self._funcs.pop(action_id, None)
+        tags = self._action_tags.pop(action_id, set())
+        for tag in tags:
+            members = self._tag_mappings.get(tag)
+            if members is not None:
+                members.discard(action_id)
+                if not members:
+                    self._tag_mappings.pop(tag, None)
+        return True
+
     def has(self, action_id: str):
         return action_id in self._specs
 

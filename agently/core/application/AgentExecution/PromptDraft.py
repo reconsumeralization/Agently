@@ -20,6 +20,7 @@ from typing import Any, Literal, TYPE_CHECKING, cast
 from agently.core.model import _UNSET, _resolve_quick_prompt_input
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.utils import FunctionShifter
+from agently.utils.LanguagePolicy import apply_language_policy_to_prompt, resolve_language_policy
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -240,6 +241,35 @@ class AgentExecutionPromptDraft:
             self.agent.options(options, always=True)
         else:
             self.request.prompt.set("options", options)
+        return self
+
+    def language(
+        self,
+        language: Any = "auto",
+        *,
+        output: Any = None,
+        process: Any = None,
+        progress: Any = None,
+        accept_language: Any = None,
+        always: bool = False,
+    ):
+        if always:
+            self.agent.language(
+                language,
+                output=output,
+                process=process,
+                progress=progress,
+                accept_language=accept_language,
+            )
+        else:
+            policy = resolve_language_policy(
+                language,
+                output_language=output,
+                process_language=process,
+                progress_language=progress,
+                accept_language=accept_language,
+            )
+            apply_language_policy_to_prompt(self.request.prompt, policy)
         return self
 
     def use_dynamic_task(self, *args: Any, **kwargs: Any):

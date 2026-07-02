@@ -24,9 +24,10 @@ from agently.core.extension import ExtensionHandlers
 from agently.core.application import AgentTask, DynamicTask
 from agently.core.model.AttachmentInput import ImageDetail, build_image_attachment
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
-from agently.core.model.ModelResponseResult import DEFAULT_SPECIFIC_EVENTS
+from agently.core.model.ModelRequestResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
-from agently.utils import DataFormatter, Settings
+from agently.utils import DataFormatter, FunctionShifter, Settings
+from agently.utils.LanguagePolicy import apply_language_policy_to_prompt, resolve_language_policy
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
@@ -47,31 +48,31 @@ if TYPE_CHECKING:
         StreamingData,
         TaskDAG,
     )
-    from agently.core.model import ModelResponseResult
+    from agently.core.model import ModelRequestResult
     from agently.types.options import ExecutionOptions
     from agently.types.plugins import AgentExecution
 
 
 class _AgentDefinitionBuilder:
-    def __init__(self, agent: "BaseAgent"):
+    def __init__(self, agent: "BaseAgent") -> None:
         self._agent = agent
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._agent, name)
 
-    def activate_model(self, model_key: str | None = None):
+    def activate_model(self, model_key: str | None = None) -> Self:
         self._agent.activate_model(model_key)
         return self
 
-    def set_settings(self, *args: Any, **kwargs: Any):
+    def set_settings(self, *args: Any, **kwargs: Any) -> Self:
         self._agent.set_settings(*args, **kwargs)
         return self
 
-    def use_workspace(self, *args: Any, **kwargs: Any):
+    def use_workspace(self, *args: Any, **kwargs: Any) -> Self:
         cast(Any, self._agent).use_workspace(*args, **kwargs)
         return self
 
-    def configure_policy_approval(self, *args: Any, **kwargs: Any):
+    def configure_policy_approval(self, *args: Any, **kwargs: Any) -> Self:
         self._agent.configure_policy_approval(*args, **kwargs)
         return self
 
@@ -81,65 +82,69 @@ class _AgentDefinitionBuilder:
         value: Any,
         *,
         mappings: dict[str, Any] | None = None,
-    ):
+    ) -> Self:
         self._agent.set_agent_prompt(key, value, mappings=mappings)
         return self
 
-    def system(self, prompt: Any, *, mappings: dict[str, Any] | None = None):
+    def system(self, prompt: Any, *, mappings: dict[str, Any] | None = None) -> Self:
         self._agent.system(prompt, mappings=mappings, always=True)
         return self
 
-    def rule(self, prompt: Any, *, mappings: dict[str, Any] | None = None):
+    def rule(self, prompt: Any, *, mappings: dict[str, Any] | None = None) -> Self:
         self._agent.rule(prompt, mappings=mappings, always=True)
         return self
 
-    def role(self, *args: Any, **kwargs: Any):
+    def role(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.role(*args, **kwargs)
         return self
 
-    def user_info(self, *args: Any, **kwargs: Any):
+    def user_info(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.user_info(*args, **kwargs)
         return self
 
-    def input(self, *args: Any, **kwargs: Any):
+    def input(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.input(*args, **kwargs)
         return self
 
-    def info(self, *args: Any, **kwargs: Any):
+    def info(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.info(*args, **kwargs)
         return self
 
-    def instruct(self, *args: Any, **kwargs: Any):
+    def instruct(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.instruct(*args, **kwargs)
         return self
 
-    def examples(self, *args: Any, **kwargs: Any):
+    def examples(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.examples(*args, **kwargs)
         return self
 
-    def output(self, *args: Any, **kwargs: Any):
+    def output(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.output(*args, **kwargs)
         return self
 
-    def attachment(self, *args: Any, **kwargs: Any):
+    def attachment(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.attachment(*args, **kwargs)
         return self
 
-    def image(self, *args: Any, **kwargs: Any):
+    def image(self, *args: Any, **kwargs: Any) -> Self:
         kwargs["always"] = True
         self._agent.image(*args, **kwargs)
         return self
 
-    def options(self, options: dict[str, Any]):
+    def options(self, options: dict[str, Any]) -> Self:
         self._agent.options(options, always=True)
+        return self
+
+    def language(self, *args: Any, **kwargs: Any) -> Self:
+        self._agent.language(*args, **kwargs)
         return self
 
 
@@ -150,7 +155,7 @@ class BaseAgent:
         *,
         parent_settings: "Settings | None" = None,
         name: str | None = None,
-    ):
+    ) -> None:
         self.id = uuid.uuid4().hex
         self.name = name if name is not None else self.id[:7]
 
@@ -185,17 +190,37 @@ class BaseAgent:
         )
         self.request_prompt = self.request.prompt
         self.prompt = self.request_prompt
-        self._dynamic_task_candidates: list[dict[str, Any]] = []
 
         self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
 
-    def configure_policy_approval(self, *, handler: str | None = None):
+    def configure_policy_approval(self, *, handler: str | None = None) -> Self:
         if handler is not None:
             self.settings.set("policy_approval.handler", str(handler))
         return self
 
-    def activate_model(self, model_key: str | None = None):
+    def language(
+        self,
+        language: Any = "auto",
+        *,
+        output: Any = None,
+        process: Any = None,
+        progress: Any = None,
+        accept_language: Any = None,
+    ) -> Self:
+        policy = resolve_language_policy(
+            language,
+            output_language=output,
+            process_language=process,
+            progress_language=progress,
+            accept_language=accept_language,
+        )
+        self.settings.set("agent.language_policy", cast(Any, dict(policy)))
+        self.settings.set("agent_task.progress.language", policy.get("progress_language", policy.get("language", "auto")))
+        apply_language_policy_to_prompt(self.agent_prompt, policy)
+        return self
+
+    def activate_model(self, model_key: str | None = None) -> Self:
         """Set the default model key for subsequent Agent-owned requests.
 
         The model key is resolved through the existing model_pool /
@@ -224,7 +249,7 @@ class BaseAgent:
         policy: Mapping[str, Any] | None = None,
         settings: Mapping[str, Any] | None = None,
         **kwargs: Any,
-    ):
+    ) -> _AgentDefinitionBuilder:
         builder = _AgentDefinitionBuilder(self)
         if model is not None:
             self.activate_model(model)
@@ -290,7 +315,7 @@ class BaseAgent:
             model_key=model_key if model_key is not None else self._active_model_key,
         )
 
-    def create_temp_request(self, model_key: str | None = None):
+    def create_temp_request(self, model_key: str | None = None) -> ModelRequest:
         return self.create_request(
             name=f"{ self.name }-Temp-{ uuid.uuid4().hex }",
             inherit_agent_prompt=False,
@@ -447,52 +472,38 @@ class BaseAgent:
         graph_input: Any = _UNSET,
         timeout: float | None = None,
         max_retries: int = 3,
-    ):
-        if mode not in {"auto", "submitted"}:
-            raise ValueError("Dynamic Task mode must be one of: 'auto', 'submitted'.")
-        if mode == "submitted" and plan is None:
-            raise ValueError("use_dynamic_task(mode='submitted') requires plan=.")
-        graph_input_provided = graph_input is not _UNSET
-        self._dynamic_task_candidates.append(
-            {
-                "mode": mode,
-                "plan": plan,
-                "planner": planner,
-                "model": model,
-                "actions": actions,
-                "skills": skills,
-                "handlers": handlers,
-                "name": name,
-                "max_tasks": max_tasks,
-                "output_schema": output_schema,
-                "ensure_keys": ensure_keys,
-                "output_format": output_format,
-                "graph_input": graph_input if graph_input_provided else None,
-                "graph_input_provided": graph_input_provided,
-                "timeout": timeout,
-                "max_retries": max_retries,
-            }
+    ) -> Self:
+        raise ValueError(
+            "Agent.use_dynamic_task(...) no longer registers a DynamicTask route for "
+            "agent.start(), agent.async_start(), or AgentExecution.async_start(). "
+            "Use Agently.create_dynamic_task(...) or direct TaskDAGExecutor(...) for "
+            "independent DAG workflows."
         )
-        return self
 
     def _create_agent_execution_run_context(
         self,
         *,
         parent_run_context: "RunContext | None" = None,
-    ):
+        execution_id: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> "RunContext":
         from agently.types.data import RunContext
 
         parent_run_context = resolve_parent_run_context(parent_run_context)
         session_id = self.settings.get("runtime.session_id", None)
         if session_id is not None:
             session_id = str(session_id)
+        run_meta = {"entrypoint": "agent"}
+        if meta is not None:
+            run_meta.update(meta)
         return RunContext.create(
             run_kind="agent_execution",
             parent=parent_run_context,
             agent_id=self.id,
             agent_name=self.name,
             session_id=session_id,
-            meta={"entrypoint": "agent"},
+            execution_id=execution_id,
+            meta=run_meta,
         )
 
     def _emit_agent_execution_started(self, agent_execution_run_context: "RunContext"):
@@ -524,6 +535,97 @@ class BaseAgent:
                     "agent_name": self.name,
                 },
                 "run": agent_execution_run_context,
+            }
+        )
+
+    async def _async_emit_agent_execution_terminal_event(
+        self,
+        agent_execution_run_context: "RunContext",
+        *,
+        execution_id: str,
+        status: str,
+        route: str | None,
+        strategy: str | None,
+        task_refs: dict[str, Any],
+        close_snapshot: dict[str, Any],
+        failed: bool = False,
+    ) -> None:
+        from agently.base import async_emit_runtime
+
+        event_type = "agent_execution.failed" if failed else "agent_execution.completed"
+        await async_emit_runtime(
+            {
+                "event_type": event_type,
+                "source": "BaseAgent",
+                "message": f"AgentExecution { 'failed' if failed else 'completed' } for '{ self.name }'.",
+                "payload": {
+                    "execution_id": execution_id,
+                    "status": status,
+                    "route": route,
+                    "strategy": strategy,
+                    "task_refs": DataFormatter.sanitize(task_refs),
+                    "close_snapshot": DataFormatter.sanitize(close_snapshot),
+                },
+                "run": agent_execution_run_context,
+                "meta": {
+                    "execution_id": execution_id,
+                    "route": route,
+                    "strategy": strategy,
+                },
+            }
+        )
+
+    async def _async_emit_agent_execution_stream_event(
+        self,
+        agent_execution_run_context: "RunContext",
+        *,
+        execution_id: str,
+        item: Any,
+        execution_strategy: str | None,
+        effective_execution_strategy: str | None,
+    ) -> None:
+        from agently.base import async_emit_runtime
+
+        item_meta = dict(getattr(item, "meta", None) or {})
+        stream_event_type = "delta" if getattr(item, "event_type", None) == "delta" else "done"
+        stream_kind = item_meta.get("stream_kind")
+        payload = {
+            "execution_id": execution_id,
+            "path": getattr(item, "path", None),
+            "value": DataFormatter.sanitize(getattr(item, "value", None)),
+            "delta": getattr(item, "delta", None),
+            "is_complete": getattr(item, "is_complete", None),
+            "stream_event_type": stream_event_type,
+            "source": getattr(item, "source", None),
+            "route": getattr(item, "route", None),
+            "stage_id": getattr(item, "stage_id", None),
+            "task_id": getattr(item, "task_id", None),
+            "action_id": getattr(item, "action_id", None),
+            "graph_id": getattr(item, "graph_id", None),
+            "stream_kind": stream_kind,
+            "execution_strategy": execution_strategy,
+            "effective_execution_strategy": effective_execution_strategy,
+            "item": item.model_dump(mode="json") if hasattr(item, "model_dump") else DataFormatter.sanitize(item),
+            "meta": DataFormatter.sanitize(item_meta),
+        }
+        await async_emit_runtime(
+            {
+                "event_type": "agent_execution.stream.delta" if stream_event_type == "delta" else "agent_execution.stream",
+                "source": "BaseAgent",
+                "message": str(getattr(item, "path", None) or ""),
+                "payload": payload,
+                "run": agent_execution_run_context,
+                "meta": {
+                    "execution_id": execution_id,
+                    "path": getattr(item, "path", None),
+                    "route": getattr(item, "route", None),
+                    "source": getattr(item, "source", None),
+                    "task_id": getattr(item, "task_id", None),
+                    "action_id": getattr(item, "action_id", None),
+                    "graph_id": getattr(item, "graph_id", None),
+                    "stream_kind": stream_kind,
+                    "high_frequency": stream_event_type == "delta",
+                },
             }
         )
 
@@ -575,32 +677,32 @@ class BaseAgent:
             }
         )
 
-    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
+    def get_response(self, *, parent_run_context: "RunContext | None" = None) -> "ModelRequestResult":
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_response(parent_run_context=agent_execution_run_context)
 
-    def get_result(self, *, parent_run_context: "RunContext | None" = None) -> "ModelResponseResult":
+    def get_result(self, *, parent_run_context: "RunContext | None" = None) -> "ModelRequestResult":
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_result(parent_run_context=agent_execution_run_context)
 
-    def get_meta(self, *, parent_run_context: "RunContext | None" = None):
+    def get_meta(self, *, parent_run_context: "RunContext | None" = None) -> dict[str, Any]:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_meta(parent_run_context=agent_execution_run_context)
 
-    async def async_get_meta(self, *, parent_run_context: "RunContext | None" = None):
+    async def async_get_meta(self, *, parent_run_context: "RunContext | None" = None) -> dict[str, Any]:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_meta(parent_run_context=agent_execution_run_context)
 
-    def get_text(self, *, parent_run_context: "RunContext | None" = None):
+    def get_text(self, *, parent_run_context: "RunContext | None" = None) -> str:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_text(parent_run_context=agent_execution_run_context)
 
-    async def async_get_text(self, *, parent_run_context: "RunContext | None" = None):
+    async def async_get_text(self, *, parent_run_context: "RunContext | None" = None) -> str:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_text(parent_run_context=agent_execution_run_context)
@@ -616,7 +718,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_data(
@@ -641,7 +743,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_data(
@@ -665,7 +767,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         self._emit_agent_execution_started(agent_execution_run_context)
         return self.request.get_data_object(
@@ -688,7 +790,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         agent_execution_run_context = self._create_agent_execution_run_context(parent_run_context=parent_run_context)
         await self._async_emit_agent_execution_started(agent_execution_run_context)
         return await self.request.async_get_data_object(
@@ -866,7 +968,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         return self.create_execution(parent_run_context=parent_run_context).get_data(
             type=type,
             ensure_keys=ensure_keys,
@@ -888,7 +990,7 @@ class BaseAgent:
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
-    ):
+    ) -> Any:
         return await self.create_execution(parent_run_context=parent_run_context).async_get_data(
             type=type,
             ensure_keys=ensure_keys,
@@ -923,70 +1025,216 @@ class BaseAgent:
         *,
         goal: str,
         success_criteria: list[str] | None = None,
+        execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
         workspace: str | os.PathLike[str] | None = None,
-        max_iterations: int = 3,
+        max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
-        recall_profile: str = "software_dev",
+        context_profile: str = "auto",
         context_budget: dict[str, Any] | None = None,
         limits: dict[str, Any] | None = None,
         options: dict[str, Any] | None = None,
         task_id: str | None = None,
-    ):
+    ) -> "AgentExecution":
         if workspace is not None:
             cast(Any, self).use_workspace(workspace)
+        normalized_execution = AgentTask.normalize_execution_strategy(execution)
+        resolved_task_id = task_id or f"agent_task_{uuid.uuid4().hex}"
+        resolved_options = dict(options or {})
+        agent_task_options = dict(resolved_options.get("agent_task") or {})
+        scoped_workspace_action_ids: list[str] = []
+        if bool(agent_task_options.get("enable_workspace_readback_actions")) or bool(
+            agent_task_options.get("enable_workspace_coding_actions")
+        ):
+            scoped_workspace_action_ids = self._enable_task_workspace_read_actions(
+                resolved_task_id,
+                coding_agent=bool(agent_task_options.get("enable_workspace_coding_actions")),
+            )
+        language_policy = self.settings.get("agent.language_policy", None)
+        if isinstance(language_policy, Mapping):
+            agent_task_options.setdefault("language_policy", dict(language_policy))
+        if agent_task_options:
+            resolved_options["agent_task"] = agent_task_options
         task_options = {
             "goal": goal,
             "success_criteria": success_criteria,
+            "execution": normalized_execution,
             "workspace": workspace,
             "max_iterations": max_iterations,
             "verify": verify,
-            "recall_profile": recall_profile,
+            "context_profile": context_profile,
             "context_budget": context_budget,
             "limits": limits,
-            "options": options,
-            "task_id": task_id,
+            "options": resolved_options if resolved_options else options,
+            "task_id": resolved_task_id,
         }
-        execution = self.create_execution(
-            lineage={"task_id": task_id} if task_id is not None else None,
+        agent_execution = self.create_execution(
+            lineage={"task_id": resolved_task_id},
             options={
                 "strategy": "task",
                 "task": {key: value for key, value in task_options.items() if value is not None},
             },
         )
-        execution.goal(goal, success_criteria)
+        if scoped_workspace_action_ids:
+            agent_execution.use_actions(scoped_workspace_action_ids)
+        agent_execution.goal(goal, success_criteria)
+        agent_execution.workspace = getattr(self, "workspace", None)
+        return agent_execution
+
+    def _enable_task_workspace_read_actions(self, task_id: str, *, coding_agent: bool = False) -> list[str]:
+        workspace = getattr(self, "workspace", None)
+        with_scope_node = getattr(workspace, "with_scope_node", None)
+        enable = getattr(
+            self,
+            "enable_coding_agent_actions" if coding_agent else "enable_workspace_file_actions",
+            None,
+        )
+        if not callable(with_scope_node) or not callable(enable):
+            return []
+        try:
+            task_workspace = with_scope_node(
+                "tasks",
+                task_id,
+                scope={"task_id": task_id},
+                search_scope={"task_id": task_id},
+            )
+            files_root = getattr(task_workspace, "files_root", None)
+            if files_root is None:
+                return []
+            enable(
+                root=files_root,
+                read=True,
+                write=bool(coding_agent),
+                search=True,
+                list_files=True,
+                expose_to_model=True,
+                max_file_bytes=50000,
+                max_search_file_bytes=200000,
+                desc=(
+                    "Read and edit files written by this AgentTask, including trusted "
+                    "Workspace deliverables and bounded evidence readbacks. Prefer "
+                    "edit_file/apply_patch for targeted repairs."
+                    if coding_agent
+                    else (
+                        "Read files written by this AgentTask, including trusted "
+                        "Workspace deliverables and bounded evidence readbacks."
+                    )
+                ),
+            )
+        except Exception:
+            return []
+        registry = getattr(getattr(self, "action", None), "action_registry", None)
+        has_action = getattr(registry, "has", None)
+        if not callable(has_action):
+            return []
+        candidates = (
+            "list_files",
+            "read_file",
+            "search_files",
+            "glob_files",
+            "grep_files",
+            "write_file",
+            "edit_file",
+            "apply_patch",
+        )
+        return [action_id for action_id in candidates if has_action(action_id)]
+
+    async def async_resume(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        """Resume a previously checkpointed Agent task as an AgentExecution.
+
+        Reads the task's latest durable snapshot from the Workspace and returns
+        a task-strategy AgentExecution draft. The returned execution continues
+        from the iteration after the last completed one (or exposes the stored
+        terminal result) through the normal AgentExecution result/meta/stream
+        surface.
+        """
+        from agently.core.application import AgentTask
+
+        normalized_task_id = str(task_id)
+        task = await AgentTask.async_resume(cast(Any, self), normalized_task_id, workspace=workspace)
+        execution = self.create_execution(
+            lineage={"task_id": normalized_task_id},
+            options={
+                "strategy": "task",
+                "task": {
+                    "task_id": normalized_task_id,
+                    "workspace": workspace,
+                    "resume": True,
+                },
+            },
+        )
+        execution.goal(task.goal, list(task.success_criteria))
         execution.workspace = getattr(self, "workspace", None)
+        execution.task_record = task
+        execution.task_refs = {
+            "task_id": task.id,
+            "strategy": "task",
+            "resume": True,
+            "resumed_from_iteration": getattr(task, "_resumed_from_iteration", 0),
+        }
         return execution
+
+    def resume(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        return FunctionShifter.syncify(self.async_resume)(task_id, workspace=workspace)
+
+    async def async_resume_task(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        """Compatibility alias for async_resume(...)."""
+        return await self.async_resume(task_id, workspace=workspace)
+
+    def resume_task(
+        self,
+        task_id: str,
+        *,
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> "AgentExecution":
+        return self.resume(task_id, workspace=workspace)
 
     def create_task_loop(
         self,
         *,
         goal: str,
         success_criteria: list[str] | None = None,
+        execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
         workspace: str | os.PathLike[str] | None = None,
-        max_iterations: int = 3,
+        max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
-        recall_profile: str = "software_dev",
+        context_profile: str = "auto",
         context_budget: dict[str, Any] | None = None,
         limits: dict[str, Any] | None = None,
         options: dict[str, Any] | None = None,
         task_id: str | None = None,
-    ):
-        execution = self.create_task(
+    ) -> "AgentExecution":
+        agent_execution = self.create_task(
             goal=goal,
             success_criteria=success_criteria,
+            execution=execution,
             workspace=workspace,
             max_iterations=max_iterations,
             verify=verify,
-            recall_profile=recall_profile,
+            context_profile=context_profile,
             context_budget=context_budget,
             limits=limits,
             options=options,
             task_id=task_id,
         )
-        execution.strategy("task_loop")
-        return execution
+        agent_execution.strategy("task_loop")
+        return agent_execution
 
-    def validate(self, handler: "OutputValidateHandler"):
+    def validate(self, handler: "OutputValidateHandler") -> Self:
         self.extension_handlers.append("validate_handlers", handler)
         return self
 
@@ -997,15 +1245,15 @@ class BaseAgent:
         value: Any,
         *,
         mappings: dict[str, Any] | None = None,
-    ):
+    ) -> Self:
         self.agent_prompt.set(key, value, mappings=mappings)
         return self
 
-    def remove_agent_prompt(self, key: "PromptStandardSlot | str"):
+    def remove_agent_prompt(self, key: "PromptStandardSlot | str") -> Self:
         self.agent_prompt.set(key, None)
         return self
 
-    def remove_execution_prompt(self, key: "PromptStandardSlot | str"):
+    def remove_execution_prompt(self, key: "PromptStandardSlot | str") -> Self:
         self.request.prompt.set(key, None)
         return self
 
@@ -1014,32 +1262,32 @@ class BaseAgent:
             del self.agent_prompt[key]
         self.agent_prompt.set(key, value)
 
-    def reset_chat_history(self):
+    def reset_chat_history(self) -> Self:
         self._replace_agent_prompt_value("chat_history", [])
         return self
 
-    def set_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict]"):
+    def set_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict]") -> Self:
         if not isinstance(chat_history, Sequence):
             chat_history = [chat_history]
         self._replace_agent_prompt_value("chat_history", chat_history)
         return self
 
-    def add_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict] | ChatMessageDict | ChatMessage"):
+    def add_chat_history(self, chat_history: "Sequence[ChatMessage | ChatMessageDict] | ChatMessageDict | ChatMessage") -> Self:
         if not isinstance(chat_history, Sequence):
             chat_history = [chat_history]
         self.agent_prompt.extend("chat_history", chat_history)
         return self
 
-    def reset_action_results(self):
+    def reset_action_results(self) -> Self:
         if "action_results" in self.agent_prompt:
             del self.agent_prompt["action_results"]
         return self
 
-    def set_action_results(self, action_results: list[dict[str, Any]]):
+    def set_action_results(self, action_results: list[dict[str, Any]]) -> Self:
         self._replace_agent_prompt_value("action_results", action_results)
         return self
 
-    def add_action_results(self, action: str, result: Any):
+    def add_action_results(self, action: str, result: Any) -> Self:
         self.agent_prompt.append("action_results", {action: result})
         return self
 
@@ -1068,7 +1316,7 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("system", prompt, mappings=mappings)
             return self
@@ -1098,7 +1346,7 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
             self.agent_prompt.set("system.rule", prompt, mappings=mappings)
@@ -1135,7 +1383,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
@@ -1173,7 +1421,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
@@ -1211,7 +1459,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("input", prompt, mappings=mappings)
@@ -1248,7 +1496,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("info", prompt, mappings=mappings)
@@ -1285,7 +1533,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("instruct", prompt, mappings=mappings)
@@ -1322,7 +1570,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         **kwargs: Any,
-    ):
+    ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
             self.agent_prompt.set("examples", prompt, mappings=mappings)
@@ -1371,7 +1619,7 @@ class BaseAgent:
         mappings: dict[str, Any] | None = None,
         always: bool = False,
         format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("output", prompt, mappings=mappings)
             if format is not None:
@@ -1403,7 +1651,7 @@ class BaseAgent:
         *,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("attachment", prompt, mappings=mappings)
             return self
@@ -1448,7 +1696,7 @@ class BaseAgent:
         detail: ImageDetail | None = None,
         mappings: dict[str, Any] | None = None,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         attachment = build_image_attachment(
             question=question,
             file=file,
@@ -1483,7 +1731,7 @@ class BaseAgent:
         options: dict[str, Any],
         *,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if always:
             self.agent_prompt.set("options", options)
             return self
@@ -1504,5 +1752,5 @@ class BaseAgent:
         return self.create_execution().strategy(value, **options)
 
     # Prompt
-    def get_prompt_text(self):
+    def get_prompt_text(self) -> str:
         return self.request_prompt.to_text()[6:][:-11]

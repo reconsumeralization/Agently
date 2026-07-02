@@ -1,4 +1,4 @@
-"""Standard SKILL.md skill that generates an architecture diagram (single_shot).
+"""Standard SKILL.md skill that generates an architecture diagram.
 
 Run:
     python examples/skills_executor/08_architecture_diagram_skill.py
@@ -9,16 +9,18 @@ Environment:
 
 What this demonstrates
 ----------------------
-A real task driven by the default single_shot SkillsExecutor path:
+A real task driven by the default single_shot compatibility route:
 
     * The capability is a single standard ``SKILL.md`` (frontmatter ``name`` /
       ``description`` / ``keywords`` + a Markdown design system). This example
-      intentionally declares no ``execution`` metadata, so it stays single_shot.
+      intentionally declares no execution metadata, so it stays on the default
+      single_shot route label, lowered through Blocks to a model_request block.
     * ``agent.use_skills(["architecture-diagram"], mode="required")`` selects it.
       (``mode`` defaults to ``"model_decision"``; we force it here because we know
       exactly which skill must run.)
-    * ``run_skills_task(...)`` issues one structured model request that injects the
-      full SKILL.md body as instructions and returns a structured result shaped by
+    * ``run_skills_task(...)`` builds a Blocks ExecutionPlan with
+      ``skill_activation`` plus a ``model_request`` block, injects the full
+      SKILL.md body as instructions, and returns a structured result shaped by
       ``output``.
     * The HOST owns the side effect: it writes the returned HTML to disk. The skill
       never touches the filesystem.
@@ -67,15 +69,15 @@ top to bottom, with the listed components:
    Agent, TriggerFlow, plus Agent Extensions (Skills, Action, Session/ChatSession,
    ConfigurePrompt, AutoFunc, KeyWaiter, StreamingPrint).
 3. Core Contracts (core colour, from agently/core): Agent, Session, Prompt,
-   ModelRequest, ModelResponseResult, DynamicTask, TaskDAGExecutor, TriggerFlow,
-   ExecutionEnvironment, Action, Tool, SkillsExecutor, PluginManager, EventCenter.
+   ModelRequest, ModelRequestResult, DynamicTask, TaskDAGExecutor, TriggerFlow,
+   ExecutionResource, Action, Tool, SkillsExecutor, PluginManager, EventCenter.
 4. Plugins / Providers (plugin colour, from agently/builtins/plugins):
    ModelRequester (OpenAICompatible), PromptGenerator, ResponseParser,
-   AgentOrchestrator, SkillsExecutor (SKILL.md single_shot / staged / react),
+   AgentOrchestrator, SkillsExecutor (SKILL.md compatibility labels backed by Blocks),
    TaskDAGPlanner,
-   ActionExecutor, ActionFlow, ActionRuntime, ExecutionEnvironmentProvider,
+   ActionExecutor, ActionFlow, ActionRuntime, ExecutionResourceProvider,
    ToolManager.
-5. Execution Environment Manager & Capabilities (capability colour): Sandbox,
+5. ExecutionResourceManager & Capabilities (capability colour): Sandbox,
    Process, Filesystem, Network, Credentials, MCP, Resources.
 6. External Dependencies & Integrations (external colour): Model Providers
    (DeepSeek, Ollama, any OpenAI-compatible endpoint), ChromaDB, FastAPI.

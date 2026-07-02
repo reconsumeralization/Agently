@@ -14,6 +14,7 @@
 
 import asyncio
 import contextlib
+import html
 import re
 import warnings
 
@@ -273,6 +274,23 @@ class AgentlyResponseParser(ResponseParser):
             return None, "Parser returned no structured payload.", False
         return parsed, None, payload_extracted
 
+    def _parse_json_fallback_output(
+        self,
+        text: str,
+    ) -> tuple[dict[str, Any] | None, str | None, bool, BaseModel | None, bool, str | None]:
+        completed, parsed, result_object, repaired = self._parse_json_output(text)
+        payload_extracted = completed is not None
+        if parsed is None:
+            parse_error = (
+                "No JSON payload could be located."
+                if completed is None
+                else "Located JSON payload could not be parsed."
+            )
+            return None, parse_error, payload_extracted, None, repaired, completed
+        if not isinstance(parsed, Mapping):
+            return None, "JSON fallback parsed a non-dict payload.", payload_extracted, None, repaired, completed
+        return dict(parsed), None, payload_extracted, result_object, repaired, completed
+
     def _record_runtime_observation(
         self,
         kind: str,
@@ -296,6 +314,35 @@ class AgentlyResponseParser(ResponseParser):
         observations = self._runtime_observations
         self._runtime_observations = []
         return observations
+
+    @staticmethod
+    def _should_reset_for_retry_status(data: Any) -> bool:
+        return isinstance(data, Mapping) and data.get("status") == "failed" and data.get("retry") is True
+
+    @staticmethod
+    def _format_delta_retry_marker(data: Any) -> str:
+        """Format the plain-delta replay boundary without trusting provider text."""
+
+        reason = data.get("reason") if isinstance(data, Mapping) else None
+        text = str(reason).strip() if reason is not None else ""
+        if not text:
+            text = "Retrying model request."
+        return f"<$retry>{ html.escape(text, quote=False) }</$retry>"
+
+    def _reset_retried_attempt_result(self) -> None:
+        """Discard parser-owned state from an attempt replaced by a replay."""
+
+        self.full_result_data["meta"].clear()
+        self.full_result_data["original_delta"].clear()
+        self.full_result_data["original_done"] = {}
+        self.full_result_data["text_result"] = ""
+        self.full_result_data["cleaned_result"] = ""
+        self.full_result_data["parsed_result"] = None
+        self.full_result_data["result_object"] = None
+        self.full_result_data["errors"].clear()
+        self.full_result_data["extra"].clear()
+        self._final_json_parse_result = None
+        self._streaming_canceled = False
 
     async def _handle_done_event(self, data: Any, buffer: str) -> None:
         self.full_result_data["text_result"] = str(data)
@@ -360,7 +407,9 @@ class AgentlyResponseParser(ResponseParser):
             parsed, parse_error, payload_extracted = self._parse_structured_text_output(str(data))
             self.full_result_data["extra"]["parse_error"] = parse_error
             self.full_result_data["extra"]["output_format"] = self._prompt_object.output_format
+            self.full_result_data["extra"]["resolved_output_format"] = self._prompt_object.output_format
             self.full_result_data["extra"]["payload_extracted"] = payload_extracted
+            self.full_result_data["extra"]["format_fallback"] = None
             if parsed is not None:
                 result_object = self._build_result_object(parsed)
                 self.full_result_data["parsed_result"] = parsed
@@ -382,24 +431,82 @@ class AgentlyResponseParser(ResponseParser):
                     },
                 )
             else:
-                self.full_result_data["parsed_result"] = None
-                self.full_result_data["result_object"] = None
-                self.full_result_data["text_result"] = str(data)
-                self.full_result_data["extra"]["parse_success"] = False
-                self._record_runtime_observation(
-                    "parse_failed",
-                    level="WARNING",
-                    message=f"Can not parse {self._prompt_object.output_format} output from model response.",
-                    payload={
-                        "result": str(data),
-                        "streamed_text": buffer,
-                        "format": self._prompt_object.output_format,
-                        "resolved_format": self._prompt_object.output_format,
-                        "payload_extracted": payload_extracted,
-                        "parse_success": False,
-                        "parse_error": parse_error,
-                    },
-                )
+                (
+                    fallback_parsed,
+                    fallback_error,
+                    fallback_payload_extracted,
+                    fallback_result_object,
+                    fallback_repaired,
+                    fallback_cleaned,
+                ) = self._parse_json_fallback_output(str(data))
+                if fallback_parsed is not None:
+                    self.full_result_data["cleaned_result"] = fallback_cleaned
+                    self.full_result_data["parsed_result"] = fallback_parsed
+                    self.full_result_data["result_object"] = fallback_result_object
+                    self.full_result_data["text_result"] = str(data)
+                    self.full_result_data["extra"]["parse_error"] = None
+                    self.full_result_data["extra"]["parse_success"] = True
+                    self.full_result_data["extra"]["resolved_output_format"] = "json"
+                    self.full_result_data["extra"]["payload_extracted"] = fallback_payload_extracted
+                    self.full_result_data["extra"]["format_fallback"] = {
+                        "from": self._prompt_object.output_format,
+                        "to": "json",
+                        "reason": parse_error,
+                        "repaired": fallback_repaired,
+                    }
+                    self._record_runtime_observation(
+                        "completed",
+                        message=(
+                            f"Model response parsed as JSON fallback after "
+                            f"{self._prompt_object.output_format} output parsing failed."
+                        ),
+                        payload={
+                            "result": DataFormatter.sanitize(fallback_parsed),
+                            "raw_text": str(data),
+                            "cleaned_text": fallback_cleaned,
+                            "streamed_text": buffer,
+                            "format": self._prompt_object.output_format,
+                            "resolved_format": "json",
+                            "payload_extracted": fallback_payload_extracted,
+                            "parse_success": True,
+                            "parse_error": None,
+                            "format_fallback": {
+                                "from": self._prompt_object.output_format,
+                                "to": "json",
+                                "reason": parse_error,
+                                "repaired": fallback_repaired,
+                            },
+                        },
+                    )
+                else:
+                    combined_error = parse_error
+                    if fallback_error:
+                        combined_error = f"{parse_error}; JSON fallback: {fallback_error}"
+                    self.full_result_data["parsed_result"] = None
+                    self.full_result_data["result_object"] = None
+                    self.full_result_data["text_result"] = str(data)
+                    self.full_result_data["extra"]["parse_error"] = combined_error
+                    self.full_result_data["extra"]["parse_success"] = False
+                    self._record_runtime_observation(
+                        "parse_failed",
+                        level="WARNING",
+                        message=f"Can not parse {self._prompt_object.output_format} output from model response.",
+                        payload={
+                            "result": str(data),
+                            "streamed_text": buffer,
+                            "format": self._prompt_object.output_format,
+                            "resolved_format": self._prompt_object.output_format,
+                            "payload_extracted": payload_extracted or fallback_payload_extracted,
+                            "parse_success": False,
+                            "parse_error": combined_error,
+                            "format_fallback": {
+                                "from": self._prompt_object.output_format,
+                                "to": "json",
+                                "reason": parse_error,
+                                "error": fallback_error,
+                            },
+                        },
+                    )
             return
 
         if (
@@ -434,6 +541,122 @@ class AgentlyResponseParser(ResponseParser):
         async for streaming_data in streaming_json_parser.flush_final_data(parsed_result):
             yield streaming_data
 
+    def _new_streaming_json_parser(self) -> StreamingJSONParser:
+        max_chars: Any = self.settings.get("response.streaming_parse_max_incomplete_chars", None)
+        if max_chars is None:
+            max_chars = StreamingJSONParser.DEFAULT_MAX_INCOMPLETE_PARSE_CHARS
+        else:
+            try:
+                max_chars = int(max_chars)
+            except (TypeError, ValueError):
+                max_chars = StreamingJSONParser.DEFAULT_MAX_INCOMPLETE_PARSE_CHARS
+        return StreamingJSONParser(
+            self._prompt_object.output,
+            max_incomplete_parse_chars=max_chars,
+        )
+
+    @staticmethod
+    def _streaming_path_parts(path: str) -> list[str | int]:
+        if not path or path.startswith("$"):
+            return []
+        parts: list[str | int] = []
+        buffer = ""
+        index = 0
+        while index < len(path):
+            char = path[index]
+            if char == ".":
+                if buffer:
+                    parts.append(buffer)
+                    buffer = ""
+                index += 1
+                continue
+            if char == "[":
+                if buffer:
+                    parts.append(buffer)
+                    buffer = ""
+                end = path.find("]", index)
+                if end < 0:
+                    return []
+                raw_index = path[index + 1 : end]
+                if not raw_index.isdigit():
+                    return []
+                parts.append(int(raw_index))
+                index = end + 1
+                continue
+            buffer += char
+            index += 1
+        if buffer:
+            parts.append(buffer)
+        return parts
+
+    @staticmethod
+    def _streaming_child_container(next_part: str | int) -> list[Any] | dict[str, Any]:
+        return [] if isinstance(next_part, int) else {}
+
+    @classmethod
+    def _set_streaming_snapshot_path(cls, root: dict[str, Any], path: str, value: Any) -> None:
+        parts = cls._streaming_path_parts(path)
+        if not parts:
+            return
+        current: Any = root
+        for index, part in enumerate(parts):
+            is_last = index == len(parts) - 1
+            next_part = parts[index + 1] if not is_last else None
+            if isinstance(part, int):
+                if not isinstance(current, list):
+                    return
+                while len(current) <= part:
+                    current.append(None)
+                if is_last:
+                    current[part] = value
+                    return
+                child = current[part]
+                if not isinstance(child, (dict, list)):
+                    child = cls._streaming_child_container(cast(str | int, next_part))
+                    current[part] = child
+                current = child
+                continue
+            if not isinstance(current, dict):
+                return
+            if is_last:
+                current[part] = value
+                return
+            child = current.get(part)
+            if not isinstance(child, (dict, list)):
+                child = cls._streaming_child_container(cast(str | int, next_part))
+                current[part] = child
+            current = child
+
+    def _record_streaming_snapshot(self, streaming_data: StreamingData) -> None:
+        if not streaming_data.is_complete or streaming_data.path.startswith("$"):
+            return
+        snapshot = self.full_result_data.get("parsed_result")
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+            self.full_result_data["parsed_result"] = snapshot
+        if streaming_data.full_data not in (None, "", [], {}):
+            self.full_result_data["parsed_result"] = DataFormatter.sanitize(streaming_data.full_data)
+        else:
+            self._set_streaming_snapshot_path(
+                snapshot,
+                streaming_data.path,
+                DataFormatter.sanitize(streaming_data.value),
+            )
+        parsed_result = self.full_result_data.get("parsed_result")
+        self.full_result_data["result_object"] = self._build_result_object(parsed_result)
+        self.full_result_data["extra"]["streaming_snapshot"] = True
+        self.full_result_data["extra"]["parse_success"] = parsed_result is not None
+
+    def _prepare_streaming_data_for_yield(self, streaming_data: StreamingData, path_style: str) -> StreamingData:
+        self._record_streaming_snapshot(streaming_data)
+        if path_style == "slash":
+            streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
+        return streaming_data
+
+    async def async_close(self) -> None:
+        if self._response_consumer is not None:
+            await self._response_consumer.close()
+
     async def _ensure_consumer(self):
         if self._response_consumer is None:
             async with self._consumer_lock:
@@ -465,6 +688,14 @@ class AgentlyResponseParser(ResponseParser):
                     event, data = item
                 except:
                     warnings.warn(f"\n⚠️ Incorrect response data from Agently Response Generator: { item }")
+                    continue
+                if event == "status":
+                    if self._should_reset_for_retry_status(data):
+                        buffer = ""
+                        stream_chunk_index = 0
+                        think_normalizer = LeadingThinkEventNormalizer()
+                        self._reset_retried_attempt_result()
+                    yield event, data
                     continue
                 if event == "delta":
                     for normalized_event, normalized_data in think_normalizer.feed_delta(str(data)):
@@ -634,7 +865,7 @@ class AgentlyResponseParser(ResponseParser):
         await self._ensure_consumer()
         consumer = cast(GeneratorConsumer, self._response_consumer)
         parsed_generator = consumer.get_async_generator()
-        _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
+        _streaming_parse_path_style = str(self.settings.get("response.streaming_parse_path_style", "dot") or "dot")
         streaming_json_parser = None
         streaming_flat_markdown_parser = None
         streaming_hybrid_parser = None
@@ -642,7 +873,7 @@ class AgentlyResponseParser(ResponseParser):
         streaming_yaml_literal_parser = None
         if type in ("instant", "streaming_parse"):
             if self._prompt_object.output_format == "json":
-                streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+                streaming_json_parser = self._new_streaming_json_parser()
             elif self._prompt_object.output_format == "flat_markdown":
                 streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
             elif self._prompt_object.output_format == "hybrid":
@@ -664,7 +895,9 @@ class AgentlyResponseParser(ResponseParser):
                     case "all":
                         yield event, data
                     case "delta":
-                        if event == "delta":
+                        if event == "status" and self._should_reset_for_retry_status(data):
+                            yield self._format_delta_retry_marker(data)
+                        elif event == "delta":
                             yield data
                     case "specific":
                         if specific is None:
@@ -674,63 +907,89 @@ class AgentlyResponseParser(ResponseParser):
                         if event in specific:
                             yield event, data
                     case "instant" | "streaming_parse":
+                        if event == "status":
+                            if self._should_reset_for_retry_status(data):
+                                if streaming_json_parser is not None:
+                                    streaming_json_parser = self._new_streaming_json_parser()
+                                if streaming_flat_markdown_parser is not None:
+                                    streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
+                                if streaming_hybrid_parser is not None:
+                                    streaming_hybrid_parser = HybridStreamingParser(self._prompt_object.output or {})
+                                if streaming_xml_field_parser is not None:
+                                    streaming_xml_field_parser = XmlFieldStreamingParser(self._prompt_object.output or {})
+                                if streaming_yaml_literal_parser is not None:
+                                    streaming_yaml_literal_parser = YamlLiteralStreamingParser(self._prompt_object.output or {})
+                            yield StreamingData(path="$status", value=data)
+                            continue
                         if streaming_json_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_json_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             if event == "tool_calls":
                                 yield StreamingData(path="$tool_calls", value=data)
                             elif event == "done":
                                 async for streaming_data in self._flush_streaming_json_events(streaming_json_parser):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                         if streaming_flat_markdown_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_flat_markdown_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             elif event == "done":
-                                async for streaming_data in streaming_flat_markdown_parser.flush():
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                async for streaming_data in streaming_flat_markdown_parser.flush_final_data(
+                                    self.full_result_data.get("parsed_result")
+                                ):
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                         if streaming_hybrid_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_hybrid_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             elif event == "done":
                                 async for streaming_data in streaming_hybrid_parser.flush():
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                         if streaming_xml_field_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_xml_field_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             elif event == "done":
                                 async for streaming_data in streaming_xml_field_parser.flush():
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                         if streaming_yaml_literal_parser is not None:
                             if event == "delta":
                                 async for streaming_data in streaming_yaml_literal_parser.parse_chunk(str(data)):
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                             elif event == "done":
                                 async for streaming_data in streaming_yaml_literal_parser.flush():
-                                    if _streaming_parse_path_style == "slash":
-                                        streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                    yield streaming_data
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                     case "original":
                         if event.startswith("original"):
                             yield data
@@ -801,7 +1060,7 @@ class AgentlyResponseParser(ResponseParser):
     ) -> Generator:
         asyncio.run(self._ensure_consumer())
         parsed_generator = cast(GeneratorConsumer, self._response_consumer).get_generator()
-        _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
+        _streaming_parse_path_style = str(self.settings.get("response.streaming_parse_path_style", "dot") or "dot")
         streaming_json_parser = None
         streaming_flat_markdown_parser = None
         streaming_hybrid_parser = None
@@ -809,7 +1068,7 @@ class AgentlyResponseParser(ResponseParser):
         streaming_yaml_literal_parser = None
         if type in ("instant", "streaming_parse"):
             if self._prompt_object.output_format == "json":
-                streaming_json_parser = StreamingJSONParser(self._prompt_object.output)
+                streaming_json_parser = self._new_streaming_json_parser()
             elif self._prompt_object.output_format == "flat_markdown":
                 streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
             elif self._prompt_object.output_format == "hybrid":
@@ -830,7 +1089,9 @@ class AgentlyResponseParser(ResponseParser):
                 case "all":
                     yield event, data
                 case "delta":
-                    if event == "delta":
+                    if event == "status" and self._should_reset_for_retry_status(data):
+                        yield self._format_delta_retry_marker(data)
+                    elif event == "delta":
                         yield data
                 case "specific":
                     if specific is None:
@@ -840,83 +1101,109 @@ class AgentlyResponseParser(ResponseParser):
                     if event in specific:
                         yield event, data
                 case "instant" | "streaming_parse":
+                    if event == "status":
+                        if self._should_reset_for_retry_status(data):
+                            if streaming_json_parser is not None:
+                                streaming_json_parser = self._new_streaming_json_parser()
+                            if streaming_flat_markdown_parser is not None:
+                                streaming_flat_markdown_parser = FlatMarkdownStreamingParser(self._prompt_object.output or {})
+                            if streaming_hybrid_parser is not None:
+                                streaming_hybrid_parser = HybridStreamingParser(self._prompt_object.output or {})
+                            if streaming_xml_field_parser is not None:
+                                streaming_xml_field_parser = XmlFieldStreamingParser(self._prompt_object.output or {})
+                            if streaming_yaml_literal_parser is not None:
+                                streaming_yaml_literal_parser = YamlLiteralStreamingParser(self._prompt_object.output or {})
+                        yield StreamingData(path="$status", value=data)
+                        continue
                     if streaming_json_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_json_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         if event == "tool_calls":
                             yield StreamingData(path="$tool_calls", value=data)
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 self._flush_streaming_json_events(streaming_json_parser)
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                     if streaming_flat_markdown_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_flat_markdown_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
-                                streaming_flat_markdown_parser.flush()
+                                streaming_flat_markdown_parser.flush_final_data(
+                                    self.full_result_data.get("parsed_result")
+                                )
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                     if streaming_hybrid_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_hybrid_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_hybrid_parser.flush()
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                     if streaming_xml_field_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_xml_field_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_xml_field_parser.flush()
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                     if streaming_yaml_literal_parser is not None:
                         if event == "delta":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_yaml_literal_parser.parse_chunk(str(data))
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 streaming_yaml_literal_parser.flush()
                             ):
-                                if _streaming_parse_path_style == "slash":
-                                    streaming_data.path = DataPathBuilder.convert_dot_to_slash(streaming_data.path)
-                                yield streaming_data
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                 case "original":
                     if event.startswith("original"):
                         yield data

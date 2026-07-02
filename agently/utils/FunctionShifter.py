@@ -32,10 +32,10 @@ class FunctionShifter:
     _future_lock = threading.Lock()
 
     @staticmethod
-    def run_async_func_in_thread(func, *args, **kwargs):
+    def run_async_func_in_thread(func: Callable[..., Coroutine[Any, Any, R]], *args: Any, **kwargs: Any) -> R:
         result: dict[str, Any] = {}
 
-        def runner():
+        def runner() -> None:
             try:
                 result["data"] = asyncio.run(func(*args, **kwargs))
             except Exception as e:

@@ -15,8 +15,31 @@
 
 import shlex
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Iterable, Sequence
+
+
+DEFAULT_SAFE_CMD_PREFIXES = [
+    "pwd",
+    "ls",
+    "rg",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "find",
+    "date",
+    "whoami",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git rev-parse",
+    "python -m pytest",
+    "python -m pyright",
+    "pytest",
+]
 
 
 class Cmd:
@@ -27,21 +50,30 @@ class Cmd:
         allowed_workdir_roots: Iterable[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        max_output_chars: int = 20000,
+        output_artifact_dir: str | Path | None = None,
     ):
         self.allowed_cmd_prefixes = set(
             allowed_cmd_prefixes
             if allowed_cmd_prefixes is not None
-            else ["ls", "rg", "cat", "pwd", "whoami", "date", "head", "tail"]
+            else DEFAULT_SAFE_CMD_PREFIXES
         )
         self._allowed_cmd_prefix_tokens = [
             self._normalize_cmd(prefix)
             for prefix in self.allowed_cmd_prefixes
             if isinstance(prefix, str) and prefix.strip()
         ]
-        roots = allowed_workdir_roots if allowed_workdir_roots is not None else [Path.cwd()]
+        # No implicit process-cwd boundary: a Workspace-bound shell must inject
+        # the working directory through the Workspace file boundary (e.g.
+        # agent.enable_shell(...) derives allowed_workdir_roots from the bound
+        # Workspace files_root). Executors must not invent a fallback cwd
+        # (spec sections 8.6 / 9).
+        roots = allowed_workdir_roots if allowed_workdir_roots is not None else []
         self.allowed_workdir_roots = [Path(root).resolve() for root in roots]
         self.timeout = timeout
         self.env = env
+        self.max_output_chars = max(1, int(max_output_chars))
+        self.output_artifact_dir = Path(output_artifact_dir).resolve() if output_artifact_dir is not None else None
 
     def register_actions(
         self,
@@ -56,7 +88,11 @@ class Cmd:
         action_id = f"{ prefix }cmd" if prefix else "cmd"
         action.register_action(
             action_id=action_id,
-            desc="Run a low-level allowlisted shell command. Prefer `agent.enable_shell(...)` for user-facing shell access.",
+            desc=(
+                "Run a low-level allowlisted shell command with bounded stdout/stderr previews. "
+                "Prefer `agent.enable_shell(...)` for user-facing shell access, and prefer "
+                "Workspace file actions for reading, searching, editing, and writing files."
+            ),
             kwargs={
                 "cmd": ("str | list[str]", "Command to run."),
                 "workdir": ("str | None", "Working directory."),
@@ -102,6 +138,8 @@ class Cmd:
 
     def _is_workdir_allowed(self, workdir: str | Path | None) -> bool:
         workdir_path = self._resolve_workdir(workdir)
+        if workdir_path is None or not self.allowed_workdir_roots:
+            return False
         for root in self.allowed_workdir_roots:
             try:
                 workdir_path.relative_to(root)
@@ -110,12 +148,13 @@ class Cmd:
                 continue
         return False
 
-    def _resolve_workdir(self, workdir: str | Path | None) -> Path:
+    def _resolve_workdir(self, workdir: str | Path | None) -> Path | None:
         if workdir is not None:
             return Path(workdir).resolve()
         if self.allowed_workdir_roots:
             return self.allowed_workdir_roots[0]
-        return Path.cwd().resolve()
+        # No Workspace-issued boundary configured; do not fall back to cwd.
+        return None
 
     async def run(
         self,
@@ -125,31 +164,107 @@ class Cmd:
     ) -> dict:
         args = self._normalize_cmd(cmd)
         workdir_path = self._resolve_workdir(workdir)
+        if workdir_path is None:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "need_approval": True,
+                "reason": "workspace_boundary_required",
+                "detail": (
+                    "No Workspace-issued working directory. Bind a Workspace and enable a "
+                    "Workspace-bound shell (agent.use_workspace(...) + agent.enable_shell(...)) so "
+                    "the working directory is injected through the Workspace file boundary; "
+                    "executors do not fall back to the process cwd."
+                ),
+                "diagnostics": [{"code": "shell.workspace_boundary_required"}],
+            }
         if not self._is_workdir_allowed(workdir):
             return {
                 "ok": False,
+                "status": "blocked",
                 "need_approval": True,
                 "reason": "workdir_not_allowed",
                 "workdir": str(workdir_path),
+                "diagnostics": [{"code": "shell.workdir_not_allowed", "workdir": str(workdir_path)}],
             }
         if not self._is_cmd_allowed(args) and not allow_unsafe:
             return {
                 "ok": False,
+                "status": "blocked",
                 "need_approval": True,
                 "reason": "cmd_not_allowed",
                 "cmd": args,
+                "diagnostics": [{"code": "shell.cmd_not_allowed", "cmd": args}],
             }
-        result = subprocess.run(
-            args,
-            cwd=str(workdir_path),
-            capture_output=True,
-            text=True,
-            timeout=self.timeout,
-            env=self.env,
-        )
+        try:
+            result = subprocess.run(
+                args,
+                cwd=str(workdir_path),
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                env=self.env,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout, stdout_truncated, stdout_artifact = self._bounded_output("stdout", error.stdout or "")
+            stderr, stderr_truncated, stderr_artifact = self._bounded_output("stderr", error.stderr or "")
+            artifacts = [item for item in (stdout_artifact, stderr_artifact) if item is not None]
+            return {
+                "ok": False,
+                "status": "timed_out",
+                "reason": "command_timeout",
+                "cmd": args,
+                "timeout_seconds": self.timeout,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
+                "output_artifacts": artifacts,
+                "diagnostics": [
+                    {
+                        "code": "shell.command_timeout",
+                        "timeout_seconds": self.timeout,
+                        "cmd": args,
+                    }
+                ],
+            }
+        stdout, stdout_truncated, stdout_artifact = self._bounded_output("stdout", result.stdout)
+        stderr, stderr_truncated, stderr_artifact = self._bounded_output("stderr", result.stderr)
+        artifacts = [item for item in (stdout_artifact, stderr_artifact) if item is not None]
         return {
             "ok": result.returncode == 0,
             "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "output_artifacts": artifacts,
+            "diagnostics": [],
         }
+
+    def _bounded_output(self, stream_name: str, value: str | bytes) -> tuple[str, bool, dict | None]:
+        text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
+        if len(text) <= self.max_output_chars:
+            return text, False, None
+        preview = text[: self.max_output_chars]
+        artifact = self._write_output_artifact(stream_name, text)
+        return preview, True, artifact
+
+    def _write_output_artifact(self, stream_name: str, text: str) -> dict | None:
+        if self.output_artifact_dir is None:
+            return None
+        self.output_artifact_dir.mkdir(parents=True, exist_ok=True)
+        path = self.output_artifact_dir / f"{stream_name}-{uuid.uuid4().hex}.txt"
+        path.write_text(text, encoding="utf-8")
+        artifact: dict[str, str | int] = {
+            "stream": stream_name,
+            "path": str(path),
+            "bytes": len(text.encode("utf-8")),
+        }
+        for root in self.allowed_workdir_roots:
+            try:
+                artifact["relative_path"] = str(path.relative_to(root))
+                break
+            except ValueError:
+                continue
+        return artifact

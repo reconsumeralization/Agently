@@ -28,7 +28,7 @@ def basic_delta_streaming():
 def instant_structured_streaming():
     # Instant streaming emits structured StreamingData patches while the
     # response is still generating. It is useful for dashboards, SSE/WebSocket
-    # UIs, long reports, and workflow panels that can render one field before
+    # UIs, long, sectioned, or file-backed deliverables, and workflow panels that can render one field before
     # the full structured result is ready.
     gen = (
         agent.input(

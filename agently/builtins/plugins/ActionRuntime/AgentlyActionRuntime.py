@@ -229,6 +229,19 @@ class AgentlyActionRuntime:
         return timeout if timeout > 0 else None
 
     @staticmethod
+    def _record_agent_execution_progress(
+        *,
+        stage: str,
+        status: str,
+        event_type: str,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        context = get_current_agent_execution_context()
+        record_progress = getattr(context, "record_progress", None)
+        if callable(record_progress):
+            record_progress(stage=stage, status=status, event_type=event_type, meta=meta or {})
+
+    @staticmethod
     def _resolve_planning_model_key(settings: Any) -> str | None:
         value = settings.get("action.planning_model_key", None)
         if value is None:
@@ -293,7 +306,8 @@ class AgentlyActionRuntime:
                         "todo_suggestion": (str, "Suggestion for next round's next_action decision."),
                     }
                 ],
-            }
+            },
+            format="json",
         )
         action_plan_result = _get_model_request_result(
             action_plan_request,
@@ -420,17 +434,21 @@ class AgentlyActionRuntime:
         context: "ActionRunContext",
         request: "ActionExecutionRequest",
     ) -> list["ActionResult"]:
+        from agently.core.orchestration.TriggerFlow import TriggerFlow
+
         settings = context["settings"]
         action_calls = request.get("action_calls", [])
         concurrency = request.get("concurrency", None)
+        timeout = request.get("timeout", None)
         if len(action_calls) == 0:
             return []
         if self.action.async_execute_action is None:
             raise RuntimeError("[Agently Action] Action dispatcher is not available.")
 
-        semaphore = asyncio.Semaphore(concurrency) if isinstance(concurrency, int) and concurrency > 0 else None
-
-        async def run_one(action_call: "ActionCall"):
+        async def run_one(data):
+            action_call = data.input
+            if not isinstance(action_call, dict):
+                action_call = {}
             action_id = str(action_call.get("action_id", ""))
             action_input = action_call.get("action_input", {})
             if not isinstance(action_input, dict):
@@ -442,6 +460,14 @@ class AgentlyActionRuntime:
                 policy_override = {}
 
             async def execute_once():
+                command_index = getattr(data, "index", None)
+                progress_meta = {"action_id": action_id, "command_index": command_index}
+                self._record_agent_execution_progress(
+                    stage=f"actions.{action_id}" if action_id else "actions.unknown",
+                    status="started",
+                    event_type="action.started",
+                    meta=progress_meta,
+                )
                 return await self.action.async_execute_action(
                     action_id,
                     action_input,
@@ -453,12 +479,38 @@ class AgentlyActionRuntime:
                     next_value=next_step,
                 )
 
-            if semaphore is None:
-                return await execute_once()
-            async with semaphore:
-                return await execute_once()
+            try:
+                result = await execute_once()
+            except BaseException:
+                self._record_agent_execution_progress(
+                    stage=f"actions.{action_id}" if action_id else "actions.unknown",
+                    status="failed",
+                    event_type="action.failed",
+                    meta={"action_id": action_id, "command_index": getattr(data, "index", None)},
+                )
+                raise
+            status = str(result.get("status") or "").strip().lower() if isinstance(result, dict) else ""
+            self._record_agent_execution_progress(
+                stage=f"actions.{action_id}" if action_id else "actions.unknown",
+                status=status or "completed",
+                event_type="action.completed",
+                meta={"action_id": action_id, "command_index": getattr(data, "index", None)},
+            )
+            return result
 
-        return await asyncio.gather(*[run_one(action_call) for action_call in action_calls])
+        async def collect_results(data):
+            values = data.input if isinstance(data.input, list) else []
+            await data.async_set_state("results", values)
+            return values
+
+        flow = TriggerFlow(name="action-runtime-execute-actions")
+        flow.for_each(concurrency=concurrency).to(run_one).end_for_each().to(collect_results)
+        execution = flow.create_execution(auto_close=False)
+        await execution.async_start(list(action_calls))
+        close_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
+        snapshot = await execution.async_close(timeout=close_timeout)
+        results = snapshot.get("results")
+        return cast(list["ActionResult"], results if isinstance(results, list) else [])
 
     async def async_generate_action_call(
         self,
@@ -479,10 +531,13 @@ class AgentlyActionRuntime:
 
         standard_planning_handler = self.resolve_planning_handler(planning_handler)
         if max_rounds is None:
-            configured_max_rounds = self.action_settings.get("loop.max_rounds", self.tool_settings.get("loop.max_rounds", 5))
-            max_rounds = configured_max_rounds if isinstance(configured_max_rounds, int) else 5
+            configured_max_rounds = self.action_settings.get(
+                "loop.max_rounds",
+                self.tool_settings.get("loop.max_rounds", None),
+            )
+            max_rounds = configured_max_rounds if isinstance(configured_max_rounds, int) else None
         if not isinstance(max_rounds, int) or max_rounds < 0:
-            max_rounds = 5
+            max_rounds = None
 
         safe_done_plans = self.action.to_model_visible_records(done_plans if isinstance(done_plans, list) else [])
         safe_last_round_records = self.action.to_model_visible_records(

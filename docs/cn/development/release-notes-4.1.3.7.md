@@ -76,8 +76,10 @@ DAG-shaped bounded steps；它不授予权限，也不会绕过 host policy。
 - `AgentTurn`、`create_turn(...)`、`set_turn_prompt(...)`、
   `set_request_prompt(...)`、`one_turn`、`task_step` 和 `task_scope` 不属于
   4.1.3.7 当前推荐表面。
-- `AgentExecutionResult.resume()` 仍是预留表面，在 resumable strategy 落地前返回
-  `supported=false`。
+- `agent.resume(task_id)` / `await agent.async_resume(task_id)` 会把已 checkpoint
+  的 AgentTaskLoop 恢复为 task-strategy `AgentExecution`。当 result 携带可恢复的
+  `task_refs` 时，`AgentExecutionResult.resume()` 会委托同一个 Agent facade；
+  `resume_task(...)` 只保留为兼容别名，不是推荐生命周期。
 
 ## 验证摘要
 

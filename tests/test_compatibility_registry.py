@@ -32,7 +32,13 @@ def test_current_release_manifest_matches_registry_release_file():
     release_devtools = dict(release_manifest["companions"]["devtools"])
     current_devtools.pop("recommended_version_specifier", None)
     release_devtools.pop("recommended_version_specifier", None)
+    current_runtime_control = dict(current_devtools.pop("runtime_control"))
+    release_runtime_control = dict(release_devtools.pop("runtime_control"))
     assert current_devtools == release_devtools
+    assert release_runtime_control.items() <= current_runtime_control.items()
+    assert current_runtime_control["model_request_telemetry_contract"].startswith(
+        "Existing model RuntimeEvents may carry payload.model_request_telemetry"
+    )
 
 
 def test_devtools_and_skills_companion_views_derive_from_current_release_manifest():
@@ -61,7 +67,10 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.7"
+    assert in_development["target_version"] == "4.1.3.8"
+    assert in_development["release_train"] == "2026-06-4.1.3.8-dev"
+    assert "framework-level bug fixes and structural cleanup" in in_development["notes"]
+    assert "business-specific special-case fixes" in in_development["notes"]
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",
@@ -69,7 +78,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
         "event_center_dispatch": "RuntimeEvent",
         "compatibility_input_type": "ObservationEvent",
     }
-    assert in_development["companions"]["devtools"]["runtime_control"] == {
+    expected_runtime_control = {
         "runtime_event_ownership": {
             "official_event_producer": "core",
             "plugin_contract": "plugins return observations/errors/decisions; core maps them to official RuntimeEvent records",
@@ -84,12 +93,14 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
         "provider_stream_idle_timeout": [
             "OpenAICompatible.stream_idle_timeout",
             "OpenAIResponsesCompatible.stream_idle_timeout",
+            "AnthropicCompatible.stream_idle_timeout",
         ],
         "response_materialization_idle_timeout": "response.materialization_idle_timeout",
         "typed_stall_error": "RuntimeStageStallError",
         "typed_provider_stall_stages": [
             "response_first_event",
             "response_stream",
+            "response_materialization",
         ],
         "action_runtime_stall_stages": [
             "action_planning",
@@ -113,6 +124,14 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
             "summary_marker": "meta.coalesced",
         },
     }
+    in_development_runtime_control = in_development["companions"]["devtools"]["runtime_control"]
+    assert expected_runtime_control.items() <= in_development_runtime_control.items()
+    assert in_development_runtime_control["model_request_telemetry_contract"].startswith(
+        "Existing model RuntimeEvents may carry payload.model_request_telemetry"
+    )
+    assert in_development_runtime_control["model_request_result_stream_status_contract"].startswith(
+        "ModelRequestResult reserves $status"
+    )
     assert in_development["companions"]["skills"]["authoring_protocol"] == "agently-skills.authoring.v2"
     assert in_development["companions"]["skills"]["authoring_format"] == "standard SKILL.md only"
     runtime_capability_contract = in_development["companions"]["skills"]["runtime_capability_contract"]
@@ -128,6 +147,10 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     )
     assert in_development["companions"]["skills"]["catalog_generation"] == "v2"
     assert in_development["companions"]["skills"]["recommended_bundle"] == "app"
+    artifact_stream_contract = in_development["companions"]["blocks"]["agent_task_artifact_stream_contract"]
+    assert "without .output()" in artifact_stream_contract
+    assert "<$retry>...</$retry> is a consumer-side replay boundary" in artifact_stream_contract
+    assert "targeted_readbacks" in artifact_stream_contract
     execution_contract = in_development["request_input"]["agent_execution_request_scope"]
     assert "AgentExecution" in execution_contract["surface"]
     assert "AgentExecutionResult" in execution_contract["surface"]
@@ -141,23 +164,45 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentExecution.goals" in task_loop_contract["surface"]
     assert "Agent.create_task" in task_loop_contract["surface"]
     assert "Agent.create_task_loop" in task_loop_contract["surface"]
-    assert "AgentExecution.use_dynamic_task" in task_loop_contract["surface"]
+    assert "AgentExecution.use_dynamic_task" not in task_loop_contract["surface"]
+    assert "Agent.resume" in task_loop_contract["surface"]
+    assert "Agent.async_resume" in task_loop_contract["surface"]
     assert "AgentExecution.success_criteria" not in task_loop_contract["surface"]
     assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
+    assert "without .output()" in task_loop_contract["artifact_stream_contract"]
+    assert "targeted_readbacks" in task_loop_contract["artifact_stream_contract"]
+    assert "content/content_preview/text/excerpt/snippet" in task_loop_contract["contract"]
+    assert "TaskBoard final verification carries board source_refs" in task_loop_contract["contract"]
     assert "agent.goal(goal_or_goals, success_criteria=None)" in task_loop_contract["contract"]
+    assert "4.1.3.8 development target" in task_loop_contract["contract"]
+    assert "planner-visible capability summaries" in task_loop_contract["contract"]
+    assert "structured bounded-step scope" in task_loop_contract["contract"]
+    assert "capability/evidence requirements" in task_loop_contract["contract"]
+    assert "business-specific special-case fixes" in task_loop_contract["contract"]
     assert "plural alias agent.goals(...)" in task_loop_contract["contract"]
-    assert "effort budget iteration_limit maps to task-loop max_iterations" in task_loop_contract["contract"]
-    assert "effort execution.step_plan" in task_loop_contract["contract"]
-    assert "TaskDAG / DAG-shaped bounded step" in task_loop_contract["contract"]
+    assert "effort budget values such as iteration_limit" in task_loop_contract["contract"]
+    assert "soft strategy metadata" in task_loop_contract["contract"]
+    assert "do not silently set task-strategy max_iterations or AgentExecution hard limits" in task_loop_contract["contract"]
+    assert "AgentTask does not impose model-request, iteration, TaskBoard tick, or Action round quotas" in task_loop_contract["contract"]
+    assert "no-progress and idle timeouts remain liveness guards" in task_loop_contract["contract"]
+    assert "TaskDAG is no longer an AgentTask bounded-step strategy" in task_loop_contract["contract"]
     assert "compatibility/convenience facade over DAG" in task_loop_contract["contract"]
-    assert "execution-local DAG candidate" in task_loop_contract["contract"]
+    assert "Agent.use_dynamic_task(...) and AgentExecution.use_dynamic_task(...) fail fast" in task_loop_contract["contract"]
+    assert "Agently.create_dynamic_task(...)" in task_loop_contract["contract"]
     assert "not current public surfaces" in task_loop_contract["contract"]
     assert "task-strategy AgentExecution drafts" in task_loop_contract["contract"]
     assert "not a separate recommended AgentTask execution owner" in task_loop_contract["contract"]
     assert "accepted=true" in task_loop_contract["contract"]
     assert "artifact_status=partial" in task_loop_contract["contract"]
-    assert "supported=false" in task_loop_contract["contract"]
+    assert "agent.resume(task_id)" in task_loop_contract["contract"]
+    assert "compatibility aliases only" in task_loop_contract["contract"]
+    assert "planner-visible capability summaries instead of provider- or example-specific prompt patches" in task_loop_contract["scope"]["current_slice"]
+    assert "structured bounded-step capability scope instead of prose-only step instructions" in task_loop_contract["scope"]["current_slice"]
     assert "multi-task scheduling" in task_loop_contract["scope"]["deferred"]
+    assert (
+        "distributed pause/resume beyond the single-task agent.resume(...) snapshot slice"
+        in task_loop_contract["scope"]["deferred"]
+    )
     assert "TriggerFlow-backed AdaptiveLoop or BootstrapLoop packaging" in task_loop_contract["scope"]["deferred"]
     assert "AgentExecutionResult as the common consumption surface" in task_loop_contract["compatibility_policy"]
     assert in_development["companions"]["skills"]["archived_catalog_generations"] == [

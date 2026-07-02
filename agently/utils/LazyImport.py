@@ -15,6 +15,8 @@
 import sys
 import importlib
 import subprocess
+from types import ModuleType
+from typing import Any
 
 from importlib.metadata import version as get_installed_version, PackageNotFoundError
 from packaging.version import parse as parse_version
@@ -33,7 +35,7 @@ class LazyImport:
         version_constraint: str | None = None,
         install_name: str | None = None,
         _attempted_install: bool = False,
-    ):
+    ) -> Any:
         # Ensure version constraint has a valid operator
         if version_constraint and not any(
             version_constraint.startswith(op) for op in ("==", ">=", "<=", "!=", ">", "<")
@@ -127,7 +129,7 @@ class LazyImport:
         version_constraint: str | None = None,
         install_name: str | None = None,
         _attempted_install: bool = False,
-    ):
+    ) -> ModuleType:
         # Ensure version constraint has a valid operator
         if version_constraint and not any(
             version_constraint.startswith(op) for op in ("==", ">=", "<=", "!=", ">", "<")

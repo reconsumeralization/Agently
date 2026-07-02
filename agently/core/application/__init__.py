@@ -20,6 +20,7 @@ from .AgentExecution import (
     RuntimeStageStallError,
 )
 from .AgentTask import AgentTask
+from .Blocks import Blocks
 from .DynamicTask import ActionTaskAdapter, DynamicTask, SkillTaskAdapter
 from .SkillsExecutor import SkillsExecutor
 
@@ -30,6 +31,7 @@ __all__ = [
     "AgentExecutionResult",
     "AgentExecutionStream",
     "AgentTask",
+    "Blocks",
     "DynamicTask",
     "RuntimeStageStallError",
     "SkillTaskAdapter",

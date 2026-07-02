@@ -12,29 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .Recall import DefaultContextBuilder, RecallProfile, RuleRecallPlanner, WorkspaceRetriever
+# Workspace and its ContextBuilder substrate now live in the Foundation package
+# `agently.core.workspace`. Session is a Workspace consumer, not the owner
+# namespace for the storage substrate, so it no longer re-exports those
+# surfaces. Import Workspace/ContextBuilder from `agently.core.workspace`.
 from .Session import Session
-from .Workspace import (
-    LazyWorkspace,
-    LocalWorkspaceBackend,
-    Workspace,
-    WorkspaceConfigurationError,
-    WorkspaceError,
-    WorkspaceManager,
-    WorkspacePolicyError,
-)
 
 __all__ = [
-    "DefaultContextBuilder",
-    "LazyWorkspace",
-    "LocalWorkspaceBackend",
-    "RecallProfile",
-    "RuleRecallPlanner",
     "Session",
-    "Workspace",
-    "WorkspaceConfigurationError",
-    "WorkspaceError",
-    "WorkspaceManager",
-    "WorkspacePolicyError",
-    "WorkspaceRetriever",
 ]

@@ -6,7 +6,9 @@ from typing import Any, Callable, cast
 import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowEventData, TriggerFlowRuntimeData
-from agently.base import execution_environment
+from agently.base import execution_resource
+from agently.core.workspace._defaults import script_scope
+from agently.types.data import RunContext
 from agently.types.plugins import ExecutionSnapshotStore, RuntimeEventStore
 from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY
 from agently.types.trigger_flow import TRIGGER_FLOW_EXECUTION_SNAPSHOT_KIND
@@ -72,12 +74,75 @@ def test_trigger_flow_execution_binds_lazy_default_workspace(tmp_path, monkeypat
     execution = flow.create_execution()
     workspace = cast(Any, execution.require_runtime_resource("workspace"))
     state = execution.save()
+    expected_root = tmp_path / ".agently" / "workspaces" / "scripts" / script_scope()
 
     assert getattr(workspace, "is_materialized") is False
-    assert workspace.root.parent == (tmp_path / ".agently" / "workspaces").resolve()
-    assert workspace.root.name.startswith("execution-workspace-default-")
+    assert workspace.root == expected_root.resolve()
+    assert workspace.files_root == (
+        expected_root / "files" / "lineage" / "executions" / execution.id / "files"
+    ).resolve()
     assert not workspace.root.exists()
     assert "workspace" in state["resource_keys"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_default_executions_share_physical_workspace_db_and_isolate_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-workspace-shared-default")
+
+    first = flow.create_execution()
+    second = flow.create_execution()
+    first_workspace = cast(Any, first.require_runtime_resource("workspace"))
+    second_workspace = cast(Any, second.require_runtime_resource("workspace"))
+
+    assert first_workspace.root == second_workspace.root
+    assert first_workspace.files_root != second_workspace.files_root
+    assert first_workspace.files_root.parent.name == first.id
+    assert second_workspace.files_root.parent.name == second.id
+
+    await first_workspace.put("first execution", collection="observations", kind="execution_probe")
+    await second_workspace.put("second execution", collection="observations", kind="execution_probe")
+
+    assert len(list((tmp_path / ".agently" / "workspaces" / "scripts").glob("**/workspace.db"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_default_execution_search_is_execution_isolated(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-workspace-search-isolation")
+
+    first = flow.create_execution()
+    second = flow.create_execution()
+    first_workspace = cast(Any, first.require_runtime_resource("workspace"))
+    second_workspace = cast(Any, second.require_runtime_resource("workspace"))
+
+    await first_workspace.put("record from first execution", collection="observations", kind="iso_probe")
+    await second_workspace.put("record from second execution", collection="observations", kind="iso_probe")
+
+    # Default search is execution-isolated even though both executions share the
+    # same physical workspace.db (spec: explicit cross-scope search).
+    first_hits = await first_workspace.search("record")
+    assert [hit.get("summary") for hit in first_hits] == ["record from first execution"]
+    second_hits = await second_workspace.search("record")
+    assert [hit.get("summary") for hit in second_hits] == ["record from second execution"]
+
+    # Explicit cross-execution scope can still reach the sibling execution.
+    cross_hits = await first_workspace.search("record", filters={"scope.execution_id": second.id})
+    assert [hit.get("summary") for hit in cross_hits] == ["record from second execution"]
+
+
+def test_trigger_flow_default_workspace_uses_parent_session_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-workspace-session-default")
+    parent = RunContext.create(run_kind="agent_execution", session_id="issue-123")
+
+    execution = flow.create_execution(parent_run_context=parent)
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    assert workspace.root == (tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123").resolve()
+    assert workspace.files_root == (
+        workspace.root / "files" / "lineage" / "executions" / execution.id / "files"
+    ).resolve()
 
 
 def test_trigger_flow_execution_can_disable_default_workspace(tmp_path, monkeypatch):
@@ -570,7 +635,7 @@ async def test_trigger_flow_config_round_trip_with_runtime_resources():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_execution_environment_injects_managed_resource():
+async def test_trigger_flow_execution_resource_injects_managed_resource():
     flow = TriggerFlow()
 
     async def calculate(data: TriggerFlowRuntimeData):
@@ -582,7 +647,7 @@ async def test_trigger_flow_execution_environment_injects_managed_resource():
 
     result = await flow.async_start(
         41,
-        execution_environments=[
+        execution_resources=[
             {
                 "kind": "python",
                 "scope": "execution",
@@ -593,11 +658,11 @@ async def test_trigger_flow_execution_environment_injects_managed_resource():
     )
 
     assert result == {"calculated": 42}
-    assert execution_environment.list(scope="execution") == []
+    assert execution_resource.list(scope="execution") == []
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_save_records_managed_execution_environment_keys():
+async def test_trigger_flow_save_records_managed_execution_resource_keys():
     flow = TriggerFlow()
 
     async def hold_resource(data: TriggerFlowRuntimeData):
@@ -607,7 +672,7 @@ async def test_trigger_flow_save_records_managed_execution_environment_keys():
 
     execution = flow.create_execution(
         auto_close=False,
-        execution_environments=[
+        execution_resources=[
             {
                 "requirement_id": "managed-python-save-test",
                 "kind": "python",
@@ -620,22 +685,22 @@ async def test_trigger_flow_save_records_managed_execution_environment_keys():
     state = execution.save()
 
     assert "managed_python" in state["managed_resource_keys"]
-    assert "managed-python-save-test" in state["execution_environment_requirement_ids"]
+    assert "managed-python-save-test" in state["execution_resource_requirement_ids"]
     requirements = state["resource_requirements"]
     environment_requirements = [
         requirement
         for requirement in requirements
-        if requirement["kind"] == "execution_environment_requirement"
+        if requirement["kind"] == "execution_resource_requirement"
     ]
     assert environment_requirements[0]["metadata"]["resource_key"] == "managed_python"
     assert environment_requirements[0]["metadata"]["requirement"]["requirement_id"] == "managed-python-save-test"
 
     await execution.async_close()
-    assert execution_environment.list(scope="execution") == []
+    assert execution_resource.list(scope="execution") == []
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_async_load_restores_managed_execution_environment():
+async def test_trigger_flow_async_load_restores_managed_execution_resource():
     flow = TriggerFlow()
 
     async def pause(data: TriggerFlowRuntimeData):
@@ -649,7 +714,7 @@ async def test_trigger_flow_async_load_restores_managed_execution_environment():
     flow.to(pause).to(use_environment)
     execution = flow.create_execution(
         auto_close=False,
-        execution_environments=[
+        execution_resources=[
             {
                 "requirement_id": "managed-python-load-test",
                 "kind": "python",
@@ -672,7 +737,7 @@ async def test_trigger_flow_async_load_restores_managed_execution_environment():
     snapshot = await restored.async_close()
 
     assert snapshot["answer"] == 42
-    assert execution_environment.list(scope="execution") == []
+    assert execution_resource.list(scope="execution") == []
 
 
 @pytest.mark.asyncio

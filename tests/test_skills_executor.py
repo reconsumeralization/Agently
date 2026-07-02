@@ -1,3 +1,4 @@
+import asyncio
 import json
 import shutil
 import subprocess
@@ -76,7 +77,7 @@ class MockSkillsRequester:
             }
         elif "verify" in request_text and "Validate the execution output" in request_text:
             response = {"passed": True, "issues": [], "reason": "The output satisfies the selected Skill guidance."}
-        elif "### html" in request_text:
+        elif "Required sections" in request_text and "html" in request_text:
             yield "message", "### html\n<section>OK</section>"
             return
         else:
@@ -687,14 +688,95 @@ and write the final Markdown deliverable to a workspace file.
     assert agent.action.action_registry.has("run_python")
     mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
     assert {item["need"] for item in mounted} >= {"web_search", "web_browse", "workspace_write", "python"}
-    search_spec = agent.action.action_registry.get_spec("search")
-    assert search_spec is not None
-    assert search_spec.get("meta", {}).get("provider") == "ddgs"
-    assert search_spec.get("meta", {}).get("backend") == "auto"
 
 
 @pytest.mark.asyncio
-async def test_skill_web_search_can_refresh_ddgs_without_forcing_backend(monkeypatch, tmp_path):
+async def test_execution_scoped_capabilities_are_released_after_run(tmp_path):
+    """ISSUE-002: capability_scope='execution' reverses mounts after the run."""
+    source = tmp_path / "research-writer-scoped"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Research Writer Scoped
+description: Research public context and write a report.
+---
+
+# Research Writer Scoped
+
+Search public sources and write the final Markdown deliverable to a file.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(
+        auto_load={"web_search": "allow", "workspace_write": "allow"},
+        workspace_root=str(tmp_path / "workspace"),
+        capability_scope="execution",
+    )
+
+    execution = await agent.async_run_skills_task(
+        "prepare a research report",
+        skills=["research-writer-scoped"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
+    assert mounted  # capabilities were mounted during the run
+    # ...but execution-scoped capabilities must not persist on the agent afterward.
+    assert not agent.action.action_registry.has("search")
+    assert not agent.action.action_registry.has("write_file")
+
+
+@pytest.mark.asyncio
+async def test_execution_scoped_capabilities_preserve_existing_host_action(tmp_path):
+    """Execution-scoped auto-load must not overwrite or unregister host actions."""
+    source = tmp_path / "python-skill-scoped"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Python Skill Scoped
+description: Uses Python for deterministic calculations.
+---
+
+# Python Skill Scoped
+
+Run Python for small deterministic calculations before producing the final result.
+""",
+    )
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(
+        auto_load={"python": "allow"},
+        capability_scope="execution",
+    )
+    agent.register_action(
+        name="run_python",
+        desc="Host-owned Python capability.",
+        kwargs={},
+        func=lambda: {"owner": "host"},
+    )
+    host_action = agent.action.action_registry.get_func("run_python")
+
+    execution = await agent.async_run_skills_task(
+        "calculate with Python",
+        skills=["python-skill-scoped"],
+        mode="required",
+    )
+
+    assert execution.status == "success"
+    assert agent.action.action_registry.has("run_python")
+    assert agent.action.action_registry.get_func("run_python") is host_action
+    assert host_action is not None
+    assert host_action() == {"owner": "host"}
+    assert any(
+        item.get("type") == "skills.capability.mounted"
+        and item.get("need") == "python"
+        and item.get("action_ids") == ["run_python"]
+        for item in execution.runtime_stream
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_web_search_mounts_without_environment_mutation(monkeypatch, tmp_path):
     source = tmp_path / "search-skill"
     _write(
         source / "SKILL.md",
@@ -711,21 +793,11 @@ Search public sources before answering.
     Agently.skills_executor.install_skills(source)
     agent = _create_agent().configure_skill_capabilities(
         auto_load={"web_search": "allow"},
-        search={"refresh_ddgs": "allow"},
     )
-    refresh_calls: list[dict[str, Any]] = []
+    shell_calls: list[dict[str, Any]] = []
 
     def fake_enable_shell(**kwargs):
-        refresh_calls.append(dict(kwargs))
-        agent.action.register_action(
-            action_id=kwargs["action_id"],
-            desc="Refresh ddgs.",
-            kwargs={"cmd": (list, "Command.")},
-            func=lambda cmd: {"stdout": "Requirement already satisfied: ddgs", "cmd": cmd},
-            tags=[f"agent-{ agent.name }"],
-            expose_to_model=bool(kwargs.get("expose_to_model", True)),
-            side_effect_level="exec",
-        )
+        shell_calls.append(dict(kwargs))
         return agent
 
     monkeypatch.setattr(agent, "enable_shell", fake_enable_shell)
@@ -737,15 +809,12 @@ Search public sources before answering.
     )
 
     assert execution.status == "success"
-    assert refresh_calls
-    assert refresh_calls[0]["commands"] == ["python -m pip install --upgrade ddgs"]
-    assert refresh_calls[0]["expose_to_model"] is False
+    # Mounting web_search must never shell out to mutate the host environment.
+    assert shell_calls == []
     search_spec = agent.action.action_registry.get_spec("search")
     assert search_spec is not None
     assert search_spec.get("meta", {}).get("provider") == "ddgs"
     assert search_spec.get("meta", {}).get("backend") == "auto"
-    mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
-    assert any("refresh_ddgs_dependency" in item.get("action_ids", []) for item in mounted)
 
 
 @pytest.mark.asyncio
@@ -855,6 +924,14 @@ Run scripts/helper.sh when the host permits script execution.
         and item.get("need") == "script_run"
         and "run_script_skill_script" in item.get("action_ids", [])
         for item in execution.runtime_stream
+    )
+    scoped_action_candidates = execution.close_snapshot["blocks"]["execution_plan"]["capability_resolution"][
+        "scoped_action_candidates"
+    ]
+    assert any(
+        candidate.get("need") == "script_run"
+        and "run_script_skill_script" in candidate.get("action_ids", [])
+        for candidate in scoped_action_candidates
     )
 
 
@@ -1063,6 +1140,13 @@ eight concrete questions.
     action_rounds: list[set[str]] = []
 
     async def fake_plan_and_execute(**kwargs):
+        prompt_obj = kwargs.get("prompt")
+        prompt_input = (
+            prompt_obj.get("input")
+            if prompt_obj is not None and callable(getattr(prompt_obj, "get", None))
+            else prompt_obj
+        )
+        assert "Write the final Markdown deliverable" in str(prompt_input)
         action_ids = {
             str(item.get("action_id") or item.get("name") or "")
             for item in kwargs.get("action_list", [])
@@ -1256,6 +1340,68 @@ async def test_effort_normal_runs_full_runtime_chain(tmp_path):
     assert phases == ["preflight", "research", "plan", "execute", "verify", "reflect", "finalize"]
     assert isinstance(execution.output, dict)
     assert execution.output["response"] == "Finalized through the Skills runtime chain."
+    blocks = execution.close_snapshot["blocks"]
+    assert blocks["compatibility_route_label"] == "runtime_chain"
+    assert [block["kind"] for block in blocks["execution_plan"]["plan_blocks"]] == [
+        "skill_activation",
+        "flow_segment",
+    ]
+    assert [block["kind"] for block in blocks["execution_graph"]["execution_blocks"]] == [
+        "skill_activation",
+        "flow_segment",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skills_blocks_route_uses_active_blocks_plugin(tmp_path):
+    from agently.builtins.plugins.Blocks import AgentlyBlocks
+
+    calls: list[str] = []
+
+    class TracingBlocks(AgentlyBlocks):
+        name = "TracingBlocks"
+        DEFAULT_SETTINGS: dict[str, Any] = {}
+
+        def compile(self, request: Any):
+            calls.append("compile")
+            return super().compile(request)
+
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    previous_active = Agently.settings.get("plugins.Blocks.activate", "AgentlyBlocks")
+    Agently.plugin_manager.register("Blocks", TracingBlocks, activate=True)
+    try:
+        execution = await _create_agent().async_run_skills_task(
+            "handle release",
+            skills=["alpha-skill"],
+            mode="required",
+            effort="normal",
+        )
+    finally:
+        Agently.settings.set("plugins.Blocks.activate", previous_active)
+        Agently.plugin_manager.unregister("Blocks", "TracingBlocks")
+
+    assert execution.status == "success"
+    assert calls == ["compile"]
+
+
+@pytest.mark.asyncio
+async def test_staged_strategy_without_stages_reports_error(tmp_path):
+    """ISSUE-014: staged with no execution_stages must report error, not success."""
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+    agent = _create_agent()
+    agent.set_settings("effort_presets", {"staged_preset": {"strategy": "staged"}})
+
+    execution = await agent.async_run_skills_task(
+        "handle release",
+        skills=["alpha-skill"],
+        mode="required",
+        effort="staged_preset",
+    )
+
+    assert execution.status == "error"
+    assert "execution_stages" in str(execution.output)
 
 
 @pytest.mark.asyncio
@@ -1307,6 +1453,126 @@ async def test_custom_effort_strategy_handler_executes(tmp_path):
         "test.custom_strategy.checkpoint",
         "skills.custom_strategy.done",
     ]
+
+
+@pytest.mark.asyncio
+async def test_skills_execution_emits_abort_diagnostic_on_host_cancellation(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    started = asyncio.Event()
+
+    async def slow_strategy(**kwargs):
+        await started.wait()
+        await asyncio.sleep(30)
+        return {"status": "unexpected"}
+
+    events: list[dict[str, Any]] = []
+
+    async def stream_handler(item: dict[str, Any]):
+        events.append(item)
+        if item.get("type") == "skills.custom_strategy.start":
+            started.set()
+
+    Agently.skills_executor.register_effort_strategy("slow_cancel", slow_strategy, replace=True)
+    try:
+        agent = _create_agent()
+        agent.set_settings("effort_presets", {"slow_cancel": {"strategy": "slow_cancel"}})
+        task = asyncio.create_task(
+            agent.async_run_skills_task(
+                "handle release",
+                skills=["alpha-skill"],
+                mode="required",
+                effort="slow_cancel",
+                stream_handler=stream_handler,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        Agently.skills_executor.unregister_effort_strategy("slow_cancel")
+
+    abort_events = [item for item in events if item.get("type") == "skills.execution.aborted"]
+    assert abort_events
+    payload = abort_events[-1]["payload"]
+    assert payload["reason"] == "host_cancellation"
+    assert payload["strategy"] == "slow_cancel"
+    assert payload["active_event"]["type"] == "skills.custom_strategy.start"
+    assert payload["elapsed_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_react_strategy_emits_budget_exhausted_diagnostic():
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import (
+        run_react_execution,
+    )
+
+    class BudgetContext:
+        def __init__(self):
+            self.events: list[dict[str, Any]] = []
+
+        async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
+            self.events.append(item)
+
+        async def async_request_model(self, **kwargs):  # pragma: no cover - budget 0 should avoid model calls
+            raise AssertionError("budget-exhausted react flow should not call the model")
+
+    context = BudgetContext()
+    result = await run_react_execution(
+        task="handle release",
+        plan={},
+        context=cast(Any, context),
+        settings=Settings(name="ReactBudgetTestSettings", parent=Agently.settings),
+        step_budget=0,
+    )
+
+    assert result["budget_exhausted"] is True
+    budget_events = [item for item in context.events if item.get("type") == "skills.execution.budget_exhausted"]
+    assert budget_events
+    assert budget_events[-1]["payload"] == {
+        "reason": "step_budget_exhausted",
+        "strategy": "react",
+        "active_phase": "reason",
+        "step_count": 0,
+        "step_budget": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_staged_strategy_emits_budget_exhausted_diagnostic():
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.staged import (
+        run_staged_execution,
+    )
+
+    class BudgetContext:
+        def __init__(self):
+            self.events: list[dict[str, Any]] = []
+
+        async def async_emit_runtime_stream(self, item: dict[str, Any]) -> None:
+            self.events.append(item)
+
+    context = BudgetContext()
+    result = await run_staged_execution(
+        task="handle release",
+        plan={"execution_stages": [{"description": "one"}, {"description": "two"}]},
+        context=cast(Any, context),
+        settings=Settings(name="StagedBudgetTestSettings", parent=Agently.settings),
+        step_budget=0,
+    )
+
+    assert result["steps"] == []
+    budget_events = [item for item in context.events if item.get("type") == "skills.execution.budget_exhausted"]
+    assert budget_events
+    assert budget_events[-1]["payload"] == {
+        "reason": "step_budget_exhausted",
+        "strategy": "staged",
+        "active_phase": "plan",
+        "step_count": 0,
+        "step_budget": 0,
+        "total_steps": 2,
+    }
 
 
 @pytest.mark.asyncio
@@ -1599,6 +1865,39 @@ def test_run_skills_task_uses_full_skill_guidance_not_only_decision_card(tmp_pat
     assert execution.skill_logs[0]["execution_mode"] == "prompt_only"
 
 
+def test_run_skills_task_compatibility_route_is_lowered_to_blocks(tmp_path):
+    _skill(tmp_path / "alpha", name="Alpha Skill", body="Alpha guidance full sentence.")
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    execution = _create_agent().run_skills_task(
+        "handle release",
+        skills=["alpha-skill"],
+        mode="required",
+    )
+
+    blocks = execution.close_snapshot["blocks"]
+    strategy_records = [
+        item
+        for item in blocks["evidence"]["execution_block_results"]
+        if item.get("source_plan_block_id") == "skills_strategy"
+    ]
+
+    assert execution.status == "success"
+    assert [block["kind"] for block in blocks["execution_plan"]["plan_blocks"]] == [
+        "skill_activation",
+        "model_request",
+    ]
+    assert [block["kind"] for block in blocks["execution_graph"]["execution_blocks"]] == [
+        "skill_activation",
+        "model_request",
+    ]
+    assert blocks["compatibility_route_label"] == "single_shot"
+    assert strategy_records[0]["kind"] == "model_request"
+    assert blocks["evidence"]["skill_evidence"][0]["skill_id"] == "alpha-skill"
+    assert blocks["evidence"]["skill_evidence"][0]["evidence_kind"] == "skill_context"
+    assert blocks["evidence"]["skill_evidence"][0]["proves_side_effect"] is False
+
+
 def test_run_skills_task_passes_output_format_to_model_request(tmp_path):
     _skill(tmp_path / "alpha", name="Alpha Skill", body="Draft a render-ready HTML fragment.")
     Agently.skills_executor.install_skills(tmp_path / "alpha")
@@ -1767,6 +2066,32 @@ async def test_orchestrator_stream_bridge_maps_prompt_only_skill_model_fields():
     assert stream.items[0].is_complete is False
 
 
+def test_http_capability_blocks_private_hosts_by_default():
+    """ISSUE-015: the built-in HTTP capability must default-deny SSRF targets."""
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecutor
+
+    assert SkillExecutor._http_host_allowed("127.0.0.1", {}) is False
+    assert SkillExecutor._http_host_allowed("169.254.169.254", {}) is False  # cloud metadata
+    assert SkillExecutor._http_host_allowed("10.0.0.5", {}) is False
+    assert SkillExecutor._http_host_allowed("8.8.8.8", {}) is True  # public IP literal, no DNS
+    # Explicit host allowlist opens an internal host.
+    assert SkillExecutor._http_host_allowed("127.0.0.1", {"allow_hosts": ["127.0.0.1"]}) is True
+    assert SkillExecutor._http_host_allowed("10.0.0.5", {"allow_private": True}) is True
+    # Denylist overrides allowance for a public host.
+    assert SkillExecutor._http_host_allowed("8.8.8.8", {"deny_hosts": ["8.8.8.8"]}) is False
+
+
+def test_skill_script_commands_exclude_package_runners():
+    """ISSUE-015: npx/npm must not be in the default script allowlist."""
+    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecutor
+
+    executor = SkillExecutor(registry=Agently.skills_executor.registry)
+    commands = executor._script_commands({"resource_index": {"resources": []}}, {})
+    assert "npx" not in commands
+    assert "npm" not in commands
+    assert "python" in commands
+
+
 def test_no_matching_skill_returns_no_match(tmp_path):
     _skill(tmp_path / "alpha", name="Alpha Skill", description="Use for alpha-only work.")
     Agently.skills_executor.install_skills(tmp_path / "alpha")
@@ -1775,3 +2100,23 @@ def test_no_matching_skill_returns_no_match(tmp_path):
 
     assert execution.status == "no_match"
     assert execution.output is None
+
+
+def test_model_decision_matches_on_keywords_not_description_words(tmp_path):
+    """ISSUE-006: candidate selection must not over-match on description words.
+
+    The Skill declares keyword ``release``; a task that merely shares a common
+    description word (``review``) but not the keyword/name must not activate it.
+    """
+    _skill(
+        tmp_path / "alpha",
+        name="Alpha Skill",
+        description="Use this to review the alpha release.",
+    )
+    Agently.skills_executor.install_skills(tmp_path / "alpha")
+
+    miss = _create_agent().run_skills_task("review the quarterly billing numbers", mode="model_decision")
+    assert miss.status == "no_match"
+
+    hit = _create_agent().run_skills_task("prepare the release notes", mode="model_decision")
+    assert hit.status != "no_match"

@@ -81,7 +81,10 @@ class DAGActionFlow:
             return []
 
         if max_rounds is None:
-            max_rounds = action.action_settings.get("loop.max_rounds", action.tool_settings.get("loop.max_rounds", 5))
+            max_rounds = action.action_settings.get(
+                "loop.max_rounds",
+                action.tool_settings.get("loop.max_rounds", None),
+            )
         if concurrency is None:
             concurrency = action.action_settings.get(
                 "loop.concurrency",
@@ -91,7 +94,7 @@ class DAGActionFlow:
             timeout = action.action_settings.get("loop.timeout", action.tool_settings.get("loop.timeout", None))
 
         if not isinstance(max_rounds, int) or max_rounds < 0:
-            max_rounds = 5
+            max_rounds = None
         if not isinstance(concurrency, int) or concurrency <= 0:
             concurrency = None
         if not isinstance(timeout, (int, float)) or timeout <= 0:
@@ -367,10 +370,16 @@ class DAGActionFlow:
             await data.async_emit("PLAN", None)
             return records
 
+        async def finalize_loop(data):
+            result = data.value if isinstance(data.value, list) else []
+            data.set_state("action_loop_result", result)
+            data.set_state("done_plans", result)
+            return result
+
         flow.to(initialize_loop)
         flow.when("PLAN").to(plan_step)
         flow.when("EXECUTE").to(execute_step_via_dag)
-        flow.when("DONE").to(lambda data: data.value).end()
+        flow.when("DONE").to(finalize_loop)
 
         execution = flow.create_execution(parent_run_context=action_loop_run)
         try:
@@ -399,7 +408,7 @@ class DAGActionFlow:
                 )
             raise
         if isinstance(result, dict):
-            result = result.get("$final_result")
+            result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
             return []
         normalized = [

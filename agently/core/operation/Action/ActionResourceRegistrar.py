@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agently.types.data import (
     ActionPolicy,
-    ExecutionEnvironmentPolicy,
-    ExecutionEnvironmentRequirement,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirement,
 )
 from agently.utils import DataFormatter, LazyImport
 from agently.utils.MCP import normalize_mcp_transport
@@ -41,22 +41,25 @@ class ActionResourceRegistrar:
         allowed_cmd_prefixes: list[str] | None,
         allowed_workdir_roots: list[str | Path] | None,
         timeout: int,
+        max_output_chars: int | None = None,
     ) -> str:
         command_text = (
             ", ".join(str(prefix) for prefix in allowed_cmd_prefixes)
             if allowed_cmd_prefixes
-            else "no command allowlist configured"
+            else "executor default safe profile"
         )
         roots_text = (
             ", ".join(str(Path(root)) for root in allowed_workdir_roots)
             if allowed_workdir_roots
-            else "current working directory only"
+            else "no Workspace root configured"
         )
         policy_desc = (
             f"Allowed command prefixes: {command_text}. "
             f"Allowed working directory roots: {roots_text}. "
             f"Timeout: {timeout} seconds."
         )
+        if max_output_chars is not None:
+            policy_desc += f" Output preview limit: {max_output_chars} characters per stream."
         base_desc = str(desc).strip()
         return f"{base_desc}\n\n{policy_desc}" if base_desc else policy_desc
 
@@ -74,8 +77,8 @@ class ActionResourceRegistrar:
         expose_to_model: bool = True,
     ):
         action = self._action
-        LazyImport.import_package("fastmcp", version_constraint=">=3")
-        from fastmcp import Client
+        LazyImport.import_package("fastmcp", version_constraint=">=3", auto_install=False)
+        from fastmcp import Client  # pyright: ignore[reportMissingImports]
 
         transport = normalize_mcp_transport(transport, headers=headers)
         normalized_tags = action._normalize_tags(tags)
@@ -104,14 +107,14 @@ class ActionResourceRegistrar:
                     sandbox_required=sandbox_required,
                     replay_safe=replay_safe,
                     expose_to_model=expose_to_model,
-                    execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+                    execution_resources=cast(list[ExecutionResourceRequirement], [
                         {
                             "requirement_id": f"mcp:{ tool.name }",
                             "kind": "mcp",
                             "scope": "agent",
                             "resource_key": tool.name,
                             "config": {"transport": transport},
-                            "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                            "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                             "approval_required": approval_required,
                         }
                     ]),
@@ -156,7 +159,7 @@ class ActionResourceRegistrar:
             side_effect_level="exec",
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"python:{ action_id }",
                     "kind": "python",
@@ -167,7 +170,7 @@ class ActionResourceRegistrar:
                         "base_vars": base_vars,
                         "allowed_return_types": allowed_return_types,
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
             ]),
         )
@@ -185,6 +188,8 @@ class ActionResourceRegistrar:
         allowed_workdir_roots: list[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        max_output_chars: int = 20000,
+        output_artifact_dir: str | Path | None = None,
     ):
         action = self._action
         model_desc = self._format_bash_sandbox_desc(
@@ -192,6 +197,7 @@ class ActionResourceRegistrar:
             allowed_cmd_prefixes=allowed_cmd_prefixes,
             allowed_workdir_roots=allowed_workdir_roots,
             timeout=timeout,
+            max_output_chars=max_output_chars,
         )
         action.register_action(
             action_id=action_id,
@@ -207,13 +213,15 @@ class ActionResourceRegistrar:
                 allowed_workdir_roots=allowed_workdir_roots,
                 timeout=timeout,
                 env=env,
+                max_output_chars=max_output_chars,
+                output_artifact_dir=output_artifact_dir,
             ),
             tags=tags,
             default_policy=default_policy,
             side_effect_level="exec",
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"bash:{ action_id }",
                     "kind": "bash",
@@ -224,8 +232,10 @@ class ActionResourceRegistrar:
                         "allowed_workdir_roots": allowed_workdir_roots,
                         "timeout": timeout,
                         "env": env,
+                        "max_output_chars": max_output_chars,
+                        "output_artifact_dir": output_artifact_dir,
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
             ]),
         )
@@ -235,7 +245,7 @@ class ActionResourceRegistrar:
         self,
         *,
         action_id: str = "run_nodejs",
-        desc: str = "Execute JavaScript with Node.js inside a managed execution environment.",
+        desc: str = "Execute JavaScript with Node.js inside a managed execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
@@ -258,7 +268,7 @@ class ActionResourceRegistrar:
             side_effect_level="exec",
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"node:{ action_id }",
                     "kind": "node",
@@ -270,7 +280,7 @@ class ActionResourceRegistrar:
                         "timeout": timeout,
                         "env": env,
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
             ]),
         )
@@ -280,7 +290,7 @@ class ActionResourceRegistrar:
         self,
         *,
         action_id: str = "run_docker",
-        desc: str = "Run a command in a Docker container through a managed execution environment.",
+        desc: str = "Run a command in a Docker container through a managed execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
@@ -306,7 +316,7 @@ class ActionResourceRegistrar:
             approval_required=True,
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"docker:{ action_id }",
                     "kind": "docker",
@@ -317,7 +327,7 @@ class ActionResourceRegistrar:
                         "timeout": timeout,
                         "default_args": default_args or [],
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, default_policy or {}),
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                     "approval_required": True,
                 }
             ]),
@@ -328,7 +338,7 @@ class ActionResourceRegistrar:
         self,
         *,
         action_id: str = "query_sqlite",
-        desc: str = "Query a SQLite database through a managed execution environment.",
+        desc: str = "Query a SQLite database through a managed execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
@@ -351,7 +361,7 @@ class ActionResourceRegistrar:
             default_policy=merged_policy,
             side_effect_level="read" if read_only else "write",
             expose_to_model=expose_to_model,
-            execution_environments=cast(list[ExecutionEnvironmentRequirement], [
+            execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"sqlite:{ action_id }",
                     "kind": "sqlite",
@@ -361,7 +371,7 @@ class ActionResourceRegistrar:
                         "database": database,
                         "uri": uri,
                     },
-                    "policy": cast(ExecutionEnvironmentPolicy, merged_policy),
+                    "policy": cast(ExecutionResourcePolicy, merged_policy),
                 }
             ]),
         )

@@ -9,6 +9,7 @@ load_dotenv(find_dotenv())
 
 from typing import cast
 from agently import Agently
+from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.model.Prompt import Prompt
 from agently.utils import SerializableStateDataNamespace
 from agently.utils import Settings
@@ -127,7 +128,11 @@ async def test_non_stream_request_retries_next_api_key_on_failover(monkeypatch):
         events.append((event, payload))
 
     assert [headers.get("Authorization") for headers in calls] == ["Bearer key-a", "Bearer key-b"]
-    assert events == [("message", '{"choices":[{"delta":{"content":"ok"}}]}'), ("message", "[DONE]")]
+    assert events == [
+        ("message", '{"choices":[{"delta":{"content":"ok"}}]}'),
+        ("message", "[DONE]"),
+        ("status", {"status": "completed", "attempt_index": 1, "retry": False}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -158,16 +163,70 @@ async def test_request_model_retries_transient_provider_error_before_output_star
         events.append((event, payload))
 
     assert calls == 2
-    assert events == [("message", '{"choices":[{"delta":{"content":"ok"}}]}'), ("message", "[DONE]")]
+    assert events == [
+        (
+            "status",
+            {
+                "status": "failed",
+                "attempt_index": 1,
+                "retry": True,
+                "next_attempt_index": 2,
+                "reason": "server disconnected",
+                "error_type": "RemoteProtocolError",
+            },
+        ),
+        ("message", '{"choices":[{"delta":{"content":"ok"}}]}'),
+        ("message", "[DONE]"),
+        ("status", {"status": "completed", "attempt_index": 2, "retry": False}),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_request_model_does_not_retry_transient_provider_error_after_output_started(monkeypatch):
+async def test_request_model_retries_transient_provider_error_after_output_started_by_default(monkeypatch):
     plugin = build_plugin(
         {
             "base_url": "https://api.example.com/v1",
             "model": "m1",
             "request_retry": {"max_attempts": 2},
+        },
+        {"input": "hello"},
+    )
+    calls = 0
+
+    async def fake_legacy(_request_data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield "message", '{"choices":[{"delta":{"content":"partial"}}]}'
+            yield "error", RemoteProtocolError("server disconnected")
+            return
+        yield "message", '{"choices":[{"delta":{"content":"replacement"}}]}'
+        yield "message", "[DONE]"
+
+    monkeypatch.setattr(plugin, "_request_model_legacy", fake_legacy)
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert calls == 2
+    assert events[0] == ("message", '{"choices":[{"delta":{"content":"partial"}}]}')
+    assert events[1][0] == "status"
+    assert events[1][1]["status"] == "failed"
+    assert events[1][1]["retry"] is True
+    assert events[1][1]["next_attempt_index"] == 2
+    assert events[1][1]["reason"] == "server disconnected"
+    assert events[2] == ("message", '{"choices":[{"delta":{"content":"replacement"}}]}')
+    assert events[-1] == ("status", {"status": "completed", "attempt_index": 2, "retry": False})
+
+
+@pytest.mark.asyncio
+async def test_request_model_can_disable_retry_after_output_started(monkeypatch):
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "request_retry": {"max_attempts": 2, "after_output": False},
         },
         {"input": "hello"},
     )
@@ -187,8 +246,53 @@ async def test_request_model_does_not_retry_transient_provider_error_after_outpu
 
     assert calls == 1
     assert events[0] == ("message", '{"choices":[{"delta":{"content":"partial"}}]}')
-    assert events[1][0] == "error"
-    assert isinstance(events[1][1], RemoteProtocolError)
+    assert events[1][0] == "status"
+    assert events[1][1]["status"] == "failed"
+    assert events[1][1]["retry"] is False
+    assert events[1][1]["reason"] == "server disconnected"
+    assert events[2][0] == "error"
+    assert isinstance(events[2][1], RemoteProtocolError)
+
+
+@pytest.mark.asyncio
+async def test_request_model_retries_transient_provider_error_after_output_when_enabled(monkeypatch):
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "request_retry": {"max_attempts": 2, "after_output": True},
+        },
+        {"input": "hello"},
+    )
+    calls = 0
+
+    async def fake_legacy(_request_data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield "message", '{"choices":[{"delta":{"content":"partial"}}]}'
+            yield "error", RemoteProtocolError("peer closed connection")
+            return
+        yield "message", '{"choices":[{"delta":{"content":"replacement"}}]}'
+        yield "message", "[DONE]"
+
+    monkeypatch.setattr(plugin, "_request_model_legacy", fake_legacy)
+
+    events = [event async for event in plugin.request_model(plugin.generate_request_data())]
+
+    assert calls == 2
+    assert events[1] == (
+        "status",
+        {
+            "status": "failed",
+            "attempt_index": 1,
+            "retry": True,
+            "next_attempt_index": 2,
+            "reason": "peer closed connection",
+            "error_type": "RemoteProtocolError",
+        },
+    )
+    assert events[-1] == ("status", {"status": "completed", "attempt_index": 2, "retry": False})
 
 
 @pytest.mark.asyncio
@@ -213,6 +317,41 @@ async def test_broadcast_response_maps_non_stream_chat_message_content():
     assert ("done", "done text") in events
     original_done = next(payload for event, payload in events if event == "original_done")
     assert original_done["choices"][0]["message"]["content"] == "done text"
+
+
+@pytest.mark.asyncio
+async def test_broadcast_response_preserves_core_status_record():
+    plugin = build_plugin({"base_url": "https://api.example.com/v1", "model": "m1"}, {"input": "hello"})
+
+    async def response_generator():
+        yield "status", {"status": "failed", "attempt_index": 1, "retry": True}
+
+    events = [item async for item in plugin.broadcast_response(response_generator())]
+
+    assert events == [("status", {"status": "failed", "attempt_index": 1, "retry": True})]
+
+
+@pytest.mark.asyncio
+async def test_broadcast_response_resets_attempt_text_after_retry_status():
+    plugin = build_plugin({"base_url": "https://api.example.com/v1", "model": "m1"}, {"input": "hello"})
+
+    async def response_generator():
+        yield "message", '{"choices":[{"delta":{"content":"partial"}}]}'
+        yield "status", {
+            "status": "failed",
+            "attempt_index": 1,
+            "retry": True,
+            "next_attempt_index": 2,
+            "reason": "server disconnected",
+        }
+        yield "message", '{"choices":[{"delta":{"content":"replacement"}}]}'
+        yield "message", "[DONE]"
+
+    events = [item async for item in plugin.broadcast_response(response_generator())]
+
+    assert [payload for event, payload in events if event == "delta"] == ["partial", "replacement"]
+    assert ("done", "replacement") in events
+    assert ("done", "partialreplacement") not in events
 
 
 @pytest.mark.asyncio
@@ -558,10 +697,16 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
     async for event, payload in plugin.request_model(request_data):
         events.append((event, payload))
 
-    assert len(events) == 1
-    assert events[0][0] == "error"
-    assert isinstance(events[0][1], TimeoutError)
-    assert "First token timeout after 0.01 seconds." in str(events[0][1])
+    statuses = [payload for event, payload in events if event == "status"]
+    assert len(statuses) == 2
+    assert statuses[0]["status"] == "failed"
+    assert statuses[0]["retry"] is True
+    assert statuses[0]["reason"] == "First token timeout after 0.01 seconds."
+    assert statuses[-1]["status"] == "failed"
+    assert statuses[-1]["retry"] is False
+    assert events[-1][0] == "error"
+    assert isinstance(events[-1][1], TimeoutError)
+    assert "First token timeout after 0.01 seconds." in str(events[-1][1])
 
 
 @pytest.mark.asyncio
@@ -609,8 +754,171 @@ async def test_stream_idle_timeout_returns_timeout_error_event(monkeypatch: pyte
     async for event, payload in plugin.request_model(request_data):
         events.append((event, payload))
 
-    assert len(events) == 2
+    assert len(events) == 3
     assert events[0][0] == "message"
-    assert events[1][0] == "error"
-    assert isinstance(events[1][1], TimeoutError)
-    assert "Stream idle timeout after 0.01 seconds." in str(events[1][1])
+    assert events[1][0] == "status"
+    assert events[1][1]["status"] == "failed"
+    assert events[1][1]["retry"] is False
+    assert events[1][1]["reason"] == "Stream idle timeout after 0.01 seconds."
+    assert events[2][0] == "error"
+    assert isinstance(events[2][1], TimeoutError)
+    assert "Stream idle timeout after 0.01 seconds." in str(events[2][1])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_response_idle_timeout_returns_stall_error(monkeypatch: pytest.MonkeyPatch):
+    # A non-streaming request awaits one blocking response, which the streaming
+    # first_token/stream_idle guards never cover. With stream_idle_timeout set, a
+    # provider that opens the request but never returns must surface as a liveness
+    # stall so the framework can capture liveness evidence and fall back, instead
+    # of hanging until the coarse task-level no-progress budget.
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            del url, json, headers
+            await asyncio.sleep(10)
+            raise AssertionError("post should have been cancelled by the idle deadline")
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": False,
+            "stream_idle_timeout": 0.01,
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    statuses = [payload for event, payload in events if event == "status"]
+    assert statuses
+    assert statuses[-1]["status"] == "failed"
+    assert any(
+        "Non-streaming response made no progress before idle deadline" in str(payload.get("reason") or "")
+        for payload in statuses
+    )
+    assert events[-1][0] == "error"
+    assert isinstance(events[-1][1], RuntimeStageStallError)
+    assert events[-1][1].stage == "response_materialization"
+    assert events[-1][1].timeout_seconds == 0.01
+    assert "stream_idle_timeout=0.01" in str(events[-1][1])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_response_idle_timeout_allows_api_key_failover(monkeypatch: pytest.MonkeyPatch):
+    calls: list[dict[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, content: bytes):
+            self.status_code = status_code
+            self.content = content
+            self.text = content.decode()
+            self.headers = {"Content-Type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            del url, json
+            calls.append(dict(self.headers if headers is None else headers))
+            if len(calls) == 1:
+                await asyncio.sleep(10)
+                raise AssertionError("first post should have been cancelled by the idle deadline")
+            return FakeResponse(200, b'{"choices":[{"delta":{"content":"ok"}}]}')
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "api_key": "key-a",
+            "stream": False,
+            "stream_idle_timeout": 0.01,
+            "_api_key_pool_runtime": {
+                "pool_id": "example",
+                "failover": {"handler": lambda _context: "try_next", "max_attempts": 2},
+                "keys": [
+                    {"id": "a", "value": "key-a", "index": 0},
+                    {"id": "b", "value": "key-b", "index": 1},
+                ],
+                "selected_key_id": "a",
+                "attempts": [{"key_id": "a", "action": "initial"}],
+            },
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert [headers.get("Authorization") for headers in calls] == ["Bearer key-a", "Bearer key-b"]
+    assert events == [
+        ("message", '{"choices":[{"delta":{"content":"ok"}}]}'),
+        ("message", "[DONE]"),
+        ("status", {"status": "completed", "attempt_index": 1, "retry": False}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_response_without_idle_timeout_is_unbounded(monkeypatch: pytest.MonkeyPatch):
+    # Without an explicit stream_idle_timeout the non-streaming path stays
+    # unbounded (previous behavior): a normal response returns without any
+    # liveness deadline being applied.
+    class FakeResponse:
+        def __init__(self, status_code: int, content: bytes):
+            self.status_code = status_code
+            self.content = content
+            self.text = content.decode()
+            self.headers = {"Content-Type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            del url, json, headers
+            return FakeResponse(200, b'{"choices":[{"delta":{"content":"ok"}}]}')
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+
+    plugin = build_plugin(
+        {"base_url": "https://api.example.com/v1", "model": "m1", "stream": False},
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert ("message", '{"choices":[{"delta":{"content":"ok"}}]}') in events
+    assert not any(
+        event == "error" and isinstance(payload, TimeoutError) for event, payload in events
+    )

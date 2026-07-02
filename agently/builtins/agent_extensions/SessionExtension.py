@@ -14,21 +14,22 @@
 
 from uuid import uuid4
 
-from typing import TYPE_CHECKING, Sequence
+from typing import Any, TYPE_CHECKING, Sequence
+from typing_extensions import Self
 
 from agently.core import BaseAgent, Session
 from agently.core.runtime.RuntimeContext import get_current_request_run_context
 
 if TYPE_CHECKING:
     from agently.core import Prompt
-    from agently.core.model.ModelRequest import ModelResponseResult
+    from agently.core.model import ModelRequestResult
     from agently.types.data import ChatMessage, ChatMessageDict
     from agently.utils import Settings
     from agently.types.plugins import SessionAnalysisHandler, SessionResizeHandler
 
 
 class SessionExtension(BaseAgent):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.sessions: dict[str, Session] = {}
         self.activated_session: Session | None = None
@@ -41,7 +42,7 @@ class SessionExtension(BaseAgent):
         self.extension_handlers.append("request_prefixes", self._session_request_prefix)
         self.extension_handlers.append("finally", self._session_finally)
 
-    def register_session_analysis_handler(self, handler: "SessionAnalysisHandler"):
+    def register_session_analysis_handler(self, handler: "SessionAnalysisHandler") -> Self:
         """
         Register analysis handler for session resize planning.
 
@@ -53,7 +54,7 @@ class SessionExtension(BaseAgent):
             session.register_analysis_handler(handler)
         return self
 
-    def register_session_resize_handler(self, strategy_name: str, handler: "SessionResizeHandler"):
+    def register_session_resize_handler(self, strategy_name: str, handler: "SessionResizeHandler") -> Self:
         """
         Register resize handler for a strategy.
 
@@ -93,7 +94,7 @@ class SessionExtension(BaseAgent):
         self.agent_prompt.set("chat_history", self.activated_session.context_window)
         return self
 
-    def activate_session(self, *, session_id: str | None = None):
+    def activate_session(self, *, session_id: str | None = None) -> Self:
         if session_id is not None and session_id in self.sessions:
             self.activated_session = self.sessions[session_id]
         else:
@@ -108,6 +109,9 @@ class SessionExtension(BaseAgent):
 
         self.__bind_session_resize_pipeline(self.activated_session)
         self.settings.set("runtime.session_id", self.activated_session.id)
+        refresh_workspace = getattr(self, "_refresh_default_workspace_binding", None)
+        if callable(refresh_workspace):
+            refresh_workspace()
         self._emit_session_runtime_observation(
             "activated",
             message=f"Session '{ self.activated_session.id }' activated.",
@@ -118,10 +122,13 @@ class SessionExtension(BaseAgent):
         )
         return self._refill_agent_chat_history_with_session()
 
-    def deactivate_session(self):
+    def deactivate_session(self) -> Self:
         previous_session_id = self.activated_session.id if self.activated_session is not None else None
         self.activated_session = None
         self.settings.set("runtime.session_id", None)
+        refresh_workspace = getattr(self, "_refresh_default_workspace_binding", None)
+        if callable(refresh_workspace):
+            refresh_workspace()
         if "chat_history" in self.agent_prompt:
             del self.agent_prompt["chat_history"]
         self.agent_prompt.set("chat_history", [])
@@ -136,7 +143,7 @@ class SessionExtension(BaseAgent):
             )
         return self
 
-    def reset_chat_history(self):
+    def reset_chat_history(self) -> Self:
         if self.activated_session is None:
             return super().reset_chat_history()
         self.activated_session.reset_chat_history()
@@ -145,7 +152,7 @@ class SessionExtension(BaseAgent):
     def set_chat_history(
         self,
         chat_history: "Sequence[ChatMessage | ChatMessageDict]",
-    ):
+    ) -> Self:
         if self.activated_session is None:
             return super().set_chat_history(chat_history)
         self.activated_session.set_chat_history(chat_history)
@@ -154,13 +161,13 @@ class SessionExtension(BaseAgent):
     def add_chat_history(
         self,
         chat_history: "Sequence[ChatMessage | ChatMessageDict] | ChatMessage | ChatMessageDict",
-    ):
+    ) -> Self:
         if self.activated_session is None:
             return super().add_chat_history(chat_history)
         self.activated_session.add_chat_history(chat_history)
         return self._refill_agent_chat_history_with_session()
 
-    def clean_context_window(self):
+    def clean_context_window(self) -> Self:
         if self.activated_session is None:
             return super().reset_chat_history()
         self.activated_session.clean_context_window()
@@ -184,7 +191,7 @@ class SessionExtension(BaseAgent):
                 run=self._get_runtime_request_run_context(_settings),
             )
 
-    async def _session_finally(self, result: "ModelResponseResult", settings: "Settings"):
+    async def _session_finally(self, result: "ModelRequestResult", settings: "Settings"):
         if self.activated_session is None:
             return
 

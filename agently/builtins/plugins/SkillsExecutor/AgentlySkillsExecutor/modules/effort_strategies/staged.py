@@ -59,9 +59,13 @@ async def run_staged_strategy(
             execution_mode="staged",
         )
 
+    # The staged runner returns an error payload (rather than raising) when the
+    # plan has no execution_stages. Propagate that as an error status instead of
+    # reporting a misleading success.
+    result_status = str(_ensure_dict(result).get("status") or "").strip().lower()
     return executor._build_execution(
         execution_id=execution_id,
-        status="success",
+        status="error" if result_status == "error" else "success",
         plan=plan,
         runtime_stream=runtime_stream,
         skill_logs=[],

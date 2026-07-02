@@ -313,7 +313,7 @@ async def main():
         goal="",
         scope={"task_id": TASK_ID},
         budget={"chars": 1600},
-        profile="software_dev",
+        profile="auto",
     )
 
     all_items_are_open_issues = bool(issues) and all(item.get("state") == "open" for item in issues)

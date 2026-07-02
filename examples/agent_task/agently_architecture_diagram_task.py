@@ -7,7 +7,7 @@ Environment:
     DEEPSEEK_API_KEY in the shell or .env file.
     Set AGENT_TASK_MODEL_PROVIDER=ollama for local Ollama instead.
 
-This example exercises the 4.1.3.7 AgentExecution-backed task strategy on a
+This example exercises the 4.1.3.8 AgentExecution-backed task strategy on a
 longer architecture-document task:
 
     goal + effort + task strategy
@@ -82,7 +82,7 @@ SOURCE_PATHS = [
     "agently/core/application/AgentExecution/Result.py",
     "agently/core/orchestration/TaskDAG/TaskDAGExecutor.py",
     "agently/core/orchestration/TriggerFlow/TriggerFlow.py",
-    "agently/core/session/Workspace/Workspace.py",
+    "agently/core/workspace/Workspace.py",
     "agently/core/application/SkillsExecutor/SkillsExecutor.py",
     "agently/builtins/plugins/ActionRuntime/AgentlyActionRuntime.py",
 ]
@@ -96,12 +96,12 @@ EXCERPT_TERMS = [
     "DynamicTask",
     "TriggerFlow",
     "ModelRequest",
-    "ModelResponse",
+    "ModelRequestResult",
     "Workspace",
     "Action",
     "ActionRuntime",
     "SkillsExecutor",
-    "ExecutionEnvironment",
+    "ExecutionResource",
     "RuntimeEvent",
     "EventCenter",
     "goal",
@@ -254,7 +254,7 @@ async def main() -> None:
     stream_trace_path = workspace_dir / "outputs" / "agently_architecture_diagram_stream.jsonl"
     stream_trace_path.parent.mkdir(parents=True, exist_ok=True)
     with stream_trace_path.open("w", encoding="utf-8") as trace_file:
-        async for item in execution.get_async_generator():
+        async for item in execution.get_async_generator(type="instant"):
             stream_items.append(item)
             trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
             trace_file.flush()
@@ -272,7 +272,7 @@ async def main() -> None:
             "architecture_diagram_skill_guidance": ARCHITECTURE_DIAGRAM_SKILL_GUIDANCE,
             "source_paths": SOURCE_PATHS,
             "expected_output_file": OUTPUT_FILE,
-            "current_release_slice": "4.1.3.7 AgentExecution-backed AgentTaskLoop hardening",
+            "current_release_slice": "4.1.3.8 AgentExecution-backed AgentTaskLoop hardening",
         },
         rules=JUDGE_RULES,
     )

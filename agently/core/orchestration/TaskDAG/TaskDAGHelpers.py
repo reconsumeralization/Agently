@@ -75,6 +75,56 @@ def _fallback_action(task: TaskDAGNode) -> str | None:
     return None
 
 
+def _fallback_retry_config(task: TaskDAGNode) -> dict[str, Any] | None:
+    """Return bounded retry settings when a node's fallback is on_error='retry'.
+
+    Shape: ``{'max_attempts': int, 'backoff_base': float, 'backoff_max': float}``.
+    Returns None when the node does not request retry. backoff is exponential and
+    clamped; max_attempts counts total attempts (>= 1).
+    """
+    if str(_fallback_action(task) or "").strip().lower() != "retry":
+        return None
+    config = task.fallback if isinstance(task.fallback, Mapping) else {}
+    max_attempts = _coerce_positive_int(config.get("max_attempts"), default=3)
+    backoff_base = _coerce_positive_float(config.get("backoff_base"), default=0.5)
+    backoff_max = _coerce_positive_float(config.get("backoff_max"), default=30.0)
+    return {
+        "max_attempts": max(1, max_attempts),
+        "backoff_base": backoff_base,
+        "backoff_max": max(backoff_base, backoff_max),
+    }
+
+
+def _fallback_terminal_action(task: TaskDAGNode) -> str | None:
+    """The action applied once retries are exhausted (or when no retry is set).
+
+    For ``on_error='retry'`` the post-retry action is ``fallback.then`` (default
+    'fail'); otherwise it is the primary fallback action.
+    """
+    action = str(_fallback_action(task) or "").strip().lower()
+    if action == "retry":
+        if isinstance(task.fallback, Mapping):
+            return str(task.fallback.get("then") or "fail")
+        return "fail"
+    return _fallback_action(task)
+
+
+def _coerce_positive_int(value: Any, *, default: int) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result >= 1 else default
+
+
+def _coerce_positive_float(value: Any, *, default: float) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result > 0 else default
+
+
 def _validate_semantic_outputs(
     graph: TaskDAG,
     task_by_id: Mapping[str, TaskDAGNode],

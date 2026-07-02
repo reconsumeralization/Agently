@@ -60,8 +60,8 @@ from agently.types.data import (
     ActionResult,
     ActionRunContext,
     ActionSpec,
-    ExecutionEnvironmentPolicy,
-    ExecutionEnvironmentRequirement,
+    ExecutionResourcePolicy,
+    ExecutionResourceRequirement,
 )
 from agently.types.plugins import (
     ActionExecutionHandler,
@@ -130,18 +130,20 @@ class Action:
             parent=parent_settings,
         )
         self.action_settings = SettingsNamespace(self.settings, "action")
-        self.action_settings.setdefault("loop.max_rounds", 5)
+        self.action_settings.setdefault("loop.max_rounds", None)
         self.action_settings.setdefault("loop.concurrency", None)
         self.action_settings.setdefault("loop.timeout", None)
+        self.action_settings.setdefault("loop.max_consecutive_failed_rounds_per_action", 2)
         self.action_settings.setdefault("protocol", "structured_plan")
         self.action_settings.setdefault("planning_model_key", None)
         self.action_settings.setdefault("policy.global", {})
         self.action_settings.setdefault("policy.agent", {})
 
         self.tool_settings = SettingsNamespace(self.settings, "tool")
-        self.tool_settings.setdefault("loop.max_rounds", 5)
+        self.tool_settings.setdefault("loop.max_rounds", None)
         self.tool_settings.setdefault("loop.concurrency", None)
         self.tool_settings.setdefault("loop.timeout", None)
+        self.tool_settings.setdefault("loop.max_consecutive_failed_rounds_per_action", 2)
 
         self.action_registry = ActionRegistry(name="ActionRegistry")
         self.action_dispatcher = ActionDispatcher(self.action_registry, self.settings)
@@ -214,6 +216,7 @@ class Action:
                 "error": "Action artifact does not belong to the requested action_call_id.",
             }
         else:
+            value = artifact.get("value")
             result = {
                 "ok": True,
                 "status": "success",
@@ -222,7 +225,9 @@ class Action:
                 "artifact_type": artifact.get("artifact_type", ""),
                 "label": artifact.get("label", ""),
                 "media_type": artifact.get("media_type", ""),
-                "value": artifact.get("value"),
+                "value": value,
+                "data": value,
+                "result": value,
                 "meta": artifact.get("meta", {}),
             }
 
@@ -290,7 +295,7 @@ class Action:
         replay_safe: bool,
         expose_to_model: bool,
         executor_type: str,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None,
+        execution_resources: list[ExecutionResourceRequirement] | None,
         meta: dict[str, Any] | None,
     ) -> "ActionSpec":
         spec = cast(ActionSpec, {
@@ -306,7 +311,7 @@ class Action:
             "replay_safe": replay_safe,
             "expose_to_model": expose_to_model,
             "executor_type": executor_type,
-            "execution_environments": execution_environments if execution_environments is not None else [],
+            "execution_resources": execution_resources if execution_resources is not None else [],
             "meta": meta if meta is not None else {},
         })
         if returns is not None:
@@ -329,7 +334,7 @@ class Action:
         sandbox_required: bool = False,
         replay_safe: bool = True,
         expose_to_model: bool = True,
-        execution_environments: list[ExecutionEnvironmentRequirement] | None = None,
+        execution_resources: list[ExecutionResourceRequirement] | None = None,
         meta: dict[str, Any] | None = None,
     ):
         if executor is None:
@@ -351,7 +356,7 @@ class Action:
             replay_safe=replay_safe,
             expose_to_model=expose_to_model,
             executor_type=executor_type,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
             meta=meta,
         )
         self.action_registry.register(spec, executor, func=func)
@@ -386,6 +391,20 @@ class Action:
     def tag(self, action_ids: str | list[str], tags: str | list[str]):
         self.action_registry.tag(action_ids, tags)
         return self
+
+    def unregister_action(self, action_ids: str | list[str]) -> list[str]:
+        """Unregister one or more actions, returning the ids actually removed.
+
+        Reverses scoped registrations (e.g. capability mounts) so a one-time
+        registration does not persist on the host.
+        """
+        ids = self._normalize_registered_action_ids(action_ids)
+        removed: list[str] = []
+        for action_id in ids:
+            if self.action_registry.unregister(action_id):
+                self.action_funcs.pop(action_id, None)
+                removed.append(action_id)
+        return removed
 
     def action_func(self, func: Callable[P, R]) -> Callable[P, R]:
         action_id = func.__name__
@@ -800,6 +819,8 @@ class Action:
         allowed_workdir_roots: list[str | Path] | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        max_output_chars: int = 20000,
+        output_artifact_dir: str | Path | None = None,
     ):
         return self._resource_registrar.register_bash_sandbox_action(
             action_id=action_id,
@@ -811,13 +832,15 @@ class Action:
             allowed_workdir_roots=allowed_workdir_roots,
             timeout=timeout,
             env=env,
+            max_output_chars=max_output_chars,
+            output_artifact_dir=output_artifact_dir,
         )
 
     def register_nodejs_action(
         self,
         *,
         action_id: str = "run_nodejs",
-        desc: str = "Execute JavaScript with Node.js inside a managed execution environment.",
+        desc: str = "Execute JavaScript with Node.js inside a managed execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
@@ -842,7 +865,7 @@ class Action:
         self,
         *,
         action_id: str = "run_docker",
-        desc: str = "Run a command in a Docker container through a managed execution environment.",
+        desc: str = "Run a command in a Docker container through a managed execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
@@ -867,7 +890,7 @@ class Action:
         self,
         *,
         action_id: str = "query_sqlite",
-        desc: str = "Query a SQLite database through a managed execution environment.",
+        desc: str = "Query a SQLite database through a managed execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,

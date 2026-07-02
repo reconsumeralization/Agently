@@ -76,7 +76,7 @@ flow 定义不匹配，`inspect_load(...)` 返回 `status="invalid_snapshot"`，
 
 `load(saved_state)` 是同步 load 边界，适用于所需 resource 已经在当前进程中可用的
 snapshot。重启或 worker handoff 路径使用 `async_load(...)`，因为它会在继续运行前
-校验缺失资源，并可重建 managed execution environments。
+校验缺失资源，并可重建 managed execution resources。
 
 ### 跨 pause_for 的恢复
 

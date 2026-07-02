@@ -31,8 +31,8 @@ if TYPE_CHECKING:
     from .TriggerFlow import TriggerFlow
     from agently.types.trigger_flow import TriggerFlowAllHandlers
     from agently.types.data import (
-        ExecutionEnvironmentHandle,
-        ExecutionEnvironmentRequirement,
+        ExecutionResourceHandle,
+        ExecutionResourceRequirement,
         RunContext,
         SerializableValue,
     )
@@ -54,7 +54,7 @@ from agently.types.trigger_flow.runtime_keys import (
     TRANSIENT_AGGREGATION_STATE_KEYS,
 )
 from agently.types.data import EMPTY, RunContext, RuntimeEvent
-from agently.types.data import ExecutionEnvironmentRequirement
+from agently.types.data import ExecutionResourceRequirement
 from .Control import (
     TriggerFlowPauseSignal,
     TRIGGER_FLOW_STATUS_CANCELLED,
@@ -67,6 +67,7 @@ from .Control import (
     TRIGGER_FLOW_LIFECYCLE_SEALED,
 )
 from .Signal import TriggerFlowSignal, TriggerFlowSignalType
+from .SignalNet import TriggerFlowSignalNet
 from .ExecutionState import INTERVENTIONS_STATE_KEY, TriggerFlowInterventionMode
 from .ExecutionResult import TriggerFlowExecutionResult
 from .ExecutionInterrupts import TriggerFlowExecutionInterrupts
@@ -111,7 +112,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         auto_close_timeout: float | None = 10.0,
         owner_id: str | None = None,
         lease_ttl: float | None = None,
-        execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        execution_resources: "list[ExecutionResourceRequirement] | None" = None,
         intervention_mode: TriggerFlowInterventionMode = None,
         intervention_policy: Any = None,
         resume_handle_exposed: bool = True,
@@ -176,8 +177,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._state_version = 0
         self._owner_id = owner_id
         self._lease_ttl = lease_ttl
-        self._execution_environment_requirements = execution_environments if execution_environments is not None else []
-        self._managed_execution_environment_handles: list["ExecutionEnvironmentHandle"] = []
+        self._execution_resource_requirements = execution_resources if execution_resources is not None else []
+        self._managed_execution_resource_handles: list["ExecutionResourceHandle"] = []
         self._resource_requirements: list[dict[str, Any]] = []
         self._compaction_segments: list[dict[str, Any]] = []
         self._retained_lineage_anchors: list[dict[str, Any]] = []
@@ -189,6 +190,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._task_origins: dict[asyncio.Task[Any], str] = {}
         self._accepted_signal_ids: set[str] = set()
+        self._signal_net = TriggerFlowSignalNet(self)
         self._active_runtime_operation_count = 0
         self._active_handler_count = 0
         self._auto_close_task: asyncio.Task[Any] | None = None
@@ -287,35 +289,35 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._persistence = TriggerFlowExecutionPersistence(self)
         self._runtime_io = TriggerFlowExecutionRuntimeIO(self)
 
-    async def _ensure_execution_environments(self):
-        if not self._execution_environment_requirements:
+    async def _ensure_execution_resources(self):
+        if not self._execution_resource_requirements:
             return
-        from agently.base import execution_environment
+        from agently.base import execution_resource
 
         owner_id = self._owner_id or self.id
-        for requirement in self._execution_environment_requirements:
+        for requirement in self._execution_resource_requirements:
             normalized_requirement = dict(requirement)
             normalized_requirement.setdefault("scope", "execution")
             normalized_requirement.setdefault("owner_id", owner_id)
-            handle = await execution_environment.async_ensure(
-                cast(ExecutionEnvironmentRequirement, normalized_requirement),
+            handle = await execution_resource.async_ensure(
+                cast(ExecutionResourceRequirement, normalized_requirement),
                 scope="execution",
                 owner_id=owner_id,
             )
-            self._managed_execution_environment_handles.append(handle)
+            self._managed_execution_resource_handles.append(handle)
             resource_key = str(handle.get("resource_key", normalized_requirement.get("resource_key", "")))
             if resource_key:
                 self.set_runtime_resource(resource_key, handle.get("resource"))
 
-    async def _release_managed_execution_environments(self):
-        if not self._managed_execution_environment_handles:
+    async def _release_managed_execution_resources(self):
+        if not self._managed_execution_resource_handles:
             return
-        from agently.base import execution_environment
+        from agently.base import execution_resource
 
-        handles = list(self._managed_execution_environment_handles)
-        self._managed_execution_environment_handles.clear()
+        handles = list(self._managed_execution_resource_handles)
+        self._managed_execution_resource_handles.clear()
         for handle in handles:
-            await execution_environment.async_release(handle)
+            await execution_resource.async_release(handle)
 
     def _to_serializable_value(self, value: Any):
         return json.loads(StateData({"value": value}).dump("json"))["value"]
@@ -713,6 +715,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     def get_lifecycle_state(self):
         return self._lifecycle_state
 
+    @property
+    def started(self) -> bool:
+        """True once async_start has begun this execution's run."""
+        return self._started
+
     def is_open(self):
         return self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_OPEN
 
@@ -1012,7 +1019,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                         )
 
                 await self.async_stop_stream()
-                await self._release_managed_execution_environments()
+                await self._release_managed_execution_resources()
 
                 self._closed_at = time.time()
                 self._close_result = result
@@ -2064,14 +2071,14 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         *,
         encoding: str | None = "utf-8",
         runtime_resources: dict[str, Any] | None = None,
-        execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        execution_resources: "list[ExecutionResourceRequirement] | None" = None,
         validate_resources: bool = False,
     ):
         return self._persistence.load(
             state,
             encoding=encoding,
             runtime_resources=runtime_resources,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
             validate_resources=validate_resources,
         )
 
@@ -2162,13 +2169,13 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         *,
         encoding: str | None = "utf-8",
         runtime_resources: dict[str, Any] | None = None,
-        execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        execution_resources: "list[ExecutionResourceRequirement] | None" = None,
     ):
         return self._persistence.inspect_load(
             state,
             encoding=encoding,
             runtime_resources=runtime_resources,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
         )
 
     def inspect_runtime_event_records(self, records: list[dict[str, Any]]):
@@ -2183,15 +2190,15 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         *,
         encoding: str | None = "utf-8",
         runtime_resources: dict[str, Any] | None = None,
-        execution_environments: "list[ExecutionEnvironmentRequirement] | None" = None,
+        execution_resources: "list[ExecutionResourceRequirement] | None" = None,
         require_resources: bool = True,
-        restore_execution_environments: bool = True,
+        restore_execution_resources: bool = True,
     ):
         resolver_report = await self._persistence.async_resolve_load_resources(
             state,
             encoding=encoding,
             runtime_resources=runtime_resources,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
             require_resources=require_resources,
         )
         resolved_runtime_resources = dict(runtime_resources or {})
@@ -2200,15 +2207,15 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             state,
             encoding=encoding,
             runtime_resources=resolved_runtime_resources or None,
-            execution_environments=execution_environments,
+            execution_resources=execution_resources,
             validate_resources=False,
         )
-        if restore_execution_environments:
-            await self._ensure_execution_environments()
+        if restore_execution_resources:
+            await self._ensure_execution_resources()
         load = self.inspect_load(
             self.save(),
             runtime_resources=None,
-            execution_environments=None,
+            execution_resources=None,
         )
         load["diagnostics"] = [
             *load.get("diagnostics", []),
@@ -2409,7 +2416,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if not self._accepts_signal_in_current_lifecycle(signal):
             await self._reject_signal(signal)
             return None
-        self._accepted_signal_ids.add(signal.id)
+        self._signal_net.accept_signal(signal)
         self._mark_activity()
         token = self._without_current_concurrency_permit_context()
         try:
@@ -2451,7 +2458,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if not self._accepts_signal_in_current_lifecycle(signal):
             loop.create_task(self._reject_signal(signal))
             return None
-        self._accepted_signal_ids.add(signal.id)
+        self._signal_net.accept_signal(signal)
         self._mark_activity()
         token = self._without_current_concurrency_permit_context()
         try:
@@ -2468,17 +2475,25 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._active_runtime_operation_count += 1
         self._mark_activity()
         try:
-            return await self._async_dispatch_signal_inner(signal)
+            result = await self._async_dispatch_signal_inner(signal)
+            self._signal_net.mark_completed(signal)
+            return result
+        except asyncio.CancelledError:
+            self._signal_net.mark_interrupted(signal, reason="dispatch cancelled")
+            raise
+        except BaseException as error:
+            self._signal_net.mark_failed(signal, error)
+            raise
         finally:
             self._active_runtime_operation_count -= 1
             self._mark_activity()
 
     async def _async_dispatch_signal_inner(self, signal: TriggerFlowSignal):
-        signal_preaccepted = signal.id in self._accepted_signal_ids
+        signal_preaccepted = self._signal_net.is_accepted(signal.id)
         if not self._accepts_signal_in_current_lifecycle(signal, preaccepted=signal_preaccepted):
             await self._reject_signal(signal)
             return None
-        self._accepted_signal_ids.discard(signal.id)
+        self._signal_net.mark_running(signal)
 
         self._mark_activity()
         await self._resume_interrupts_for_signal(signal)
@@ -2490,10 +2505,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             payload=signal.to_debug_dict(),
         )
         tasks = []
-        handlers = self._handlers[signal.trigger_type]
+        signal_handlers = list(self._signal_net.iter_handlers(signal, self._handlers))
 
-        if signal.trigger_event in handlers:
-            for handler_id, handler in handlers[signal.trigger_event].items():
+        if signal_handlers:
+            for handler_id, handler in signal_handlers:
                 operator = self._get_handler_operator(handler_id)
                 chunk_run_context = self._create_chunk_run_context(operator, signal) if operator is not None else None
                 await self._emit_runtime_event(
@@ -2657,6 +2672,40 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._mark_activity()
         return None
 
+    def on(
+        self,
+        trigger_event: str,
+        handler: Any,
+        *,
+        trigger_type: TriggerFlowSignalType = "event",
+        binding_id: str | None = None,
+        handler_ref: dict[str, Any] | str | None = None,
+        metadata: dict[str, Any] | None = None,
+        durable: bool = True,
+    ):
+        return self._signal_net.register_dynamic_handler(
+            trigger_event,
+            handler,
+            trigger_type=trigger_type,
+            binding_id=binding_id,
+            handler_ref=handler_ref,
+            metadata=metadata,
+            durable=durable,
+        )
+
+    def off(
+        self,
+        binding_id: str,
+        *,
+        trigger_type: TriggerFlowSignalType | None = None,
+        trigger_event: str | None = None,
+    ):
+        return self._signal_net.unregister_dynamic_handler(
+            binding_id,
+            trigger_type=trigger_type,
+            trigger_event=trigger_event,
+        )
+
     # Change Runtime Data
     async def _async_change_runtime_data(
         self,
@@ -2782,7 +2831,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if self._started:
             return self
 
-        await self._ensure_execution_environments()
+        await self._ensure_execution_resources()
         self._started = True
         self._started_at = time.time()
         self._mark_activity()

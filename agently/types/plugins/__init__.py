@@ -15,7 +15,7 @@
 from .base import AgentlyPlugin, AgentlyPluginType
 from .ActionFlow import ActionFlow, ActionFlowObservationHandler
 from .ActionExecutor import ActionExecutor
-from .ExecutionEnvironmentProvider import ExecutionEnvironmentProvider
+from .ExecutionResourceProvider import ExecutionResourceProvider
 from .ActionRuntime import (
     ActionExecutionHandler,
     ActionPlanningHandler,
@@ -28,6 +28,7 @@ from .ExecutionExchange import ExecutionExchangeProvider
 from .PromptGenerator import PromptGenerator
 from .ModelRequester import HandlerDrivenModelRequester, ModelProviderResponseGenerator, ModelRequestHandlers, ModelRequester
 from .TaskDAGPlanner import TaskDAGPlanner
+from .Blocks import Blocks
 from .SkillsExecutor import (
     SkillsEffortStrategyHandler,
     SkillsExecutionContext,
@@ -49,12 +50,14 @@ from .Workspace import (
     RefResolver,
     RetentionPolicy,
     RuntimeEventStore,
+    ScopePruner,
     TextIndex,
     VectorIndex,
     WorkspaceBackend,
     WorkspaceBackendProvider,
 )
-from .Recall import ContextBuilder, RecallPlanner, Retriever
+from .WorkspaceFileIOHandler import WorkspaceFileIOHandler
+from .ContextBuilder import ContextBuilder, ContextPlanner, Retriever
 from .ResponseParser import ResponseParser
 from .ToolManager import ToolManager
 from .BuiltInTool import BuiltInTool

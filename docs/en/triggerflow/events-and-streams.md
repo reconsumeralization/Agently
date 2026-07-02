@@ -51,18 +51,49 @@ Mechanics:
 - `data.emit_nowait(event, payload)` is the fire-and-forget sync variant — the chunk doesn't wait for triggered handlers to run before it returns.
 - Multiple `when("Event")` branches all fire on the same event.
 
-### Definition safety vs runtime signals
+### Definition safety vs runtime event delivery
 
 Normal Python imports execute a flow module once per process for the same module
 name. TriggerFlow's duplicate-definition protection is the second line of
 defense: it avoids declaring the same graph edge or generated `when(...)` gate
 twice when application code explicitly runs the same `.to(...)` / `.when(...)`
-wiring again on the same flow object. It is not runtime signal deduplication.
+wiring again on the same flow object. It is not runtime event deduplication.
 
 During one execution, every `emit` / `emit_nowait` call is still a business
 event. If a chunk emits `Tick` three times, `when("Tick")` should react three
 times. This is what makes `emit_nowait(...)` + `when(...)` useful for dynamic
 To-Do executors, dependency joins, side branches, and reflection loops.
+
+### Execution-stage event bindings
+
+TriggerFlow can also attach event handlers to one running execution with
+`execution.on(...)`. This is an execution overlay, not a definition mutation:
+the flow definition and its fingerprint stay static, while one
+`TriggerFlowExecution` snapshot records the dynamic bindings and event attempts
+created during that run.
+
+Dynamic bindings are for framework-owned orchestration such as TaskBoard card
+fan-out, where runnable work items are discovered during execution and each
+branch may emit follow-up events before a join/synthesis point. Durable dynamic
+bindings must use recoverable handler references. Anonymous closures, coroutine
+stacks, sockets, and half-read model streams are not restored after process
+restart.
+
+Use `execution.on(...)` when the application or framework owner needs to
+add a handler to the current execution without changing the reusable flow
+definition:
+
+```python
+binding_id = execution.on(
+    "CardRequested",
+    run_card,
+    binding_id="taskboard.run_card",
+)
+execution.off(binding_id)
+```
+
+Event Center remains separate: RuntimeEvent records may observe dynamic event
+dispatch and recovery facts, but Event Center does not own control flow.
 
 For multi-dependency joins, use:
 
@@ -73,9 +104,10 @@ flow.when(["done:a", "done:b"], mode="and").to(continue_after_both)
 The join state belongs to one execution. It must not leak across executions or
 be stored in shared flow data.
 
-Signals emitted from inside a chunk carry the parent signal id and inherit the
-current aggregation scope. That keeps framework-owned fan-out, such as `batch`,
-`for_each`, and chunk-internal emits, correlated for `when(..., mode="and")`
+Events emitted from inside a chunk carry execution correlation metadata and
+inherit the current aggregation scope. That keeps framework-owned fan-out, such
+as `batch`, `for_each`, and chunk-internal emits, correlated for
+`when(..., mode="and")`
 joins. External emits that do not share a runtime scope are separate business
 events; if a host needs to join externally submitted `A` / `B` events for the
 same business item, route them through one scoped flow stage or carry an

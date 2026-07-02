@@ -29,8 +29,8 @@ Agent Component 或 facade 拥有。
 | 对象 | 优先使用 | 避免 |
 |---|---|---|
 | 应用开发者 | `agent.use_actions(...)`、`agent.use_mcp(...)`、built-in actions、未来的 `agent.enable_*` helpers | 直接使用 manager/provider API，除非应用明确拥有环境生命周期 |
-| Action 开发者 | `register_action(...)`、自定义 `ActionExecutor`、`execution_environments=[...]` | 在 executor 内部私自启动长生命周期 sandbox、MCP client、process 或 service |
-| Plugin 开发者 | `ExecutionEnvironmentProvider`、`ActionExecutor`、`ActionRuntime`、`ActionFlow` 插件契约 | 把 plugin 代码绑定到某个应用级语法糖 |
+| Action 开发者 | `register_action(...)`、自定义 `ActionExecutor`、`execution_resources=[...]` | 在 executor 内部私自启动长生命周期 sandbox、MCP client、process 或 service |
+| Plugin 开发者 | `ExecutionResourceProvider`、`ActionExecutor`、`ActionRuntime`、`ActionFlow` 插件契约 | 把 plugin 代码绑定到某个应用级语法糖 |
 | 框架维护者 | Core data types、manager、dispatch path、兼容规则 | 把产品或业务专用行为放进 core |
 
 ## 分层职责
@@ -47,7 +47,7 @@ Core 负责：
 - policy、approval、scope、cleanup 语义
 - observation event contract
 
-Core 不应该直接变成能力目录。例如，`ExecutionEnvironmentManager` 应该知道如何管理 environment requirement，但它不应该成为“让模型在我的 repo 里做 coding 工作”的用户入口。
+Core 不应该直接变成能力目录。例如，`ExecutionResourceManager` 应该知道如何管理 environment requirement，但它不应该成为“让模型在我的 repo 里做 coding 工作”的用户入口。
 
 当 plugin 或 Agent Component 层已经有相应职责时，Core 也不应该拥有 plugin output
 prompt、provider-specific default，或 Agent Component 的便利行为。Plugin 可以导入 core
@@ -59,7 +59,7 @@ Plugin 在 core contract 背后提供可替换的 backend 行为。
 
 示例：
 
-- 用于 Python、Bash、Node.js、Docker、MCP、SQLite、vector store、browser 或 remote runner 的 `ExecutionEnvironmentProvider`。
+- 用于 Python、Bash、Node.js、Docker、MCP、SQLite、vector store、browser 或 remote runner 的 `ExecutionResourceProvider`。
 - 用于一次原子 action call 的 `ActionExecutor`。
 - 用于 action planning 和 loop 行为的 `ActionRuntime`。
 - 用于执行策略的 `ActionFlow`。
@@ -68,11 +68,11 @@ Provider 代码负责环境相关的 startup、health check 和 release。它不
 
 不要为这一层引入 `ActionProvider`、`CapabilityProvider` 或独立 capability dispatcher
 这类平行概念。可调用能力仍然是 `Action`；执行方式变化属于 `ActionExecutor`；
-live resource 生命周期属于 `ExecutionEnvironmentProvider`。
+live resource 生命周期属于 `ExecutionResourceProvider`。
 
 ### Built-in Capability Actions
 
-Built-in 是 Agently 随框架提供的默认能力目录。它们以 Action 的形式暴露模型可调用操作，并且可以依赖 Execution Environment。
+Built-in 是 Agently 随框架提供的默认能力目录。它们以 Action 的形式暴露模型可调用操作，并且可以依赖 ExecutionResource。
 
 适合作为 built-in 的能力：
 
@@ -86,7 +86,7 @@ Built-in 是 Agently 随框架提供的默认能力目录。它们以 Action 的
 - 调用预注册 Python 函数
 - 调用 MCP tools
 
-Action 是模型可见的调用面。只有当 action 需要托管 live dependency、隔离边界、可复用 client 或 cleanup policy 时，才需要 Execution Environment。
+Action 是模型可见的调用面。只有当 action 需要托管 live dependency、隔离边界、可复用 client 或 cleanup policy 时，才需要 ExecutionResource。
 
 内置 capability package 的主 authoring/import path 与实现归属是
 `agently.builtins.actions`。`agently.builtins.tools` 是既有代码的薄 legacy facade，
@@ -108,7 +108,7 @@ agent.enable_vector_store(...)
 agent.enable_coding_workspace(...)
 ```
 
-这些 API 应该描述开发者意图，不应该要求应用开发者理解 `ExecutionEnvironmentHandle`、provider lifecycle 或 executor 内部机制。
+这些 API 应该描述开发者意图，不应该要求应用开发者理解 `ExecutionResourceHandle`、provider lifecycle 或 executor 内部机制。
 
 ### Typing 与 IDE 辅助
 
@@ -130,13 +130,13 @@ manager、默认实现、registry、adapter、policy 或 validation 等多个架
 才保持单文件。
 
 已落地案例包括 `core/Action`、`core/TriggerFlow`、`core/orchestration/TaskDAG`、
-`core/session/Workspace`、`builtins/plugins/ExecutionEnvironmentProvider` 和
+`core/workspace`、`builtins/plugins/ExecutionResourceProvider` 和
 `builtins/plugins/SkillsExecutor`。公开 import 通过 package `__init__.py`
 和顶层 re-export 保持稳定。
 
-## Action 与 Execution Environment
+## Action 与 ExecutionResource
 
-Action 和 Execution Environment 是两个独立层。
+Action 和 ExecutionResource 是两个独立层。
 
 Action 回答：
 
@@ -144,13 +144,13 @@ Action 回答：
 - 输入 schema 是什么？
 - 一次调用如何归一化成 `ActionResult`？
 
-Execution Environment 回答：
+ExecutionResource 回答：
 
 - 执行前必须存在什么 live dependency？
 - 是否被 policy 和 approval 允许？
 - 如何启动、复用、健康检查、按 scope 管理和释放？
 
-不是所有 Action 都需要 Execution Environment。文件 policy 检查、纯本地函数和简单无状态操作可以只是普通 Action。当涉及生命周期、隔离、健康检查、凭证或 cleanup 时，再使用 Execution Environment。
+不是所有 Action 都需要 ExecutionResource。文件 policy 检查、纯本地函数和简单无状态操作可以只是普通 Action。当涉及生命周期、隔离、健康检查、凭证或 cleanup 时，再使用 ExecutionResource。
 
 ## Skills 边界
 

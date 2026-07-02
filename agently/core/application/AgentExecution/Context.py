@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
 from agently.types.data import (
@@ -151,6 +152,11 @@ class AgentExecutionContext:
         execution_id: str,
         lineage: AgentExecutionLineage | dict[str, Any],
         limits: AgentExecutionLimits | dict[str, Any],
+        nesting_depth: int = 0,
+        nesting_budget: int | None = None,
+        task_execution_strategy: str | None = None,
+        effective_task_execution_strategy: str | None = None,
+        strategy_context_source: str | None = None,
     ):
         self.execution_id = execution_id
         self.lineage = cast(AgentExecutionLineage, dict(lineage))
@@ -161,6 +167,40 @@ class AgentExecutionContext:
         self.last_progress_at = self.started_at
         self.last_progress_event: dict[str, Any] | None = None
         self.stage_events: list[dict[str, Any]] = []
+        self._progress_callback: Callable[[dict[str, Any]], Any] | None = None
+        self.action_scope: dict[str, Any] = {}
+        self.action_artifact_recall_records: list[dict[str, Any]] = []
+        self.action_records: list[dict[str, Any]] = []
+        self._seen_action_record_keys: set[str] = set()
+        # Depth of this AgentExecution in a nested agent-step chain (root = 0).
+        self.nesting_depth = int(nesting_depth)
+        # Effective max nesting depth inherited from the constraining ancestor
+        # (or this execution's own limit). None means unbounded.
+        self.nesting_budget = nesting_budget
+        self.task_execution_strategy = _optional_str(task_execution_strategy)
+        self.effective_task_execution_strategy = _optional_str(effective_task_execution_strategy)
+        self.strategy_context_source = _optional_str(strategy_context_source)
+
+    def raise_if_nesting_exceeded(self):
+        if self.nesting_budget is None:
+            return
+        if self.nesting_depth > self.nesting_budget:
+            event = {
+                "type": "limit_exceeded",
+                "limit_name": "max_nested_agent_steps",
+                "limit_value": self.nesting_budget,
+                "used": self.nesting_depth,
+            }
+            self.limit_events.append(event)
+            raise AgentExecutionLimitExceeded(
+                (
+                    "AgentExecution nested agent-step budget exceeded: "
+                    f"max_nested_agent_steps={ self.nesting_budget }, depth={ self.nesting_depth }."
+                ),
+                limit_name="max_nested_agent_steps",
+                limit_value=self.nesting_budget,
+                used=self.nesting_depth,
+            )
 
     def consume_model_request(self, *, response_id: str | None = None, run_id: str | None = None):
         limit = self.limits.get("max_model_requests")
@@ -195,11 +235,121 @@ class AgentExecutionContext:
                 "max_model_requests": self.limits.get("max_model_requests"),
             },
             "limit_events": [dict(item) for item in self.limit_events],
+            "action_scope": DataFormatter.sanitize(dict(self.action_scope)),
+            "action_artifact_recall": {
+                "record_count": len(self.action_artifact_recall_records),
+                "artifact_ref_count": sum(
+                    len(item.get("artifact_refs", []))
+                    for item in self.action_artifact_recall_records
+                    if isinstance(item.get("artifact_refs"), list)
+                ),
+            },
+            "action_records": {
+                "record_count": len(self.action_records),
+            },
             "stages": {
                 "events": [dict(item) for item in self.stage_events[-50:]],
             },
+            "task_execution_strategy": {
+                "requested": self.task_execution_strategy,
+                "effective": self.effective_task_execution_strategy,
+                "source": self.strategy_context_source,
+            },
             "last_progress": last_progress,
         }
+
+    def set_task_execution_strategy(
+        self,
+        *,
+        requested: str | None,
+        effective: str | None = None,
+        source: str,
+    ) -> None:
+        self.task_execution_strategy = _optional_str(requested)
+        self.effective_task_execution_strategy = _optional_str(effective)
+        self.strategy_context_source = _optional_str(source)
+
+    def set_action_scope(
+        self,
+        allowed_action_ids: list[str] | tuple[str, ...] | set[str] | None,
+        *,
+        source: str,
+    ) -> None:
+        normalized: list[str] = []
+        for item in allowed_action_ids or []:
+            text = str(item or "").strip()
+            if text and text not in normalized:
+                normalized.append(text)
+        if not normalized:
+            self.action_scope = {}
+            return
+        self.action_scope = {
+            "allowed_action_ids": normalized,
+            "source": source,
+        }
+
+    def scoped_action_ids(self) -> set[str] | None:
+        ids = self.action_scope.get("allowed_action_ids")
+        if not isinstance(ids, list):
+            return None
+        normalized = {str(item).strip() for item in ids if str(item).strip()}
+        return normalized or None
+
+    def set_action_artifact_recall_records(
+        self,
+        records: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+        *,
+        source: str,
+    ) -> None:
+        normalized: list[dict[str, Any]] = []
+        for item in records or []:
+            if not isinstance(item, dict):
+                continue
+            refs = item.get("artifact_refs")
+            if not isinstance(refs, list) or not refs:
+                continue
+            normalized.append(
+                {
+                    "action_id": str(item.get("action_id") or "upstream_action_artifact"),
+                    "status": str(item.get("status") or "success"),
+                    "artifact_refs": DataFormatter.sanitize(refs),
+                    "source": source,
+                }
+            )
+        self.action_artifact_recall_records = normalized
+
+    def record_action_records(
+        self,
+        records: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+        *,
+        source: str,
+    ) -> None:
+        for item in records or []:
+            if not isinstance(item, dict):
+                continue
+            record = DataFormatter.sanitize(dict(item))
+            if not isinstance(record, dict):
+                continue
+            record.setdefault("source", source)
+            key = self._action_record_key(record)
+            if key in self._seen_action_record_keys:
+                continue
+            self._seen_action_record_keys.add(key)
+            self.action_records.append(record)
+
+    @staticmethod
+    def _action_record_key(record: dict[str, Any]) -> str:
+        action_call_id = record.get("action_call_id")
+        if action_call_id is not None:
+            return f"call:{ action_call_id }"
+        action_id = str(record.get("action_id") or record.get("tool_name") or "action")
+        status = str(record.get("status") or "")
+        data = record.get("data") if record.get("data") is not None else record.get("result")
+        digest = str(DataFormatter.sanitize(data))
+        return f"{ action_id }:{ status }:{ hash(digest) }"
+
+    def scoped_action_artifact_recall_records(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self.action_artifact_recall_records]
 
     def record_progress(
         self,
@@ -210,6 +360,7 @@ class AgentExecutionContext:
         run_id: str | None = None,
         response_id: str | None = None,
         meta: dict[str, Any] | None = None,
+        notify: bool = True,
     ):
         now = time.monotonic()
         event = {
@@ -224,6 +375,31 @@ class AgentExecutionContext:
         self.last_progress_at = now
         self.last_progress_event = event
         self.stage_events.append(event)
+        if notify:
+            self._notify_progress(event)
+
+    def set_progress_callback(self, callback: Callable[[dict[str, Any]], Any] | None):
+        self._progress_callback = callback
+
+    def _notify_progress(self, event: dict[str, Any]):
+        callback = self._progress_callback
+        if callback is None:
+            return
+        try:
+            result = callback(dict(event))
+        except Exception:
+            return
+        if result is None:
+            return
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            if hasattr(result, "__await__"):
+                task = loop.create_task(result)
+                task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        except Exception:
+            return
 
     def raise_if_limit_exceeded(self):
         if not self.limit_events:

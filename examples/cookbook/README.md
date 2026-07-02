@@ -52,7 +52,7 @@ export OLLAMA_DEFAULT_MODEL=qwen2.5:7b
   `agent.get_action_result(prompt=turn.prompt)`.
   Use a custom TriggerFlow loop only when you need explicit stage visibility,
   runtime streams, approvals, or custom stop conditions.
-- Shell policy: keep policy in Action/Execution Environment configuration. Do
+- Shell policy: keep policy in Action/ExecutionResource configuration. Do
   not rely on prompt instructions for safety boundaries.
 
 New cookbook examples should be runnable in their declared environment and

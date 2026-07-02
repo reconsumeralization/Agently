@@ -4,6 +4,7 @@ These examples are kept for reference only. They were superseded by the Action r
 
 Archived groups:
 
+- `pre-4.1.3.8-skills-orchestration/`
 - `builtin_tools/`
 - `auto_loop/`
 - `step_by_step/07-tools.py`
@@ -15,6 +16,10 @@ Archived groups:
 
 Current canonical replacements:
 
+- Blocks lifecycle smoke: `examples/blocks/`
+- Current Skills Executor examples: `examples/skills_executor/`
+- Current AgentExecution and Dynamic Task examples: `examples/agent_auto_orchestration/`
+- Current Goal Pursuit / AgentTask examples: `examples/agent_task/`
 - Recommended cookbook patterns: `examples/cookbook/`
 - Action/function/MCP/sandbox/runtime/flow examples: `examples/action_runtime/README.md`
 - Built-in Search/Browse examples: `examples/builtin_actions/`

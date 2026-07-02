@@ -15,7 +15,7 @@
 import datetime
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Iterator, Literal, Mapping, Sequence, TypeVar, cast
+from typing import Any, ItemsView, Iterator, KeysView, Literal, Mapping, Sequence, TypeVar, ValuesView, cast
 
 import json
 import toml
@@ -28,7 +28,7 @@ T = TypeVar("T")
 
 
 class DictRef:
-    def __init__(self, container: dict[Any, Any], key: Any = None):
+    def __init__(self, container: dict[Any, Any], key: Any = None) -> None:
         self.container = container
         self.key = key
 
@@ -37,7 +37,7 @@ class DictRef:
             return self.container[self.key]
         return self.container
 
-    def set(self, value: Any):
+    def set(self, value: Any) -> None:
         if self.key is not None:
             self.container[self.key] = value
         else:
@@ -47,18 +47,18 @@ class DictRef:
             else:
                 raise TypeError("Setting root container to non-dict is not supported.")
 
-    def update(self, new: dict[Any, Any]):
+    def update(self, new: dict[Any, Any]) -> None:
         ref = self.get()
         if isinstance(ref, dict):
             return ref.update(new)
         raise TypeError(f"Key '{ self.key }' from container { self.container } is not a dictionary.")
 
-    def move_in(self, key: Any):
+    def move_in(self, key: Any) -> "DictRef":
         return DictRef(self.get(), key)
 
 
 class StateData:
-    instance_counter = 0
+    instance_counter: int = 0
 
     def __init__(
         self,
@@ -66,7 +66,7 @@ class StateData:
         *,
         name: str | None = None,
         parent: "StateData | None" = None,
-    ):
+    ) -> None:
         self._data = data if data is not None else {}
         if name is None:
             # Keep the historical auto-generated prefix for compatibility.
@@ -197,13 +197,13 @@ class StateData:
             return result
         return default
 
-    def keys(self):
+    def keys(self) -> KeysView[Any]:
         return self.data.keys()
 
-    def values(self):
+    def values(self) -> ValuesView[Any]:
         return self.data.values()
 
-    def items(self):
+    def items(self) -> ItemsView[Any, Any]:
         return self.data.items()
 
     def pop(self, key: Any, default: Any = None) -> Any:
@@ -217,13 +217,13 @@ class StateData:
             return self._data.pop(key)
         return default
 
-    def clear(self):
+    def clear(self) -> None:
         return self._data.clear()
 
     def __contains__(self, key: Any) -> bool:
         return key in self.data
 
-    def _set_item(self, ref: DictRef, value: Any):
+    def _set_item(self, ref: DictRef, value: Any) -> None:
         if isinstance(ref.get(), dict) and isinstance(value, Mapping):
             for key, item_value in value.items():
                 if key not in ref.get():
@@ -269,7 +269,7 @@ class StateData:
         else:
             ref.set(self._copy(value))
 
-    def _set_item_by_dot_path(self, dot_path: str, value: Any, *, cover: bool = False):
+    def _set_item_by_dot_path(self, dot_path: str, value: Any, *, cover: bool = False) -> None:
         current = DictRef(self._data)
         path_list = dot_path.split(".")
         walked_path = ""
@@ -288,7 +288,7 @@ class StateData:
         else:
             self._set_item(current, value)
 
-    def __setitem__(self, key: Any, value: Any):
+    def __setitem__(self, key: Any, value: Any) -> None:
         if isinstance(key, str) and "." in key:
             return self._set_item_by_dot_path(key, value)
         if key in self._data:
@@ -297,15 +297,15 @@ class StateData:
         else:
             self._data[key] = self._copy(value)
 
-    def set(self, key: Any, value: Any):
+    def set(self, key: Any, value: Any) -> None:
         return self.__setitem__(key, value)
 
-    def setdefault(self, key: Any, value: Any, *, inherit: bool = True):
+    def setdefault(self, key: Any, value: Any, *, inherit: bool = True) -> Any:
         if self.get(key, inherit=inherit) is None:
             self.set(key, value)
         return self.get(key, inherit=inherit)
 
-    def update(self, new: dict[Any, Any]):
+    def update(self, new: dict[Any, Any]) -> None:
         for key, value in new.items():
             self.set(key, value)
 
@@ -313,7 +313,7 @@ class StateData:
         self,
         data_type: Literal["json_file", "yaml_file", "toml_file", "json", "yaml", "toml"],
         value: str,
-    ) -> Any:
+    ) -> None:
         data = None
         if data_type.endswith("_file"):
             with open(value, "r", encoding="utf-8") as file:
@@ -370,7 +370,7 @@ class StateData:
             case "toml":
                 return toml.dumps(DataFormatter.to_str_key_dict(serializable_data, default_key="data"))
 
-    def __delitem__(self, key: Any):
+    def __delitem__(self, key: Any) -> None:
         if isinstance(key, str) and "." in key:
             path_list = key.split(".")
             current = DictRef(self._data)
@@ -390,7 +390,7 @@ class StateData:
             if key in self._data:
                 del self._data[key]
 
-    def append(self, key: Any, value: Any):
+    def append(self, key: Any, value: Any) -> None:
         if isinstance(key, str) and "." in key:
             current = self._get_item_by_dot_path(key, inherit=False)
         else:
@@ -414,7 +414,7 @@ class StateData:
         else:
             self._data[key] = new_value
 
-    def extend(self, key: Any, values: Sequence[Any]):
+    def extend(self, key: Any, values: Sequence[Any]) -> None:
         if isinstance(key, str) and "." in key:
             current = self._get_item_by_dot_path(key, inherit=False)
         else:
@@ -434,10 +434,10 @@ class StateData:
         else:
             self._data[key] = new_value
 
-    def delete(self, key: Any):
+    def delete(self, key: Any) -> None:
         self.__delitem__(key)
 
-    def namespace(self, namespace_path: str):
+    def namespace(self, namespace_path: str) -> "StateDataNamespace":
         return StateDataNamespace(self, namespace_path)
 
 
@@ -448,7 +448,7 @@ class StateDataNamespace:
         namespace: str = "",
         *,
         root_runtime_data: StateData | None = None,
-    ):
+    ) -> None:
         if root_state_data is None:
             root_state_data = root_runtime_data
         if root_state_data is None:
@@ -511,32 +511,32 @@ class StateDataNamespace:
             result = self.root.get(self.namespace, inherit=False)
         return result if result is not None else default
 
-    def keys(self):
+    def keys(self) -> KeysView[Any]:
         ns = self.data
         if isinstance(ns, dict):
             return ns.keys()
         return {}.keys()
 
-    def values(self):
+    def values(self) -> ValuesView[Any]:
         ns = self.data
         if isinstance(ns, dict):
             return ns.values()
         return {}.values()
 
-    def items(self):
+    def items(self) -> ItemsView[Any, Any]:
         ns = self.data
         if isinstance(ns, dict):
             return ns.items()
         return {}.items()
 
-    def __setitem__(self, key: Any, value: Any):
+    def __setitem__(self, key: Any, value: Any) -> None:
         if isinstance(key, str) and "." in key:
             return self.root.set(f"{self.namespace}.{key}", value)
         if self.root.get(self.namespace, inherit=False) is None:
             self.root._data[self.namespace] = {}
         self.root.set(f"{self.namespace}.{key}", value)
 
-    def __delitem__(self, key: Any):
+    def __delitem__(self, key: Any) -> None:
         if isinstance(key, str) and "." in key:
             del self.root[f"{ self.namespace }.{ key }"]
         else:
@@ -555,29 +555,29 @@ class StateDataNamespace:
             return val
         return default
 
-    def clear(self):
+    def clear(self) -> None:
         self.root._data[self.namespace] = {}
 
     def __contains__(self, key: Any) -> bool:
         return key in self.keys()
 
-    def set(self, key: Any, value: Any):
+    def set(self, key: Any, value: Any) -> None:
         return self.__setitem__(key, value)
 
-    def setdefault(self, key: Any, value: Any, *, inherit: bool = True):
+    def setdefault(self, key: Any, value: Any, *, inherit: bool = True) -> Any:
         if self.get(key, inherit=inherit) is None:
             self.set(key, value)
         return self.get(key, inherit=inherit)
 
-    def update(self, new: dict[Any, Any]):
+    def update(self, new: dict[Any, Any]) -> None:
         for key, value in new.items():
             self.set(key, value)
 
-    def append(self, key: Any, value: Any):
+    def append(self, key: Any, value: Any) -> None:
         return self.root.append(f"{self.namespace}.{key}", value)
 
-    def extend(self, key: Any, values: Sequence[Any]):
+    def extend(self, key: Any, values: Sequence[Any]) -> None:
         return self.root.extend(f"{self.namespace}.{key}", values)
 
-    def delete(self, key: Any):
+    def delete(self, key: Any) -> None:
         return self.root.delete(f"{self.namespace}.{key}")

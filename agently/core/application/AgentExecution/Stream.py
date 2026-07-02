@@ -15,11 +15,208 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from typing import Any, Literal
+import html
+import json
+from contextlib import suppress
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, Literal, cast
 
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter
+
+
+def project_agent_execution_text_delta(item: Any) -> str | None:
+    """Project structured execution stream items onto the public text delta stream."""
+    path = str(getattr(item, "path", "") or "")
+    value = getattr(item, "value", None)
+    source = str(getattr(item, "source", "") or "")
+    if _is_retry_status_marker_source(path, value):
+        return _format_retry_marker(value)
+    if getattr(item, "event_type", None) == "delta":
+        delta = getattr(item, "delta", None)
+        if delta is None:
+            return None
+        return str(delta)
+    return _project_done_item_text(path, value, getattr(item, "meta", None), source=source)
+
+
+def _project_done_item_text(path: str, value: Any, meta: Any, *, source: str) -> str | None:
+    item_meta = meta if isinstance(meta, Mapping) else {}
+    stream_kind = str(item_meta.get("stream_kind") or "")
+    if stream_kind == "progress":
+        if str(item_meta.get("progress_source") or "") == "model":
+            return None
+        return _paragraph(_mapping_text(value, "message"))
+    if stream_kind == "snapshot":
+        return _paragraph(_mapping_text(value, "message"))
+    if stream_kind == "heartbeat":
+        if isinstance(value, Mapping):
+            stage = str(value.get("stage") or "the current step")
+            quiet_for = value.get("quiet_for_seconds")
+            if quiet_for is not None:
+                return _paragraph(f"Still working on {stage}; no new stream events for {quiet_for} seconds.")
+            return _paragraph(f"Still working on {stage}.")
+        return _paragraph("Still working; no new stream events yet.")
+    if stream_kind == "action_observation":
+        return _paragraph(_action_observation_text(value, item_meta))
+    if stream_kind == "phase":
+        return _paragraph(_phase_text(value))
+    if path == "agent_task.error":
+        return _paragraph(_terminal_error_text(value))
+    if path == "result" and source == "agent_task":
+        return _paragraph(_terminal_result_text(value))
+    return None
+
+
+def _mapping_text(value: Any, key: str) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    text = value.get(key)
+    return str(text).strip() if text is not None else ""
+
+
+def _paragraph(text: str | None) -> str | None:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return None
+    return f"{normalized}\n\n"
+
+
+def _terminal_error_text(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return f"Task failed: {_value_to_text(value)}"
+    error_type = str(value.get("type") or "error").strip()
+    message = str(value.get("message") or "").strip()
+    if message:
+        return f"Task failed: {error_type}: {message}"
+    return f"Task failed: {error_type}"
+
+
+def _phase_text(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    phase = str(value.get("phase") or "").strip()
+    if not phase:
+        return ""
+    iteration = value.get("iteration")
+    status = str(value.get("status") or "").strip()
+    prefix = f"Iteration {iteration}: " if iteration not in (None, "") else ""
+    suffix = f" ({status})" if status else ""
+    return f"{prefix}phase {phase}{suffix}."
+
+
+def _action_observation_text(value: Any, meta: Mapping[str, Any]) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    action_id = str(value.get("action_id") or value.get("action_call_id") or "action").strip()
+    action_label = action_id or "action"
+    kind = str(value.get("kind") or value.get("action_type") or "").strip()
+    label = f"{action_label} ({kind})" if kind else action_label
+    phase = str(meta.get("phase") or "").strip().lower()
+    status = str(value.get("status") or "").strip().lower()
+    if phase == "started" or status == "started":
+        text = f"Action started: {label}."
+        input_summary = _compact_inline_text(value.get("input_summary"))
+        if input_summary:
+            text += f" Input: {input_summary}"
+        return text
+    if phase == "failed" or status in {"failed", "error", "timeout", "timed_out", "blocked"}:
+        text = f"Action failed: {label}."
+        error = _compact_inline_text(value.get("error"))
+        if error:
+            text += f" Error: {error}"
+        return text
+    if phase == "completed" or value.get("success") is True or status in {"success", "succeeded", "completed", "ok"}:
+        text = f"Action completed: {label}."
+        output_summary = _compact_inline_text(value.get("output_summary"))
+        if output_summary:
+            text += f" Result: {output_summary}"
+        refs_text = _action_refs_text(value)
+        if refs_text:
+            text += f" Refs: {refs_text}"
+        return text
+    return f"Action update: {label} ({status})." if status else f"Action update: {label}."
+
+
+def _action_refs_text(value: Mapping[str, Any]) -> str:
+    refs: list[str] = []
+    for key in ("artifact_refs", "file_refs", "source_refs"):
+        raw_refs = value.get(key)
+        if not isinstance(raw_refs, list):
+            continue
+        for item in raw_refs:
+            if not isinstance(item, Mapping):
+                continue
+            ref_text = str(
+                item.get("path")
+                or item.get("value")
+                or item.get("url")
+                or item.get("uri")
+                or item.get("id")
+                or ""
+            ).strip()
+            ref_text = _compact_inline_text(ref_text, max_chars=120)
+            if ref_text and ref_text not in refs:
+                refs.append(ref_text)
+            if len(refs) >= 3:
+                return ", ".join(refs)
+    return ", ".join(refs)
+
+
+def _compact_inline_text(value: Any, *, max_chars: int = 280) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    text = _value_to_text(value)
+    text = " ".join(text.split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 14)].rstrip() + " [truncated]"
+
+
+def _terminal_result_text(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        text = _value_to_text(value)
+        return f"Final result:\n{text}" if text else "Task finished."
+    status = str(value.get("status") or "").strip()
+    accepted = value.get("accepted")
+    final_result = value.get("final_result")
+    reason = str(value.get("reason") or "").strip()
+    if final_result not in (None, ""):
+        heading = "Task completed" if status == "completed" or accepted is True else f"Task finished with status {status or 'unknown'}"
+        return f"{heading}.\nFinal result:\n{_value_to_text(final_result)}"
+    if reason:
+        if status:
+            return f"Task finished with status {status}: {reason}"
+        return f"Task finished: {reason}"
+    if status:
+        return f"Task finished with status {status}."
+    return "Task finished."
+
+
+def _value_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        return json.dumps(DataFormatter.sanitize(value), ensure_ascii=False)
+    except Exception:
+        return str(value).strip()
+
+
+def _is_retry_status_marker_source(path: str, value: Any) -> bool:
+    return (
+        (path == "$status" or path.endswith(".$status"))
+        and isinstance(value, Mapping)
+        and value.get("status") == "failed"
+        and value.get("retry") is True
+    )
+
+
+def _format_retry_marker(value: Any) -> str:
+    reason = value.get("reason") if isinstance(value, Mapping) else None
+    text = str(reason).strip() if reason is not None else ""
+    if not text:
+        text = "Retrying model request."
+    return f"<$retry>{html.escape(text, quote=False)}</$retry>"
 
 
 class AgentExecutionStream:
@@ -97,6 +294,14 @@ class AgentExecutionStream:
         self.items.append(item)
         for queue in list(self.queues):
             await queue.put(item)
+        if self._execution is not None:
+            emit_runtime_projection = getattr(self._execution, "_async_emit_stream_runtime_event", None)
+            if callable(emit_runtime_projection):
+                with suppress(Exception):
+                    await cast(
+                        Callable[[AgentExecutionStreamData], Awaitable[None]],
+                        emit_runtime_projection,
+                    )(item)
         return item
 
     def _is_compatible_delta(self, left: AgentExecutionStreamData, right: AgentExecutionStreamData) -> bool:

@@ -14,8 +14,11 @@
 
 from __future__ import annotations
 
-import asyncio
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, TYPE_CHECKING, cast
+
+from agently.core.model.ModelRequestResultDataFlow import ModelRequestResultDataFlow
+from agently.utils import DataFormatter, DataLocator
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
@@ -33,17 +36,61 @@ async def run_model_request_route(
     max_retries: int,
     raise_ensure_failure: bool,
 ) -> Any:
-    agent = execution.agent
-    agent_execution_run_context = agent._create_agent_execution_run_context(parent_run_context=execution.parent_run_context)
-    await agent._async_emit_agent_execution_started(agent_execution_run_context)
+    agent_execution_run_context = await execution._async_emit_agent_execution_started_once()
+    prompt_bound_required_skills: list[dict[str, Any]] = []
+    collect_prompt_bound_skills = getattr(execution.agent, "_prompt_bound_required_skill_records", None)
+    if callable(collect_prompt_bound_skills):
+        try:
+            raw_prompt_bound_skills = collect_prompt_bound_skills()
+            if isinstance(raw_prompt_bound_skills, list):
+                prompt_bound_required_skills = [
+                    DataFormatter.sanitize(item)
+                    for item in raw_prompt_bound_skills
+                    if isinstance(item, Mapping)
+                ]
+        except Exception:
+            prompt_bound_required_skills = []
+    if prompt_bound_required_skills:
+        route_logs = execution.logs.setdefault("route_logs", {})
+        if isinstance(route_logs, dict):
+            route_logs["prompt_bound_skills"] = prompt_bound_required_skills
+        await execution.emit_stream(
+            "skills.prompt_bound",
+            {"selected_skills": prompt_bound_required_skills},
+            route="model_request",
+            source="skills_executor",
+            meta={"binding": "prompt_guidance"},
+        )
     if ensure_all_keys is not None:
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
     result = execution.request.get_result(parent_run_context=agent_execution_run_context)
     execution.record_model_response_id(result.id)
+    stream_meta = {
+        "response_id": result.response_id,
+        "request_run_id": result.request_run_context.run_id if result.request_run_context is not None else None,
+        "model_run_id": result.model_run_context.run_id if result.model_run_context is not None else None,
+        "attempt_index": result.attempt_index,
+    }
     has_structured_stream = bool(execution.prompt_snapshot.get("output"))
     if has_structured_stream:
+        structured_completion_policies = _structured_stream_completion_policies(
+            result,
+            ensure_keys=ensure_keys,
+            key_style=key_style,
+        )
         async for item in result.get_async_generator(type="instant"):
-            await execution.bridge_model_stream_item(item, route="model_request")
+            await execution.bridge_model_stream_item(
+                item,
+                route="model_request",
+                meta=stream_meta,
+            )
+            if _structured_stream_snapshot_satisfies_policies(
+                result.full_result_data,
+                structured_completion_policies,
+                key_style=key_style,
+            ):
+                await _close_structured_response_stream(result)
+                break
     else:
         async for event, data in result.get_async_generator(type="all"):
             if event in {"action", "tool"}:
@@ -61,6 +108,15 @@ async def run_model_request_route(
                     delta=str(data),
                     event_type="delta",
                     is_complete=False,
+                    meta=stream_meta,
+                )
+            elif event == "status":
+                await execution.emit_stream(
+                    "$status",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    meta={**stream_meta, "field_path": "$status"},
                 )
             elif event == "done":
                 await execution.emit_stream(
@@ -68,6 +124,7 @@ async def run_model_request_route(
                     data,
                     route="model_request",
                     source="model_request",
+                    meta=stream_meta,
                 )
     data = await result.async_get_data(
         type=type,
@@ -115,6 +172,91 @@ async def run_model_request_route(
     return data
 
 
+def _structured_stream_completion_policies(
+    result: Any,
+    *,
+    ensure_keys: list[str] | None,
+    key_style: Literal["dot", "slash"],
+) -> dict[str, Literal["presence", "not_null"]]:
+    data_flow = getattr(result, "_data_flow", None)
+    auto_policies: dict[str, Literal["presence", "not_null"]] = {}
+    get_auto_policies = getattr(data_flow, "get_auto_ensure_policies", None)
+    if callable(get_auto_policies):
+        try:
+            raw_auto_policies = get_auto_policies(key_style=key_style)
+            if isinstance(raw_auto_policies, Mapping):
+                auto_policies = {
+                    str(key): cast(Literal["presence", "not_null"], value)
+                    for key, value in raw_auto_policies.items()
+                    if value in {"presence", "not_null"}
+                }
+        except Exception:
+            auto_policies = {}
+    if ensure_keys is None:
+        active_keys = list(auto_policies)
+    elif len(ensure_keys) == 0:
+        active_keys = []
+    else:
+        active_keys = ModelRequestResultDataFlow.merge_ensure_keys(list(auto_policies), ensure_keys)
+    if not active_keys:
+        return {}
+    policies = ModelRequestResultDataFlow.resolve_ensure_policies(active_keys, auto_policies)
+    policies.update(_structured_stream_preferred_mapping_policies(result, key_style=key_style))
+    return policies
+
+
+def _structured_stream_preferred_mapping_policies(
+    result: Any,
+    *,
+    key_style: Literal["dot", "slash"],
+) -> dict[str, Literal["presence"]]:
+    try:
+        prompt_output = result.prompt.to_prompt_object().output
+    except Exception:
+        return {}
+    if not isinstance(prompt_output, Mapping):
+        return {}
+    policies: dict[str, Literal["presence"]] = {}
+    for key, value in prompt_output.items():
+        if not key:
+            continue
+        field_shape = value[0] if isinstance(value, tuple) and value else value
+        if field_shape is dict or isinstance(field_shape, Mapping):
+            path = str(key) if key_style == "dot" else f"/{ key }"
+            policies[path] = "presence"
+    return policies
+
+
+def _structured_stream_snapshot_satisfies_policies(
+    full_result_data: Any,
+    policies: Mapping[str, Literal["presence", "not_null"]],
+    *,
+    key_style: Literal["dot", "slash"],
+) -> bool:
+    if not policies:
+        return False
+    if not isinstance(full_result_data, Mapping):
+        return False
+    snapshot = full_result_data.get("parsed_result")
+    if not isinstance(snapshot, (Mapping, Sequence)) or isinstance(snapshot, str | bytes | bytearray):
+        return False
+    empty = object()
+    for path, policy in policies.items():
+        located_value = DataLocator.locate_path_in_dict(snapshot, path, key_style, default=empty)
+        if located_value is empty:
+            return False
+        if policy == "not_null" and not ModelRequestResultDataFlow.ensure_value_is_present(located_value):
+            return False
+    return True
+
+
+async def _close_structured_response_stream(result: Any) -> None:
+    response_parser = getattr(result, "_response_parser", None)
+    close = getattr(response_parser, "async_close", None)
+    if callable(close):
+        await cast(Callable[[], Awaitable[Any]], close)()
+
+
 async def _required_action_failure(execution: "AgentExecution", *, route: str) -> dict[str, Any] | None:
     required_actions = execution.required_action_ids()
     if not required_actions:
@@ -159,8 +301,15 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     task = execution.task_target()
     agent = cast(Any, execution.agent)
     output = execution.prompt_snapshot.get("output")
-    output_format = execution.prompt_snapshot.get("output_format")
     route_options = execution.route_options("skills")
+    route_output_format = route_options.get("output_format")
+    output_format = (
+        str(route_output_format)
+        if route_output_format is not None
+        else execution.prompt_snapshot.get("output_format")
+    )
+    if route_output_format is not None:
+        execution.record_consumed_option("routes.skills.output_format", output_format, owner="AgentlySkillsExecutor")
     effort = route_options.get("effort")
     if effort is not None:
         effort = str(effort)
@@ -238,95 +387,3 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     execution.logs["route_logs"] = dict(skills_execution.to_dict())
     execution.status = skills_execution.status
     return skills_execution.output
-
-
-async def run_dynamic_task_route(execution: "AgentExecution", route_meta: dict[str, Any]) -> Any:
-    candidate = dict(route_meta.get("candidate") or {})
-    mode = str(candidate.get("mode") or "auto")
-    target = execution.task_target()
-    action_candidates = execution.action_candidates()
-    actions = candidate.get("actions")
-    if actions is None and action_candidates:
-        actions = getattr(execution.agent, "action", None)
-    task = execution.agent.create_dynamic_task(
-        target,
-        plan=candidate.get("plan"),
-        planner=candidate.get("planner"),
-        model=candidate.get("model"),
-        actions=actions,
-        skills=candidate.get("skills"),
-        handlers=candidate.get("handlers"),
-        name=candidate.get("name"),
-        max_tasks=candidate.get("max_tasks"),
-        output_schema=candidate.get("output_schema"),
-        ensure_keys=candidate.get("ensure_keys"),
-        output_format=candidate.get("output_format"),
-        _prompt_snapshot=execution.prompt_snapshot,
-    )
-    graph = candidate.get("plan")
-    if graph is None or mode == "auto":
-        graph = await task.async_plan(max_retries=int(candidate.get("max_retries", 3) or 3))
-    task.validate(graph, strict_schema_version=True)
-    graph_dict = graph.to_dict() if hasattr(graph, "to_dict") else dict(graph)
-    await execution.emit_stream("route.dynamic_task.graph", graph_dict, route="dynamic_task", source="dynamic_task")
-
-    compiled = task.compile(graph)
-    dag_execution = compiled.create_execution(auto_close=False)
-    graph_input, graph_input_source = _resolve_dynamic_task_graph_input(execution, candidate, target)
-
-    async def runner():
-        try:
-            await dag_execution.async_start(graph_input)
-            return await dag_execution.async_close(timeout=candidate.get("timeout", 30))
-        except BaseException as error:
-            await dag_execution.async_stop_stream()
-            if _is_init_placeholder_error(error):
-                raise ValueError(
-                    f"{ error } Agent Dynamic Task route resolved graph_input from "
-                    f"{ graph_input_source }."
-                ) from error
-            raise
-
-    run_task = asyncio.create_task(runner())
-    while not getattr(dag_execution, "_started", False) and not run_task.done():
-        await asyncio.sleep(0)
-    if not getattr(dag_execution, "_started", False):
-        close_snapshot = await run_task
-        task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
-        execution.close_snapshot = close_snapshot
-        execution.logs["route_logs"] = {"task_dag": close_snapshot}
-        return task_result
-    stream = dag_execution.get_async_runtime_stream(timeout=None)
-    try:
-        async for item in stream:
-            await execution.bridge_task_dag_stream_item(item, route="dynamic_task")
-        close_snapshot = await run_task
-    except BaseException:
-        if not run_task.done():
-            run_task.cancel()
-        await asyncio.gather(run_task, return_exceptions=True)
-        raise
-    task_result = close_snapshot.get("state", {}).get("task_dag_execution", close_snapshot)
-    execution.close_snapshot = close_snapshot
-    execution.logs["route_logs"] = {"task_dag": close_snapshot}
-    return task_result
-
-
-def _resolve_dynamic_task_graph_input(
-    execution: "AgentExecution",
-    candidate: dict[str, Any],
-    target: str,
-) -> tuple[Any, str]:
-    if candidate.get("graph_input_provided", False):
-        return candidate.get("graph_input"), "use_dynamic_task(graph_input=...)"
-
-    prompt_snapshot = getattr(execution, "prompt_snapshot", {})
-    if isinstance(prompt_snapshot, dict) and "input" in prompt_snapshot and prompt_snapshot.get("input") is not None:
-        return prompt_snapshot.get("input"), "execution prompt snapshot input slot"
-
-    return {"target": target}, "fallback target"
-
-
-def _is_init_placeholder_error(error: BaseException) -> bool:
-    message = str(error)
-    return "runtime placeholder" in message and "${INIT" in message

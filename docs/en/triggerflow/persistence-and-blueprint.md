@@ -79,7 +79,7 @@ flow to already exist.
 `load(saved_state)` is the synchronous load boundary for snapshots whose
 resources are already available in the current process. `async_load(...)` is
 the recovery boundary for restart or worker-handoff paths because it validates
-missing resources and can rebuild managed execution environments before the
+missing resources and can rebuild managed execution resources before the
 execution is resumed.
 
 ### Resuming around a pause_for

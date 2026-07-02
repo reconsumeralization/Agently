@@ -21,6 +21,7 @@ from agently.types.data import SkillContextPack, SkillContextPackIncludeMode, Sk
 from agently.types.options import SkillsRouteOptions
 from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
 from agently.utils import DeprecationWarnings, Settings
+from agently.core.application.SkillsExecutor.adapter import RegistrySkillSource, SkillCapabilityAdapter
 
 from .modules.effort_strategies import BUILTIN_EFFORT_STRATEGY_NAMES
 from .modules.context_pack import SkillContextPackBuilder
@@ -150,6 +151,15 @@ class AgentlySkillsExecutor(SkillsExecutor):
 
     def read_resource(self, skill_id: str, path: str, *, max_bytes: int = 262144) -> str:
         return self.registry.read_resource(skill_id, path, max_bytes=max_bytes)
+
+    def capability_adapter(self) -> SkillCapabilityAdapter:
+        return SkillCapabilityAdapter(RegistrySkillSource(self.registry))
+
+    def discover_skill_capabilities(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        return self.capability_adapter().discover(limit=limit)
+
+    def activate_skill(self, skill_id: str, *, task: str | None = None, budget_chars: int = 4000):
+        return self.capability_adapter().activate(skill_id, task=task, budget_chars=budget_chars)
 
     def build_context_pack(
         self,

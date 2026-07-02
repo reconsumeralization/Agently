@@ -112,6 +112,12 @@ for r in records:
 
 Action records are also written to `extra.action_logs` (or `extra.tool_logs` on the compat surface).
 
+When an MCP tool returns resource/content blocks or structured
+`artifact_refs`/`artifacts`/`file_refs`, Agently preserves those declarations on
+the Action record so hosts can inspect `record["artifact_refs"]` instead of
+polling output directories. The MCP server must declare the artifact metadata;
+Agently does not scan the filesystem to infer undeclared writes.
+
 ## Common pitfalls
 
 - **Forgetting `await`**: `use_mcp(...)` is async because it lists tools from the server. Forgetting `await` returns a coroutine and the registration silently doesn't happen.

@@ -58,7 +58,7 @@ async def main():
             goal="route fallback action output",
             scope={"task_id": "issue-456"},
             budget={"chars": 1200},
-            profile="software_dev",
+            profile="auto",
         )
         context_refs = [item["ref"]["id"] for item in context_pack["items"]]
         summary = {
@@ -89,8 +89,8 @@ asyncio.run(main())
 #
 # `enable_workspace_file_actions(...)` only exposes file actions over files_root.
 # The shell action output does not become memory automatically. Application code
-# explicitly ingests the action result as a Workspace observation, then Recall
-# packages it into a ContextPack through `workspace.build_context(...)`.
+# explicitly ingests the action result as a Workspace observation, then
+# ContextBuilder packages it into a ContextPackage through `workspace.build_context(...)`.
 #
 # Flow:
 # use_workspace(temp_dir)
@@ -108,4 +108,4 @@ asyncio.run(main())
 # workspace.ingest(action output as observation)
 #   |
 #   v
-# workspace.build_context(...) -> ContextPack contains the action-output record
+# workspace.build_context(...) -> ContextPackage contains the action-output record

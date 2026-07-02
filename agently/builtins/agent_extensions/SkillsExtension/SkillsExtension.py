@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, cast
+from typing_extensions import Self
 
 from agently.core import BaseAgent
 from agently.types.data import SkillContextPack, SkillContextPackIncludeMode, SkillContract, SkillExecutionPlan, SkillMode, SkillRuntimeStreamHandler
@@ -32,10 +33,11 @@ if TYPE_CHECKING:
     from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecution
     from agently.core import Prompt
     from agently.utils import Settings
+    from agently.types.plugins import AgentExecution
 
 
 class SkillsExtension(BaseAgent):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
         from agently.base import skills_executor
@@ -61,7 +63,7 @@ class SkillsExtension(BaseAgent):
         mode: SkillMode = "model_decision",
         auto_allow: bool = False,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if not always:
             return self.create_execution().use_skills(skills, mode=mode, auto_allow=auto_allow)
         self._add_skill_selectors(skills, mode=mode, auto_allow=auto_allow)
@@ -107,7 +109,7 @@ class SkillsExtension(BaseAgent):
         *,
         auto_allow: bool = False,
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         return self.use_skills(skills, mode="required", auto_allow=auto_allow, always=always)
 
     def use_skills_packs(
@@ -116,7 +118,7 @@ class SkillsExtension(BaseAgent):
         *,
         mode: SkillMode = "model_decision",
         always: bool = False,
-    ):
+    ) -> "Self | AgentExecution":
         if not always:
             return self.create_execution().use_skills_packs(skills_packs, mode=mode)
         if mode not in {"model_decision", "required"}:
@@ -133,7 +135,10 @@ class SkillsExtension(BaseAgent):
         mcp_config: Any = None,
         python: dict[str, Any] | None = None,
         search: dict[str, Any] | None = None,
-    ):
+        http_request: dict[str, Any] | None = None,
+        capability_scope: Literal["agent", "execution"] | None = None,
+        min_auto_mount_confidence: float | None = None,
+    ) -> Self:
         policy = _ensure_dict(self.settings.get("skills.capability_policy", {}))
         if auto_load is not None:
             policy["auto_load"] = dict(auto_load)
@@ -149,6 +154,14 @@ class SkillsExtension(BaseAgent):
             policy["python"] = dict(python)
         if search is not None:
             policy["web_search"] = dict(search)
+        if http_request is not None:
+            policy["http_request"] = dict(http_request)
+        if capability_scope is not None:
+            if capability_scope not in {"agent", "execution"}:
+                raise ValueError("capability_scope must be one of: 'agent', 'execution'.")
+            policy["capability_scope"] = capability_scope
+        if min_auto_mount_confidence is not None:
+            policy["min_auto_mount_confidence"] = float(min_auto_mount_confidence)
         self.settings.set("skills.capability_policy", policy)
         return self
 
@@ -526,46 +539,88 @@ class SkillsExtension(BaseAgent):
 
     # ── Prompt injection ────────────────────────────────────────────────────
 
-    async def _apply_skill_cards_to_prompt(self, prompt: "Prompt"):
-        selectors = self._collect_skill_selectors(skills=None, mode="model_decision")
-        skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=None, mode="model_decision")
+    def _collect_prompt_skill_contracts(self, *, mode: SkillMode) -> list[SkillContract]:
+        selectors = self._collect_skill_selectors(skills=None, mode=mode)
+        skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=None, mode=mode)
         if not selectors and not skills_pack_selectors:
-            return
-        cards = []
-        guidance = []
-        settings = getattr(self, "settings")
-        include_guidance = bool(settings.get("skills.prompt.include_primary_guidance", True))
-        max_guidance_chars = int(settings.get("skills.prompt.max_guidance_chars_per_skill", 6000) or 6000)
+            return []
+        contracts: list[SkillContract] = []
+        seen: set[str] = set()
         for record in self.skills_executor.list_skills():
             contract = self.skills_executor.inspect_skills(str(record["skill_id"]))
+            skill_id = str(contract.get("skill_id") or record.get("skill_id") or "")
+            if skill_id in seen:
+                continue
             if any(_matches_selector(contract, selector) for selector in selectors) or any(
                 _matches_skills_pack_selector(contract, selector) for selector in skills_pack_selectors
             ):
-                cards.append(contract.get("card", {}))
-                if include_guidance:
-                    guidance.extend(self._collect_prompt_guidance(contract, max_chars=max_guidance_chars))
-        if not cards:
+                contracts.append(contract)
+                if skill_id:
+                    seen.add(skill_id)
+        return contracts
+
+    def _prompt_bound_required_skill_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for contract in self._collect_prompt_skill_contracts(mode="required"):
+            card = _ensure_dict(contract.get("card"))
+            skill_id = str(contract.get("skill_id") or card.get("skill_id") or card.get("name") or "").strip()
+            if not skill_id:
+                continue
+            records.append(
+                {
+                    "skill_id": skill_id,
+                    "name": str(card.get("display_name") or card.get("name") or skill_id),
+                    "mode": "required",
+                    "binding": "prompt_guidance",
+                }
+            )
+        return records
+
+    async def _apply_skill_cards_to_prompt(self, prompt: "Prompt"):
+        model_decision_contracts = self._collect_prompt_skill_contracts(mode="model_decision")
+        required_contracts = self._collect_prompt_skill_contracts(mode="required")
+        if not model_decision_contracts and not required_contracts:
             return
+        settings = getattr(self, "settings")
+        include_guidance = bool(settings.get("skills.prompt.include_primary_guidance", True))
+        max_guidance_chars = int(settings.get("skills.prompt.max_guidance_chars_per_skill", 6000) or 6000)
+        model_decision_cards = [contract.get("card", {}) for contract in model_decision_contracts]
+        required_cards = [contract.get("card", {}) for contract in required_contracts]
+        model_decision_guidance = []
+        required_guidance = []
+        if include_guidance:
+            for contract in model_decision_contracts:
+                model_decision_guidance.extend(self._collect_prompt_guidance(contract, max_chars=max_guidance_chars))
+            for contract in required_contracts:
+                required_guidance.extend(self._collect_prompt_guidance(contract, max_chars=max_guidance_chars))
         prompt_mode = str(settings.get("skills.prompt.mode", settings.get("agent.auto_orchestration.skills_prompt_mode", "route_owned")))
         if prompt_mode == "route_owned":
-            prompt.append(
-                "info",
-                {
-                    "skill_candidates": cards,
-                    "skill_instruction": (
-                        "These skills are route candidates for Agent auto-orchestration. "
-                        "Do not claim that a Skill was executed unless the selected route provides skill execution logs."
-                    ),
-                },
-            )
+            payload: dict[str, Any] = {}
+            if model_decision_cards:
+                payload["skill_candidates"] = model_decision_cards
+                payload["skill_instruction"] = (
+                    "These skills are route candidates for Agent auto-orchestration. "
+                    "Do not claim that a Skill was executed unless the selected route provides skill execution logs."
+                )
+            if required_cards:
+                payload["required_skill_cards"] = required_cards
+                payload["required_skill_instruction"] = (
+                    "These Skills are required guidance for this AgentExecution. "
+                    "Apply their SKILL.md guidance while completing the task, including when using available Actions."
+                )
+                if required_guidance:
+                    payload["required_skill_guidance"] = required_guidance
+            if payload:
+                prompt.append("info", payload)
             return
         payload = {
-            "skill_cards": cards,
+            "skill_cards": [*model_decision_cards, *required_cards],
             "skill_instruction": (
-                "These skills are optional behavior-loop candidates. "
-                "Use them only when they fit the task; otherwise answer normally."
+                "Use required Skills when present. Optional Skills are behavior-loop candidates; "
+                "use them only when they fit the task."
             ),
         }
+        guidance = [*model_decision_guidance, *required_guidance]
         if guidance:
             payload["skill_guidance"] = guidance
         prompt.append("info", payload)

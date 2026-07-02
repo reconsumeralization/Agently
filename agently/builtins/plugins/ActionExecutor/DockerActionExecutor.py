@@ -49,7 +49,7 @@ class DockerActionExecutor:
             cmd = str(command)
         action_id = str(spec.get("action_id", "run_docker"))
         timeout = int(policy.get("timeout_seconds", self.timeout))
-        environment_resources = action_call.get("execution_environment_resources", {})
+        environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
             docker_resource = environment_resources.get(action_id) or environment_resources.get("docker")
             if docker_resource is not None and hasattr(docker_resource, "run"):

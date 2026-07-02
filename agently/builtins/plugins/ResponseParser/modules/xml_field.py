@@ -26,8 +26,7 @@ import re
 from typing import Any, AsyncGenerator, Mapping
 
 from agently.types.data.response import StreamingData
-
-from .section_value import normalize_json_section_value, normalize_scalar_section_value
+from agently.core.model.StructuredOutputParser import extract_xml_field_target, parse_xml_field_output
 
 
 _TARGET_START_RE = re.compile(r"<agently_output\b[^>]*>", flags=re.IGNORECASE)
@@ -42,18 +41,6 @@ _FIELD_CLOSE_RE = re.compile(
 )
 
 
-def extract_xml_field_target(text: str) -> str | None:
-    start = _TARGET_START_RE.search(text)
-    if start is None:
-        return None
-    end = None
-    for match in _TARGET_END_RE.finditer(text, start.end()):
-        end = match
-    if end is None:
-        return None
-    return text[start.start(): end.end()]
-
-
 def _iter_field_sections(target: str):
     search_pos = 0
     while True:
@@ -65,30 +52,6 @@ def _iter_field_sections(target: str):
             return
         yield start.group(1), start.group(2).lower(), target[start.end(): close.start()]
         search_pos = close.end()
-
-
-def parse_xml_field_output(text: str, output_schema: Mapping[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(output_schema, Mapping) or not output_schema:
-        return None
-
-    target = extract_xml_field_target(text)
-    if target is None:
-        return None
-
-    result: dict[str, Any] = {}
-    for field_name, field_type, raw_content in _iter_field_sections(target):
-        if field_name not in output_schema:
-            continue
-        content = raw_content.strip()
-        if field_type == "json":
-            ok, value = normalize_json_section_value(content, field_name=field_name)
-        else:
-            ok, value = normalize_scalar_section_value(content, field_name=field_name)
-        if not ok:
-            return None
-        result[field_name] = value
-
-    return result if result else None
 
 
 class XmlFieldStreamingParser:

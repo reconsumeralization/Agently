@@ -1,0 +1,529 @@
+import pytest
+from typing import Any, cast
+import importlib
+import sys
+import types
+
+from agently import Agently
+from agently.core import (
+    ExecutionResourceApprovalDenied,
+    ExecutionResourceApprovalRequired,
+    ExecutionResourceError,
+    ExecutionResourceManager,
+)
+from agently.types.data import ExecutionResourceRequirement
+from agently.utils import Settings
+
+
+def _create_manager():
+    settings = Settings(name="ExecutionResourceTestSettings", parent=Agently.settings)
+    return ExecutionResourceManager(
+        plugin_manager=Agently.plugin_manager,
+        settings=settings,
+        event_center=Agently.event_center,
+    )
+
+
+def test_execution_resource_declare_is_lazy():
+    manager = _create_manager()
+    requirement = manager.declare(
+        {
+            "kind": "python",
+            "scope": "action_call",
+            "resource_key": "python_test",
+        }
+    )
+
+    assert requirement["kind"] == "python"
+    assert manager.list() == []
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_ensure_reuses_and_releases_handle():
+    manager = _create_manager()
+    requirement = cast(ExecutionResourceRequirement, {
+        "kind": "python",
+        "scope": "session",
+        "owner_id": "session-1",
+        "resource_key": "python_test",
+        "config": {"base_vars": {"value": 1}},
+    })
+
+    handle_1 = await manager.async_ensure(requirement)
+    handle_2 = await manager.async_ensure(requirement)
+
+    assert handle_1.get("handle_id") == handle_2.get("handle_id")
+    assert handle_2.get("ref_count") == 2
+
+    await manager.async_release(handle_1)
+    assert manager.list()[0].get("ref_count") == 1
+    await manager.async_release(handle_2)
+    assert manager.list() == []
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_rechecks_health_before_reuse():
+    manager = _create_manager()
+
+    class FlakyProvider:
+        name = "FlakyProvider"
+        kind = "flaky"
+        DEFAULT_SETTINGS: dict[str, Any] = {}
+
+        def __init__(self):
+            self.ensure_count = 0
+            self.release_count = 0
+
+        async def async_ensure(self, *, requirement, policy, existing_handle=None):
+            _ = (requirement, policy, existing_handle)
+            self.ensure_count += 1
+            return {
+                "handle_id": f"flaky:{ self.ensure_count }",
+                "resource": object(),
+                "status": "ready",
+                "meta": {"provider": self.name},
+            }
+
+        async def async_health_check(self, handle):
+            _ = handle
+            return "unhealthy"
+
+        async def async_release(self, handle):
+            _ = handle
+            self.release_count += 1
+
+    provider = FlakyProvider()
+    manager.register_provider(cast(Any, provider))
+    requirement = cast(ExecutionResourceRequirement, {
+        "kind": "flaky",
+        "scope": "session",
+        "owner_id": "session-health",
+        "resource_key": "resource",
+    })
+
+    handle_1 = await manager.async_ensure(requirement)
+    handle_2 = await manager.async_ensure(requirement)
+
+    assert handle_1.get("handle_id") == "flaky:1"
+    assert handle_2.get("handle_id") == "flaky:2"
+    assert provider.ensure_count == 2
+    assert provider.release_count == 1
+    assert manager.list()[0].get("handle_id") == "flaky:2"
+
+    await manager.async_release(handle_2)
+    assert manager.list() == []
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_default_policy_denies_and_does_not_start():
+    manager = _create_manager()
+
+    with pytest.raises(ExecutionResourceApprovalDenied):
+        await manager.async_ensure(
+            {
+                "kind": "python",
+                "scope": "action_call",
+                "resource_key": "python_test",
+                "approval_required": True,
+            }
+        )
+
+    assert manager.list() == []
+
+
+def test_action_python_sandbox_uses_execution_resource():
+    action_id = "python_env_action"
+    Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)
+
+    result = Agently.action.execute_action(action_id, {"python_code": "result = 40 + 2"})
+
+    assert result.get("status") == "success"
+    result_data = cast(dict[str, Any], result.get("data"))
+    assert result_data["result"] == 42
+    assert Agently.execution_resource.list(scope="action_call") == []
+
+
+def test_action_bash_sandbox_uses_execution_resource(tmp_path):
+    action_id = "bash_env_action"
+    Agently.action.register_bash_sandbox_action(
+        action_id=action_id,
+        expose_to_model=False,
+        allowed_cmd_prefixes=["pwd"],
+        allowed_workdir_roots=[str(tmp_path)],
+    )
+
+    result = Agently.action.execute_action(action_id, {"cmd": "pwd", "workdir": str(tmp_path)})
+
+    assert result.get("status") == "success"
+    result_data = cast(dict[str, Any], result.get("data"))
+    assert result_data["ok"] is True
+    assert str(tmp_path) in result_data["stdout"]
+    assert Agently.execution_resource.list(scope="action_call") == []
+
+
+def test_bash_execution_resource_materializes_workspace_boundary(tmp_path):
+    # Provider-side file-boundary materialization: a Workspace-issued root that
+    # does not yet exist is created by the provider before the executor runs
+    # (spec section 8.6).
+    boundary = tmp_path / "lineage" / "executions" / "exec-mat" / "files"
+    assert not boundary.exists()
+    action_id = "bash_boundary_materialize"
+    Agently.action.register_bash_sandbox_action(
+        action_id=action_id,
+        expose_to_model=False,
+        allowed_cmd_prefixes=["pwd"],
+        allowed_workdir_roots=[str(boundary)],
+    )
+
+    result = Agently.action.execute_action(action_id, {"cmd": "pwd"})
+
+    assert result.get("status") == "success"
+    assert boundary.is_dir()
+    result_data = cast(dict[str, Any], result.get("data"))
+    assert result_data["ok"] is True
+    assert str(boundary.resolve()) in result_data["stdout"]
+
+
+def test_action_environment_default_policy_denies_as_blocked_action_result():
+    action_id = "approval_env_action"
+    Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)
+    spec = Agently.action.action_registry.get_spec(action_id)
+    assert spec is not None
+    spec.get("execution_resources", [])[0]["approval_required"] = True
+
+    result = Agently.action.execute_action(action_id, {"python_code": "result = 1"})
+
+    assert result.get("status") == "blocked"
+    assert "non-interactive environment" in str(result.get("error", ""))
+
+
+@pytest.mark.asyncio
+async def test_custom_action_executor_signature_still_works():
+    action_id = "custom_executor_env_compat"
+
+    class EchoExecutor:
+        kind = "echo"
+        sandboxed = False
+
+        async def execute(self, *, spec, action_call, policy, settings):
+            return {
+                "spec": spec["action_id"],
+                "input": action_call["action_input"],
+                "policy": policy,
+                "settings": settings.name,
+            }
+
+    Agently.action.register_action(
+        action_id=action_id,
+        desc="Compatibility executor.",
+        kwargs={"value": (int, "")},
+        executor=EchoExecutor(),
+        expose_to_model=False,
+    )
+
+    result = await Agently.action.async_execute_action(action_id, {"value": 7})
+
+    assert result.get("status") == "success"
+    result_data = cast(dict[str, Any], result.get("data"))
+    assert result_data["spec"] == action_id
+    assert result_data["input"] == {"value": 7}
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_release_scope_cleans_handles():
+    manager = _create_manager()
+    owner = "scope-test-owner"
+
+    await manager.async_ensure(
+        {"kind": "python", "scope": "agent", "owner_id": owner, "resource_key": "py1"},
+    )
+    await manager.async_ensure(
+        {"kind": "python", "scope": "session", "owner_id": owner, "resource_key": "py2"},
+    )
+    await manager.async_ensure(
+        {"kind": "python", "scope": "agent", "owner_id": "other-owner", "resource_key": "py3"},
+    )
+
+    assert len(manager.list(scope="agent", owner_id=owner)) == 1
+    assert len(manager.list(scope="session", owner_id=owner)) == 1
+
+    await manager.async_release_scope("agent", owner)
+
+    assert manager.list(scope="agent", owner_id=owner) == []
+    assert len(manager.list(scope="session", owner_id=owner)) == 1
+    assert len(manager.list(scope="agent", owner_id="other-owner")) == 1
+
+    await manager.async_release_scope("session", owner)
+    assert manager.list(scope="session", owner_id=owner) == []
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_missing_provider_raises_stable_error():
+    manager = _create_manager()
+
+    with pytest.raises(ExecutionResourceError) as exc_info:
+        await manager.async_ensure(
+            {"kind": "nonexistent_provider_xyz", "scope": "action_call", "resource_key": "nope"},
+        )
+
+    error = exc_info.value
+    assert hasattr(error, "code")
+    assert error.code == "execution_resource.provider_missing"
+    assert manager.list() == []
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_approval_denied_returns_blocked_action_result():
+    action_id = "denied_approval_env_action"
+    Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)
+    spec = Agently.action.action_registry.get_spec(action_id)
+    assert spec is not None
+    spec.get("execution_resources", [])[0]["approval_required"] = True
+
+    Agently.policy_approval.register_handler(
+        "deny_execution_resource_test",
+        lambda request: {"status": "denied", "reason": "Denied by test policy."},
+        replace=True,
+    )
+    Agently.configure_policy_approval(handler="deny_execution_resource_test")
+    try:
+        result = Agently.action.execute_action(action_id, {"python_code": "result = 1"})
+    finally:
+        Agently.configure_policy_approval(handler="input_timeout_fail")
+        Agently.policy_approval.unregister_handler("deny_execution_resource_test")
+
+    assert result.get("status") == "blocked"
+    assert Agently.execution_resource.list(scope="action_call") == []
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_provider_failure_does_not_poison_registry():
+    from agently.core.operation.ExecutionResource import ExecutionResourceManager
+    from agently.utils import Settings
+
+    settings = Settings(name="FailProviderTestSettings", parent=Agently.settings)
+    manager = ExecutionResourceManager(
+        plugin_manager=Agently.plugin_manager,
+        settings=settings,
+        event_center=Agently.event_center,
+    )
+
+    class FailingProvider:
+        name = "FailingProvider"
+        kind = "python"
+        DEFAULT_SETTINGS: dict[str, Any] = {}
+
+        @staticmethod
+        def _on_register():
+            pass
+
+        @staticmethod
+        def _on_unregister():
+            pass
+
+        async def async_ensure(self, *, requirement, policy, existing_handle=None):
+            raise RuntimeError("Simulated provider failure")
+
+        async def async_health_check(self, handle):
+            return "unhealthy"
+
+        async def async_release(self, handle):
+            pass
+
+    manager.register_provider(FailingProvider())
+
+    declared = manager.declare(
+        {"kind": "python", "scope": "action_call", "resource_key": "fail_test"}
+    )
+    requirement_id = declared.get("requirement_id")
+    assert requirement_id is not None
+
+    with pytest.raises(RuntimeError, match="Simulated provider failure"):
+        await manager.async_ensure({"kind": "python", "scope": "action_call", "resource_key": "fail_test"})
+
+    assert manager.list() == []
+    assert manager.inspect(requirement_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_mcp_executor_transport_routing():
+    import unittest.mock as mock
+    from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
+
+    direct_transport = object()
+    managed_transport = object()
+    executor = MCPActionExecutor(action_id="my_tool", transport=direct_transport)
+
+    captured: list[Any] = []
+
+    def fake_client(transport):
+        captured.append(transport)
+        ctx = mock.MagicMock()
+        ctx.__aenter__ = mock.AsyncMock(side_effect=Exception("stop"))
+        ctx.__aexit__ = mock.AsyncMock(return_value=False)
+        return ctx
+
+    fake_fastmcp = types.ModuleType("fastmcp")
+    fake_fastmcp.Client = fake_client  # type: ignore[attr-defined]
+    fake_mcp = types.ModuleType("mcp")
+    fake_mcp_types = types.ModuleType("mcp.types")
+    for name in ("AudioContent", "EmbeddedResource", "ImageContent", "ResourceLink", "TextContent"):
+        setattr(fake_mcp_types, name, type(name, (), {}))
+
+    spec = {"action_id": "my_tool"}
+    policy: dict[str, Any] = {}
+    settings = mock.MagicMock()
+    mcp_executor_module = importlib.import_module(
+        "agently.builtins.plugins.ActionExecutor.MCPActionExecutor"
+    )
+
+    with (
+        mock.patch.dict(sys.modules, {"fastmcp": fake_fastmcp, "mcp": fake_mcp, "mcp.types": fake_mcp_types}),
+        mock.patch.object(mcp_executor_module.LazyImport, "import_package") as lazy_import,
+        mock.patch("fastmcp.Client", fake_client),
+    ):
+        action_call_no_env: dict[str, Any] = {
+            "action_input": {},
+            "execution_resource_resources": {},
+        }
+        try:
+            await executor.execute(spec=spec, action_call=action_call_no_env, policy=policy, settings=settings)
+        except Exception:
+            pass
+        assert captured and captured[-1] is direct_transport, \
+            "Without managed resource, executor must use direct transport"
+
+        captured.clear()
+
+        action_call_with_env: dict[str, Any] = {
+            "action_input": {},
+            "execution_resource_resources": {"my_tool": managed_transport},
+        }
+        try:
+            await executor.execute(spec=spec, action_call=action_call_with_env, policy=policy, settings=settings)
+        except Exception:
+            pass
+        assert captured and captured[-1] is managed_transport, \
+            "With managed resource injected, executor must prefer managed transport"
+        assert lazy_import.call_args_list == [
+            mock.call("fastmcp", version_constraint=">=3", auto_install=False),
+            mock.call("mcp", auto_install=False),
+            mock.call("fastmcp", version_constraint=">=3", auto_install=False),
+            mock.call("mcp", auto_install=False),
+        ]
+
+
+def test_mcp_executor_resource_blocks_use_action_artifact_contract():
+    from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
+
+    class FakeTextContent:
+        def model_dump(self):
+            return {"type": "text", "text": "plain result"}
+
+    class FakeResourceLink:
+        def model_dump(self):
+            return {
+                "type": "resource_link",
+                "uri": "file:///tmp/agently/report.md",
+                "name": "report.md",
+                "mimeType": "text/markdown",
+            }
+
+    assert MCPActionExecutor._artifact_from_content_block(FakeTextContent()) is None
+
+    artifact = MCPActionExecutor._artifact_from_content_block(FakeResourceLink())
+    assert artifact is not None
+    assert artifact["artifact_type"] == "mcp_resource_link"
+    assert artifact["path"] == "file:///tmp/agently/report.md"
+    assert artifact["media_type"] == "text/markdown"
+    assert artifact["meta"]["source"] == "mcp"
+
+    result = MCPActionExecutor._result_with_artifacts({"summary": "written"}, [artifact])
+    assert result["status"] == "success"
+    assert result["data"] == {"summary": "written"}
+    assert result["artifacts"][0]["label"] == "report.md"
+
+
+def test_mcp_executor_preserves_structured_explicit_artifact_refs():
+    from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
+
+    structured = {
+        "summary": "written",
+        "artifact_refs": [
+            {
+                "path": "artifacts/report.md",
+                "label": "report.md",
+                "media_type": "text/markdown",
+            }
+        ],
+    }
+
+    result = MCPActionExecutor._result_with_artifacts(structured, [])
+    assert result["status"] == "success"
+    assert result["artifact_refs"] == structured["artifact_refs"]
+    assert result["data"] is structured
+
+
+def test_mcp_transport_normalization_supports_url_headers_and_configs():
+    from agently.utils.MCP import normalize_mcp_transport
+
+    normalized = normalize_mcp_transport(
+        "https://example.com/mcp",
+        headers={"Authorization": "Bearer token"},
+    )
+    assert normalized == {
+        "mcpServers": {
+            "default": {
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer token"},
+            }
+        }
+    }
+
+    config = {
+        "mcpServers": {
+            "weather": {"url": "https://weather.example/mcp"},
+            "filesystem": {"command": "npx", "args": ["-y", "server"]},
+        }
+    }
+    merged = normalize_mcp_transport(config, headers={"X-Team": "ops"})
+    assert merged["mcpServers"]["weather"]["headers"] == {"X-Team": "ops"}
+    assert "headers" not in merged["mcpServers"]["filesystem"]
+    assert normalize_mcp_transport(config) is config
+
+
+@pytest.mark.asyncio
+async def test_action_use_mcp_url_headers_passes_normalized_transport_to_fastmcp():
+    import unittest.mock as mock
+
+    captured: list[Any] = []
+
+    class FakeClient:
+        def __init__(self, transport):
+            captured.append(transport)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def list_tools(self):
+            return []
+
+    registrar_module = importlib.import_module(
+        "agently.core.operation.Action.ActionResourceRegistrar"
+    )
+
+    with (
+        mock.patch.object(registrar_module.LazyImport, "import_package") as lazy_import,
+        mock.patch("fastmcp.Client", FakeClient),
+    ):
+        await Agently.action.async_use_mcp(
+            "https://example.com/mcp",
+            headers={"Authorization": "Bearer token"},
+        )
+
+    lazy_import.assert_called_once_with("fastmcp", version_constraint=">=3", auto_install=False)
+    assert captured[-1]["mcpServers"]["default"]["url"] == "https://example.com/mcp"
+    assert captured[-1]["mcpServers"]["default"]["headers"] == {"Authorization": "Bearer token"}

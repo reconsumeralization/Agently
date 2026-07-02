@@ -15,13 +15,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, RuntimeStageStallError
 from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import DataFormatter
 
-from .routes import run_dynamic_task_route, run_model_request_route, run_skills_route
+from .routes import run_model_request_route, run_skills_route
 from .task_strategy import run_agent_task_route
 
 if TYPE_CHECKING:
@@ -54,10 +55,27 @@ async def async_execute_route(
         owner.route_info.setdefault("options", DataFormatter.sanitize(route_meta))
         owner.route_info.setdefault("reusable", True)
         await owner.emit_stream("route.selected", owner.route_plan, route=route)
+        if route == "route_policy_blocked":
+            reason = str(route_meta.get("route_policy_warning") or "Route policy could not be satisfied.")
+            owner.status = "blocked"
+            owner.close_snapshot = {"status": "blocked", "route": "route_policy_blocked", "route_meta": DataFormatter.sanitize(route_meta)}
+            owner.diagnostics.setdefault("route_policy_violations", []).append(DataFormatter.sanitize(route_meta))
+            await owner.emit_stream(
+                "route.policy.blocked",
+                DataFormatter.sanitize(route_meta),
+                route="route_policy_blocked",
+                source="agent_execution",
+                meta={"status": "blocked"},
+            )
+            return route, {
+                "status": "blocked",
+                "accepted": False,
+                "artifact_status": "blocked",
+                "reason": reason,
+                "route_policy": route_meta.get("route_policy"),
+            }
         if route == "skills":
             result = await run_skills_route(owner, route_meta)
-        elif route == "dynamic_task":
-            result = await run_dynamic_task_route(owner, route_meta)
         elif route == "agent_task":
             result = await run_agent_task_route(owner, route_meta)
         else:
@@ -89,19 +107,18 @@ async def start_execution(
     if parent_run_context is not None:
         owner.parent_run_context = parent_run_context
     async with owner._start_lock:
+        # The lock is held across the whole run, so a second entrant always sees
+        # a completed execution here; there is no started-but-not-completed state
+        # to busy-wait on.
         if owner._completed:
-            if owner._error is not None:
-                raise owner._error
-            return owner.result
-        if owner._started:
-            while not owner._completed:
-                await asyncio.sleep(0.01)
             if owner._error is not None:
                 raise owner._error
             return owner.result
         owner._started = True
         owner.status = "running"
         try:
+            await owner._async_emit_agent_execution_started_once()
+            owner.execution_context.raise_if_nesting_exceeded()
             owner.execution_context.record_progress(
                 stage="agent_execution",
                 status="started",
@@ -121,6 +138,9 @@ async def start_execution(
             if owner.status == "running":
                 owner.status = "success"
             await owner.emit_stream("result", owner.result, route=route, source="agent_execution")
+            if route != "model_request":
+                with suppress(Exception):
+                    await owner._async_emit_agent_execution_terminal_event(failed=False)
             return owner.result
         except RuntimeStageStallError as error:
             owner.status = "timed_out" if error.status == "timed_out" else "stalled"
@@ -131,6 +151,8 @@ async def start_execution(
                 error.to_diagnostic(),
                 source="agent_execution",
             )
+            with suppress(Exception):
+                await owner._async_emit_agent_execution_terminal_event(failed=True)
             raise
         except asyncio.TimeoutError as error:
             owner.status = "timed_out"
@@ -152,6 +174,8 @@ async def start_execution(
                 timeout_error.to_diagnostic(),
                 source="agent_execution",
             )
+            with suppress(Exception):
+                await owner._async_emit_agent_execution_terminal_event(failed=True)
             raise timeout_error from error
         except AgentExecutionLimitExceeded as error:
             owner.status = "blocked"
@@ -162,6 +186,8 @@ async def start_execution(
                 {"type": error.__class__.__name__, "message": str(error), "limit_name": error.limit_name},
                 source="agent_execution",
             )
+            with suppress(Exception):
+                await owner._async_emit_agent_execution_terminal_event(failed=True)
             raise
         except BaseException as error:
             owner.status = "error"
@@ -172,6 +198,8 @@ async def start_execution(
                 {"type": error.__class__.__name__, "message": str(error)},
                 source="agent_execution",
             )
+            with suppress(Exception):
+                await owner._async_emit_agent_execution_terminal_event(failed=True)
             raise
         finally:
             owner._refresh_diagnostics()

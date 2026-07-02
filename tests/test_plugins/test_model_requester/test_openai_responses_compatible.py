@@ -1,11 +1,13 @@
 import asyncio
 import json
+from typing import Any
 
 import pytest
 
 from types import SimpleNamespace
 
 from agently import Agently
+from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.model.Prompt import Prompt
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import (
@@ -65,7 +67,7 @@ async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict,
     return captured
 
 
-def collect_events(plugin: OpenAIResponsesCompatible, request_events: list[tuple[str, str]]):
+def collect_events(plugin: OpenAIResponsesCompatible, request_events: list[tuple[str, Any]]):
     async def _run():
         async def generator():
             for event, payload in request_events:
@@ -267,6 +269,43 @@ def test_broadcast_response_maps_text_stream_and_meta():
     assert ("reasoning_done", "") in events
     assert ("original_done", final_response) in events
     assert ("meta", {"id": "resp_1", "model": "gpt-5.5", "status": "completed", "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}, "finish_reason": "stop"}) in events
+
+
+def test_broadcast_response_preserves_core_status_record():
+    plugin = build_plugin({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
+
+    events = collect_events(
+        plugin,
+        [("status", {"status": "failed", "attempt_index": 1, "retry": True})],
+    )
+
+    assert events == [("status", {"status": "failed", "attempt_index": 1, "retry": True})]
+
+
+def test_broadcast_response_resets_attempt_text_after_retry_status():
+    plugin = build_plugin({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
+
+    events = collect_events(
+        plugin,
+        [
+            ("response.output_text.delta", json.dumps({"type": "response.output_text.delta", "delta": "partial"})),
+            (
+                "status",
+                {
+                    "status": "failed",
+                    "attempt_index": 1,
+                    "retry": True,
+                    "next_attempt_index": 2,
+                    "reason": "server disconnected",
+                },
+            ),
+            ("response.output_text.delta", json.dumps({"type": "response.output_text.delta", "delta": "replacement"})),
+        ],
+    )
+
+    assert [payload for event, payload in events if event == "delta"] == ["partial", "replacement"]
+    assert ("done", "replacement") in events
+    assert ("done", "partialreplacement") not in events
 
 
 def test_broadcast_response_synthesizes_tool_call_done_without_completed_event():
@@ -536,10 +575,14 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
     async for event, payload in plugin.request_model(request_data):
         events.append((event, payload))
 
-    assert len(events) == 1
-    assert events[0][0] == "error"
-    assert isinstance(events[0][1], TimeoutError)
-    assert "First token timeout after 0.01 seconds." in str(events[0][1])
+    assert len(events) == 2
+    assert events[0][0] == "status"
+    assert events[0][1]["status"] == "failed"
+    assert events[0][1]["retry"] is False
+    assert events[0][1]["reason"] == "First token timeout after 0.01 seconds."
+    assert events[1][0] == "error"
+    assert isinstance(events[1][1], TimeoutError)
+    assert "First token timeout after 0.01 seconds." in str(events[1][1])
 
 
 @pytest.mark.asyncio
@@ -593,8 +636,125 @@ async def test_stream_idle_timeout_returns_timeout_error_event(monkeypatch: pyte
     async for event, payload in plugin.request_model(request_data):
         events.append((event, payload))
 
-    assert len(events) == 2
+    assert len(events) == 3
     assert events[0][0] == "response.output_text.delta"
-    assert events[1][0] == "error"
-    assert isinstance(events[1][1], TimeoutError)
-    assert "Stream idle timeout after 0.01 seconds." in str(events[1][1])
+    assert events[1][0] == "status"
+    assert events[1][1]["status"] == "failed"
+    assert events[1][1]["retry"] is False
+    assert events[1][1]["reason"] == "Stream idle timeout after 0.01 seconds."
+    assert events[2][0] == "error"
+    assert isinstance(events[2][1], TimeoutError)
+    assert "Stream idle timeout after 0.01 seconds." in str(events[2][1])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_response_idle_timeout_returns_stall_error(monkeypatch: pytest.MonkeyPatch):
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            del url, json, headers
+            await asyncio.sleep(10)
+            raise AssertionError("post should have been cancelled by the idle deadline")
+
+    monkeypatch.setattr(responses_module, "AsyncClient", FakeAsyncClient)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": False,
+            "stream_idle_timeout": 0.01,
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    statuses = [payload for event, payload in events if event == "status"]
+    assert statuses
+    assert statuses[-1]["status"] == "failed"
+    assert any(
+        "Non-streaming response made no progress before idle deadline" in str(payload.get("reason") or "")
+        for payload in statuses
+    )
+    assert events[-1][0] == "error"
+    assert isinstance(events[-1][1], RuntimeStageStallError)
+    assert events[-1][1].stage == "response_materialization"
+    assert events[-1][1].timeout_seconds == 0.01
+    assert "stream_idle_timeout=0.01" in str(events[-1][1])
+
+
+@pytest.mark.asyncio
+async def test_non_stream_response_idle_timeout_allows_api_key_failover(monkeypatch: pytest.MonkeyPatch):
+    calls: list[dict[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, content: bytes):
+            self.status_code = status_code
+            self.content = content
+            self.text = content.decode()
+            self.headers = {"Content-Type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            del url, json
+            calls.append(dict(self.headers if headers is None else headers))
+            if len(calls) == 1:
+                await asyncio.sleep(10)
+                raise AssertionError("first post should have been cancelled by the idle deadline")
+            return FakeResponse(
+                200,
+                b'{"id":"resp_1","object":"response","status":"completed","output":[]}',
+            )
+
+    monkeypatch.setattr(responses_module, "AsyncClient", FakeAsyncClient)
+
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "api_key": "key-a",
+            "stream": False,
+            "stream_idle_timeout": 0.01,
+            "_api_key_pool_runtime": {
+                "pool_id": "example",
+                "failover": {"handler": lambda _context: "try_next", "max_attempts": 2},
+                "keys": [
+                    {"id": "a", "value": "key-a", "index": 0},
+                    {"id": "b", "value": "key-b", "index": 1},
+                ],
+                "selected_key_id": "a",
+                "attempts": [{"key_id": "a", "action": "initial"}],
+            },
+        },
+        {"input": "hello"},
+    )
+
+    events = []
+    async for event, payload in plugin.request_model(plugin.generate_request_data()):
+        events.append((event, payload))
+
+    assert [headers.get("Authorization") for headers in calls] == ["Bearer key-a", "Bearer key-b"]
+    assert events == [
+        ("response.completed", '{"id":"resp_1","object":"response","status":"completed","output":[]}'),
+        ("status", {"status": "completed", "attempt_index": 1, "retry": False}),
+    ]

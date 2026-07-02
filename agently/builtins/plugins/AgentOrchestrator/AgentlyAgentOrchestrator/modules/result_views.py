@@ -17,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Generator
+from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
+from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
 from agently.utils import DataFormatter, FunctionShifter
 
 from .diagnostics import build_execution_meta
@@ -74,7 +76,7 @@ async def async_get_meta(owner: "AgentExecution") -> dict[str, Any]:
 
 async def get_async_generator(
     owner: "AgentExecution",
-    type: Literal["instant", "streaming_parse", "all"] | str | None = "instant",
+    type: Literal["delta", "instant", "streaming_parse", "all"] | str | None = "delta",
     content: Any = None,
     **_: Any,
 ) -> AsyncGenerator[Any, None]:
@@ -82,23 +84,43 @@ async def get_async_generator(
         type = content
     if owner._completed:
         for item in owner.stream.items:
-            yield ("agent_execution", item) if type == "all" else item
+            projected = _project_stream_item(item, type)
+            if projected is not None:
+                yield projected
         return
     queue: asyncio.Queue[Any] = asyncio.Queue()
     for item in owner.stream.items:
         await queue.put(item)
     owner.stream.queues.append(queue)
     start_task = asyncio.create_task(owner.async_start())
+    start_task.add_done_callback(_retrieve_generator_start_exception)
     try:
         while True:
             item = await queue.get()
             if item is None:
                 break
-            yield ("agent_execution", item) if type == "all" else item
+            projected = _project_stream_item(item, type)
+            if projected is not None:
+                yield projected
         await start_task
     finally:
         if queue in owner.stream.queues:
             owner.stream.queues.remove(queue)
+
+
+def _project_stream_item(item: Any, type: Any) -> Any:
+    if type == "all":
+        return ("agent_execution", item)
+    if type == "delta":
+        return project_agent_execution_text_delta(item)
+    return item
+
+
+def _retrieve_generator_start_exception(task: "asyncio.Task[Any]") -> None:
+    if task.cancelled():
+        return
+    with suppress(Exception):
+        task.exception()
 
 
 def sync_generator(owner: "AgentExecution", *args: Any, **kwargs: Any) -> Generator[Any, None, None]:

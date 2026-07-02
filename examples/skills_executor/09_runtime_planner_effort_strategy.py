@@ -9,25 +9,29 @@ Environment:
 What this demonstrates:
   - A standard `SKILL.md` (guidance only) declared on the recommended
     `agent.async_run_skills_task(...)` path.
-  - `async_run_skills_task(..., effort=...)` selecting that profile at call time:
-        effort="fast"     → single_shot (one model request)
-        effort="normal"   → full runtime planner chain:
+  - `async_run_skills_task(..., effort=...)` selecting a compatibility route
+    label at call time. The facade lowers selected Skills through Blocks:
+        effort="fast"     → single_shot label → model_request block
+        effort="normal"   → runtime_chain label → flow_segment block:
                              preflight → research → plan → execute → verify
                              → reflect/retry → finalize
   - Stage model-key routing through the model pool without hard-coding model
     names in the Skills executor.
-  - Streaming `skills.runtime_chain.*` events so each planner phase is visible.
+  - Streaming `skills.runtime_chain.*` events so each planner phase is visible,
+    with Blocks plan/evidence metadata in `execution.close_snapshot["blocks"]`.
 
 Working principle:
-    fast   : Skill guidance + task → FINALIZE
-    normal : preflight → research → plan → execute → verify → reflect → finalize
+    fast   : skill_activation + model_request → FINALIZE
+    normal : skill_activation + flow_segment(preflight → ... → finalize)
 
 Host code still owns persistence. The Skill provides guidance; ActionRuntime,
-ExecutionEnvironment, TriggerFlow, or host code own real side effects.
+ExecutionResource, TriggerFlow, or host code own real side effects.
 
 Expected key output from one real DeepSeek run:
     fast_strategy=single_shot
+    fast_block_kind=model_request
     normal_strategy=runtime_chain
+    normal_block_kind=flow_segment
     normal_phase_events=10
     decision_doc_written=True
 """
@@ -123,7 +127,7 @@ async def main() -> None:
         contract = Agently.skills_executor.install_skills(skill_root, trust_level="local", update=True)
         skill_id = str(contract["skill_id"])
         print(f"installed skill_id={skill_id}")
-        print("declared strategy (frontmatter): single_shot default")
+        print("compatibility route label: single_shot default")
 
         task = f"Review this release candidate and decide go/no-go.\n\n{RELEASE_CONTEXT}"
 
@@ -137,9 +141,11 @@ async def main() -> None:
             output=READINESS_OUTPUTS,
         )
         fast_strategy = (fast_exec.close_snapshot or {}).get("execution_mode")
-        print(f"  status={fast_exec.status}  strategy={fast_strategy}")
+        fast_blocks = fast_exec.close_snapshot["blocks"]
+        fast_block_kind = fast_blocks["execution_graph"]["execution_blocks"][-1]["kind"]
+        print(f"  status={fast_exec.status}  strategy={fast_strategy}  block={fast_block_kind}")
 
-        # ── effort="normal" → full runtime planner chain ────────────────────
+        # ── effort="normal" → full runtime-chain compatibility label ─────────
         print(f"\n{divider}\n[2] effort='normal'  (expect runtime_chain)\n{divider}")
         phase_events: list[str] = []
 
@@ -158,8 +164,13 @@ async def main() -> None:
             stream_handler=on_stream,
         )
         normal_strategy = (normal_exec.close_snapshot or {}).get("execution_mode")
+        normal_blocks = normal_exec.close_snapshot["blocks"]
+        normal_block_kind = normal_blocks["execution_graph"]["execution_blocks"][-1]["kind"]
         decision = normal_exec.output or {}
-        print(f"  status={normal_exec.status}  strategy={normal_strategy}  phases={len(phase_events)}")
+        print(
+            f"  status={normal_exec.status}  strategy={normal_strategy}  "
+            f"block={normal_block_kind}  phases={len(phase_events)}"
+        )
 
         # Host owns persistence: write a decision document from the finalized result.
         out_dir = ROOT / "examples" / "skills_executor" / "_artifacts"
@@ -181,7 +192,9 @@ async def main() -> None:
 
     print(f"\n{divider}")
     print(f"fast_strategy={fast_strategy}")
+    print(f"fast_block_kind={fast_block_kind}")
     print(f"normal_strategy={normal_strategy}")
+    print(f"normal_block_kind={normal_block_kind}")
     print(f"normal_phase_events={len(phase_events)}")
     print(f"decision_doc_written={doc_path.exists()}")
 

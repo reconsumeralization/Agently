@@ -60,6 +60,13 @@ class OpenAICompatibleResponseAdapterMixin:
         async for event, message in response_generator:
             if event == "error":
                 yield "error", message
+            elif event == "status":
+                if isinstance(message, dict) and message.get("status") == "failed" and message.get("retry") is True:
+                    meta = {}
+                    message_record = {}
+                    reasoning_buffer = ""
+                    content_buffer = ""
+                yield "status", message
             elif message != "[DONE]":
                 yield "original_delta", message
                 loaded_message = json.loads(message)

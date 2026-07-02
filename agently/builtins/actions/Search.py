@@ -14,6 +14,8 @@
 
 
 from typing import Any, Literal
+from collections.abc import Mapping
+import time
 
 from agently.utils import LazyImport, FunctionShifter
 
@@ -32,6 +34,18 @@ SearchBackend = Literal[
     "yandex",
 ]
 NewsSearchBackend = Literal["auto", "all", "bing", "duckduckgo", "yahoo"]
+
+
+_DEFAULT_REGION_BY_LANGUAGE = {
+    "zh-CN": "cn-zh",
+    "zh-TW": "tw-tzh",
+    "en": "us-en",
+    "ja": "jp-jp",
+    "ko": "kr-kr",
+    "fr": "fr-fr",
+    "de": "de-de",
+    "es": "es-es",
+}
 
 
 class Search:
@@ -114,10 +128,12 @@ class Search:
             "ue-es",
             "ve-es",
             "vn-vi",
-        ] = "us-en",
+        ] | None = None,
         fallback_backends: list[str] | tuple[str, ...] | str | None = None,
         search_fallback_backends: list[str] | tuple[str, ...] | str | None = None,
         news_fallback_backends: list[str] | tuple[str, ...] | str | None = None,
+        max_attempts: int = 2,
+        retry_backoff_seconds: float = 0.25,
         options: dict[str, Any] | None = None,
     ):
         self.proxy = proxy
@@ -127,12 +143,25 @@ class Search:
             "search": search_backend if search_backend is not None else backend,
             "news": news_backend if news_backend is not None else backend,
         }
-        self.region = region
+        self.region = region or "us-en"
+        self._region_explicit = region is not None
         self.fallback_backends = {
             "search": search_fallback_backends if search_fallback_backends is not None else fallback_backends,
             "news": news_fallback_backends if news_fallback_backends is not None else fallback_backends,
         }
+        self.max_attempts = max(1, int(max_attempts)) if isinstance(max_attempts, int) else 2
+        self.retry_backoff_seconds = (
+            max(0.0, float(retry_backoff_seconds)) if isinstance(retry_backoff_seconds, (int, float)) else 0.25
+        )
         self._extra_options = options or {}
+
+    def apply_language_policy(self, policy: Mapping[str, Any]) -> None:
+        if not isinstance(policy, Mapping):
+            return
+        language = str(policy.get("output_language") or policy.get("language") or "").strip()
+        region = _DEFAULT_REGION_BY_LANGUAGE.get(language)
+        if region is not None and str(region).strip() and not self._region_explicit:
+            self.region = str(region).strip()  # type: ignore[assignment]
 
     def _get_ddgs(self):
         if self.ddgs is None:
@@ -157,7 +186,11 @@ class Search:
         specs = [
             (
                 "search",
-                "Search the web with {query}.",
+                (
+                    "Search the web with {query}. If results include an official homepage, section index, "
+                    "or same-site entry page, browse those entry pages before concluding that a specific "
+                    "document is unavailable; search results are discovery hints, not complete site evidence."
+                ),
                 {
                     "query": (str, "Search query."),
                     "timelimit": ("d | w | m | y | None", "Optional time limit."),
@@ -167,7 +200,11 @@ class Search:
             ),
             (
                 "search_news",
-                "Search recent news with {query}.",
+                (
+                    "Search recent news with {query}. If results include an official homepage, section index, "
+                    "or same-site entry page, browse those entry pages before concluding that a specific "
+                    "document is unavailable; search results are discovery hints, not complete site evidence."
+                ),
                 {
                     "query": (str, "News search query."),
                     "timelimit": ("d | w | m | None", "Optional time limit."),
@@ -310,7 +347,7 @@ class Search:
                 max_results=kwargs.get("max_results", 10),
             )
         method = getattr(self, method_name)
-        return method(**kwargs)
+        return await FunctionShifter.asyncify(method)(**kwargs)
 
     async def search_wikipedia(
         self,
@@ -360,63 +397,114 @@ class Search:
         empty_backends: list[str] = []
         candidates = self._candidate_backends(category)
         for backend in self._candidate_backends(category):
-            try:
-                result = method(
-                    query=query,
-                    timelimit=timelimit,
-                    max_results=max_results,
-                    backend=backend,
-                    region=self.region,
-                    **self._extra_options,
-                )
-            except Exception as error:
-                errors.append(
-                    {
-                        "backend": backend,
-                        "type": error.__class__.__name__,
-                        "message": str(error),
+            for attempt_index in range(self.max_attempts):
+                try:
+                    result = method(
+                        query=query,
+                        timelimit=timelimit,
+                        max_results=max_results,
+                        backend=backend,
+                        region=self.region,
+                        **self._extra_options,
+                    )
+                except Exception as error:
+                    if self._is_no_results_error(error):
+                        empty_backends.append(backend)
+                        break
+                    retryable = self._is_transient_error(error)
+                    errors.append(
+                        {
+                            "backend": backend,
+                            "attempt_index": str(attempt_index),
+                            "retryable": str(retryable),
+                            "type": error.__class__.__name__,
+                            "message": str(error),
+                        }
+                    )
+                    if retryable and attempt_index + 1 < self.max_attempts:
+                        if self.retry_backoff_seconds > 0:
+                            time.sleep(self.retry_backoff_seconds)
+                        continue
+                    break
+                results = result if isinstance(result, list) else list(result) if result is not None else []
+                if results:
+                    diagnostics = [
+                        {
+                            "code": "search_backend_failed",
+                            "backend": item["backend"],
+                            "attempt_index": int(item.get("attempt_index", "0")),
+                            "retryable": item.get("retryable") == "True",
+                            "error_type": item["type"],
+                            "message": item["message"],
+                        }
+                        for item in errors
+                    ]
+                    diagnostics.extend(
+                        {
+                            "code": "search_backend_empty",
+                            "backend": backend_name,
+                            "message": "Backend returned no parsed results.",
+                        }
+                        for backend_name in empty_backends
+                    )
+                    status = "partial_success" if diagnostics else "success"
+                    return {
+                        "ok": True,
+                        "success": True,
+                        "status": status,
+                        "data": results,
+                        "result": results,
+                        "diagnostics": diagnostics,
+                        "meta": {
+                            "provider": "ddgs",
+                            "category": category,
+                            "backend": backend,
+                            "attempted_backends": candidates,
+                            "max_attempts": self.max_attempts,
+                            "failed_backends": list(dict.fromkeys(item["backend"] for item in errors)),
+                            "empty_backends": empty_backends,
+                        },
                     }
-                )
-                continue
-            results = result if isinstance(result, list) else list(result) if result is not None else []
-            if results:
-                diagnostics = [
-                    {
-                        "code": "search_backend_failed",
-                        "backend": item["backend"],
-                        "error_type": item["type"],
-                        "message": item["message"],
-                    }
-                    for item in errors
-                ]
-                diagnostics.extend(
-                    {
-                        "code": "search_backend_empty",
-                        "backend": backend_name,
-                        "message": "Backend returned no parsed results.",
-                    }
-                    for backend_name in empty_backends
-                )
-                status = "partial_success" if diagnostics else "success"
-                return {
-                    "ok": True,
-                    "success": True,
-                    "status": status,
-                    "data": results,
-                    "result": results,
-                    "diagnostics": diagnostics,
-                    "meta": {
-                        "provider": "ddgs",
-                        "category": category,
-                        "backend": backend,
-                        "attempted_backends": candidates,
-                        "failed_backends": [item["backend"] for item in errors],
-                        "empty_backends": empty_backends,
-                    },
-                }
-            empty_backends.append(backend)
-        if errors and all(self._is_no_results_message(item["message"]) for item in errors):
-            errors = []
+                empty_backends.append(backend)
+                break
+        if errors and empty_backends:
+            return {
+                "ok": True,
+                "success": True,
+                "status": "partial_success",
+                "data": [],
+                "result": [],
+                "diagnostics": [
+                    *[
+                        {
+                            "code": "search_backend_failed",
+                            "backend": item["backend"],
+                            "attempt_index": int(item.get("attempt_index", "0")),
+                            "retryable": item.get("retryable") == "True",
+                            "error_type": item["type"],
+                            "message": item["message"],
+                        }
+                        for item in errors
+                    ],
+                    *[
+                        {
+                            "code": "search_backend_empty",
+                            "backend": backend,
+                            "message": "Backend returned no parsed results.",
+                        }
+                        for backend in empty_backends
+                    ],
+                ],
+                "meta": {
+                    "provider": "ddgs",
+                    "category": category,
+                    "backend": None,
+                    "attempted_backends": candidates,
+                    "max_attempts": self.max_attempts,
+                    "failed_backends": list(dict.fromkeys(item["backend"] for item in errors)),
+                    "empty_backends": empty_backends,
+                },
+            }
         if errors:
             raise RuntimeError(
                 "Search failed after trying backends: "
@@ -441,6 +529,7 @@ class Search:
                 "category": category,
                 "backend": None,
                 "attempted_backends": candidates,
+                "max_attempts": self.max_attempts,
                 "failed_backends": [],
                 "empty_backends": empty_backends,
             },
@@ -486,6 +575,29 @@ class Search:
     @staticmethod
     def _is_no_results_message(message: str) -> bool:
         return "No results found" in message
+
+    @staticmethod
+    def _is_transient_error(error: Exception | str) -> bool:
+        message = str(error).lower()
+        error_name = error.__class__.__name__.lower() if isinstance(error, Exception) else ""
+        transient_markers = (
+            "timeout",
+            "timed out",
+            "connection",
+            "connect",
+            "network",
+            "reset",
+            "disconnect",
+            "incomplete chunked read",
+            "chunked",
+            "broken pipe",
+            "temporarily unavailable",
+            "temporary failure",
+            "proxy",
+            "ssl",
+            "tls",
+        )
+        return any(marker in message or marker in error_name for marker in transient_markers)
 
     async def search_arxiv(
         self,

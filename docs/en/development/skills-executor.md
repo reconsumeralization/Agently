@@ -131,15 +131,21 @@ plan = await agent.async_resolve_skills_plan(
 ## Execute
 
 Use `run_skills_task(...)` when the task must be answered through selected
-Skills. By default, execution is `single_shot`: Agently injects the selected
-`SKILL.md` guidance, decision cards, resource summaries, and the task into one
-model request. Host execution options such as `effort="react"` or configured
-route options select multi-step strategies; Skills do not declare Agently
+Skills. This is a compatibility facade over the Blocks lifecycle: it builds an
+internal ExecutionPlan with `skill_activation` PlanBlocks plus a concrete
+strategy PlanBlock, then lowers that plan to a TriggerFlow-backed
+ExecutionBlockGraph. The default `single_shot` route label lowers to a
+`model_request` block; multi-step labels such as `runtime_chain`, `staged`, and
+`react` lower to a trusted `flow_segment` block. Skills do not declare Agently
 execution strategies through private frontmatter.
+
 When actions are available, `react` delegates tool/action planning and
 execution to the Agent ActionRuntime, so kwargs schemas, MCP tools, policy,
 approvals, concurrency, and execution-environment handling stay on the Action
-layer instead of being reimplemented by Skills.
+layer instead of being reimplemented by Skills. Skill activation evidence only
+proves that guidance and resource context were loaded; side-effect evidence must
+come from downstream Actions, Workspace operations, waits, or other concrete
+execution blocks.
 
 ```python
 execution = await agent.async_run_skills_task(
@@ -151,6 +157,7 @@ execution = await agent.async_run_skills_task(
 print(execution.status)
 print(execution.output)
 print(execution.skill_logs)
+print(execution.close_snapshot["blocks"]["evidence"])
 ```
 
 `output=` uses the same schema grammar as `.output(...)`; it is the
@@ -245,9 +252,23 @@ Direct Skills execution streams runtime items through `stream_handler`:
 - `skills.model_stream` with `path`, `value`, `delta`, and `is_complete`
 - `skills.prompt_only.done`
 - `skills.runtime_chain.*` when `effort="normal"` or `effort="max"` selects the
-  built-in planner chain
-- `skills.staged.*`, `skills.react.*`, and `block.*` events when a multi-step
-  strategy is selected
+  built-in planner chain compatibility label
+- `skills.staged.*` and `skills.react.*` when those multi-step compatibility
+  labels are selected
+- `skills.execution.budget_exhausted` when a built-in `staged` or `react`
+  strategy stops or truncates work because the configured step budget is
+  exhausted
+- `skills.execution.aborted` when host cancellation reaches the Skills runtime
+  or when framework execution fails before a normal Skills result can be
+  returned
+
+The Blocks lowering evidence, ExecutionBlockGraph, ResultAdapter output, and
+TriggerFlow close snapshot are available under
+`execution.close_snapshot["blocks"]`.
+Abort diagnostics include the strategy, effort, elapsed seconds, and the last
+active runtime event when one is available. Wall-clock and no-progress limits
+remain host policy; Skills only records the cancellation or failure once it is
+observed by the runtime.
 
 Annotate direct Skills `stream_handler` callbacks with
 `SkillRuntimeStreamHandler` from `agently.types.data`. If you are writing a
@@ -257,10 +278,12 @@ handler receives `StreamingData` and can be annotated with
 `ModelStreamingHandler`. Both types are available from the package root:
 `from agently import StreamingData, ModelStreamingHandler`.
 
-`effort="fast"` uses the low-overhead single-shot path. `effort="normal"` runs
-the full preflight -> research -> plan -> execute -> verify -> reflect ->
-finalize chain. `effort="max"` uses the same chain with a larger retry budget
-and is the planned hook for Dynamic Task escalation.
+`effort="fast"` uses the low-overhead single-shot compatibility label.
+`effort="normal"` runs the full preflight -> research -> plan -> execute ->
+verify -> reflect -> finalize compatibility chain. `effort="max"` uses the same
+chain with a larger retry budget and is the planned hook for Dynamic Task
+escalation. Each label is backed by Blocks plan/evidence metadata in the close
+snapshot.
 
 Use `agent.set_settings("effort_presets", {...})` when you need to override the
 built-in profile mapping to strategy, model key, step budget, retry count, or
@@ -313,13 +336,15 @@ def handler(
 ) -> Awaitable[Any] | Any: ...
 ```
 
-The builtin handlers are registered through the same strategy table:
-`single_shot`, `runtime_chain`, `staged`, and `react`. Use
+The builtin compatibility route labels are registered through the same strategy
+table: `single_shot`, `runtime_chain`, `staged`, and `react`. Use
 `Agently.skills_executor.list_effort_strategies()` to inspect the available
 strategy names. A custom handler may replace a builtin only with
 `replace=True`; otherwise duplicate names fail closed. Builtin reference
 implementations live under
-`agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/effort_strategies/`.
+`agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/effort_strategies/`
+and are invoked as trusted Blocks runtime handlers, not as a separate
+Skills-owned lifecycle.
 
 ```python
 async def audit_plus_strategy(*, context, task, plan, effort_config, **_):
@@ -436,15 +461,38 @@ agent.configure_skill_capabilities(
     workspace_root="./.agently/tasks/research",
     search={
         "backend": "auto",
-        "refresh_ddgs": "allow",
     },
+    # Reverse one-time capability mounts after each Skills execution instead of
+    # leaving them on the agent. Default "agent" keeps mounts for reuse.
+    capability_scope="execution",
+    # Only auto-mount capability needs at or above this confidence; lower-
+    # confidence needs inferred from SKILL.md prose are advisory. Default: no floor.
+    min_auto_mount_confidence=0.8,
+    # The built-in HTTP capability default-denies private/loopback/link-local
+    # targets; allow specific internal hosts explicitly when needed.
+    http_request={"allow_hosts": ["internal.api.example.com"]},
 )
 agent.configure_policy_approval(handler="input_timeout_fail")
 ```
 
+The built-in read-only HTTP capability blocks private, loopback, and
+link-local hosts by default (an SSRF guard); use
+`http_request={"allow_hosts": [...]}` or `{"allow_private": true}` to allow
+internal targets. The default script allowlist contains local interpreters
+(`bash`, `sh`, `python`, `node`) but not package runners (`npx`/`npm`), which
+fetch and execute arbitrary remote code; add them through policy only when
+required.
+
+When `capability_scope="execution"`, SkillsExecutor releases only capabilities
+that were newly mounted for that execution. If the host Agent already has an
+action with the requested action id, SkillsExecutor reuses it and leaves it
+registered after the Skills run; execution-scoped cleanup must not overwrite or
+unregister host-owned actions.
+
 For search-oriented Skills, Agently mounts the framework Search package backed
-by the `ddgs` Python package. Keep `ddgs` upgraded before real search runs:
-`python -m pip install --upgrade ddgs`. The backend strategy is not fixed to one
+by the `ddgs` Python package. Keep `ddgs` upgraded in the host environment
+before real search runs (`python -m pip install --upgrade ddgs`); Agently does
+not mutate the host environment at runtime. The backend strategy is not fixed to one
 provider; use `backend="auto"` by default, or configure any ddgs-supported
 backend through host policy. Search treats backend-level "no results" as an
 empty successful result and falls back through configured/default ddgs backends
@@ -493,10 +541,10 @@ running `effort="normal"`.
 
 Skill applicability comes from `SKILL.md`; Agently's `.agently/` files are
 descriptive install metadata only. Multi-step Skills execution composes
-Agently's existing TriggerFlow, Action, and ExecutionEnvironment boundaries;
+Agently's existing TriggerFlow, Action, and ExecutionResource boundaries;
 human approval or durable wait/resume flows should be modeled through
 TriggerFlow `pause_for(...)` / `continue_with(...)` or Action /
-ExecutionEnvironment approval policies, not by mutating a closed
+ExecutionResource approval policies, not by mutating a closed
 `SkillExecution` snapshot.
 
 Framework-level `skills.*` settings may still tune host behavior, such as

@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Generator
-from typing import Any, Literal, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import Any, Literal, Protocol, TYPE_CHECKING, overload, runtime_checkable
 
 from agently.types.data import (
     AgentExecutionLineage,
@@ -47,6 +47,8 @@ class AgentExecution(Protocol):
     stream: Any
     execution_context: Any
     workspace: Any
+    task_refs: dict[str, Any]
+    task_record: Any
 
     def __getattr__(self, name: str) -> Any: ...
 
@@ -134,12 +136,34 @@ class AgentExecution(Protocol):
         profile: str = "fast",
     ) -> AgentExecutionWorkspaceRecord: ...
 
+    @overload
     def get_async_generator(
         self,
-        type: Literal["instant", "streaming_parse", "all"] | str | None = "instant",
+        type: Literal["delta"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> AsyncGenerator[str, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["all"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> AsyncGenerator[tuple[str, AgentExecutionStreamData], None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["instant", "streaming_parse", "specific", "original"],
         content: Any = None,
         **kwargs: Any,
     ) -> AsyncGenerator[AgentExecutionStreamData, None]: ...
+
+    @overload
+    def get_async_generator(self, *args: Any, **kwargs: Any) -> AsyncGenerator[str, None]: ...
+
+    def get_async_generator(self, *args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]: ...
 
     def get_data(self, **kwargs: Any) -> Any: ...
 
@@ -149,7 +173,34 @@ class AgentExecution(Protocol):
 
     def record_workspace(self, **kwargs: Any) -> AgentExecutionWorkspaceRecord: ...
 
-    def get_generator(self, *args: Any, **kwargs: Any) -> Generator[AgentExecutionStreamData, None, None]: ...
+    @overload
+    def get_generator(
+        self,
+        type: Literal["delta"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> Generator[str, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["all"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> Generator[tuple[str, AgentExecutionStreamData], None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["instant", "streaming_parse", "specific", "original"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> Generator[AgentExecutionStreamData, None, None]: ...
+
+    @overload
+    def get_generator(self, *args: Any, **kwargs: Any) -> Generator[str, None, None]: ...
+
+    def get_generator(self, *args: Any, **kwargs: Any) -> Generator[Any, None, None]: ...
 
 
 @runtime_checkable

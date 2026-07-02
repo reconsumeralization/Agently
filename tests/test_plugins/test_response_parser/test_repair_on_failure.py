@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 from typing import Any, cast
 
 import pytest
@@ -170,6 +171,71 @@ async def test_instant_async_generator_streams_valid_json_before_done(monkeypatc
 
     with pytest.raises(StopAsyncIteration):
         await anext(generator)
+
+
+@pytest.mark.asyncio
+async def test_instant_async_generator_defers_large_json_delta_by_default(monkeypatch):
+    monkeypatch.setattr(agently.base, "async_emit_runtime", _noop_async_emit_runtime)
+
+    parser_module = importlib.import_module("agently.utils.StreamingJSONParser")
+
+    def fail_if_called(_value):
+        raise AssertionError("large JSON deltas should not be parsed incrementally by default")
+
+    monkeypatch.setattr(parser_module.json5, "loads", fail_if_called)
+
+    async def response_generator():
+        yield "delta", '{"report": "' + ("x" * 20000)
+
+    parser = AgentlyResponseParser(
+        agent_name="test-agent",
+        response_id="resp-large-json-delta",
+        prompt=cast(Any, DummyPrompt({"report": None})),
+        response_generator=response_generator(),
+        settings=Settings(),
+    )
+
+    generator = parser.get_async_generator(type="instant")
+    first_event = await asyncio.wait_for(anext(generator), timeout=1)
+
+    assert first_event.path == "$status"
+    assert first_event.value["status"] == "streaming_parse_deferred"
+    assert first_event.value["reason"] == "large_json_incremental_parse"
+
+    await generator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_instant_async_generator_defers_large_json_delta_when_setting_is_none(monkeypatch):
+    monkeypatch.setattr(agently.base, "async_emit_runtime", _noop_async_emit_runtime)
+
+    parser_module = importlib.import_module("agently.utils.StreamingJSONParser")
+
+    def fail_if_called(_value):
+        raise AssertionError("None settings should keep the default large-delta guard")
+
+    monkeypatch.setattr(parser_module.json5, "loads", fail_if_called)
+
+    async def response_generator():
+        yield "delta", '{"report": "' + ("x" * 20000)
+
+    settings = Settings()
+    settings.set("response.streaming_parse_max_incomplete_chars", None)
+    parser = AgentlyResponseParser(
+        agent_name="test-agent",
+        response_id="resp-large-json-delta-none-setting",
+        prompt=cast(Any, DummyPrompt({"report": None})),
+        response_generator=response_generator(),
+        settings=settings,
+    )
+
+    generator = parser.get_async_generator(type="instant")
+    first_event = await asyncio.wait_for(anext(generator), timeout=1)
+
+    assert first_event.path == "$status"
+    assert first_event.value["status"] == "streaming_parse_deferred"
+
+    await generator.aclose()
 
 
 @pytest.mark.asyncio

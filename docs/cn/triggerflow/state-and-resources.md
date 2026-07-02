@@ -150,11 +150,11 @@ policy-forbidden resource 会出现在 `inspect_load(...)` diagnostics 中；
 ### 托管 execution resources
 
 当你向 `flow.create_execution(...)`、`flow.start_execution(...)` 或
-`flow.async_start(...)` 传入 `execution_environments=[...]` 时，
-`runtime_resources` 也可以接收来自 `Agently.execution_environment` 的托管资源。
+`flow.async_start(...)` 传入 `execution_resources=[...]` 时，
+`runtime_resources` 也可以接收来自 `Agently.execution_resource` 的托管资源。
 
 chunk 内仍然通过 `data.require_resource(...)` 读取。差异在 ownership：
-Execution Environment Manager 负责启动/复用资源，并在 execution close 时释放。
+ExecutionResourceManager 负责启动/复用资源，并在 execution close 时释放。
 手动传入的 `runtime_resources={...}` 仍是 unmanaged。
 
 ## 决策表
@@ -179,7 +179,7 @@ Execution Environment Manager 负责启动/复用资源，并在 execution close
 ## 另见
 
 - [Lifecycle](lifecycle.md) —— `close()` 返回什么
-- [Execution Environment](../actions/execution-environment.md) —— 托管 live resource 生命周期
+- [ExecutionResource](../actions/execution-environment.md) —— 托管 live resource 生命周期
 - [持久化与 Blueprint](persistence-and-blueprint.md) —— `save` / `load` 语义
 - [分布式 Pause 与 Resume 边界](distributed-pause-resume.md) —— 宿主管理恢复和 live object ownership
 - [兼容](compatibility.md) —— `runtime_data` 是 `state` 的 deprecated 别名

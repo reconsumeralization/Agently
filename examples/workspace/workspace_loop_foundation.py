@@ -46,7 +46,7 @@ def build_flow(agent):
             goal="route fallback",
             scope={"task_id": task_id},
             budget={"chars": 1200},
-            profile="software_dev",
+            profile="auto",
         )
         decision = {
             "attempt": attempt,
@@ -145,7 +145,7 @@ asyncio.run(main())
 # TriggerFlow owns the explicit loop, while the Agent's default lazy Workspace
 # materializes only when durable provider ports are used. Workspace owns durable
 # structured observations, decisions, links, checkpoints, RuntimeEvent records,
-# and ContextPack recall.
+# and ContextPackage construction.
 #
 # Flow:
 # async_start({"task_id": "issue-123"})

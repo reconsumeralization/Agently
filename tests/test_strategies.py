@@ -10,7 +10,7 @@ import pytest
 class MockStrategyContext:
     """Minimal context stub for strategy runner unit tests."""
 
-    execution_environment: Any = None
+    execution_resource: Any = None
 
     def __init__(self):
         self.model_calls: list[dict[str, Any]] = []
@@ -377,12 +377,93 @@ class TestReactStrategy:
             context=ctx,
             step_budget=1,
             allowed_tools=["add"],
+            skill_prompt={
+                "selected_skill_guidance": [
+                    {
+                        "skill_id": "math-skill",
+                        "content": "Use the selected skill guidance when choosing actions.",
+                    }
+                ]
+            },
         )
 
         assert ctx.model_calls == []
         assert len(ctx.action_rounds) == 1
         assert ctx.action_rounds[0]["allowed_tools"] == ["add"]
+        assert ctx.action_rounds[0]["prompt"]["skill_context"]["selected_skill_guidance"][0]["skill_id"] == "math-skill"
         assert ctx.action_rounds[0]["max_rounds"] == 1
         assert result["history"][0]["name"] == "add"
         assert result["history"][0]["result"] == 3
         assert any(event["type"] == "skills.react.action_runtime_round" for event in ctx.stream_events)
+
+    @pytest.mark.asyncio
+    async def test_react_fallback_prompt_includes_skill_guidance_from_plan(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = MockStrategyContext()
+        ctx._model_response = {"next_action": "done", "final": True}
+
+        await run_react_execution(
+            task="write a report",
+            plan={
+                "selected_skills": [
+                    {
+                        "skill_id": "report-skill",
+                        "display_name": "Report Skill",
+                        "guidance": {"path": "SKILL.md", "content": "Use the report-specific structure."},
+                    }
+                ]
+            },
+            context=ctx,
+            step_budget=1,
+        )
+
+        assert "Use the report-specific structure." in str(ctx.model_calls[0]["prompt"])
+
+    @pytest.mark.asyncio
+    async def test_react_stops_after_required_action_evidence(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        class RequiredActionContext(ActionRuntimeRoundContext):
+            async def async_execute_action_round(self, **kwargs: Any) -> list[dict[str, Any]]:
+                self.action_rounds.append(kwargs)
+                action_id = "write_file" if len(self.action_rounds) == 1 else "read_file"
+                return [{"status": "success", "action_id": action_id, "result": {"path": "out.html"}}]
+
+        ctx = RequiredActionContext()
+
+        result = await run_react_execution(
+            task="write and read an artifact",
+            plan={},
+            context=ctx,
+            step_budget=6,
+            allowed_actions=["write_file", "read_file"],
+            required_actions=["write_file", "read_file"],
+        )
+
+        assert len(ctx.action_rounds) == 2
+        assert ctx.action_rounds[0]["prompt"]["remaining_required_actions"] == ["write_file", "read_file"]
+        assert ctx.action_rounds[1]["prompt"]["remaining_required_actions"] == ["read_file"]
+        assert result["step_count"] == 2
+        assert [item["name"] for item in result["history"]] == ["write_file", "read_file"]
+        assert [item["status"] for item in result["history"]] == ["success", "success"]
+        assert [item["action_id"] for item in result["history"]] == ["write_file", "read_file"]
+
+    @pytest.mark.asyncio
+    async def test_react_does_not_delegate_action_runtime_without_allowlist(self):
+        from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.strategies.react import run_react_execution
+
+        ctx = ActionRuntimeRoundContext()
+        ctx._model_response = {"next_action": "done", "final": True}
+
+        result = await run_react_execution(
+            task="think only",
+            plan={},
+            context=ctx,
+            step_budget=1,
+        )
+
+        assert ctx.action_rounds == []
+        assert len(ctx.model_calls) == 1
+        assert result["history"][0]["name"] == "reason"
+        assert result["history"][0]["result"] == "done"

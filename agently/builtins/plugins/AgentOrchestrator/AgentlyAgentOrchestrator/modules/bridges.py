@@ -22,6 +22,13 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 
+# Framework loop signals (e.g. the action-loop max_rounds boundary, planning stalls)
+# are surfaced as records so the model and observers can see them, but they are not
+# capability actions the agent executed. They must not enter the executed action_logs
+# (action scope, capability evidence, required-action gates all read that list).
+_FRAMEWORK_DIAGNOSTIC_ACTION_IDS = frozenset({"action_loop", "action_planning"})
+
+
 def record_model_response_id(owner: "AgentExecution", response_id: str | None) -> None:
     if not response_id:
         return
@@ -49,7 +56,15 @@ async def record_action_log(
     artifact_refs = log.get("artifact_refs") or model_digest.get("artifact_refs") or []
     if not isinstance(artifact_refs, list):
         artifact_refs = []
-    key = str(action_call_id or f"{ action_id }:{ len(owner.logs.get('action_logs', [])) }")
+    if action_call_id:
+        key = str(action_call_id)
+    else:
+        # No call id: dedup the same action reported through both the stream and
+        # the result's extra.action_logs by action id + status + result content,
+        # rather than the action-log count (which differs between channels and
+        # would double-count the same execution).
+        digest = str(DataFormatter.sanitize(log.get("data") if log.get("data") is not None else log.get("result")))
+        key = f"{ action_id }:{ status }:{ hash(digest) }"
     if key in owner._seen_action_log_keys:
         return None
     owner._seen_action_log_keys.add(key)
@@ -70,9 +85,13 @@ async def record_action_log(
             "raw": log,
         }
     )
-    action_logs = owner.logs.setdefault("action_logs", [])
-    if isinstance(action_logs, list):
-        action_logs.append(normalized)
+    # Keep framework loop diagnostics out of the executed action_logs; retain them in
+    # a sibling channel so the boundary signal stays inspectable without being counted
+    # as an action execution.
+    target_log_key = "action_loop_diagnostics" if action_id in _FRAMEWORK_DIAGNOSTIC_ACTION_IDS else "action_logs"
+    target_logs = owner.logs.setdefault(target_log_key, [])
+    if isinstance(target_logs, list):
+        target_logs.append(normalized)
     aggregated_artifact_refs = owner.logs.setdefault("artifact_refs", [])
     if isinstance(aggregated_artifact_refs, list):
         for ref in artifact_refs:
@@ -106,6 +125,31 @@ async def bridge_model_stream_item(
     graph_id: str | None = None,
     meta: dict[str, Any] | None = None,
 ) -> None:
+    raw_path = str(getattr(item, "path", "") or "model")
+    path = f"{path_prefix}.{raw_path}" if path_prefix else raw_path
+    raw_event_type = getattr(item, "event_type", "done")
+    event_type = "delta" if raw_event_type == "delta" else "done"
+    completed = bool(getattr(item, "is_complete", event_type == "done"))
+    progress_meta = {
+        "route": route,
+        "source": source,
+        "field_path": raw_path,
+        "wildcard_path": getattr(item, "wildcard_path", None),
+        "indexes": getattr(item, "indexes", None),
+    }
+    if meta:
+        progress_meta.update(meta)
+    record_progress = getattr(owner.execution_context, "record_progress", None)
+    if callable(record_progress):
+        record_progress(
+            stage=path,
+            status="completed" if completed else "progress",
+            event_type=path,
+            run_id=str(progress_meta.get("model_run_id") or progress_meta.get("request_run_id") or "") or None,
+            response_id=str(progress_meta.get("response_id") or "") or None,
+            meta=progress_meta,
+            notify=False,
+        )
     await owner.stream.bridge_model_stream_item(
         item,
         route=route,

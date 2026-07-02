@@ -21,16 +21,19 @@ flowchart TD
     model_request["ModelRequest\none model request"]
     agent_execution["AgentExecution\nunified Agent run"]
     task_dag["TaskDAG / DAG substrate\nplanner, validator, resolver, executor, handlers"]
+    blocks["Blocks\nExecutionPlan, PlanBlocks, ExecutionBlocks"]
     triggerflow["TriggerFlow\nworkflow execution substrate"]
     workspace["Workspace / Evidence\nrecords, checkpoints, context packs"]
 
     business -->|"single answer"| model_request
     business -->|"Agent run, tools, Skills, goals, stream"| agent_execution
+    business -->|"submitted dependency graph"| task_dag
     agent_execution -->|"direct route"| model_request
-    agent_execution -->|"DAG-shaped route or bounded step"| task_dag
-    task_dag -->|"compiled execution"| triggerflow
+    agent_execution -->|"bounded task frame"| blocks
+    task_dag -->|"validated DAG segment"| blocks
+    blocks -->|"compiled execution block graph"| triggerflow
     agent_execution -->|"task evidence"| workspace
-    task_dag -->|"result and runtime facts"| agent_execution
+    task_dag -.->|"snapshot evidence handoff"| agent_execution
     triggerflow -->|"runtime events, state, pause/resume"| task_dag
 ```
 
@@ -42,6 +45,12 @@ Contract behind the edges:
 - `TaskDAG` owns graph-shaped planning and execution logic: Planner,
   Validator, Resolver, Executor, handlers, dependency results, semantic
   outputs, and runtime placeholders.
+- `TaskDAG` is an independent submitted-DAG API. `AgentExecution` may consume a
+  TaskDAG snapshot as evidence, but it does not select TaskDAG / DynamicTask as
+  a route or bounded-step strategy.
+- `Blocks` owns the lowering bridge from bounded ExecutionPlan / PlanBlock
+  instances or validated TaskDAG nodes into TriggerFlow-backed
+  ExecutionBlocks, plus evidence/result mapping.
 - `TriggerFlow` owns the lower-level workflow substrate: execution state,
   signals, concurrency, stream, pause/resume, persistence, and lifecycle.
 - `Workspace` stores evidence and context; it does not decide completion.
@@ -58,7 +67,7 @@ substrate. It can still be used, but the architectural owner is `TaskDAG`.
 | One complex business task that must verify completion | `agent.goal(...).effort(...).start()` or `agent.create_task(...)` | Goal planning, bounded steps, Workspace evidence, model verifier, host guards, replan |
 | A submitted or model-generated dependency graph | `TaskDAG` modules, or the DynamicTask facade | DAG planning, validation, handler resolution, dependency result collection, semantic outputs |
 | A stable workflow topology owned by application code | `TriggerFlow` | Branching, concurrency, signals, pause/resume, persistence, runtime stream |
-| A product team wants maximum DAG customization and still an Agent result surface | Build/customize `TaskDAG` modules, then attach the DAG to `AgentExecution` | Custom Planner/Validator/Resolver/Executor plus AgentExecution result, stream, meta, and evidence paths |
+| A product team wants maximum DAG customization and still an Agent result surface | Build/customize `TaskDAG` modules, then pass its snapshot into `AgentExecution` as evidence | Custom Planner/Validator/Resolver/Executor plus AgentExecution result, stream, meta, and evidence paths |
 
 ## Intervention Points
 
@@ -67,13 +76,15 @@ substrate. It can still be used, but the architectural owner is `TaskDAG`.
 | `ModelRequest` | Exact prompt, output schema, model settings, and one response | Tool routing, long task completion, workflow state |
 | `AgentExecution` | User-facing Agent run, route diagnostics, stream/meta/result, execution-local candidates | Custom graph validation internals or workflow persistence details |
 | `TaskDAG` | Graph schema, planner contract, validator rules, handlers, dependency data, semantic outputs | Human-facing task acceptance or full workflow lifecycle |
+| `Blocks` | ExecutionPlan lowering, PlanBlock/ExecutionBlock contracts, standard block signals, result/evidence mapping | Task lifecycle ownership, capability grants, or raw TriggerFlow dispatch |
 | `TriggerFlow` | Runtime state, signals, joins, concurrency, pause/resume, save/load | Model prompt/output behavior or DAG task semantics |
 | `Workspace` | Evidence records, checkpoints, context packs, recall into later steps | Planning, verification, or automatic memory decisions |
 
-## Custom DAG Back Into AgentExecution
+## Custom DAG Then AgentExecution Evidence
 
 When a team wants high freedom, it can decompose the DAG path, customize each
-module, and still write the result back through `AgentExecution`.
+module, run it independently, and pass the snapshot into `AgentExecution` as
+evidence for a later agent step.
 
 ```python
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
@@ -92,14 +103,17 @@ planner = AgentlyTaskDAGPlanner(validator=validator)
 graph = await planner.async_plan(planner_agent, {"target": goal})
 validator.validate(graph, strict_schema_version=True)
 
+snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
+    graph,
+    graph_input={"goal": goal},
+)
+
 execution = agent.create_execution()
-execution.input({"goal": goal})
-execution.use_dynamic_task(mode="submitted", plan=graph, handlers=handlers)
+execution.input({"goal": goal, "dag_snapshot": snapshot})
 result = await execution.async_start()
 ```
 
-If the application runs the DAG directly through `TaskDAGExecutor`, treat the
-snapshot as evidence for the next Agent step:
+The same separation works when the application already owns the executor:
 
 ```python
 snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
@@ -119,7 +133,7 @@ await execution.async_record_workspace(
 ```
 
 In both shapes, the DAG result is evidence. It does not by itself mean a
-business goal is complete. Goal completion still belongs to AgentTaskLoop model
+business goal is complete. Goal completion still belongs to AgentTask model
 verification plus host guards when goal pursuit is active.
 
 ## Runtime Flow
@@ -129,15 +143,24 @@ sequenceDiagram
     participant App as Application
     participant AE as AgentExecution
     participant DAG as TaskDAG
+    participant Blocks as Blocks
     participant TF as TriggerFlow
     participant WS as Workspace
     participant V as Verifier/Guard
 
     App->>AE: configure prompt, skills, actions, goal, effort
-    AE->>DAG: optional DAG-shaped route or bounded step
-    DAG->>TF: compile graph to runtime execution
-    TF-->>DAG: task events, dependency results, semantic outputs
-    DAG-->>AE: snapshot, logs, route metadata, result
+    opt independent DAG evidence
+        App->>DAG: run submitted or customized DAG
+        DAG->>Blocks: validated DAG segment
+        Blocks->>TF: ExecutionBlockGraph
+        TF-->>Blocks: block signals, dependency results, snapshots
+        Blocks-->>DAG: DAG snapshot and result
+        DAG-->>AE: optional snapshot evidence
+    end
+    AE->>Blocks: bounded ExecutionPlan segment
+    Blocks->>TF: ExecutionBlockGraph
+    TF-->>Blocks: block signals, dependency results, snapshots
+    Blocks-->>AE: EvidenceEnvelope and result views
     AE->>WS: optional evidence/checkpoint records
     AE->>V: verify goal completion when Goal Pursuit is active
     V-->>AE: accepted, blocked, replan, or partial
@@ -151,6 +174,9 @@ sequenceDiagram
 - Use `ModelRequest` when the task is only one model call.
 - Use `TaskDAG` when the plan is data and needs validation, dependency
   execution, handlers, and result collection.
+- Use [Blocks Lifecycle](blocks-lifecycle.md) when you need to understand how a
+  bounded AgentTask step, Skill activation, or TaskDAG segment is lowered into
+  TriggerFlow and mapped back to evidence.
 - Use `TriggerFlow` when the application owns stable workflow topology,
   waits, joins, concurrency, or durable execution.
 - Use `Workspace` to persist evidence and context, not to decide what to do.
@@ -158,4 +184,3 @@ sequenceDiagram
   as a second task lifecycle in product-facing guidance.
 - When goal pursuit is active, DAG completion is evidence only. Final
   acceptance still requires model verifier plus host guard.
-

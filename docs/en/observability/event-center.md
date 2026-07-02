@@ -25,6 +25,33 @@ Run and retry naming:
 - `attempt_index` describes a retryable model-request attempt inside a request; it is not an AgentExecution counter.
 - DevTools should preserve both fields as separate semantics: render `agent_execution` from `run.run_kind`, and read model retry attempts from `payload.attempt_index` or `run.meta.attempt_index` on `model_request` runs.
 
+Model request telemetry:
+
+- Model RuntimeEvents may include `payload["model_request_telemetry"]` on `model.request_started`, `model.requesting`, `model.status`, `model.completed`, `model.meta`, `model.request_failed`, and `model.requester.error`.
+- The telemetry payload is observation-only. It can contain `response_id`, `attempt_index`, run ids, provider/model, request URL, duration, raw usage, normalized usage summary, estimated input/output character lengths, side-channel, and normalized error facts.
+- Telemetry dedupe only removes duplicate telemetry sub-payloads for the same `response_id + attempt_index + event kind`; it does not suppress the original RuntimeEvent.
+- Do not feed these telemetry facts back into route selection, retry policy, verifier judgment, quality scoring, planner context, or prompt content. Use them for logs, DevTools display, and diagnostics.
+
+Model request status:
+
+- `model.status` records a ModelRequest attempt outcome. It is observation-only;
+  it does not decide retry or downstream control flow.
+- The raw response stream event is `("status", payload)`; `instant` /
+  `streaming_parse` exposes it as `StreamingData(path="$status", value=payload)`.
+- `payload["status"]` is `completed`, `failed`, or `cancelled`.
+- `failed` with `retry=true` invalidates partial output from
+  `payload["attempt_index"]`; the next attempt is
+  `payload["next_attempt_index"]`. Consumers must clear provisional output
+  before rendering replacement deltas.
+- `reason` carries a bounded provider/transport explanation and `error_type`
+  carries the original exception class when available. It is not a traceback or
+  a raw request body.
+- Text-only `type="delta"` generators receive a standalone
+  `"<$retry>{reason}</$retry>"` chunk at that replay boundary. They must clear
+  provisional text on the marker; use `type="all"`, `specific`, `instant`, or
+  `streaming_parse` when lineage or collision-free structured facts are
+  required.
+
 ## Register a hook
 
 ```python
@@ -86,7 +113,7 @@ net, not a replacement for explicit flush before CLI/script shutdown.
 
 Agently-owned event types such as `model.*`, `request.*`, `action.*`,
 `tool.*`, `session.*`, `agent_execution.*`, `triggerflow.*`, and
-`execution_environment.*` are produced by core runtime coordinators. Custom
+`execution_resource.*` are produced by core runtime coordinators. Custom
 plugins and applications may emit their own Event Center messages, but they
 should use an application/plugin-owned namespace and must not rely on official
 Agently modules consuming those custom messages.
@@ -153,6 +180,23 @@ The top-level fields come from `agently.types.data.event.RuntimeEvent`. `Observa
 | `meta` | additional metadata |
 | `timestamp` | millisecond timestamp |
 
+For model request events, `payload.model_request_telemetry` is an extensible sub-payload. Consumers should treat missing fields as unknown, not as failure. Common fields are:
+
+| Field | Meaning |
+|---|---|
+| `event_kind` | original model event kind that carried the telemetry |
+| `telemetry_key` | dedupe key, usually `response_id:attempt_index:event_kind` |
+| `response_id` | request/response correlation id |
+| `attempt_index` | retry attempt number inside the request |
+| `request_run_id` / `model_run_id` | run lineage ids for request and model attempt |
+| `provider` / `provider_family` / `model` | provider metadata when known |
+| `request_url` | provider endpoint or provider-owned symbolic URL when known |
+| `duration_ms` | elapsed time from model request start when available |
+| `usage` | provider-reported usage metadata when available |
+| `usage_summary` | observation-only usage summary with normalized provider token fields and estimated input/output character lengths; terminal `model.status` events may carry estimated lengths without exposing raw request payloads; missing provider tokens should be displayed as unknown, not as a failure |
+| `side_channel` | whether the model event came from a side-channel request path |
+| `error` | normalized error facts for failed/requester-error events |
+
 ## TriggerFlow event aliases
 
 Event Center keeps compatibility with historical TriggerFlow event prefixes. A subscription to `workflow.execution_started` can receive `triggerflow.execution_started`; a subscription to `trigger_flow.signal` can receive `triggerflow.signal`. Documentation and new code should prefer `triggerflow.*`.
@@ -176,9 +220,9 @@ execution use `action.approval_required` or `action.blocked` instead of being
 reported as ordinary failures. For tool-backed actions, `payload.action_type`
 may be `"tool"`; that does not change the event family.
 
-## Execution environment events
+## ExecutionResource events
 
-Execution Environment lifecycle uses `execution_environment.*`. Providers and
+ExecutionResource lifecycle uses `execution_resource.*`. Providers and
 DevTools consumers should treat this namespace as extensible. Current manager
 events include `declared`, `approval_required`, `ensuring`, `ready`,
 `unhealthy`, `releasing`, `released`, and `failed`. `unhealthy` means a ready

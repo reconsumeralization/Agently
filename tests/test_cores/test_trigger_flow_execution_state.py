@@ -79,6 +79,194 @@ async def test_trigger_flow_execution_save_and_load_then_continue():
     }
 
 
+@pytest.mark.asyncio
+async def test_trigger_flow_signal_net_dynamic_binding_fanout_and_join():
+    flow = TriggerFlow(name="signal-net-dynamic-fanout")
+    active_count = 0
+    max_active_count = 0
+    lock = asyncio.Lock()
+
+    async def prepare(data: TriggerFlowRuntimeData):
+        await data.async_set_state("expected", len(data.value))
+        await data.async_set_state("results", [])
+        for item in data.value:
+            await data.async_emit_nowait("dynamic.item", {"item": item})
+
+    async def dynamic_item(data: TriggerFlowRuntimeData):
+        nonlocal active_count, max_active_count
+        async with lock:
+            active_count += 1
+            max_active_count = max(max_active_count, active_count)
+        await asyncio.sleep(0.02)
+        try:
+            item = data.value["item"]
+            async with lock:
+                results = list(data.get_state("results", [], inherit=False))
+                results.append(item * 2)
+                await data.async_set_state("results", results)
+                if len(results) == data.get_state("expected", 0, inherit=False):
+                    await data.async_emit("dynamic.done", sorted(results))
+        finally:
+            async with lock:
+                active_count -= 1
+
+    async def finish(data: TriggerFlowRuntimeData):
+        return {"results": data.value}
+
+    flow.to(prepare)
+    flow.when("dynamic.done").to(finish).end()
+    execution = flow.create_execution(auto_close=False, concurrency=3)
+    execution.on(
+        "dynamic.item",
+        dynamic_item,
+        binding_id="test.dynamic_item",
+    )
+
+    await execution.async_start([1, 2, 3])
+    snapshot = await execution.async_close(timeout=1)
+
+    assert snapshot["$final_result"] == {"results": [2, 4, 6]}
+    assert max_active_count > 1
+    binding = execution.save()["signal_net"]["bindings"][0]
+    assert binding["binding_id"] == "test.dynamic_item"
+    assert binding["trigger_event"] == "dynamic.item"
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_signal_net_nested_emit_respects_concurrency_cap():
+    flow = TriggerFlow(name="signal-net-nested-concurrency")
+    active_count = 0
+    max_active_count = 0
+    lock = asyncio.Lock()
+
+    async def prepare(data: TriggerFlowRuntimeData):
+        await data.async_set_state("expected", len(data.value))
+        await data.async_set_state("results", [])
+        for item in data.value:
+            await data.async_emit_nowait("dynamic.root", {"item": item})
+
+    async def track_start():
+        nonlocal active_count, max_active_count
+        async with lock:
+            active_count += 1
+            max_active_count = max(max_active_count, active_count)
+
+    async def track_done():
+        nonlocal active_count
+        async with lock:
+            active_count -= 1
+
+    async def dynamic_root(data: TriggerFlowRuntimeData):
+        await track_start()
+        try:
+            await asyncio.sleep(0.01)
+            await data.async_emit_nowait("dynamic.child", {"item": data.value["item"]})
+        finally:
+            await track_done()
+
+    async def dynamic_child(data: TriggerFlowRuntimeData):
+        await track_start()
+        try:
+            await asyncio.sleep(0.01)
+            item = data.value["item"]
+            async with lock:
+                results = list(data.get_state("results", [], inherit=False))
+                results.append(item * 10)
+                await data.async_set_state("results", results)
+                if len(results) == data.get_state("expected", 0, inherit=False):
+                    await data.async_emit("dynamic.done", sorted(results))
+        finally:
+            await track_done()
+
+    async def finish(data: TriggerFlowRuntimeData):
+        return {"results": data.value}
+
+    flow.to(prepare)
+    flow.when("dynamic.done").to(finish).end()
+    execution = flow.create_execution(auto_close=False, concurrency=1)
+    execution.on("dynamic.root", dynamic_root, binding_id="test.dynamic_root")
+    execution.on("dynamic.child", dynamic_child, binding_id="test.dynamic_child")
+
+    await execution.async_start([1, 2, 3])
+    snapshot = await execution.async_close(timeout=1)
+    signal_net_state = execution.save()["signal_net"]
+    completed_events = {
+        attempt["trigger_event"]
+        for attempt in signal_net_state["signal_attempts"]
+        if attempt["status"] == "completed"
+    }
+
+    assert snapshot["$final_result"] == {"results": [10, 20, 30]}
+    assert max_active_count == 1
+    assert {"dynamic.root", "dynamic.child"}.issubset(completed_events)
+
+
+def test_trigger_flow_signal_net_rejects_anonymous_durable_handler():
+    flow = TriggerFlow(name="signal-net-anonymous-handler")
+    execution = flow.create_execution(auto_close=False)
+
+    with pytest.raises(ValueError, match="recoverable handler ref"):
+        execution.on("dynamic.item", lambda data: None)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_signal_net_snapshot_requires_dynamic_handler_before_load():
+    flow = TriggerFlow(name="signal-net-load")
+
+    async def dynamic_handler(data: TriggerFlowRuntimeData):
+        await data.async_set_state("seen", data.value)
+
+    execution = flow.create_execution(auto_close=False)
+    execution.on(
+        "dynamic.item",
+        dynamic_handler,
+        binding_id="test.dynamic_load_handler",
+    )
+    saved_state = execution.save()
+
+    missing_handler_execution = flow.create_execution(auto_close=False)
+    missing_report = missing_handler_execution.inspect_load(saved_state)
+    assert missing_report["ready"] is False
+    assert missing_report["status"] == "missing_resources"
+    assert "dynamic_event_handler:test.dynamic_load_handler" in missing_report["missing_resource_keys"]
+
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.on(
+        "dynamic.item",
+        dynamic_handler,
+        binding_id="test.dynamic_load_handler",
+    )
+    restored_execution.load(saved_state, validate_resources=True)
+    await restored_execution.async_emit("dynamic.item", {"value": "restored"})
+    snapshot = await restored_execution.async_close(timeout=1)
+
+    assert snapshot["seen"] == {"value": "restored"}
+    assert restored_execution.save()["signal_net"]["bindings"][0]["status"] == "active"
+
+
+def test_trigger_flow_signal_net_load_marks_nonterminal_attempts_interrupted():
+    flow = TriggerFlow(name="signal-net-interrupted-attempt")
+    execution = flow.create_execution(auto_close=False)
+    saved_state = execution.save()
+    saved_state["signal_net"]["accepted_signal_ids"] = ["signal-1"]
+    saved_state["signal_net"]["signal_attempts"] = [
+        {
+            "signal_id": "signal-1",
+            "trigger_type": "event",
+            "trigger_event": "dynamic.item",
+            "source": "runtime",
+            "status": "running",
+        }
+    ]
+
+    restored_execution = flow.create_execution(auto_close=False)
+    restored_execution.load(saved_state)
+    restored_state = restored_execution.save()["signal_net"]
+
+    assert restored_state["accepted_signal_ids"] == []
+    assert restored_state["signal_attempts"][0]["status"] == "interrupted"
+
+
 def test_trigger_flow_snapshot_records_definition_fingerprint_and_rejects_mismatch():
     flow = TriggerFlow(name="snapshot-fingerprint")
 

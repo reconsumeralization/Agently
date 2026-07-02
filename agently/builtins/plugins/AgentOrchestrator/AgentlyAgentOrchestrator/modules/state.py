@@ -23,6 +23,8 @@ from agently.utils import DataFormatter
 if TYPE_CHECKING:
     from .execution import AgentExecution
 
+_TASK_ROUTE_STRATEGIES = {"task", "task_loop", "long_task"}
+
 
 class ExecutionOptionsState(dict):
     """Callable dict preserving AgentExecution.options(...) compatibility."""
@@ -60,11 +62,14 @@ def load_strategy_state_from_options(owner: "AgentExecution"):
         if isinstance(execution_options, dict):
             strategy = execution_options.get("strategy")
     if strategy is not None:
-        owner.strategy_name = str(strategy)
+        apply_strategy_selection(owner, strategy, source="execution_options")
 
     task_options = owner.options.get("task")
     if isinstance(task_options, dict):
         owner.task_options.update(task_options)
+        if "execution" in task_options:
+            owner.task_options["execution"] = normalize_task_execution_strategy(task_options.get("execution"))
+            owner.task_options.setdefault("_execution_strategy_source", "task_options")
         goal = task_options.get("goal")
         if goal is not None:
             owner.goal(goal)
@@ -119,6 +124,38 @@ def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
     return effective
 
 
+def normalize_task_execution_strategy(value: Any) -> str:
+    from agently.core.application import AgentTask
+
+    return str(AgentTask.normalize_execution_strategy(value))
+
+
+def is_task_execution_strategy_value(value: Any) -> bool:
+    try:
+        normalize_task_execution_strategy(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def apply_strategy_selection(owner: "AgentExecution", value: Any, *, source: str) -> bool:
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return False
+    try:
+        execution_strategy = normalize_task_execution_strategy(text)
+    except (TypeError, ValueError):
+        owner.strategy_name = text
+        owner.options["strategy"] = text
+        return False
+
+    owner.strategy_name = execution_strategy
+    owner.options["strategy"] = execution_strategy
+    owner.task_options["execution"] = execution_strategy
+    owner.task_options["_execution_strategy_source"] = source
+    return True
+
+
 def configure_effort(
     owner: "AgentExecution",
     value: Any = "medium",
@@ -167,13 +204,41 @@ def normalize_effort_configuration(
 def resolve_effort_strategy(effort: Any, detail: Any = None) -> dict[str, Any]:
     name, detail_map = normalize_effort_configuration(effort, detail)
     presets: dict[str, dict[str, Any]] = {
-        "minimal": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
-        "low": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
-        "fast": {"planning_depth": "shallow", "max_iterations": 1, "verifier_strength": "standard"},
-        "medium": {"planning_depth": "standard", "max_iterations": 3, "verifier_strength": "strong"},
-        "normal": {"planning_depth": "standard", "max_iterations": 3, "verifier_strength": "strong"},
-        "high": {"planning_depth": "deep", "max_iterations": 5, "verifier_strength": "strong"},
-        "max": {"planning_depth": "deep", "max_iterations": 5, "verifier_strength": "strong"},
+        "minimal": {
+            "planning_depth": "shallow",
+            "verifier_strength": "standard",
+            "reflection_density": "final",
+        },
+        "low": {
+            "planning_depth": "shallow",
+            "verifier_strength": "standard",
+            "reflection_density": "final",
+        },
+        "fast": {
+            "planning_depth": "shallow",
+            "verifier_strength": "standard",
+            "reflection_density": "final",
+        },
+        "medium": {
+            "planning_depth": "standard",
+            "verifier_strength": "strong",
+            "reflection_density": "major_node",
+        },
+        "normal": {
+            "planning_depth": "standard",
+            "verifier_strength": "strong",
+            "reflection_density": "major_node",
+        },
+        "high": {
+            "planning_depth": "deep",
+            "verifier_strength": "strong",
+            "reflection_density": "action",
+        },
+        "max": {
+            "planning_depth": "deep",
+            "verifier_strength": "strong",
+            "reflection_density": "action",
+        },
     }
     resolved = dict(presets.get(name) or presets["medium"])
     resolved["name"] = name
@@ -184,33 +249,11 @@ def resolve_effort_strategy(effort: Any, detail: Any = None) -> dict[str, Any]:
 
 
 def apply_effort_strategy_limits(owner: "AgentExecution"):
-    strategy = owner.effective_options.get("effort_strategy")
-    if not isinstance(strategy, dict):
-        return owner
-    effort_applied_limits = getattr(owner, "_effort_applied_limits", set())
-    applied: dict[str, tuple[str, Any]] = {
-        "max_model_requests": ("effort.budget.model_call_limit", strategy.get("max_model_requests")),
-        "max_seconds": ("effort.budget.wall_time_seconds", strategy.get("max_seconds")),
-        "max_no_progress_seconds": (
-            "effort.budget.no_progress_seconds",
-            strategy.get("max_no_progress_seconds"),
-        ),
-    }
-    for limit_name, (option_path, value) in applied.items():
-        if value is None:
-            if limit_name in effort_applied_limits:
-                owner.limits[limit_name] = None
-                effort_applied_limits.discard(limit_name)
-            continue
-        if owner.limits.get(limit_name) is not None and limit_name not in effort_applied_limits:
-            continue
-        owner.limits[limit_name] = value
-        effort_applied_limits.add(limit_name)
-        record_consumed_option(owner, option_path, value, owner_name="AgentExecution")
-    owner._effort_applied_limits = effort_applied_limits
-    execution_context = getattr(owner, "execution_context", None)
-    if execution_context is not None:
-        execution_context.limits = owner.limits
+    # Effort is orchestration-shape guidance. It must not silently become hard
+    # model-call, wall-clock, no-progress, or task-iteration limits. Callers that
+    # need hard resource controls should use explicit execution limits or task
+    # strategy options so those controls stay visible as limits, not effort.
+    owner._effort_applied_limits = set()
     return owner
 
 
@@ -227,8 +270,9 @@ def _copy_effort_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _apply_effort_aliases(strategy: dict[str, Any]):
-    budget = strategy.get("budget")
-    budget = budget if isinstance(budget, dict) else {}
+    raw_budget = strategy.get("budget")
+    budget = dict(raw_budget) if isinstance(raw_budget, dict) else {}
+    budget_changed = isinstance(raw_budget, dict)
     planning = strategy.get("planning")
     planning = planning if isinstance(planning, dict) else {}
     verification = strategy.get("verification")
@@ -238,49 +282,59 @@ def _apply_effort_aliases(strategy: dict[str, Any]):
         budget,
         "iteration_limit",
         "max_iterations",
-        fallback=strategy.get("iteration_limit", strategy.get("max_iterations")),
+        fallback=_first_present(strategy, "iteration_limit", "max_iterations"),
     )
     if iteration_limit is not None:
         value = _positive_int(iteration_limit, "effort budget iteration_limit")
-        strategy["max_iterations"] = value
-        if isinstance(budget, dict):
-            budget["iteration_limit"] = value
+        budget["iteration_limit"] = value
+        budget_changed = True
 
     model_call_limit = _first_present(
         budget,
         "model_call_limit",
         "max_model_requests",
-        fallback=strategy.get("model_call_limit", strategy.get("max_model_requests")),
+        fallback=_first_present(strategy, "model_call_limit", "max_model_requests"),
     )
     if model_call_limit is not None:
         value = _positive_int(model_call_limit, "effort budget model_call_limit")
-        strategy["max_model_requests"] = value
-        if isinstance(budget, dict):
-            budget["model_call_limit"] = value
+        budget["model_call_limit"] = value
+        budget_changed = True
 
     wall_time_seconds = _first_present(
         budget,
         "wall_time_seconds",
         "max_seconds",
-        fallback=strategy.get("wall_time_seconds", strategy.get("max_seconds")),
+        fallback=_first_present(strategy, "wall_time_seconds", "max_seconds"),
     )
     if wall_time_seconds is not None:
         value = _positive_float(wall_time_seconds, "effort budget wall_time_seconds")
-        strategy["max_seconds"] = value
-        if isinstance(budget, dict):
-            budget["wall_time_seconds"] = value
+        budget["wall_time_seconds"] = value
+        budget_changed = True
 
     no_progress_seconds = _first_present(
         budget,
         "no_progress_seconds",
         "max_no_progress_seconds",
-        fallback=strategy.get("no_progress_seconds", strategy.get("max_no_progress_seconds")),
+        fallback=_first_present(strategy, "no_progress_seconds", "max_no_progress_seconds"),
     )
     if no_progress_seconds is not None:
         value = _positive_float(no_progress_seconds, "effort budget no_progress_seconds")
-        strategy["max_no_progress_seconds"] = value
-        if isinstance(budget, dict):
-            budget["no_progress_seconds"] = value
+        budget["no_progress_seconds"] = value
+        budget_changed = True
+
+    for legacy_key in (
+        "iteration_limit",
+        "max_iterations",
+        "model_call_limit",
+        "max_model_requests",
+        "wall_time_seconds",
+        "max_seconds",
+        "no_progress_seconds",
+        "max_no_progress_seconds",
+    ):
+        strategy.pop(legacy_key, None)
+    if budget_changed:
+        strategy["budget"] = budget
 
     planning_depth = planning.get("depth") if isinstance(planning, dict) else None
     if planning_depth is not None:
@@ -371,12 +425,47 @@ def task_success_criteria(owner: "AgentExecution") -> list[str]:
 
 
 def is_task_strategy(owner: "AgentExecution") -> bool:
-    if owner.strategy_name in {"task", "task_loop", "long_task"}:
+    if owner.strategy_name in _TASK_ROUTE_STRATEGIES:
+        return True
+    if owner.strategy_name is not None and is_task_execution_strategy_value(owner.strategy_name):
         return True
     if owner.goal_items or owner.success_criteria_items:
         return True
     task_options = owner.options.get("task")
-    return isinstance(task_options, dict) and bool(task_options)
+    if isinstance(task_options, dict) and bool(task_options):
+        return True
+    return _top_level_execution_has_skills(owner)
+
+
+def _top_level_execution_has_skills(owner: "AgentExecution") -> bool:
+    lineage = getattr(owner, "lineage", {}) or {}
+    if isinstance(lineage, Mapping):
+        if lineage.get("step_id") is not None:
+            return False
+        scope = lineage.get("scope")
+        if isinstance(scope, Mapping) and scope.get("strategy_phase"):
+            return False
+
+    if getattr(owner, "local_skill_selectors", None) or getattr(owner, "local_skills_pack_selectors", None):
+        return True
+
+    agent = getattr(owner, "agent", None)
+    for method_name, kwargs in (
+        ("_collect_skill_selectors", {"skills": None, "mode": "model_decision"}),
+        ("_collect_skill_selectors", {"skills": None, "mode": "required"}),
+        ("_collect_skills_pack_selectors", {"skills_packs": None, "mode": "model_decision"}),
+        ("_collect_skills_pack_selectors", {"skills_packs": None, "mode": "required"}),
+    ):
+        collect = getattr(agent, method_name, None)
+        if not callable(collect):
+            continue
+        try:
+            values = collect(**kwargs)
+        except Exception:
+            continue
+        if isinstance(values, (list, tuple, set)) and values:
+            return True
+    return False
 
 
 def route_options(owner: "AgentExecution", route_name: str) -> dict[str, Any]:

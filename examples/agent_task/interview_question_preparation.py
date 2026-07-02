@@ -494,7 +494,6 @@ async def main(argv: list[str] | None = None):
         workspace_root=str(workspace_dir),
         search={
             "backend": os.getenv("SEARCH_BACKEND", "auto"),
-            "refresh_ddgs": "allow",
         },
     )
     workspace = agent.workspace
@@ -568,7 +567,7 @@ async def main(argv: list[str] | None = None):
     stream_items = []
     try:
         with stream_trace_path.open("w", encoding="utf-8") as trace_file:
-            async for item in execution.get_async_generator():
+            async for item in execution.get_async_generator(type="instant"):
                 stream_items.append(item)
                 trace_file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
                 trace_file.flush()
@@ -644,10 +643,6 @@ async def main(argv: list[str] | None = None):
     for stream_item in stream_items:
         value = stream_item.value if isinstance(stream_item.value, dict) else {}
         record_action_logs(value.get("logs", {}))
-    ddgs_refresh_action_present = "refresh_ddgs_dependency" in action_log_ids
-    action_registry = getattr(agent.action, "action_registry", None)
-    if action_registry is not None and hasattr(action_registry, "has"):
-        ddgs_refresh_action_present = ddgs_refresh_action_present or bool(action_registry.has("refresh_ddgs_dependency"))
     semantic_judge = await judge_interview_semantics(
         agent,
         file_text=file_text,
@@ -656,7 +651,6 @@ async def main(argv: list[str] | None = None):
         action_summary={
             "action_log_count": action_log_count,
             "action_log_ids": sorted(action_id for action_id in action_log_ids if action_id),
-            "ddgs_refresh_action_present": ddgs_refresh_action_present,
             "stream_trace_file": str(stream_trace_path),
         },
     )
@@ -690,7 +684,6 @@ async def main(argv: list[str] | None = None):
         "progress_model": os.getenv("AGENT_TASK_PROGRESS_MODEL", "qwen2.5:7b"),
         "workspace_checkpoint_count": len(await workspace.checkpoint_history(task_id)),
         "action_log_count": action_log_count,
-        "ddgs_refresh_action_present": ddgs_refresh_action_present,
         "output_file": str(output_path),
     }
     print_result_summary(summary, file_text)
@@ -721,7 +714,6 @@ if __name__ == "__main__":
 # progress_event_count=2
 # snapshot_event_count=4
 # stream_trace_file points to a JSONL stream trace under the Workspace
-# ddgs_refresh_action_present=True
 #
 # Skills contract note:
 # The selected Skill is a standard SKILL.md without Agently-specific

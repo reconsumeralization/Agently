@@ -1,0 +1,8 @@
+# Archived Skills Executor Examples
+
+Archived from `examples/skills_executor/` during the 4.1.3.8 development-line
+Blocks lifecycle refactor.
+
+These files are not current runnable examples for 4.1.3.8 and later. They are
+preserved only as historical reference for pre-Blocks Skills orchestration
+behavior.

@@ -42,9 +42,10 @@ explicitly. `yaml_literal` is explicit opt-in and is not selected by auto.
 
 Use `get_generator(type="instant")` or `get_async_generator(type="instant")`
 when the caller benefits from field-level structured updates before the full
-response is finished: progress panels, live forms, long reports with
-independently renderable sections, model-stage dashboards, or workflow UIs that
-can route one field while the rest of the response is still generating. For one
+response is finished: progress panels, live forms, long, sectioned, or
+file-backed deliverables with independently renderable sections,
+model-stage dashboards, or workflow UIs that can route one field while the rest
+of the response is still generating. For one
 freeform text artifact, use `type="delta"` instead; plain text has no structured
 field paths for instant events.
 
@@ -69,7 +70,7 @@ request.
 | `xml_field` | Yes, field-level text deltas inside `<field name="..." type="...">` blocks. | Useful when explicit boundaries are easier for the target model than Markdown section headers. Final parsing consumes the normalized answer payload, not provider reasoning. |
 | `yaml_literal` | Yes, top-level field deltas inside the target YAML boundary. | Treat as provisional UI state. Final YAML parsing is indentation-sensitive and should be checked through `get_data()`. |
 | `json` | Yes, via incremental JSON parsing. | Best when arrays or nested objects need path-level updates. More sensitive to malformed or delayed JSON syntax while streaming; final repair still happens at completion. |
-| Plain text / `text` | No structured instant paths. | Use `type="delta"` for raw token streaming, or `get_text()` after completion. |
+| Plain text / `text` | No structured instant paths. | Use `type="delta"` for text-increment streaming, or `get_text()` after completion. Use `original` / `original_delta` views only when debugging provider-level raw events. |
 
 ### Current Format Contracts
 
@@ -308,7 +309,7 @@ Two caveats:
 
 ## Single execution per response
 
-Validation runs **once** per `ModelResponseResult` and the outcome is cached. Repeated calls — `get_data()` then `get_data()` again, or `get_data()` then `get_data_object()` — do **not** rerun validators. If you try to inject a different handler on the same result after validation has already finalized, the new handler is ignored with a warning.
+Validation runs **once** per `ModelRequestResult` and the outcome is cached. Repeated calls — `get_data()` then `get_data()` again, or `get_data()` then `get_data_object()` — do **not** rerun validators. If you try to inject a different handler on the same result after validation has already finalized, the new handler is ignored with a warning.
 
 This means: don't expect to swap validators per consumer. If you need different validation for different consumers, run the request twice.
 

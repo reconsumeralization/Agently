@@ -25,7 +25,7 @@ ingest, search, checkpoint, and build context.
   `get_data(...)`, `search(...)`, `link(...)`, `links(...)`,
   `checkpoint(...)`, `latest_checkpoint(...)`, `history(...)`,
   `capabilities()`, and `build_context(...)`.
-- Recall is plugin-shaped through `RecallPlanner`, `Retriever`, and
+- Recall is plugin-shaped through `ContextPlanner`, `Retriever`, and
   `ContextBuilder`; default `auto` and `software_dev` profiles are available.
 - `agent.enable_workspace_file_actions(...)` exposes the Workspace file working
   tree as list/search/read/write actions without creating a second Workspace.

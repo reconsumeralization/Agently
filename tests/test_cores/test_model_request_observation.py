@@ -6,9 +6,14 @@ from typing import Any
 import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently.core import ModelRequest, ModelResponseResult, PluginManager
+from agently.builtins.plugins.ResponseParser.AgentlyResponseParser import AgentlyResponseParser
+from agently.core import ModelRequest, ModelRequestResult, PluginManager
 from agently.core.model.AttemptRunner import core_attempt_runner_entrypoint
-from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
+from agently.core.runtime.RuntimeEvents import (
+    attach_model_request_telemetry,
+    async_emit_action_flow_observation,
+    async_emit_response_parser_observation,
+)
 from agently.types.data import AgentlyRequestData, AttemptDecision, AttemptHandlers, AttemptState, RunContext
 from agently.types.data.event import normalize_triggerflow_event_type
 from agently.utils import Settings
@@ -76,6 +81,18 @@ class MockObservationRequester:
                 await asyncio.sleep(0)
         yield "done", response_text
         yield "meta", {"provider": "mock-observation", "model": "mock-1"}
+
+
+class MockStatusObservationRequester(MockObservationRequester):
+    name = "MockStatusObservationRequester"
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, Any], None],
+    ):
+        async for item in super().broadcast_response(response_generator):
+            yield item
+        yield "status", {"status": "completed"}
 
 
 class MockThinkStructuredRequester:
@@ -280,12 +297,20 @@ class MockHandlerDrivenRequester:
 
     def build_request_handlers(self, request_data: AgentlyRequestData):
         async def execute(state: AttemptState):
-            del state
-            if "fail" in str(request_data.data.get("prompt_text", "")):
+            prompt_text = str(request_data.data.get("prompt_text", ""))
+            if "after-output retry" in prompt_text:
+                if state.attempt_index == 1:
+                    yield "message", '{"reply": "partial'
+                    raise RuntimeError("handler stream broke")
+                yield "message", json.dumps({"reply": "done"}, ensure_ascii=False)
+                return
+            if "fail" in prompt_text:
                 raise RuntimeError("handler provider failed")
             yield "message", "handler output"
 
-        async def handle_error(error: BaseException, _state: AttemptState):
+        async def handle_error(error: BaseException, state: AttemptState):
+            if str(error) == "handler stream broke":
+                return AttemptDecision.retry(reason="transient_stream_error", allow_after_output_started=True)
             return AttemptDecision.yield_error(error)
 
         return AttemptHandlers(execute=execute, handle_error=handle_error)
@@ -305,8 +330,14 @@ class MockHandlerDrivenRequester:
             if event == "error":
                 yield event, data
                 continue
+            if event == "status":
+                if isinstance(data, dict) and data.get("status") == "failed" and data.get("retry") is True:
+                    response_text = ""
+                yield event, data
+                continue
             if event == "message":
                 response_text += str(data)
+                yield "delta", str(data)
         if response_text:
             yield "done", response_text
 
@@ -315,6 +346,22 @@ def _create_request():
     settings = Settings(name="ObservationTestSettings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="ObservationTestPluginManager")
     plugin_manager.register("ModelRequester", MockObservationRequester, activate=True)
+    return ModelRequest(
+        plugin_manager,
+        agent_name="observation-agent",
+        agent_id="agent-observation",
+        parent_settings=settings,
+    )
+
+
+def _create_status_request():
+    settings = Settings(name="StatusObservationTestSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="StatusObservationTestPluginManager",
+    )
+    plugin_manager.register("ModelRequester", MockStatusObservationRequester, activate=True)
     return ModelRequest(
         plugin_manager,
         agent_name="observation-agent",
@@ -342,6 +389,17 @@ def _create_slow_agent():
         plugin_manager,
         parent_settings=settings,
         name="slow-observation-agent",
+    )
+
+
+def _create_handler_driven_agent():
+    settings = Settings(name="HandlerDrivenAgentSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="HandlerDrivenAgentPluginManager")
+    plugin_manager.register("ModelRequester", MockHandlerDrivenRequester, activate=True)
+    return Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="handler-driven-agent",
     )
 
 
@@ -441,20 +499,37 @@ async def test_model_request_events_include_prompt_and_child_run_lineage():
         assert requesting_event.payload["request"]["request_url"] == "mock://observation-requester"
         assert requesting_event.payload["attempt_index"] == 1
 
+        started_event = next(event for event in model_events if event.event_type == "model.request_started")
+        started_telemetry = started_event.payload["model_request_telemetry"]
+        assert started_telemetry["event_kind"] == "model.request_started"
+        assert started_telemetry["response_id"] == response.response_id
+        assert started_telemetry["attempt_index"] == 1
+        assert started_telemetry["request_run_id"] == request_run.run_id
+        assert started_telemetry["model_run_id"] == model_run.run_id
+        assert started_telemetry["provider_family"] == "MockObservationRequester"
+
+        requesting_telemetry = requesting_event.payload["model_request_telemetry"]
+        assert requesting_telemetry["event_kind"] == "model.requesting"
+        assert requesting_telemetry["request_url"] == "mock://observation-requester"
+
         meta_event = next(event for event in model_events if event.event_type == "model.meta")
         assert meta_event.payload["meta"]["provider"] == "mock-observation"
         assert meta_event.payload["meta"]["model"] == "mock-1"
+        meta_telemetry = meta_event.payload["model_request_telemetry"]
+        assert meta_telemetry["event_kind"] == "model.meta"
+        assert meta_telemetry["provider"] == "mock-observation"
+        assert meta_telemetry["model"] == "mock-1"
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
 
-def test_get_result_is_primary_response_facade():
+def test_get_result_is_primary_model_request_facade():
     request = _create_request()
     request.input("Summarize the morning operations notes.")
 
     result = request.get_result()
 
-    assert isinstance(result, ModelResponseResult)
+    assert isinstance(result, ModelRequestResult)
     assert result.result is result
     assert result.id == result.response_id
 
@@ -465,7 +540,7 @@ def test_get_response_returns_result_compatible_facade():
 
     result = request.get_response()
 
-    assert isinstance(result, ModelResponseResult)
+    assert isinstance(result, ModelRequestResult)
     assert result.result is result
 
 
@@ -486,6 +561,122 @@ async def test_handler_driven_model_requester_streams_through_core_attempt_runne
 
     response = request.get_response()
     assert await response.async_get_text() == "handler output"
+
+
+@pytest.mark.asyncio
+async def test_handler_driven_after_output_retry_emits_status_and_replays_cleanly():
+    captured = []
+    hook_name = "test_model_request_observation.status_capture"
+    Agently.event_center.register_hook(lambda event: captured.append(event), hook_name=hook_name)
+    request = _create_handler_driven_request()
+    try:
+        request.input("after-output retry")
+        request.output({"reply": (str, "Final reply.", True)}, format="json")
+
+        response = request.get_response()
+        all_events = [item async for item in response.get_async_generator(type="all")]
+
+        status_events = [item for item in all_events if item[0] == "status"]
+        assert len(status_events) == 2
+        failed_status = status_events[0][1]
+        assert failed_status["status"] == "failed"
+        assert failed_status["response_id"] == response.response_id
+        assert failed_status["attempt_index"] == 1
+        assert failed_status["next_attempt_index"] == 2
+        assert failed_status["retry"] is True
+        assert failed_status["reason"] == "handler stream broke"
+        assert failed_status["error_type"] == "RuntimeError"
+        assert status_events[1][1]["status"] == "completed"
+        done_events = [item for item in all_events if item[0] == "done"]
+        assert done_events[-1][1] == '{"reply": "done"}'
+
+        status_runtime_events = [event for event in captured if event.event_type == "model.status"]
+        assert len(status_runtime_events) == 2
+        assert status_runtime_events[0].payload["response_id"] == response.response_id
+        assert status_runtime_events[0].payload["reason"] == "handler stream broke"
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    parsed_request = _create_handler_driven_request()
+    parsed_request.input("after-output retry")
+    parsed_request.output({"reply": (str, "Final reply.", True)}, format="json")
+
+    data = await parsed_request.get_response().async_get_data()
+    assert data == {"reply": "done"}
+
+    instant_request = _create_handler_driven_request()
+    instant_request.input("after-output retry")
+    instant_request.output({"reply": (str, "Final reply.", True)}, format="json")
+
+    instant_items = [item async for item in instant_request.get_response().get_async_generator(type="instant")]
+    instant_statuses = [item for item in instant_items if item.path == "$status"]
+    assert len(instant_statuses) == 2
+    assert instant_statuses[0].value["status"] == "failed"
+    assert instant_statuses[0].value["next_attempt_index"] == 2
+    assert instant_statuses[-1].value["status"] == "completed"
+
+    delta_request = _create_handler_driven_request()
+    delta_request.input("after-output retry")
+    delta_request.output({"reply": (str, "Final reply.", True)}, format="json")
+
+    delta_chunks = [
+        item
+        async for item in delta_request.get_response().get_async_generator(type="delta")
+    ]
+    assert delta_chunks == [
+        '{"reply": "partial',
+        "<$retry>handler stream broke</$retry>",
+        '{"reply": "done"}',
+    ]
+
+    rendered_text = ""
+    for chunk in delta_chunks:
+        if "<$retry>" in chunk:
+            rendered_text = ""
+            continue
+        rendered_text += chunk
+    assert rendered_text == '{"reply": "done"}'
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_projects_model_status_and_lineage_for_plain_delta_replay():
+    execution = _create_handler_driven_agent().input("after-output retry")
+
+    stream_items = [item async for item in execution.get_async_generator(type="instant")]
+    status_items = [item for item in stream_items if item.path == "$status"]
+    delta_items = [item for item in stream_items if item.path == "model.delta"]
+
+    assert [item.value["status"] for item in status_items] == ["failed", "completed"]
+    assert status_items[0].value["retry"] is True
+    assert status_items[0].value["next_attempt_index"] == 2
+    assert [item.delta for item in delta_items] == ['{"reply": "partial', '{"reply": "done"}']
+    assert stream_items.index(status_items[0]) > stream_items.index(delta_items[0])
+    assert stream_items.index(status_items[0]) < stream_items.index(delta_items[1])
+
+    model_items = [*status_items, *delta_items]
+    response_ids = {item.meta["response_id"] for item in model_items if item.meta is not None}
+    request_run_ids = {item.meta["request_run_id"] for item in model_items if item.meta is not None}
+    model_run_ids = {item.meta["model_run_id"] for item in model_items if item.meta is not None}
+    assert len(response_ids) == len(request_run_ids) == len(model_run_ids) == 1
+    assert all(item.source == "model_request" and item.route == "model_request" for item in model_items)
+
+    delta_execution = _create_handler_driven_agent().input("after-output retry")
+    delta_chunks = [chunk async for chunk in delta_execution.get_async_generator(type="delta")]
+    assert delta_chunks == [
+        '{"reply": "partial',
+        "<$retry>handler stream broke</$retry>",
+        '{"reply": "done"}',
+    ]
+
+
+def test_delta_retry_marker_escapes_provider_reason():
+    assert AgentlyResponseParser._format_delta_retry_marker(
+        {
+            "status": "failed",
+            "retry": True,
+            "reason": "peer <closed> & sent </$retry>",
+        }
+    ) == "<$retry>peer &lt;closed&gt; &amp; sent &lt;/$retry&gt;</$retry>"
 
 
 @pytest.mark.asyncio
@@ -510,6 +701,11 @@ async def test_handler_driven_provider_error_becomes_core_runtime_event():
         assert requester_errors[0].source == "MockHandlerDrivenRequester"
         assert requester_errors[0].error is not None
         assert requester_errors[0].error.message == "handler provider failed"
+        requester_error_telemetry = requester_errors[0].payload["model_request_telemetry"]
+        assert requester_error_telemetry["event_kind"] == "model.requester.error"
+        assert requester_error_telemetry["response_id"] == response.response_id
+        assert requester_error_telemetry["attempt_index"] == 1
+        assert requester_error_telemetry["error"]["message"] == "handler provider failed"
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
@@ -543,6 +739,15 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
         attempt_start_events = [event for event in captured if event.event_type == "model.request_started"]
         assert len(attempt_start_events) == 2
         assert [event.payload["attempt_index"] for event in attempt_start_events] == [1, 2]
+        assert [
+            event.payload["model_request_telemetry"]["attempt_index"] for event in attempt_start_events
+        ] == [1, 2]
+        assert len(
+            {
+                event.payload["model_request_telemetry"]["telemetry_key"]
+                for event in attempt_start_events
+            }
+        ) == 2
         assert len({event.run.run_id for event in attempt_start_events if event.run is not None}) == 2
         assert response.run_context is not None
         request_run = response.run_context
@@ -564,6 +769,191 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
         }
         assert final_completed_event.payload["raw_text"] == '{"summary": "all good", "reply": "done"}'
         assert final_completed_event.payload["cleaned_text"] == '{"summary": "all good", "reply": "done"}'
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_model_request_telemetry_dedupes_same_kind_for_same_attempt():
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.telemetry_dedupe_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        run = RunContext.create(
+            run_kind="model_request",
+            agent_name="dedupe-agent",
+            response_id="response-dedupe",
+            meta={"attempt_index": 1},
+        )
+        await async_emit_response_parser_observation(
+            {
+                "kind": "meta",
+                "source": "TestParser",
+                "payload": {"meta": {"provider": "mock-provider", "model": "mock-model", "usage": {"total_tokens": 3}}},
+            },
+            agent_name="dedupe-agent",
+            response_id="response-dedupe",
+            run=run,
+        )
+        await async_emit_response_parser_observation(
+            {
+                "kind": "meta",
+                "source": "TestParser",
+                "payload": {"meta": {"provider": "mock-provider", "model": "mock-model", "usage": {"total_tokens": 3}}},
+            },
+            agent_name="dedupe-agent",
+            response_id="response-dedupe",
+            run=run,
+        )
+
+        meta_events = [event for event in captured if event.event_type == "model.meta"]
+        assert len(meta_events) == 2
+        assert "model_request_telemetry" in meta_events[0].payload
+        assert meta_events[0].payload["model_request_telemetry"]["telemetry_key"] == (
+            "response-dedupe:1:model.meta"
+        )
+        assert "model_request_telemetry" not in meta_events[1].payload
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+def test_model_request_telemetry_summarizes_usage_and_estimated_lengths():
+    provider_run = RunContext.create(
+        run_kind="model_request",
+        agent_name="usage-agent",
+        response_id="response-usage",
+        meta={"attempt_index": 1},
+    )
+    provider_payload: dict[str, Any] = {
+        "response_id": "response-usage",
+        "meta": {
+            "provider": "mock-provider",
+            "model": "mock-model",
+            "usage": {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19},
+        },
+        "raw_text": "provider text",
+    }
+
+    attach_model_request_telemetry(
+        provider_payload,
+        event_kind="model.completed",
+        run=provider_run,
+        source="TestParser",
+    )
+
+    provider_summary = provider_payload["model_request_telemetry"]["usage_summary"]
+    assert provider_payload["model_request_telemetry"]["usage"] == {
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "total_tokens": 19,
+    }
+    assert provider_summary["available"] is True
+    assert provider_summary["source"] == "provider"
+    assert provider_summary["provider"]["prompt_tokens"] == 12
+    assert provider_summary["provider"]["completion_tokens"] == 7
+    assert provider_summary["provider"]["input_tokens"] == 12
+    assert provider_summary["provider"]["output_tokens"] == 7
+    assert provider_summary["provider"]["total_tokens"] == 19
+    assert provider_summary["estimated_lengths"]["output_chars"] == len("provider text")
+
+    estimated_run = RunContext.create(
+        run_kind="model_request",
+        agent_name="usage-agent",
+        response_id="response-estimated",
+        meta={"attempt_index": 1},
+    )
+    estimated_payload: dict[str, Any] = {
+        "response_id": "response-estimated",
+        "prompt_text": "summarize this",
+        "raw_text": "estimated response",
+    }
+
+    attach_model_request_telemetry(
+        estimated_payload,
+        event_kind="model.completed",
+        run=estimated_run,
+        source="TestParser",
+    )
+
+    estimated_summary = estimated_payload["model_request_telemetry"]["usage_summary"]
+    assert estimated_summary["available"] is False
+    assert estimated_summary["source"] == "estimated_lengths"
+    assert estimated_summary["provider"]["prompt_tokens"] is None
+    assert estimated_summary["provider"]["completion_tokens"] is None
+    assert estimated_summary["provider"]["total_tokens"] is None
+    assert estimated_summary["estimated_lengths"] == {
+        "input_chars": len("summarize this"),
+        "input_source": "prompt_text",
+        "output_chars": len("estimated response"),
+        "output_source": "raw_text",
+    }
+
+    explicit_run = RunContext.create(
+        run_kind="model_request",
+        agent_name="usage-agent",
+        response_id="response-explicit",
+        meta={"attempt_index": 1},
+    )
+    explicit_payload: dict[str, Any] = {
+        "response_id": "response-explicit",
+        "estimated_input_chars": 4321,
+        "estimated_input_source": "request_text",
+        "estimated_output_chars": 987,
+        "estimated_output_source": "text_result",
+    }
+
+    attach_model_request_telemetry(
+        explicit_payload,
+        event_kind="model.status",
+        run=explicit_run,
+        source="TestParser",
+    )
+
+    explicit_summary = explicit_payload["model_request_telemetry"]["usage_summary"]
+    assert explicit_summary["available"] is False
+    assert explicit_summary["estimated_lengths"] == {
+        "input_chars": 4321,
+        "input_source": "request_text",
+        "output_chars": 987,
+        "output_source": "text_result",
+    }
+
+
+@pytest.mark.asyncio
+async def test_terminal_model_status_includes_estimated_lengths_without_provider_usage():
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.terminal_status_estimated_lengths"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        request = _create_status_request()
+        request.input("Prepare a short operations note.")
+        text = await request.async_get_text()
+
+        assert "Morning briefing prepared." in text
+        status_events = [
+            event
+            for event in captured
+            if event.event_type == "model.status"
+            and event.payload.get("status") == "completed"
+            and "model_request_telemetry" in event.payload
+        ]
+        assert status_events
+        summary = status_events[-1].payload["model_request_telemetry"]["usage_summary"]
+        assert summary["available"] is False
+        assert summary["estimated_lengths"]["input_chars"] > 0
+        assert summary["estimated_lengths"]["input_source"] == "request_text"
+        assert summary["estimated_lengths"]["output_chars"] == len(text)
+        assert summary["estimated_lengths"]["output_source"] == "text_result"
+        assert "request_text" not in status_events[-1].payload
+        assert "request_data" not in status_events[-1].payload
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
@@ -688,14 +1078,16 @@ async def test_agent_execution_wraps_request_and_model_request_runs():
         assert "Morning briefing prepared." in text
 
         execution_events = [event for event in captured if event.run and event.run.run_kind == "agent_execution"]
-        assert [event.event_type for event in execution_events] == [
-            "agent_execution.started",
-            "agent_execution.completed",
-        ]
+        execution_event_types = [event.event_type for event in execution_events]
+        assert execution_event_types[0] == "agent_execution.started"
+        assert "agent_execution.stream" in execution_event_types
+        assert "agent_execution.completed" in execution_event_types
+        assert execution_event_types.index("agent_execution.started") < execution_event_types.index("agent_execution.completed")
 
         execution_run = execution_events[0].run
         assert execution_run is not None
         assert execution_run.parent_run_id == workflow_run.run_id
+        assert execution_run.execution_id == execution.id
 
         request_events = [
             event
@@ -899,15 +1291,19 @@ async def test_trigger_flow_runtime_context_auto_inherits_parent_run_for_agent_a
             request.input("Provide a direct request summary.")
             agent_text = await execution.async_get_text()
             request_text = await request.async_get_text()
-            return {
+            final = {
                 "agent_text": agent_text,
                 "request_text": request_text,
             }
+            await data.async_set_state("final", final)
+            return final
 
-        flow.to(run_inside_flow).end()
+        flow.to(run_inside_flow)
 
-        result = await flow.async_start("start")
-        final = result.get("$final_result", result)
+        execution = flow.create_execution(auto_close=False)
+        await execution.async_start("start")
+        result = await execution.async_close()
+        final = result["final"]
 
         assert "Morning briefing prepared." in final["agent_text"]
         assert "Morning briefing prepared." in final["request_text"]
@@ -970,15 +1366,25 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
                     "request_text": request_text,
                 }
 
-            return await helper()
+            final = await helper()
+            await data.async_set_state("final", final)
+            return final
 
-        sub_flow.to(summarize_candidate).end()
+        sub_flow.to(summarize_candidate)
 
         flow = TriggerFlow(name="daily-news-root-flow")
-        flow.to_sub_flow(sub_flow, capture={"input": "value"}, write_back={"value": "result"}).end()
+        async def store_sub_flow_result(data: TriggerFlowRuntimeData):
+            await data.async_set_state("final", data.value)
+            return data.value
 
-        result = await flow.async_start("topic")
-        final = result.get("$final_result", result)
+        flow.to_sub_flow(sub_flow, capture={"input": "value"}, write_back={"value": "result.final"}).to(
+            store_sub_flow_result
+        )
+
+        execution = flow.create_execution(auto_close=False)
+        await execution.async_start("topic")
+        result = await execution.async_close()
+        final = result["final"]
 
         assert "Morning briefing prepared." in final["agent_text"]
         assert "Morning briefing prepared." in final["request_text"]
@@ -1038,7 +1444,7 @@ async def test_nested_subflow_helper_calls_auto_inherit_runtime_context():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_failed_events():
+async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_cancelled_status():
     MockSlowCancelableRequester.reset()
     captured = []
 
@@ -1061,22 +1467,27 @@ async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_fail
             await asyncio.sleep(0.05)
             raise RuntimeError("branch boom")
 
-        flow.batch(slow_branch, fail_branch).end()
+        flow.batch(slow_branch, fail_branch)
 
         with pytest.raises(RuntimeError, match="branch boom"):
             await flow.async_start("start")
 
         for _ in range(20):
             if MockSlowCancelableRequester.canceled_attempts >= 1 and any(
-                event.event_type == "model.request_failed" for event in captured
+                event.event_type == "model.status" and event.payload.get("status") == "cancelled"
+                for event in captured
             ):
                 break
             await asyncio.sleep(0.01)
 
         event_types = [event.event_type for event in captured]
-        assert "model.request_failed" in event_types
-        assert "request.failed" in event_types
-        assert "agent_execution.failed" in event_types
+        cancelled_statuses = [
+            event for event in captured if event.event_type == "model.status" and event.payload.get("status") == "cancelled"
+        ]
+        assert len(cancelled_statuses) == 1
+        assert cancelled_statuses[0].payload["retry"] is False
+        assert "model.request_failed" not in event_types
+        assert "request.failed" not in event_types
         assert "chunk.failed" in event_types
         assert normalize_triggerflow_event_type("triggerflow.execution_failed") in {
             normalize_triggerflow_event_type(event_type) for event_type in event_types
@@ -1111,15 +1522,19 @@ async def test_trigger_flow_for_each_failure_waits_for_sibling_cleanup():
             await asyncio.sleep(0.05)
             raise RuntimeError("for_each branch boom")
 
-        flow.to(prepare_items).for_each(concurrency=2).to(analyze_item).end_for_each().end()
+        flow.to(prepare_items).for_each(concurrency=2).to(analyze_item).end_for_each()
 
         with pytest.raises(RuntimeError, match="for_each branch boom"):
             await flow.async_start("start")
 
         event_types = [event.event_type for event in captured]
-        assert "model.request_failed" in event_types
-        assert "request.failed" in event_types
-        assert "agent_execution.failed" in event_types
+        cancelled_statuses = [
+            event for event in captured if event.event_type == "model.status" and event.payload.get("status") == "cancelled"
+        ]
+        assert len(cancelled_statuses) == 1
+        assert cancelled_statuses[0].payload["retry"] is False
+        assert "model.request_failed" not in event_types
+        assert "request.failed" not in event_types
         assert "chunk.failed" in event_types
         assert normalize_triggerflow_event_type("triggerflow.execution_failed") in {
             normalize_triggerflow_event_type(event_type) for event_type in event_types

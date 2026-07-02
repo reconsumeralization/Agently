@@ -17,6 +17,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from .adapter import RegistrySkillSource, SkillCapabilityAdapter
+
 if TYPE_CHECKING:
     from agently.core import PluginManager
     from agently.utils import Settings
@@ -42,6 +44,18 @@ class SkillsExecutor:
     @property
     def registry(self):
         return self._impl.registry
+
+    def capability_adapter(self) -> SkillCapabilityAdapter:
+        factory = getattr(self._impl, "capability_adapter", None)
+        if callable(factory):
+            return cast(SkillCapabilityAdapter, factory())
+        return SkillCapabilityAdapter(RegistrySkillSource(self.registry))
+
+    def discover_skill_capabilities(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        return self.capability_adapter().discover(limit=limit)
+
+    def activate_skill(self, skill_id: str, *, task: str | None = None, budget_chars: int = 4000):
+        return self.capability_adapter().activate(skill_id, task=task, budget_chars=budget_chars)
 
     def configure(
         self,

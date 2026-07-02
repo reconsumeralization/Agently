@@ -28,7 +28,7 @@ Agently's action stack has three replaceable plugin layers below the orchestrati
 | `ActionRuntime` | planning protocol, action call normalization, default execution orchestration | `AgentlyActionRuntime` |
 | `ActionFlow` | bridge between an `ActionRuntime` and a flow representation | `TriggerFlowActionFlow` |
 | `ActionExecutor` | how one action actually runs | local function, MCP, Python/Bash sandbox, Search/Browse, Node.js, Docker, SQLite executors |
-| `ExecutionEnvironment` | managed execution dependencies required before an executor call | MCP, Bash, Python, Node, Docker, Browser, SQLite providers |
+| `ExecutionResource` | managed execution dependencies required before an executor call | MCP, Bash, Python, Node, Docker, Browser, SQLite providers |
 
 `Action` in `agently.core` is a façade that wires:
 
@@ -105,10 +105,11 @@ print(calculate("3333+6666=?"))
 | `agent.use_actions(Search(...))` | mount the built-in Search package from `agently.builtins.actions` |
 | `agent.use_actions(Browse(...))` | mount the built-in Browse package from `agently.builtins.actions` |
 | `agent.enable_python(...)` | mount a managed `run_python` action for deterministic code execution |
-| `agent.enable_shell(...)` | mount a managed `run_bash` action with workspace and command allowlists |
+| `agent.enable_shell(...)` | mount a managed `run_bash` action with workspace roots, command allowlists, timeouts, and bounded output previews |
 | `agent.enable_nodejs(...)` | mount a managed `run_nodejs` action |
 | `agent.enable_sqlite(...)` | mount a managed `query_sqlite` action |
-| `agent.enable_workspace_file_actions(...)` | expose the current Workspace file area as list/search/read/write actions |
+| `agent.enable_workspace_file_actions(...)` | expose the current Workspace file area as handler-backed list/search/read/write actions, plus `export_file` when `export=True` and `write=True` |
+| `agent.enable_coding_agent_actions(...)` | expose coding-agent Workspace actions for file readback, glob/grep search, targeted edit, unified-diff patch, and guarded full-file writes |
 | `@agent.auto_func` | turn a Python function signature + docstring into a model-backed implementation that uses the agent's actions |
 | `agent.get_action_result(prompt=turn.prompt)` | retrieve action call records for a request-scoped turn |
 | `extra.action_logs` | structured logs produced during the action loop |
@@ -123,8 +124,26 @@ raw env only through the execution path.
 
 For application code, prefer `enable_*` helpers when the goal is to give the
 model a common capability such as Python, shell, or workspace access. Use
-`register_action(..., executor=..., execution_environments=[...])` when you are
+`register_action(..., executor=..., execution_resources=[...])` when you are
 building a custom Action backend.
+
+For coding-agent style local file work, prefer
+`agent.enable_coding_agent_actions(...)`. It exposes `read_file`,
+`glob_files`, `grep_files`, `edit_file`, `apply_patch`, and guarded
+`write_file` over the current Workspace file root. `edit_file(...)` can use an
+`expected_sha256` stale guard, `apply_patch(...)` applies a unified diff and can
+require exact `expected_files`, and `write_file(...)` in coding-agent mode
+requires either prior read state or an expected hash unless the host disables
+that guard. Use shell for tests, builds, git inspection, and read-only
+diagnostics; use Workspace file actions for file reading, search, editing, and
+writing.
+
+When `agent.enable_shell(...)` is called without an explicit `commands=...`
+allowlist, Agently uses a small safe shell profile for commands such as `pwd`,
+`ls`, `rg`, `cat`, `git status`, `git diff`, `git log`, `python -m pytest`, and
+`python -m pyright`. Stdout and stderr are returned as bounded previews; if a
+stream exceeds `max_output_chars`, the full stream is written under the
+Workspace root at `artifacts/shell/` and referenced from the action result.
 
 Built-in capability packages live under `agently.builtins.actions`. For example:
 
@@ -135,17 +154,60 @@ agent.use_actions(Search(timeout=15, backend="auto"))
 agent.use_actions(Browse())
 ```
 
-Search is an Action-native package and does not use Execution Environment;
+Search is an Action-native package and does not use ExecutionResource;
 proxy, timeout, backend, and region are package/executor configuration. Browse
-is also Action-native; its default path is Playwright + BS4, while pyautogui is
-kept as legacy/advanced configuration. If a Browse action needs a managed
-browser/page/session, register it with Browser Execution Environment enabled.
+is also Action-native; its default path is Playwright -> restricted curl -> BS4,
+while pyautogui is kept as legacy/advanced configuration. The curl backend is a
+Browse-internal URL fetch fallback, not model-visible shell access. If a Browse action needs a managed
+browser/page/session, register it with a Browser ExecutionResource provider enabled.
+
+Agent Client Protocol (ACP) coding agents are exposed as Action capability, not
+as an AgentExecution route. Use `agent.use_acp(on_missing="skip")` to
+scan local ACP endpoints and built-in local coding-agent CLI adapters, then
+register `acp_list_agents` plus `acp_run_task` only when a runnable agent is
+verified. `acp_list_agents` also returns non-binding adapter-name hints for
+common ACP adapters such as `codex`, `claude code` / `cc`, `openclaw`,
+`hermes` / `hermes agent`, and `gemini`; these hints do not make an agent
+runnable. Built-in local CLI adapters cover common Codex and Claude Code command
+locations in addition to the current process `PATH`; they use fixed
+framework-owned argv templates and do not expose model-visible shell execution.
+The default `on_missing="skip"` records diagnostics and avoids fake runnable
+agents; `on_missing="error"` fails closed. ACP run actions declare
+`ExecutionResource(kind="acp")` so root scope and lifecycle facts stay in the
+resource layer. If `root` is omitted, `agent.use_acp()` uses the Agent's bound
+Workspace `files_root` as the coding-agent project root; pass `root=...` only
+when the host intentionally authorizes a different project directory. ACP
+session reuse is an internal AgentExecution resource policy, not an ordinary
+task-start option. CLI adapters are marked
+`acp_session.persistence="stateless_cli"` unless a real protocol session is
+available.
+
+AgentTask can also use ACP as an opt-in recovery fallback after a bounded
+step or TaskBoard card fails and configured retries are exhausted. This still
+uses the registered `acp_run_task` Action plus `ExecutionResource(kind="acp")`;
+ACP is not a route that bypasses AgentExecution or task strategy policy. If the
+host never called `agent.use_acp(...)`, the fallback records skipped diagnostics
+instead of importing ACP dependencies or inventing an agent.
 
 The `desc=` argument on `enable_*` helpers is optional. By default it is appended
 as additional guidance so the model still sees the baseline usage and safety
 constraints. Use `desc_mode="override"` when you intentionally want to replace
 the default description, or `desc_mode="default"` to ignore the supplied
 description and keep only the built-in one.
+
+## Model-sourced input safety
+
+Action commands produced by model planning are treated as untrusted input at the
+Action boundary. For `structured_plan` and `native_tool_calls` commands,
+`ActionDispatcher` filters `action_input` to the keys declared in the registered
+`ActionSpec.kwargs` before the executor is called. Direct host calls keep their
+existing behavior and are not filtered this way.
+
+Filtered calls keep structured diagnostics on the `ActionResult`, including
+`action.input.unexpected_keys_stripped`, the stripped keys, and bounded previews
+of the original and executed kwargs. Timeout and executor exceptions also return
+structured Action failures with diagnostics. RuntimeEvent consumers may observe
+those facts, but RuntimeEvent does not enforce input safety or authorization.
 
 ## Execution recall
 
@@ -155,9 +217,22 @@ recording an execution digest plus artifact references.
 
 The digest is what the next action-planning round normally sees. It includes the
 action id, call id, purpose, status, a compact instruction preview, result
-preview, redaction notes, and artifact refs. Full raw content such as complete
+preview, preview truncation metadata, redaction notes, artifact refs, and any
+Workspace file refs returned by the Action. Full raw content such as complete
 code, shell output, SQL rows, page HTML, screenshots, or logs is retained as a
-redacted artifact instead of being inserted into every prompt.
+redacted artifact instead of being inserted into every prompt. Artifact refs
+include role, media type, size/bytes, preview size, SHA-256, and truncation
+flags so consumers can tell that a preview is not complete evidence.
+Actions that explicitly return `artifacts` or `artifact_refs` use the same
+contract even when the output is small. This includes MCP resource/content
+blocks surfaced by `MCPActionExecutor`; Agently records the declared artifact
+metadata, but it does not infer undeclared file writes by scanning directories.
+When the digest is still too large for later planning or reply hot paths,
+Agently compacts the model-visible digest again: `result` keeps the bounded
+digest, duplicate `data` / `model_digest` fields may become `same_as="result"`
+pointers, and artifact refs omit preview bodies while keeping readback ids.
+That compaction only applies to hot-path model context; full redacted content
+stays in the Action artifact store for explicit readback.
 
 When the model or application needs the omitted detail, read it explicitly:
 
@@ -175,6 +250,11 @@ raw = agent.action.read_action_artifact(
 `Action.to_action_results(records)` uses the digest for instruction-heavy
 actions, so follow-up replies can reason about what happened without receiving
 the full payload by default.
+
+`max_output_bytes` is an output evidence policy, not a destructive storage
+operation. When an Action output exceeds it, Agently records diagnostics and
+keeps the full value behind an artifact ref while the model-visible path
+continues to use bounded previews.
 
 When a host explicitly calls `agent.get_action_result(prompt=...)`, Agently
 marks that prompt as having consumed the action loop even if the returned record
@@ -235,7 +315,7 @@ agent.set_settings("action.planning_model_key", "task-main")
 
 This applies to the default structured-plan and native tool-call planning
 paths. It is especially important when a higher-level runtime such as
-SkillsExecutor or AgentTaskLoop delegates a bounded action round to
+SkillsExecutor or AgentTask delegates a bounded action round to
 ActionRuntime.
 
 `agent.get_action_result(..., timeout=N)` bounds the full action loop,
@@ -247,6 +327,14 @@ When `planning_protocol="native_tool_calls"` returns no provider-native tool
 calls, Agently emits a skipped diagnostic action record with code
 `action_runtime.native_tool_calls.empty`. Host code should treat that diagnostic
 as planning evidence, not as executed work.
+
+When consecutive rounds select the same failing action ids and none of those
+records shows progress, the default `TriggerFlowActionFlow` closes the current
+bounded action step and returns the failure evidence it already has. The default
+threshold is `action.loop.max_consecutive_failed_rounds_per_action = 2`
+(`tool.loop...` remains a compatibility alias). This is not a task budget; a
+higher-level owner such as AgentTask can then verify, replan, or block from the
+structured failure records.
 
 ## Handler interface
 
@@ -285,12 +373,12 @@ There is no legacy positional handler signature — the public contract is `(con
 | The planning protocol or how calls are normalized | `ActionRuntime` |
 | The orchestration shape between runtime and flow | `ActionFlow` |
 | Higher-level flow control over many action calls | use `TriggerFlow` above the runtime — don't embed it inside an executor |
-| Lifecycle for MCP/sandbox/process-like dependencies | declare an `ExecutionEnvironment` requirement — don't hide lifecycle inside an executor |
+| Lifecycle for MCP/sandbox/process-like dependencies | declare an `ExecutionResource` requirement — don't hide lifecycle inside an executor |
 
 ## See also
 
 - [Actions Overview](overview.md) — where Action Runtime stops and orchestration starts
-- [Execution Environment](execution-environment.md) — managed MCP/sandbox dependencies
+- [ExecutionResource](execution-environment.md) — managed MCP/sandbox dependencies
 - [Tools](tools.md) — the compat surface in more detail
 - [MCP](mcp.md) — `agent.use_mcp(...)`
 - [TriggerFlow Overview](../triggerflow/overview.md) — orchestration above actions

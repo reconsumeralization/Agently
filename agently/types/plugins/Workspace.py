@@ -27,7 +27,36 @@ from agently.types.data.workspace import (
     WorkspaceReferenceEnvelope,
     WorkspaceRetentionAnchor,
     WorkspaceRuntimeEventRecord,
+    WorkspaceScratchLease,
 )
+
+
+@runtime_checkable
+class ScratchLeaseStore(Protocol):
+    """Durable scratch lease facts for crash-safe scratch recovery.
+
+    Scratch leases must be persisted as Workspace facts so TTL/startup cleanup
+    and scope prune can recover crashed runs from lease records rather than
+    filesystem heuristics such as mtime (spec sections 8.5 / 11.1).
+    """
+
+    async def register_scratch_lease(self, lease: WorkspaceScratchLease) -> WorkspaceScratchLease: ...
+
+    async def get_scratch_lease(self, lease_id: str) -> WorkspaceScratchLease | None: ...
+
+    async def list_scratch_leases(
+        self,
+        *,
+        include_closed: bool = False,
+        expired_before: str | None = None,
+    ) -> list[WorkspaceScratchLease]: ...
+
+    async def close_scratch_lease(
+        self,
+        lease_id: str,
+        *,
+        closed_at: str | None = None,
+    ) -> WorkspaceScratchLease | None: ...
 
 
 @runtime_checkable
@@ -213,6 +242,16 @@ class RetentionPolicy(Protocol):
         anchor_type: str | None = None,
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]: ...
+
+
+@runtime_checkable
+class ScopePruner(Protocol):
+    async def prune_scope(
+        self,
+        scope: dict[str, Any],
+        *,
+        remove_files: bool = True,
+    ) -> dict[str, Any]: ...
 
 
 @runtime_checkable
@@ -475,6 +514,24 @@ class WorkspaceBackend(Protocol):
         *,
         metadata: dict[str, Any] | None = None,
     ) -> WorkspaceRecordRef: ...
+
+    async def register_scratch_lease(self, lease: WorkspaceScratchLease) -> WorkspaceScratchLease: ...
+
+    async def get_scratch_lease(self, lease_id: str) -> WorkspaceScratchLease | None: ...
+
+    async def list_scratch_leases(
+        self,
+        *,
+        include_closed: bool = False,
+        expired_before: str | None = None,
+    ) -> list[WorkspaceScratchLease]: ...
+
+    async def close_scratch_lease(
+        self,
+        lease_id: str,
+        *,
+        closed_at: str | None = None,
+    ) -> WorkspaceScratchLease | None: ...
 
     async def append_runtime_event(
         self,

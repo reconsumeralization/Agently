@@ -63,7 +63,9 @@ async def run_staged_execution(
             "error": "Staged strategy requires execution_stages in the plan.",
         }
 
+    original_stage_count = len(stages)
     stages = stages[:step_budget]
+    budget_exhausted = original_stage_count > len(stages)
 
     await context.async_emit_runtime_stream(
         {
@@ -76,6 +78,21 @@ async def run_staged_execution(
             },
         }
     )
+    if budget_exhausted:
+        await context.async_emit_runtime_stream(
+            {
+                "type": "skills.execution.budget_exhausted",
+                "action": "abort",
+                "payload": {
+                    "reason": "step_budget_exhausted",
+                    "strategy": "staged",
+                    "active_phase": "plan",
+                    "step_count": len(stages),
+                    "step_budget": step_budget,
+                    "total_steps": original_stage_count,
+                },
+            }
+        )
 
     flow = TriggerFlow(name=f"staged-skill-{uuid.uuid4().hex[:8]}")
 

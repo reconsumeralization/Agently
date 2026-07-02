@@ -28,7 +28,7 @@ Agently.set_settings("OpenAICompatible", {
 | `api_key` | bearer token；本地无鉴权服务可省略 |
 | `model` | provider 模型名 |
 | `model_type` | `"chat"`（默认）或 `"completion"`（旧 completion 端点） |
-| `request_retry` | 临时传输错误重试策略；默认 `{"max_attempts": 2}`，且只在尚未开始输出时重试 |
+| `request_retry` | 临时传输错误重试策略；默认 `{"max_attempts": 2, "after_output": true}` |
 | `request_options` | 转给底层 HTTP client 的额外 dict（timeout、header） |
 
 完整集合在 [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/) 包目录中。公开插件类由 `plugin.py` 导出，请求构造、鉴权、transport、handler 绑定和 response mapping 放在私有 `modules/` 包下。
@@ -88,10 +88,27 @@ agent.set_settings("OpenAICompatible", {"model": "${ENV.OPENAI_MODEL_FAST}"})
 
 某 provider 没完全实现 OpenAI 语义中的某项时（如怪异流式格式），底层插件尽量容忍；具体 case 通过 issue 报告。
 
-对连接重置、provider 断开连接这类临时传输错误，如果还没有任何输出发出，
-`OpenAICompatible` 默认用同一个请求重试一次。它不会改变已选模型、prompt 或结构化输出
-格式。设置 `"request_retry": {"max_attempts": 1}` 或 `"request_retry": False` 可以关闭
-这次重放。一旦输出已经开始，Agently 不会自动重放 stream，避免重复 partial content。
+对连接重置、provider 断开连接这类临时传输错误，`OpenAICompatible` 默认用同一个请求重试
+一次。它不会改变已选模型、prompt 或结构化输出格式。默认也覆盖已经输出 partial 内容后
+发生的断流，因此 stream 消费者必须处理保留的 `$status` 记录、处理纯文本 delta 的
+`"<$retry>{reason}</$retry>"` 标记，或只读取最终结果。设置
+`"request_retry": {"max_attempts": 1}` 或 `"request_retry": False` 可以关闭这次重放。
+只有当消费者无法在 retry 边界清空临时输出时，才设置 `request_retry.after_output=False`：
+
+```python
+agent.set_settings("OpenAICompatible.request_retry", {
+    "max_attempts": 2,
+    "after_output": False,
+})
+```
+
+重放前 Agently 会发出 `("status", payload)` stream event，其中
+`payload["status"] == "failed"` 且 `payload["retry"] is True`。payload 包含失败的
+`attempt_index`、`next_attempt_index`、provider 的实际错误 `reason` 和 `error_type`。
+`instant` / `streaming_parse` 消费者会在 `$status` 收到同一记录，应清除这个失败 attempt
+的临时输出。普通 `delta` generator 会在同一边界收到独立的
+`"<$retry>{reason}</$retry>"` 标记，必须先清空本地 delta buffer，再接受替换 attempt
+的正文。
 
 ## 另见
 

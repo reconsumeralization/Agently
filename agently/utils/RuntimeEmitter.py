@@ -13,7 +13,10 @@
 # limitations under the License.
 
 
-def create_runtime_emitter(source: str | None = None):
+from typing import Any
+
+
+def create_runtime_emitter(source: str | None = None) -> Any:
     from agently.base import event_center
 
     return event_center.create_emitter(source)

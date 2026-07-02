@@ -1,5 +1,5 @@
 ---
-title: Model Response
+title: Model Results
 description: Reading text, structured data, metadata, and streaming events from one result.
 keywords: Agently, result, get_result, get_data, get_text, get_meta, generator, streaming
 ---
@@ -12,7 +12,9 @@ keywords: Agently, result, get_result, get_data, get_text, get_meta, generator, 
 runs it, and returns the parsed data. For everything more interesting — text,
 metadata, streaming, reuse, status, or task refs — go through `get_result()`.
 Quick prompt chains return an `AgentExecutionResult`; direct
-`agent.create_request(...).get_result()` still returns `ModelResponseResult`.
+`agent.create_request(...).get_result()` returns `ModelRequestResult`.
+`ModelResponseResult` is no longer a public result facade. Direct
+`ModelResponse` construction remains deprecated as well.
 
 ## Two consumption styles
 
@@ -57,7 +59,7 @@ This is also how `.validate(...)` runs only once per result — the cached resul
 
 | `type` | What you get | Use it for |
 |---|---|---|
-| `"delta"` | raw token deltas | terminal-style typing UX |
+| `"delta"` | text deltas, plus `"<$retry>{reason}</$retry>"` before a replay replacement | terminal-style typing UX |
 | `"instant"` | structured `StreamingData` events with `path`, `delta`, `value`, and `is_complete` | field-level UI updates |
 | `"streaming_parse"` | alias for the same structured streaming parser used by `instant` | compatibility / incremental dict reads |
 | `"specific"` | `(event, data)` tuples filtered by event type (`delta`, `reasoning_delta`, `tool_calls`, etc.) | pick exactly the events you care about |
@@ -73,6 +75,9 @@ The older `AgentlySpecificResponseMessage`, `AgentlyModelResponseMessage`, and
 related `Response` aliases remain available from `agently.types.data` for
 compatibility, but they are not re-exported from the `agently` root. The
 `Result` names are the recommended API.
+
+`ModelRequestResult` is the canonical result class. Do not import or annotate
+with the historical `ModelResponseResult` name.
 
 ### Delta example
 
@@ -104,6 +109,30 @@ for item in gen:
 `.value`, `.delta`, `.is_complete`, and `.event_type`. Use `.delta` to update
 the visible field while it is growing. Use `.is_complete` / `event_type=="done"`
 when downstream work should wait until the field is closed.
+
+### AgentExecution projection
+
+`AgentExecutionStreamData` is an execution-level structured projection, not a
+`ModelRequestResult`. When an execution owns a model request, `instant` / `all`
+streams preserve model attempt facts as structured stream items. In particular,
+`$status` carries retry/failure/completion state and its `meta` includes
+`response_id`, `request_run_id`, `model_run_id`, and `attempt_index`.
+`type="delta"` is the plain text projection; it yields strings and uses
+`"<$retry>{reason}</$retry>"` to mark a replay boundary.
+
+```python
+execution = agent.input("Summarize the incident update.")
+async for item in execution.get_async_generator(type="instant"):
+    if item.path == "$status":
+        print(item.value["status"], item.meta["response_id"])
+    elif item.path == "model.delta" and item.delta:
+        print(item.delta, end="", flush=True)
+```
+
+The no-argument execution generator defaults to the same `delta` projection, so
+`execution.get_generator()` and `execution.get_async_generator()` yield strings.
+Use `type="instant"` or `type="all"` when the consumer needs the structured
+`$status` item instead of the text marker.
 
 For shared-output CLI rendering, do not treat `.is_complete` as a global
 display-order barrier. A structured parser often confirms that one path is
@@ -212,6 +241,74 @@ asyncio.run(main())
 
 For services and TriggerFlow usage, async is the recommended path — see [Async First](../start/async-first.md).
 
+### Attempt status
+
+`$status` is a reserved framework stream path, not a model output field. It is
+useful when a provider replay is explicitly allowed after partial output:
+
+```python
+result = agent.create_request().input("Summarize the incident.").get_result()
+
+async for item in result.get_async_generator(type="instant"):
+    if item.path == "$status" and item.value["status"] == "failed" and item.value["retry"]:
+        clear_provisional_answer()
+        continue
+    render_field_update(item)
+```
+
+The final `get_data()` result contains no `$status`. Use `type="all"` or
+`type="specific", specific="status"` when a consumer needs raw status events.
+`reason` contains a bounded transport/provider explanation, and `cancelled` is
+distinct from a failed request.
+
+Plain `delta` consumers receive the standalone
+`"<$retry>{reason}</$retry>"` marker before replacement text. It is a replay
+boundary, not model content:
+
+```python
+import html
+
+provisional_text = ""
+for chunk in result.get_generator(type="delta"):
+    if "<$retry>" in chunk:
+        retry_reason = html.unescape(
+            chunk.removeprefix("<$retry>").removesuffix("</$retry>")
+        )
+        provisional_text = ""
+        clear_provisional_answer(retry_reason)
+        continue
+    provisional_text += chunk
+    render_delta(chunk)
+```
+
+The marker reason XML-escapes `<`, `>`, and `&` from the provider message.
+When structured events are available, `$status` is the preferred retry control
+record. When a consumer chooses plain `delta`, the marker is the corresponding
+public replay boundary. A text-only stream cannot make a sentinel collision-free,
+so consumers that must preserve a literal model chunk containing `"<$retry>"`
+should use `instant`, `specific`, or `all`.
+
+An AgentExecution projects the same status as a structured process item and
+adds the originating request/run lineage in `item.meta`. Use `instant` or
+`specific` when the consumer needs those structured retry facts:
+
+```python
+execution = agent.input("Summarize the incident.")
+
+async for item in execution.get_async_generator(type="instant"):
+    if item.path == "$status" and item.value["retry"]:
+        clear_provisional_output(item.meta["response_id"])
+        continue
+    render_execution_item(item)
+```
+
+Its public `type="delta"` projection may emit the same `<$retry>...</$retry>`
+replay marker as text. Durable artifact writers and SSE/UI consumers should
+handle that marker as a public replay delimiter when they choose a plain-text
+stream, but structured `$status` is the retry control source and the only source
+for retry metadata such as attempt indexes. Do not force a freeform document
+body through `.output()` only to obtain instant fields.
+
 ## Concurrency
 
 Because `get_result()` only kicks off the actual request when you consume it, you can build many results up front and consume them in parallel:
@@ -230,6 +327,29 @@ results = await asyncio.gather(
 ```
 
 This is a standard async pattern; nothing in Agently is special about it.
+
+### Optional request scheduling
+
+When many concurrent requests (or long-running tasks) risk hitting a provider's
+concurrency or rate limits, you can bound model request dispatch per provider.
+Scheduling is opt-in; with no configuration, requests dispatch immediately and
+retries re-issue immediately (unchanged behavior).
+
+```python
+# Cap concurrent in-flight requests and starts/second for all providers,
+# with an optional per-provider override.
+agent.set_settings("model_request.scheduler.max_concurrency", 8)
+agent.set_settings("model_request.scheduler.rate_per_second", 5)
+agent.set_settings("model_request.scheduler.providers",
+                   {"OpenAICompatible": {"max_concurrency": 2}})
+
+# Back off between retries instead of re-issuing immediately (exponential + jitter).
+agent.set_settings("model_request.retry_backoff_base", 0.5)  # seconds
+agent.set_settings("model_request.retry_backoff_max", 30)
+```
+
+Because retries re-issue through the same per-provider slot, the rate limit also
+spaces out retried calls, which dampens provider error storms.
 
 ## Don't re-issue when you can re-read
 

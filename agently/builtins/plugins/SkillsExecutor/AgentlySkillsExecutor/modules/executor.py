@@ -14,10 +14,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import ipaddress
+import socket
+import time
 import uuid
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any, Callable, Literal, cast
+from typing import Any, Callable, Literal, Mapping, cast
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -25,6 +30,7 @@ from agently.types.data import SkillExecutionDict, SkillExecutionPlan, SkillExec
 from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
 
+from agently.core.application.SkillsExecutor.adapter import RegistrySkillSource, SkillCapabilityAdapter
 from .registry import SkillRegistry
 from .effort_strategies import create_builtin_effort_strategy_handlers
 from .contexts import RuntimeStreamCaptureContext
@@ -48,10 +54,14 @@ class SkillExecution:
     def to_dict(self) -> SkillExecutionDict:
         return _copy_public(self.data)
 
-    # ── Snapshot durability (E5) ──
+    # ── Snapshot inspection ──
+    # A SkillExecution snapshot is a read-only record of a completed run. It is
+    # for persistence and inspection, not active resume: a closed snapshot has no
+    # live TriggerFlow execution to continue. Resuming an active wait must use the
+    # underlying TriggerFlow execution continue_with(...) lifecycle.
 
     def save_snapshot(self, path: str) -> None:
-        """Persist execution snapshot to a JSON file for later resume."""
+        """Persist the execution snapshot to a JSON file for later inspection."""
         import json as _json
         snapshot = self.to_dict()
         with open(path, "w", encoding="utf-8") as f:
@@ -66,7 +76,11 @@ class SkillExecution:
         return cls(cast(SkillExecutionDict, data))
 
     def get_pending_waits(self) -> list[dict[str, Any]]:
-        """Return pending intervention records that need human input."""
+        """Return intervention records recorded as pending in this snapshot.
+
+        These are informational for inspection; resuming them requires the live
+        TriggerFlow execution, not a closed snapshot.
+        """
         return [
             r for r in self.intervention_records
             if r.get("status") == "pending"
@@ -81,9 +95,10 @@ class SkillExecution:
 
     async def async_resume_wait(self, wait_id: str, payload: Any = None) -> "SkillExecution":
         del payload
-        raise KeyError(
-            f"Skill wait '{wait_id}' is not resumable from a closed SkillExecution snapshot. "
-            "Use the underlying TriggerFlow execution continue_with(...) lifecycle for active waits."
+        raise NotImplementedError(
+            f"Skill wait '{wait_id}' is not resumable from a closed SkillExecution snapshot, which is "
+            "inspection-only. Resume an active wait through the underlying TriggerFlow execution "
+            "continue_with(...) lifecycle while the execution is still open."
         )
 
 
@@ -137,7 +152,11 @@ class SkillExecutor:
 
         capability_result = await self._prepare_capabilities(context=context, plan=plan)
         runtime_stream.extend(capability_result["runtime_stream"])
+        capability_policy = self._capability_policy(context=context, plan=plan)
+        capability_scope = str(capability_policy.get("capability_scope") or "agent").strip().lower()
+        mounted_action_ids = list(capability_result.get("mounted_action_ids", []) or [])
         if capability_result["status"] in {"blocked", "approval_required"}:
+            self._release_scoped_capabilities(context, capability_scope, mounted_action_ids)
             return self._build_execution(
                 execution_id=execution_id,
                 status="blocked",
@@ -152,9 +171,18 @@ class SkillExecutor:
             )
 
         effort_config = self._resolve_effort(context, effort)
+        if mounted_action_ids:
+            configured_allowed = _ensure_list(effort_config.get("allowed_actions"))
+            allowed_actions: list[str] = []
+            for action_id in [*configured_allowed, *mounted_action_ids]:
+                text = str(action_id or "").strip()
+                if text and text not in allowed_actions:
+                    allowed_actions.append(text)
+            effort_config["allowed_actions"] = allowed_actions
         strategy_name = self._resolve_strategy_name(plan=plan, effort=effort, effort_config=effort_config)
         strategy_handler = self._strategy_handlers().get(strategy_name)
         if strategy_handler is None:
+            self._release_scoped_capabilities(context, capability_scope, mounted_action_ids)
             return self._build_execution(
                 execution_id=execution_id,
                 status="error",
@@ -168,18 +196,40 @@ class SkillExecutor:
                 effort=effort,
                 execution_mode=strategy_name,
             )
-        return await strategy_handler(
-            context=context,
-            task=task,
-            plan=plan,
-            execution_id=execution_id,
-            runtime_stream=runtime_stream,
-            skill_logs=skill_logs,
-            output_format=output_format,
-            effort_config=effort_config,
-            effort=effort,
-            strategy_name=strategy_name,
-        )
+        try:
+            return await self._execute_strategy_as_blocks(
+                context=context,
+                task=task,
+                plan=plan,
+                execution_id=execution_id,
+                runtime_stream=runtime_stream,
+                skill_logs=skill_logs,
+                output_format=output_format,
+                effort_config=effort_config,
+                effort=effort,
+                strategy_name=strategy_name,
+                strategy_handler=strategy_handler,
+                capability_result=capability_result,
+            )
+        finally:
+            # capability_scope="execution" reverses one-time capability mounts so
+            # they do not persist on the host past this Skills execution. The
+            # default "agent" scope keeps mounts on the agent (current contract).
+            self._release_scoped_capabilities(context, capability_scope, mounted_action_ids)
+
+    @staticmethod
+    def _release_scoped_capabilities(
+        context: SkillsExecutionContext,
+        capability_scope: str,
+        mounted_action_ids: list[str],
+    ) -> None:
+        if capability_scope != "execution" or not mounted_action_ids:
+            return
+        agent = getattr(context, "agent", None)
+        action = getattr(agent, "action", None)
+        unregister = getattr(action, "unregister_action", None)
+        if callable(unregister):
+            unregister(mounted_action_ids)
 
     def _resolve_effort(
         self,
@@ -226,6 +276,376 @@ class SkillExecutor:
         for name, handler in self.effort_strategy_handlers.items():
             handlers[name] = self._custom_strategy_adapter(name, handler)
         return handlers
+
+    async def _execute_strategy_as_blocks(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        task: str,
+        plan: SkillExecutionPlan,
+        execution_id: str,
+        runtime_stream: list[dict[str, Any]],
+        skill_logs: list[dict[str, Any]],
+        output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None,
+        effort_config: dict[str, Any],
+        effort: str | None,
+        strategy_name: str,
+        strategy_handler: Any,
+        capability_result: dict[str, Any],
+    ) -> SkillExecution:
+        from agently.base import blocks
+
+        handler_key = f"skills.strategy.{ execution_id }"
+        blocks_plan = self._build_skills_blocks_plan(
+            task=task,
+            plan=plan,
+            execution_id=execution_id,
+            strategy_name=strategy_name,
+            handler_key=handler_key,
+            effort=effort,
+            effort_config=effort_config,
+            capability_result=capability_result,
+        )
+        graph = blocks.compile(blocks_plan["compile_request"])
+        strategy_plan_block_id = str(blocks_plan["strategy_plan_block_id"])
+
+        async def run_strategy(_block_context: dict[str, Any]) -> dict[str, Any]:
+            strategy_execution = await strategy_handler(
+                context=context,
+                task=task,
+                plan=plan,
+                execution_id=execution_id,
+                runtime_stream=runtime_stream,
+                skill_logs=skill_logs,
+                output_format=output_format,
+                effort_config=effort_config,
+                effort=effort,
+                strategy_name=strategy_name,
+            )
+            if isinstance(strategy_execution, SkillExecution):
+                strategy_execution_dict = strategy_execution.to_dict()
+                return {
+                    "strategy": strategy_name,
+                    "execution_mode": strategy_execution.close_snapshot.get("execution_mode", strategy_name),
+                    "status": strategy_execution.status,
+                    "output": _copy_public(strategy_execution.output),
+                    "result": _copy_public(strategy_execution.result),
+                    "skill_execution": strategy_execution_dict,
+                    "action_evidence": self._action_evidence_from_execution(strategy_execution),
+                }
+            copied_result = _copy_public(strategy_execution)
+            return {
+                "strategy": strategy_name,
+                "execution_mode": strategy_name,
+                "status": "success",
+                "output": copied_result,
+                "result": copied_result,
+                "skill_execution": None,
+                "action_evidence": self._action_evidence_from_output(copied_result),
+            }
+
+        runtime_resources: dict[str, Any] = {
+            "blocks.handlers": {handler_key: run_strategy},
+            "skills.capability_adapter": SkillCapabilityAdapter(RegistrySkillSource(self.registry)),
+            "skills.executor": self,
+        }
+        agent = getattr(context, "agent", None)
+        workspace = getattr(agent, "workspace", False) or False
+        execution = blocks.bind_runtime(graph).create_execution(
+            auto_close=False,
+            workspace=workspace,
+            runtime_resources=runtime_resources,
+        )
+        started_at = time.monotonic()
+        try:
+            await execution.async_start({"task": task, "plan_id": str(plan.get("plan_id", ""))})
+            blocks_close_snapshot = await execution.async_close()
+        except asyncio.CancelledError as error:
+            await self._emit_abort_diagnostic(
+                context=context,
+                runtime_stream=runtime_stream,
+                execution_id=execution_id,
+                strategy_name=strategy_name,
+                effort=effort,
+                reason="host_cancellation",
+                started_at=started_at,
+                error=error,
+            )
+            raise
+        except Exception as error:
+            await self._emit_abort_diagnostic(
+                context=context,
+                runtime_stream=runtime_stream,
+                execution_id=execution_id,
+                strategy_name=strategy_name,
+                effort=effort,
+                reason="execution_error",
+                started_at=started_at,
+                error=error,
+            )
+            return self._build_execution(
+                execution_id=execution_id,
+                status="error",
+                plan=plan,
+                runtime_stream=runtime_stream,
+                skill_logs=skill_logs,
+                output={"error": str(error)},
+                effort=effort,
+                execution_mode=strategy_name,
+                blocks_meta={
+                    "execution_plan": _copy_public(blocks_plan["execution_plan"]),
+                    "execution_graph": graph.to_dict(),
+                    "error": str(error),
+                },
+            )
+
+        evidence = blocks.map_evidence(graph, blocks_close_snapshot)
+        result = blocks.map_result(graph, blocks_close_snapshot)
+        blocks_meta = {
+            "execution_plan": _copy_public(blocks_plan["execution_plan"]),
+            "execution_graph": graph.to_dict(),
+            "triggerflow_execution_id": execution.id,
+            "close_snapshot": _copy_public(blocks_close_snapshot),
+            "evidence": evidence.to_dict(),
+            "result": _copy_public(result),
+            "compatibility_route_label": strategy_name,
+        }
+        strategy_payload = self._strategy_execution_payload(
+            blocks_close_snapshot,
+            strategy_plan_block_id=strategy_plan_block_id,
+        )
+        skill_execution_payload = _ensure_dict(strategy_payload.get("skill_execution"))
+        if skill_execution_payload:
+            return self._attach_blocks_meta(
+                SkillExecution.load(skill_execution_payload),
+                blocks_meta=blocks_meta,
+            )
+        return self._build_execution(
+            execution_id=execution_id,
+            status=cast(SkillExecutionStatus, str(strategy_payload.get("status") or "success")),
+            plan=plan,
+            runtime_stream=runtime_stream,
+            skill_logs=skill_logs,
+            output=strategy_payload.get("output"),
+            effort=effort,
+            execution_mode=str(strategy_payload.get("execution_mode") or strategy_name),
+            blocks_meta=blocks_meta,
+        )
+
+    def _build_skills_blocks_plan(
+        self,
+        *,
+        task: str,
+        plan: SkillExecutionPlan,
+        execution_id: str,
+        strategy_name: str,
+        handler_key: str,
+        effort: str | None,
+        effort_config: dict[str, Any],
+        capability_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        selected = [_ensure_dict(item) for item in _ensure_list(plan.get("selected_skills"))]
+        plan_id = str(plan.get("plan_id") or f"skills:{ execution_id }")
+        blocks_plan_id = f"{ plan_id }:blocks:{ execution_id[:8] }"
+        activation_blocks: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        for index, selection in enumerate(selected):
+            skill_id = str(selection.get("skill_id") or f"skill_{ index }")
+            block_id = f"skill_activation_{ index }_{ self._safe_id(skill_id) }"
+            activation_blocks.append(
+                {
+                    "id": block_id,
+                    "plan_block_id": "skill_activation",
+                    "kind": "skill_activation",
+                    "intent": "load selected Skill guidance and scoped capability recommendations",
+                    "bound_inputs": {
+                        "skill_id": skill_id,
+                        "task": task,
+                        "budget_chars": 4000,
+                    },
+                    "evidence_contract": {
+                        "evidence_kind": "skill_context",
+                        "proves_side_effect": False,
+                    },
+                }
+            )
+            edges.append({"from": block_id, "to": "skills_strategy", "kind": "context"})
+        strategy_kind = self._strategy_plan_block_kind(strategy_name)
+        strategy_block = {
+            "id": "skills_strategy",
+            "plan_block_id": strategy_kind,
+            "kind": strategy_kind,
+            "intent": "run the selected Skills compatibility route through a concrete execution block",
+            "bound_inputs": {
+                "task": task,
+                "strategy": strategy_name,
+                "effort": effort,
+                "selected_skill_ids": [str(item.get("skill_id")) for item in selected],
+            },
+            "runtime_preferences": {
+                "handler": handler_key,
+                "compatibility_route_label": strategy_name,
+            },
+            "output_contract": {
+                "skill_execution": "legacy SkillExecution payload",
+                "compatibility_route_label": strategy_name,
+            },
+            "evidence_contract": {
+                "requires_real_strategy_output": True,
+                "skill_activation_is_not_side_effect_evidence": True,
+            },
+            "budget": {
+                "effort": effort,
+                **{key: value for key, value in effort_config.items() if key in {"step_budget", "retry_count"}},
+            },
+        }
+        capability_resolution = self._capability_resolution_from_result(capability_result)
+        execution_plan = {
+            "plan_id": blocks_plan_id,
+            "task_frame_id": f"skills:{ execution_id }",
+            "plan_blocks": [*activation_blocks, strategy_block],
+            "edges": edges,
+            "semantic_outputs": {"result": "skills_strategy"},
+            "evidence_requirements": [
+                {
+                    "kind": "skill_context",
+                    "required": bool(activation_blocks),
+                    "proves_side_effect": False,
+                },
+                {
+                    "kind": "strategy_result",
+                    "required": True,
+                    "route_label": strategy_name,
+                },
+            ],
+            "diagnostics": [
+                {
+                    "code": "skills.compatibility_route_lowered_to_blocks",
+                    "route_label": strategy_name,
+                    "strategy_plan_block_kind": strategy_kind,
+                }
+            ],
+            "capability_resolution": capability_resolution,
+        }
+        compile_request = {
+            "execution_id": execution_id,
+            "task_frame_id": execution_plan["task_frame_id"],
+            "plan_id": blocks_plan_id,
+            "plan_blocks": execution_plan["plan_blocks"],
+            "edges": execution_plan["edges"],
+            "capability_resolution": capability_resolution,
+            "evidence_requirements": execution_plan["evidence_requirements"],
+            "runtime_policy": {"compatibility_route_label": strategy_name},
+        }
+        return {
+            "execution_plan": execution_plan,
+            "compile_request": compile_request,
+            "strategy_plan_block_id": "skills_strategy",
+        }
+
+    @staticmethod
+    def _strategy_plan_block_kind(strategy_name: str) -> str:
+        if strategy_name == "single_shot":
+            return "model_request"
+        return "flow_segment"
+
+    @staticmethod
+    def _safe_id(value: str) -> str:
+        safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(value))
+        return safe.strip("._-") or "skill"
+
+    @staticmethod
+    def _capability_resolution_from_result(capability_result: dict[str, Any]) -> dict[str, Any]:
+        diagnostics = [
+            _copy_public(item)
+            for item in _ensure_list(capability_result.get("diagnostics"))
+            if isinstance(item, dict)
+        ]
+        allowed: list[str] = []
+        scoped_action_candidates: list[dict[str, Any]] = []
+        for item in diagnostics:
+            if item.get("code") != "capability_mounted":
+                continue
+            need = str(item.get("need") or "")
+            if need and need not in allowed:
+                allowed.append(need)
+            action_ids = [
+                str(action_id)
+                for action_id in _ensure_list(item.get("action_ids"))
+                if str(action_id).strip()
+            ]
+            if action_ids:
+                scoped_action_candidates.append(
+                    {
+                        "need": need,
+                        "skill_id": item.get("skill_id"),
+                        "action_ids": action_ids,
+                    }
+                )
+        return {
+            "allowed_capabilities": allowed,
+            "scoped_action_candidates": scoped_action_candidates,
+            "diagnostics": diagnostics,
+        }
+
+    @staticmethod
+    def _strategy_execution_payload(
+        close_snapshot: Mapping[str, Any],
+        *,
+        strategy_plan_block_id: str,
+    ) -> dict[str, Any]:
+        blocks_state = close_snapshot.get("blocks", {})
+        if not isinstance(blocks_state, dict):
+            return {}
+        for item in reversed(_ensure_list(blocks_state.get("execution_block_results"))):
+            if not isinstance(item, dict):
+                continue
+            if item.get("source_plan_block_id") == strategy_plan_block_id:
+                output = item.get("output")
+                return dict(output) if isinstance(output, dict) else {"output": output}
+        return {}
+
+    @staticmethod
+    def _action_evidence_from_execution(execution: SkillExecution) -> list[dict[str, Any]]:
+        data = execution.to_dict()
+        evidence = SkillExecutor._action_evidence_from_output(data.get("output"))
+        for item in _ensure_list(data.get("action_logs")):
+            if isinstance(item, dict):
+                evidence.append({"source": "skills.action_log", **_copy_public(item)})
+        return evidence
+
+    @staticmethod
+    def _action_evidence_from_output(output: Any) -> list[dict[str, Any]]:
+        if not isinstance(output, dict):
+            return []
+        raw_history = output.get("history") or output.get("observation_history") or []
+        evidence: list[dict[str, Any]] = []
+        for item in _ensure_list(raw_history):
+            if not isinstance(item, dict):
+                continue
+            action_id = str(item.get("action_id") or item.get("name") or "")
+            if not action_id:
+                continue
+            evidence.append(
+                {
+                    "source": "skills.strategy_output",
+                    "action_id": action_id,
+                    "status": item.get("status"),
+                    "result": _copy_public(item.get("result")),
+                    "error": item.get("error"),
+                    "proves_side_effect": item.get("status") == "success" or item.get("error") is None,
+                }
+            )
+        return evidence
+
+    @staticmethod
+    def _attach_blocks_meta(execution: SkillExecution, *, blocks_meta: dict[str, Any]) -> SkillExecution:
+        data = cast(dict[str, Any], execution.to_dict())
+        close_snapshot = _ensure_dict(data.get("close_snapshot"))
+        close_snapshot["blocks"] = _copy_public(blocks_meta)
+        data["close_snapshot"] = close_snapshot
+        data["blocks"] = _copy_public(blocks_meta)
+        return SkillExecution(cast(SkillExecutionDict, data))
 
     def _resolve_strategy_name(
         self,
@@ -420,13 +840,31 @@ class SkillExecutor:
             if isinstance(item, dict)
         }
         policy = self._capability_policy(context=context, plan=plan)
+        min_confidence = self._min_auto_mount_confidence(policy)
         approval_required = False
         blocked = False
         mounted_keys: set[tuple[str, str]] = set()
+        mounted_action_ids: list[str] = []
 
         for need in needs:
             need_name = str(need.get("need") or "")
             skill_id = str(need.get("skill_id") or "")
+            # Low-confidence needs inferred only from SKILL.md prose are advisory
+            # when the host configured a min_auto_mount_confidence floor: they are
+            # reported but not auto-mounted, to avoid over-granting on false
+            # positives. Structured declarations (frontmatter, resources) are not
+            # affected unless they too fall below the floor.
+            if (
+                min_confidence is not None
+                and str(need.get("source") or "") in {"body", "metadata"}
+                and float(need.get("confidence") or 0.0) < min_confidence
+            ):
+                diagnostics.append({
+                    **self._capability_diagnostic("capability_low_confidence_advisory", need, mode="advisory"),
+                    "min_auto_mount_confidence": min_confidence,
+                })
+                runtime_stream.append(self._capability_event("skills.capability.advisory", need, mode="advisory"))
+                continue
             mode = self._policy_mode(policy, need_name)
             event_policy_mode = mode
             if mode == "off":
@@ -467,6 +905,7 @@ class SkillExecutor:
                 continue
             mounted_keys.add(mount_key)
             try:
+                action_ids_before_mount = self._agent_action_ids(agent)
                 action_ids = await self._mount_capability(
                     agent=agent,
                     need=need,
@@ -484,6 +923,9 @@ class SkillExecutor:
                 })
                 blocked = True
                 continue
+            for action_id in self._new_action_ids(agent, action_ids_before_mount):
+                if action_id and action_id not in mounted_action_ids:
+                    mounted_action_ids.append(action_id)
             diagnostics.append({
                 **self._capability_diagnostic("capability_mounted", need, mode=event_policy_mode),
                 "action_ids": action_ids,
@@ -494,10 +936,10 @@ class SkillExecutor:
             })
 
         if blocked:
-            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
+            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
         if approval_required:
-            return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
-        return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream}
+            return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
+        return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
 
     def _capability_policy(
         self,
@@ -519,6 +961,16 @@ class SkillExecutor:
                     merged[key] = value
             policy = merged
         return policy
+
+    @staticmethod
+    def _min_auto_mount_confidence(policy: dict[str, Any]) -> float | None:
+        raw = policy.get("min_auto_mount_confidence")
+        if raw is None:
+            return None
+        try:
+            return max(0.0, min(float(raw), 1.0))
+        except (TypeError, ValueError):
+            return None
 
     def _policy_mode(self, policy: dict[str, Any], need_name: str) -> str:
         auto_load = _ensure_dict(policy.get("auto_load"))
@@ -597,9 +1049,7 @@ class SkillExecutor:
         need_name = str(need.get("need") or "")
         if need_name == "web_search":
             from agently.builtins.actions import Search
-            before = self._agent_action_ids(agent)
             options = self._web_search_options(policy)
-            refresh_actions = self._refresh_ddgs_if_allowed(agent, options)
             before = self._agent_action_ids(agent)
             agent.use_actions(Search(
                 backend=cast(Any, options.get("backend", "auto")),
@@ -610,8 +1060,6 @@ class SkillExecutor:
                 region=cast(Any, options.get("region", "us-en")),
                 options=cast(Any, options.get("options", None)),
             ))
-            action_ids = self._new_action_ids(agent, before)
-            return [*refresh_actions, *action_ids]
             return self._new_action_ids(agent, before)
         if need_name == "web_browse":
             from agently.builtins.actions import Browse
@@ -649,6 +1097,8 @@ class SkillExecutor:
         if need_name == "python":
             before = self._agent_action_ids(agent)
             action_id = str(_ensure_dict(policy.get("python")).get("action_id") or "run_python")
+            if self._agent_has_action(agent, action_id):
+                return [action_id]
             agent.enable_python(action_id=action_id)
             return self._new_action_ids(agent, before) or [action_id]
         if need_name in {"shell", "script_run"}:
@@ -656,10 +1106,12 @@ class SkillExecutor:
             root = self._skill_root_for_selection(selection)
             commands = self._script_commands(selection, need)
             action_id = self._script_action_id(need, selection)
+            if self._agent_has_action(agent, action_id):
+                return [action_id]
             agent.enable_shell(root=root, commands=commands or None, action_id=action_id)
             return self._new_action_ids(agent, before) or [action_id]
         if need_name == "http_request":
-            return self._mount_http_request(agent)
+            return self._mount_http_request(agent, _ensure_dict(policy.get("http_request")))
         if need_name == "mcp":
             mcp_config = _ensure_dict(policy.get("mcp")).get("config")
             if not mcp_config:
@@ -675,27 +1127,6 @@ class SkillExecutor:
         merged.setdefault("backend", "auto")
         return merged
 
-    def _refresh_ddgs_if_allowed(self, agent: Any, options: dict[str, Any]) -> list[str]:
-        refresh_mode = str(
-            options.get("refresh_ddgs")
-            or options.get("ensure_latest_ddgs")
-            or "off"
-        ).strip().lower()
-        if refresh_mode not in {"allow", "allowed", "true", "yes", "auto"}:
-            return []
-        action_id = str(options.get("refresh_action_id") or "refresh_ddgs_dependency")
-        command = ["python", "-m", "pip", "install", "--upgrade", "ddgs"]
-        agent.enable_shell(
-            commands=["python -m pip install --upgrade ddgs"],
-            action_id=action_id,
-            expose_to_model=False,
-            timeout=int(options.get("refresh_timeout", 60)),
-        )
-        result = agent.action.execute_action(action_id, {"cmd": command})
-        if result.get("status") != "success":
-            raise RuntimeError(f"ddgs dependency refresh failed: { result.get('error') or result.get('data') }")
-        return [action_id]
-
     def _agent_action_ids(self, agent: Any) -> set[str]:
         action = getattr(agent, "action", None)
         get_action_list = getattr(action, "get_action_list", None)
@@ -709,6 +1140,12 @@ class SkillExecutor:
             if str(item.get("action_id") or item.get("name") or "")
         }
 
+    def _agent_has_action(self, agent: Any, action_id: str) -> bool:
+        action = getattr(agent, "action", None)
+        registry = getattr(action, "action_registry", None)
+        has_action = getattr(registry, "has", None)
+        return bool(callable(has_action) and has_action(action_id))
+
     def _new_action_ids(self, agent: Any, before: set[str]) -> list[str]:
         return sorted(self._agent_action_ids(agent) - before)
 
@@ -719,7 +1156,11 @@ class SkillExecutor:
         return Path(".").resolve()
 
     def _script_commands(self, selection: dict[str, Any], need: dict[str, Any]) -> list[str]:
-        commands = ["bash", "sh", "python", "python3", "node", "npx", "npm"]
+        # Local interpreters plus the Skill's declared script paths. Package
+        # runners (npx/npm exec) are deliberately excluded from the default
+        # allowlist: they fetch and execute arbitrary remote code, defeating the
+        # allowlist. Hosts that need them must add them through capability policy.
+        commands = ["bash", "sh", "python", "python3", "node"]
         resource_path = str(need.get("resource_path") or "")
         if resource_path:
             name = Path(resource_path).name
@@ -744,13 +1185,70 @@ class SkillExecutor:
         base = skill_id.replace(".", "_").replace("-", "_")
         return f"run_{ base }_script"
 
-    def _mount_http_request(self, agent: Any) -> list[str]:
+    @staticmethod
+    def _http_host_allowed(host: str, http_policy: dict[str, Any]) -> bool:
+        """Block private/loopback/link-local targets unless explicitly allowed.
+
+        Default-deny SSRF guard for the built-in read-only HTTP capability. A host
+        policy may allow internal hosts via `allow_private: true` or an explicit
+        `allow_hosts` list, and may extend the denylist via `deny_hosts`.
+        """
+        host = (host or "").strip().lower()
+        if not host:
+            return False
+        deny_hosts = {str(item).strip().lower() for item in _ensure_list(http_policy.get("deny_hosts"))}
+        if host in deny_hosts:
+            return False
+        allow_hosts = {str(item).strip().lower() for item in _ensure_list(http_policy.get("allow_hosts"))}
+        if host in allow_hosts:
+            return True
+        if bool(http_policy.get("allow_private")):
+            return True
+
+        def is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+            return (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or ip.is_unspecified
+            )
+
+        # A literal IP is checked directly; a hostname is resolved and every
+        # resolved address must be public (fail closed on resolution failure).
+        try:
+            return not is_blocked(ipaddress.ip_address(host))
+        except ValueError:
+            pass
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except Exception:
+            return False
+        for info in infos:
+            try:
+                ip = ipaddress.ip_address(info[4][0])
+            except ValueError:
+                return False
+            if is_blocked(ip):
+                return False
+        return True
+
+    def _mount_http_request(self, agent: Any, http_policy: dict[str, Any] | None = None) -> list[str]:
         before = self._agent_action_ids(agent)
+        if self._agent_has_action(agent, "http_request"):
+            return ["http_request"]
+        host_policy = _ensure_dict(http_policy)
 
         def http_request(url: str, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None, timeout: int = 20):
             parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"}:
                 raise ValueError("Only http/https URLs are allowed.")
+            if not self._http_host_allowed(parsed.hostname or "", host_policy):
+                raise ValueError(
+                    "The built-in Skills HTTP capability blocks private, loopback, and link-local hosts. "
+                    "Allow an internal host through skills.capability_policy.http_request.allow_hosts."
+                )
             resolved_method = method.upper()
             if resolved_method not in {"GET", "HEAD"}:
                 raise ValueError("The built-in Skills HTTP capability is read-only and supports GET/HEAD only.")
@@ -841,6 +1339,56 @@ class SkillExecutor:
         runtime_stream.append(item)
         await context.async_emit_runtime_stream(item)
 
+    @staticmethod
+    def _last_active_runtime_item(runtime_stream: list[dict[str, Any]]) -> dict[str, Any] | None:
+        terminal_types = {
+            "skills.execution.aborted",
+            "skills.execution.budget_exhausted",
+            "skills.custom_strategy.done",
+            "skills.react.done",
+            "skills.staged.done",
+        }
+        for item in reversed(runtime_stream):
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type in terminal_types:
+                continue
+            return _copy_public(item)
+        return None
+
+    async def _emit_abort_diagnostic(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        runtime_stream: list[dict[str, Any]],
+        execution_id: str,
+        strategy_name: str,
+        effort: str | None,
+        reason: str,
+        started_at: float,
+        error: BaseException | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "reason": reason,
+            "strategy": strategy_name,
+            "effort": effort,
+            "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 6),
+            "active_event": self._last_active_runtime_item(runtime_stream),
+        }
+        if error is not None:
+            payload["exception_type"] = type(error).__name__
+            payload["exception_message"] = str(error)
+        item = {
+            "type": "skills.execution.aborted",
+            "action": "abort",
+            "execution_id": execution_id,
+            "payload": payload,
+        }
+        runtime_stream.append(item)
+        with contextlib.suppress(BaseException):
+            await context.async_emit_runtime_stream(item)
+
     def _build_execution(
         self,
         *,
@@ -852,6 +1400,7 @@ class SkillExecutor:
         output: Any,
         effort: str | None = None,
         execution_mode: str | None = None,
+        blocks_meta: dict[str, Any] | None = None,
     ) -> SkillExecution:
         strategy = execution_mode or str(plan.get("execution_strategy", "single_shot"))
         close_snapshot = {
@@ -861,6 +1410,8 @@ class SkillExecutor:
             "plan_id": str(plan.get("plan_id", "")),
             "effort": effort,
         }
+        if blocks_meta is not None:
+            close_snapshot["blocks"] = _copy_public(blocks_meta)
         data = SkillExecutionDict({
             "execution_id": execution_id,
             "plan_id": str(plan.get("plan_id", "")),
@@ -875,4 +1426,6 @@ class SkillExecutor:
             "close_snapshot": close_snapshot,
             "effort": effort,
         })
+        if blocks_meta is not None:
+            cast(dict[str, Any], data)["blocks"] = _copy_public(blocks_meta)
         return SkillExecution(data)

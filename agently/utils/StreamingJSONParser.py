@@ -37,7 +37,14 @@ class StreamingJSONParser:
         schema (PromptOutputStructure): The schema describing the expected JSON structure.
     """
 
-    def __init__(self, schema: "PromptOutputStructure"):
+    DEFAULT_MAX_INCOMPLETE_PARSE_CHARS = 1024
+
+    def __init__(
+        self,
+        schema: "PromptOutputStructure",
+        *,
+        max_incomplete_parse_chars: int | None = DEFAULT_MAX_INCOMPLETE_PARSE_CHARS,
+    ):
         """
         Initialize an AsyncStreamingJSONParser instance.
 
@@ -45,18 +52,112 @@ class StreamingJSONParser:
             schema (PromptOutputStructure): The schema describing the expected JSON structure.
         """
         self.schema = schema
+        self.max_incomplete_parse_chars = (
+            self.DEFAULT_MAX_INCOMPLETE_PARSE_CHARS
+            if max_incomplete_parse_chars is None
+            else max_incomplete_parse_chars
+        )
         self.completer = StreamingJSONCompleter()
         self.previous_data = {}
         self.current_data = {}
         self.field_completion_status = set()  # Tracks completed field paths
         self.string_values = {}  # Tracks current string values for fields
         self.last_complete_structure = {}  # Last complete structure for completion checks
+        self._large_incremental_parse_deferred = False
 
         # Get the expected field parsing order and all possible paths
         self.expected_field_order = DataPathBuilder.extract_parsing_key_orders(schema, style="dot")
         self.all_possible_paths = DataPathBuilder.extract_possible_paths(schema, style="dot")
 
         self.current_parsing_position = 0  # Current position in parsing order
+
+    @staticmethod
+    def _looks_structurally_complete(text: str) -> bool:
+        stack: list[str] = []
+        started = False
+        in_string = False
+        escape = False
+        comment: str | None = None
+        string_char: str | None = None
+
+        for index, char in enumerate(text):
+            next_char = text[index + 1] if index + 1 < len(text) else ""
+            if comment is not None:
+                if comment == "//" and char in "\r\n":
+                    comment = None
+                elif comment == "/*" and char == "*" and next_char == "/":
+                    comment = None
+                continue
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == string_char:
+                    in_string = False
+                    string_char = None
+                continue
+            if char == "/" and next_char == "/":
+                comment = "//"
+                continue
+            if char == "/" and next_char == "*":
+                comment = "/*"
+                continue
+            if char in "\"'":
+                if started:
+                    in_string = True
+                    string_char = char
+                continue
+            if char in "{[":
+                started = True
+                stack.append("}" if char == "{" else "]")
+                continue
+            if char in "}]":
+                if not stack or stack[-1] != char:
+                    return False
+                stack.pop()
+                if started and not stack:
+                    tail = text[index + 1 :].strip()
+                    return not tail or tail.startswith("```")
+        return False
+
+    def _should_skip_large_incremental_parse(self) -> bool:
+        if self.max_incomplete_parse_chars <= 0:
+            return False
+        raw_buffer = str(getattr(self.completer, "_buffer", "") or "")
+        return len(raw_buffer) > self.max_incomplete_parse_chars
+
+    def _large_incremental_parse_status(self) -> StreamingData:
+        raw_buffer = str(getattr(self.completer, "_buffer", "") or "")
+        self._large_incremental_parse_deferred = True
+        return StreamingData(
+            path="$status",
+            value={
+                "status": "streaming_parse_deferred",
+                "reason": "large_json_incremental_parse",
+                "buffer_chars": len(raw_buffer),
+                "threshold": self.max_incomplete_parse_chars,
+            },
+            delta=None,
+            is_complete=False,
+            event_type="delta",
+        )
+
+    def _parse_buffer_once(self) -> bool:
+        completed_json = self.completer.complete()
+        located_json = DataLocator.locate_output_json(
+            completed_json,
+            self.schema,
+        )
+        if not located_json:
+            return False
+        try:
+            parsed_data = json5.loads(located_json)
+        except (json.JSONDecodeError, ValueError):
+            return False
+        self.previous_data = copy.deepcopy(self.current_data)
+        self.current_data = parsed_data
+        return True
 
     async def _get_value_at_path(self, data: dict, path_keys: List[str | int]) -> Any:
         """
@@ -426,6 +527,9 @@ class StreamingJSONParser:
         Yields:
             StreamingData: The completion event for each remaining field.
         """
+        raw_buffer = str(getattr(self.completer, "_buffer", "") or "")
+        if raw_buffer and (not self.current_data or self._looks_structurally_complete(raw_buffer)):
+            self._parse_buffer_once()
 
         async def mark_all_complete(data: Any, path_keys: List[str | int] = []):
             path = DataPathBuilder.build_dot_path(path_keys)
@@ -494,22 +598,13 @@ class StreamingJSONParser:
             StreamingData: The event for each detected update or completion.
         """
         self.completer.append(chunk)
-        completed_json = self.completer.complete()
-        located_json = DataLocator.locate_output_json(
-            completed_json,
-            self.schema,
-        )
-        if located_json:
-            try:
-                parsed_data = json5.loads(located_json)
-                self.previous_data = copy.deepcopy(self.current_data)
-                self.current_data = parsed_data
-
-                async for event in self._compare_and_generate_events():
-                    yield event
-            except (json.JSONDecodeError, ValueError):
-                # JSON parsing failed; wait for more data.
-                pass
+        if self._should_skip_large_incremental_parse():
+            if not self._large_incremental_parse_deferred:
+                yield self._large_incremental_parse_status()
+            return
+        if self._parse_buffer_once():
+            async for event in self._compare_and_generate_events():
+                yield event
 
     async def parse_stream(self, chunk_stream: AsyncGenerator[str, None]) -> AsyncGenerator[StreamingData, None]:
         """

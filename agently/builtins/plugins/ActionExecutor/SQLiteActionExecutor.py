@@ -44,7 +44,7 @@ class SQLiteActionExecutor:
         if params is None:
             params = []
         read_only = bool(policy.get("read_only", self.read_only))
-        environment_resources = action_call.get("execution_environment_resources", {})
+        environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
             sqlite_resource = environment_resources.get(action_id) or environment_resources.get("sqlite")
             if sqlite_resource is not None and hasattr(sqlite_resource, "execute"):
