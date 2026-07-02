@@ -7460,7 +7460,7 @@ def test_pending_action_evidence_requirement_escalates_direct_step_to_actions(tm
         def record_consumed_option(self, *args, **kwargs):
             return None
 
-    plan = {
+    plan: dict[str, Any] = {
         "execution_shape": "direct",
         "step_instruction": "Write the file.",
         "expected_evidence": "final.md",
@@ -7521,7 +7521,7 @@ def test_pending_action_evidence_requirement_escalates_skills_step_to_actions(tm
         def record_consumed_option(self, *args, **kwargs):
             return None
 
-    plan = {
+    plan: dict[str, Any] = {
         "execution_shape": "skills",
         "step_instruction": "Write the file with the configured Skill guidance.",
         "expected_evidence": "final.md",

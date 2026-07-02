@@ -591,7 +591,7 @@ async def test_action_runtime_action_completion_refreshes_execution_progress():
     context = AgentExecutionContext(
         execution_id="action-runtime-action-progress",
         lineage={"task_id": "issue-intake", "step_id": "execute"},
-        limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 0.12},
+        limits={"max_model_requests": None, "max_nested_agent_steps": 0, "max_no_progress_seconds": 0.3},
     )
     handler = runtime.resolve_execution_handler()
 

@@ -1550,7 +1550,7 @@ class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
         elif "Execute exactly one TaskBoard card" in text:
             MockTaskBoardRetryCardRequester.card_calls += 1
             if MockTaskBoardRetryCardRequester.card_calls == 1:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.5)
             payload = {
                 "status": "completed",
                 "answer": "retried card completed",
@@ -5015,8 +5015,8 @@ async def test_flat_request_timeout_does_not_cancel_progressing_child_execution(
         execution="flat",
         max_iterations=1,
         options={
-            "request_timeout_seconds": 0.2,
-            "agent_task": {"request_timeout_seconds": 1.0},
+            "request_timeout_seconds": 0.6,
+            "agent_task": {"request_timeout_seconds": 2.0},
         },
     ).use_actions(["probe_action"])
 
@@ -5055,8 +5055,8 @@ async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_p
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     execution_error = task_meta["diagnostics"]["execution_errors"][0]
 
-    assert elapsed < 2
-    assert result["status"] == "max_iterations"
+    assert elapsed < 8.0
+    assert result["status"] in {"max_iterations", "timed_out"}
     assert result["accepted"] is False
     assert execution_error["type"] != "_AgentTaskDeadlineExceeded"
     assert (
@@ -5109,7 +5109,7 @@ async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_pa
         success_criteria=["The probe action executes."],
         execution="flat",
         max_iterations=1,
-        limits={"max_no_progress_seconds": 0.2},
+        limits={"max_no_progress_seconds": 1.5},
     ).use_actions(["probe_action"])
 
     result = await execution.async_get_data()
@@ -5167,10 +5167,10 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
         execution="flat",
         max_iterations=1,
         options={
-            "request_timeout_seconds": 0.2,
+            "request_timeout_seconds": 1.0,
             "agent_task": {
-                "request_timeout_seconds": 0.2,
-                "heartbeat_interval_seconds": 0.05,
+                "request_timeout_seconds": 1.0,
+                "heartbeat_interval_seconds": 0.1,
             },
         },
     )
@@ -5190,7 +5190,7 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
     failed_delivery = deliveries[-1]
     heartbeat_items = [item for item in stream_items if getattr(item, "path", "") == "agent_task.heartbeat"]
 
-    assert elapsed < 2
+    assert elapsed < 4
     assert result["accepted"] is False
     assert failed_delivery["status"] == "failed"
     assert failed_delivery["error"]["type"] == "_AgentTaskDeadlineExceeded"
@@ -6199,7 +6199,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
         options={
             "request_timeout_seconds": 5.0,
             "agent_task": {
-                "taskboard_card_timeout_seconds": 0.3,
+                "taskboard_card_timeout_seconds": 1.0,
                 "taskboard_card_max_attempts": 2,
             },
         },

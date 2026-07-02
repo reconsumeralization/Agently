@@ -2314,6 +2314,8 @@ async def test_task_board_frontier_resume_retries_running_cards_from_json_state(
     original_tick = await original_board.async_start_tick(concurrency=1)
     await asyncio.wait_for(second_running.wait(), timeout=1)
     saved_state = original_tick.save()
+    completed_before_save = original_calls[0]
+    running_before_save = original_calls[1]
 
     release_original.set()
     await original_tick.async_close(timeout=1)
@@ -2324,9 +2326,9 @@ async def test_task_board_frontier_resume_retries_running_cards_from_json_state(
     await restored_tick.async_resume_pending()
     result = await restored_tick.async_close(timeout=1)
 
-    assert restored_calls == ["b"]
-    assert result.revision.card_results["a"].preview == "original:a"
-    assert result.revision.card_results["b"].preview == "restored:b"
+    assert restored_calls == [running_before_save]
+    assert result.revision.card_results[completed_before_save].preview == f"original:{completed_before_save}"
+    assert result.revision.card_results[running_before_save].preview == f"restored:{running_before_save}"
 
 
 @pytest.mark.asyncio

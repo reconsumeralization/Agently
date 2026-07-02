@@ -294,7 +294,7 @@ async def test_workspace_checkpoint_cas_lease_and_artifact_refs(tmp_path):
         {"large": "payload"},
         metadata={"kind": "checkpoint_payload", "summary": "large Workspace record payload"},
     )
-    lease = await workspace.claim_lease("run-cas", "worker-1", ttl=0.02, expected_state_version=2)
+    lease = await workspace.claim_lease("run-cas", "worker-1", ttl=0.2, expected_state_version=2)
 
     assert second["id"] != first["id"]
     assert artifact_ref["collection"] == "artifacts"

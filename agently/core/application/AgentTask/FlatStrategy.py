@@ -1015,7 +1015,13 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 action_candidates = getattr(execution, "action_candidates", None)
                 if callable(action_candidates):
                     try:
-                        for item in action_candidates() or []:
+                        raw_action_candidates = action_candidates() or []
+                        candidates = (
+                            cast(Sequence[Any], raw_action_candidates)
+                            if isinstance(raw_action_candidates, Sequence)
+                            else []
+                        )
+                        for item in candidates:
                             if not isinstance(item, Mapping):
                                 continue
                             action_id = str(item.get("action_id") or item.get("name") or "").strip()

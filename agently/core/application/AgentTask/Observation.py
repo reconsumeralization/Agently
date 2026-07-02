@@ -896,13 +896,19 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         if isinstance(diagnostics, dict) and diagnostics.get("execution_error"):
             execution_errors.append(_compact_agent_task_error_info(diagnostics["execution_error"]))
         replan_signals = cls._collect_replan_signals(execution_meta)
-        collect_evidence_requirements = getattr(cls, "_capability_evidence_requirements_from_mapping", None)
+        collect_evidence_requirements = cast(
+            Callable[[Mapping[str, Any] | None], list[dict[str, Any]]] | None,
+            getattr(cls, "_capability_evidence_requirements_from_mapping", None),
+        )
         capability_evidence_requirements: list[dict[str, Any]] = []
         if callable(collect_evidence_requirements):
             for source in (execution_meta.get("effective_options"), execution_meta.get("options")):
                 if isinstance(source, Mapping):
                     capability_evidence_requirements.extend(collect_evidence_requirements(source))
-            merge_evidence_requirements = getattr(cls, "_merge_capability_evidence_requirements", None)
+            merge_evidence_requirements = cast(
+                Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None,
+                getattr(cls, "_merge_capability_evidence_requirements", None),
+            )
             if callable(merge_evidence_requirements):
                 capability_evidence_requirements = merge_evidence_requirements(capability_evidence_requirements)
         # Unified capability-evidence view (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
