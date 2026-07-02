@@ -33,6 +33,21 @@ _VALID_RUNTIME_LOG_PROFILES = frozenset({"off", "simple", "detail"})
 _ALWAYS_VISIBLE_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})
 _CONSOLE_EVENT_FAMILIES = frozenset({"model", "action", "triggerflow", "runtime"})
 _RUNTIME_PRINT_EVENTS = frozenset({"runtime.print"})
+_SIMPLE_AGENT_EXECUTION_STREAM_KINDS = frozenset(
+    {
+        "action_observation",
+        "child_execution",
+        "heartbeat",
+        "phase",
+        "progress",
+        "runtime_progress",
+        "snapshot",
+        "taskboard_control_request",
+        "workspace_artifact_draft",
+        "workspace_artifact_draft_public_replay_marker",
+        "workspace_artifact_draft_retry",
+    }
+)
 _SIMPLE_EVENT_TYPES = {
     "model": frozenset(
         {
@@ -74,6 +89,10 @@ _SIMPLE_EVENT_TYPES = {
     ),
     "runtime": frozenset(
         {
+            "agent_execution.started",
+            "agent_execution.completed",
+            "agent_execution.failed",
+            "agent_execution.stream",
             "runtime.print",
         }
     ),
@@ -166,6 +185,9 @@ def is_simple_runtime_event(event: "ObservationEvent") -> bool:
     event_type = event.event_type
     if family == "triggerflow":
         event_type = normalize_triggerflow_event_type(event.event_type)
+    if event_type == "agent_execution.stream":
+        stream_kind = _payload_value(event, "stream_kind")
+        return isinstance(stream_kind, str) and stream_kind in _SIMPLE_AGENT_EXECUTION_STREAM_KINDS
     return event_type in _SIMPLE_EVENT_TYPES[family]
 
 
@@ -244,6 +266,13 @@ def _stringify_payload(payload: Any, *, indent: int | None = None) -> str:
         return str(sanitized)
 
 
+def _compact_single_line(text: str, *, max_chars: int = 4000) -> str:
+    compacted = " ".join(text.split())
+    if len(compacted) <= max_chars:
+        return compacted
+    return f"{compacted[: max_chars - 3]}..."
+
+
 def _event_detail(event: "ObservationEvent", *, pretty_payload: bool = False) -> str:
     if event.message:
         return event.message
@@ -278,6 +307,28 @@ def _resolve_execution_id(event: "ObservationEvent") -> str | None:
     if event.run is not None and event.run.execution_id:
         return event.run.execution_id
     return None
+
+
+def _model_request_detail(event: "ObservationEvent", *, indent: int | None = None) -> str:
+    request_text = _payload_value(event, "request_text")
+    if isinstance(request_text, str) and request_text:
+        return request_text if indent is not None else _compact_single_line(request_text)
+    request = _payload_value(event, "request")
+    if request is not None:
+        return _stringify_payload(request, indent=indent)
+    return ""
+
+
+def _model_result_detail(event: "ObservationEvent", *, indent: int | None = None) -> str:
+    keys = ("result", "raw_text", "cleaned_text") if indent is not None else ("raw_text", "cleaned_text", "result")
+    for key in keys:
+        value = _payload_value(event, key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            return value if indent is not None else _compact_single_line(value)
+        return _stringify_payload(value, indent=indent)
+    return ""
 
 
 def _resolve_tool_stage(event: "ObservationEvent") -> str:
@@ -390,6 +441,50 @@ def _resolve_action_stage(event: "ObservationEvent") -> str:
     return _resolve_tool_stage(event)
 
 
+def _resolve_agent_execution_stage(event: "ObservationEvent") -> str:
+    stage_mapping = {
+        "agent_execution.started": "Started",
+        "agent_execution.completed": "Completed",
+        "agent_execution.failed": "Failed",
+        "agent_execution.stream": "Process",
+        "agent_execution.stream.delta": "Streaming",
+    }
+    if event.event_type in stage_mapping:
+        return stage_mapping[event.event_type]
+    if event.level in ("ERROR", "CRITICAL"):
+        return "Failed"
+    if event.level == "WARNING":
+        return "Warning"
+    return "Info"
+
+
+def _agent_execution_stream_detail(event: "ObservationEvent", profile: "RuntimeLogProfile") -> str:
+    if profile == "detail":
+        return _event_detail(event, pretty_payload=True)
+
+    stream_kind = _payload_value(event, "stream_kind")
+    path = _payload_value(event, "path")
+    value = _payload_value(event, "value")
+    delta = _payload_value(event, "delta")
+    status_parts: list[str] = []
+    if isinstance(stream_kind, str) and stream_kind:
+        status_parts.append(f"kind={stream_kind}")
+    if isinstance(path, str) and path:
+        status_parts.append(f"path={path}")
+    prefix = " ".join(status_parts)
+
+    content = value if value is not None else delta
+    if content is None:
+        content_text = event.message or ""
+    elif isinstance(content, str):
+        content_text = _compact_single_line(content)
+    else:
+        content_text = _stringify_payload(content)
+    if prefix and content_text:
+        return f"{prefix}\n{content_text}"
+    return prefix or content_text or event.message or event.event_type
+
+
 def _render_block(header: str, stage: str, detail: str, *, detail_color: str = "gray", end: str = "\n"):
     header_text = color_text(header, color="blue", bold=True)
     stage_label = color_text("Stage:", color="cyan", bold=True)
@@ -473,15 +568,18 @@ class RuntimeConsoleSinkHooker(EventHooker):
                 retry_count = _payload_value(event, "retry_count")
                 retry_label = f" (retry={ retry_count })" if retry_count is not None else ""
                 detail = f"{ event.message or 'Model response retrying.' }{ retry_label }"
+            elif event.event_type == "model.requesting":
+                detail = _model_request_detail(event) or event.message or stage_mapping.get(event.event_type, event.event_type)
+            elif event.event_type == "model.completed":
+                detail = _model_result_detail(event) or event.message or stage_mapping.get(event.event_type, event.event_type)
             elif event.error is not None:
                 detail = event.error.message
             else:
                 detail = event.message or stage_mapping.get(event.event_type, event.event_type)
         elif event.event_type == "model.requesting":
-            request_text = _payload_value(event, "request_text")
-            detail = str(request_text) if request_text else _stringify_payload(_payload_value(event, "request"), indent=2)
+            detail = _model_request_detail(event, indent=2)
         elif event.event_type == "model.completed":
-            detail = _stringify_payload(_payload_value(event, "result"), indent=2) or detail
+            detail = _model_result_detail(event, indent=2) or detail
         elif event.event_type == "model.retrying":
             response_text = _payload_value(event, "response_text")
             retry_count = _payload_value(event, "retry_count")
@@ -492,6 +590,21 @@ class RuntimeConsoleSinkHooker(EventHooker):
             detail = _stringify_payload(event.payload, indent=2)
         detail_color = "red" if event.level in ("WARNING", "ERROR", "CRITICAL") else "gray"
         _render_block(response_label, stage_mapping.get(event.event_type, event.event_type), detail, detail_color=detail_color)
+
+    @staticmethod
+    def _handle_agent_execution_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
+        RuntimeConsoleSinkHooker._close_stream_if_needed()
+        execution_id = _resolve_execution_id(event)
+        prefix = "[AgentExecution]"
+        if execution_id:
+            prefix = f"{ prefix } [Execution-{ execution_id }]"
+        stage = _resolve_agent_execution_stage(event)
+        if event.event_type in {"agent_execution.stream", "agent_execution.stream.delta"}:
+            detail = _agent_execution_stream_detail(event, profile)
+        else:
+            detail = (event.message or stage) if profile == "simple" else _event_detail(event, pretty_payload=True)
+        detail_color = "red" if stage in ("Failed", "Warning") else "gray"
+        _render_block(prefix, stage, detail, detail_color=detail_color)
 
     @staticmethod
     def _handle_tool_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
@@ -567,6 +680,9 @@ class RuntimeConsoleSinkHooker(EventHooker):
             return
         if family == "triggerflow":
             RuntimeConsoleSinkHooker._handle_trigger_flow_event(event, profile)
+            return
+        if event.event_type.startswith("agent_execution."):
+            RuntimeConsoleSinkHooker._handle_agent_execution_event(event, profile)
             return
         if event.event_type.startswith("action."):
             RuntimeConsoleSinkHooker._handle_action_event(event, profile)

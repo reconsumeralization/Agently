@@ -67,10 +67,13 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.8"
-    assert in_development["release_train"] == "2026-06-4.1.3.8-dev"
-    assert "framework-level bug fixes and structural cleanup" in in_development["notes"]
-    assert "business-specific special-case fixes" in in_development["notes"]
+    assert in_development["target_version"] == "4.1.3.9"
+    assert in_development["release_train"] == "2026-07-4.1.3.9-dev"
+    assert "4.1.3.9 work" in in_development["notes"]
+    assert "framework-level observability architecture review and bug fixes" in in_development["notes"]
+    assert "Session conversation behavior and memory systems" in in_development["notes"]
+    assert "Human-in-the-loop capabilities" in in_development["notes"]
+    assert "long-task intermediate artifacts plus task execution memory" in in_development["notes"]
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",

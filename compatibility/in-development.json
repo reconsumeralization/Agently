@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.3.8",
-  "release_train": "2026-06-4.1.3.8-dev",
-  "notes": "Current public development-line manifest for the 4.1.3.8 task-execution quality hardening work after the 4.1.3.7 AgentExecution-backed AgentTask release. The target is framework-level bug fixes and structural cleanup: make task planning capability-aware, enforce bounded-step scope through structured policy/evidence contracts, improve verification and replan quality across task levels, remove strong-instruction or business-specific special-case fixes from framework paths, and project AgentExecution flat/TaskBoard process stream items to RuntimeEvent for DevTools observation.",
+  "target_version": "4.1.3.9",
+  "release_train": "2026-07-4.1.3.9-dev",
+  "notes": "Current public development-line manifest for the 4.1.3.9 work after the 4.1.3.8 task-execution quality hardening release. The target is to optimize 4.1.3.8 residual issues through framework-level observability architecture review and bug fixes, improve Session conversation behavior and memory systems, add Human-in-the-loop capabilities for approval, suggestions, guidance, and insertion, and strengthen long-task intermediate artifacts plus task execution memory. Existing 4.1.3.8 task-execution contracts remain the baseline while 4.1.3.9 work refines observation, memory, HITL, and long-task runtime behavior.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
