@@ -171,7 +171,7 @@ ACP adapter 名称提示，例如 `codex`、`claude code` / `cc`、`openclaw`、
 选项。CLI adapter 会标记 `acp_session.persistence="stateless_cli"`，除非存在真实可恢复的
 ACP protocol session。
 
-AgentTaskLoop 也可以在 bounded step 或 TaskBoard card 执行失败、且配置的重试耗尽后，
+AgentTask 也可以在 bounded step 或 TaskBoard card 执行失败、且配置的重试耗尽后，
 把 ACP 作为显式启用的 recovery fallback。这个路径仍然调用已注册的 `acp_run_task`
 Action，并使用 `ExecutionResource(kind="acp")`；ACP 不是绕过 AgentExecution 或 task
 strategy policy 的新 route。如果 host 从未调用 `agent.use_acp(...)`，fallback 只会记录
@@ -286,7 +286,7 @@ agent.set_settings("action.planning_model_key", "task-main")
 ```
 
 这个配置同时作用于默认 structured-plan 和 native tool-call planning
-路径。当 SkillsExecutor 或 AgentTaskLoop 把一个 bounded action round
+路径。当 SkillsExecutor 或 AgentTask 把一个 bounded action round
 委托给 ActionRuntime 时尤其重要，否则 action planning 可能没有显式使用
 预期的 `model_pool` 业务 key。
 

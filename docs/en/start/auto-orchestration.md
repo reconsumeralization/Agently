@@ -21,7 +21,7 @@ registered, `agent.start()` remains an ordinary model request.
 
 `TaskDAG` is the foundation DAG capability. `DynamicTask` remains a
 compatibility and convenience facade over DAG planning/execution, not a second
-recommended task lifecycle and not an AgentTaskLoop auto-strategy route. Use
+recommended task lifecycle and not an AgentTask auto-strategy route. Use
 TaskDAG / DynamicTask when the application or a visual automation surface owns
 the graph shape and wants to run that graph explicitly.
 
@@ -56,10 +56,13 @@ for execution prompt accumulation. Use `always=True`,
 the lower-level request-builder surface.
 
 Accepted development-line routing is candidate-driven and deterministic-first.
-Required Skills candidates run through the Skills route. When several optional
-candidates are present, such as model-decision Skills and ordinary Actions, the
-model chooses the route by default. If there is only one optional candidate,
-that route is selected directly.
+Required Skills express mandatory guidance and capability evidence; when
+ordinary Actions are also available, they can run through the normal
+`model_request` AgentExecution action loop with full required Skill guidance
+bound into the prompt and recorded as prompt-bound Skill evidence. When several
+optional candidates are present, such as model-decision Skills and ordinary
+Actions, the model chooses the route by default. If there is only one optional
+candidate, that route is selected directly.
 
 The public Agent API stays in core, but route planning and execution are owned
 by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
@@ -111,7 +114,7 @@ form keeps the same owner: effort controls strategy and resource intensity, not
 whether an execution is a goal-pursuit task. `budget.iteration_limit`,
 `model_call_limit`, and `wall_time_seconds` are soft strategy metadata: they
 may shape planning, reflection, repair posture, and evidence depth, but they do
-not silently set task-loop `max_iterations` or AgentExecution hard limits. Use
+not silently set task-strategy `max_iterations` or AgentExecution hard limits. Use
 explicit task options or `limits={...}` when the host needs hard resource
 controls. By default, AgentTask does not impose model-request, iteration,
 TaskBoard tick, or Action round quotas; no-progress and idle timeouts remain
@@ -125,13 +128,13 @@ TaskBoard card, and final result. Reflection records are Workspace evidence and
 verifier/replan input, but they are not completion evidence by themselves.
 
 `execution.step_plan` is retained only as compatibility guidance. Users
-normally do not need to spell it out. AgentTaskLoop no longer uses TaskDAG /
+normally do not need to spell it out. AgentTask no longer uses TaskDAG /
 DynamicTask as an internal bounded step strategy; legacy `dynamic_task` /
 `execution_dag` step proposals and `execution={"step_plan": "dag"}` are
 degraded to direct bounded execution with diagnostics. Use TaskDAG / DynamicTask
 separately when the host owns a submitted or visual automation graph.
 
-## AgentTask Loop
+## AgentTask Strategy
 
 Use `agent.create_task(...)` when the business goal needs a bounded multi-round
 loop instead of one direct AgentExecution. It returns a task-strategy
@@ -150,15 +153,14 @@ fan-in cards still wait for all declared dependencies. Use
 `taskboard_scheduler="batch"` only when you need the historical tick-batch
 behavior for diagnostics or regression comparison.
 
-In the current 4.1.3 line this is a hardened bounded public task-loop strategy,
-not the full future AgentTask system. `agent.create_task_loop(...)` is the explicit spelling
-for the same long-task strategy when code wants to make the strategy choice
-visible. Both APIs still return `AgentExecution`; new code should
+In the current 4.1.3 line this is a hardened bounded public AgentTask strategy.
+`agent.create_task_loop(...)` remains a compatibility spelling for the same
+task strategy when code wants to make the strategy choice visible. Both APIs still return `AgentExecution`; new code should
 consume data, text, stream, metadata, status, and task refs through
 `execution.get_result()` or the execution stream/meta facade instead of treating
 `AgentTask` as a second public lifecycle.
 
-`execution="auto"` is the default task execution strategy. In `auto`, AgentTaskLoop
+`execution="auto"` is the default task execution strategy. In `auto`, AgentTask
 asks the model for a natural-language task-shape analysis plus a thin structured
 `execution_hint`, then the strategy policy resolves the actual shape to `flat`
 or `taskboard`. The hint is only strategy evidence; TaskBoard does not classify
@@ -469,7 +471,7 @@ execution output contract is present.
 streaming proof for this contract. It runs
 `.goal(...).effort(...).input(...).output(...).strategy("flat")`, consumes
 `get_async_generator()`, streams model-generated progress deltas, and checks
-that the execution prompt snapshot reaches AgentTaskLoop planning, execution,
+that the execution prompt snapshot reaches AgentTask planning, execution,
 and verification. `examples/agent_task/goal_pursuit_acceptance_matrix.py`
 remains a smaller matrix script for accepted and non-accepted terminal states.
 
@@ -488,10 +490,21 @@ point.
 `examples/agent_task/agently_architecture_diagram_task.py` is the longer
 design-document experiment for the same path. It uses
 `.goal(...).effort(...).strategy("task")` as the compatibility spelling for an
-AgentTaskLoop draft, a repository-source Action, Workspace file Actions, and an
+AgentTask strategy draft, a repository-source Action, Workspace file Actions, and an
 independent Agently model judge to produce and review a readable Agently
 architecture diagram. The execution shape is still resolved by the task
 strategy layer unless the host explicitly selects `flat` or `taskboard`.
+
+`examples/agent_task_experiments/` contains compact developer examples based on
+the core AgentTask experiment scenarios: stock-risk briefing, Agent engineering
+weekly, LMCC mock exam generation, repository reading, and multi-runtime code
+execution. The same folder also includes mixed capability examples that combine
+native Actions, real MCP registration, local Skills, Workspace file actions,
+and delta streaming for travel planning, equity risk analysis, and market-entry
+analysis. These examples deliberately rely on `agent.create_task(...)`
+defaults, including `execution="auto"`, so the example code stays close to
+ordinary application usage, and they consume `get_async_generator(type="delta")`
+to show the task information stream.
 
 The first public slice is intentionally narrow: single task, one Agent owner,
 roughly 2-5 iterations, and bounded steps through `AgentExecution`. Those steps
@@ -505,7 +518,7 @@ lifecycle.
 
 ### Resume a task after a crash
 
-AgentTaskLoop persists a resumable snapshot after every completed iteration. If
+AgentTask persists a resumable snapshot after every completed iteration. If
 the process crashes, resume the task as a fresh `AgentExecution` and continue
 from the next iteration. Completed iterations are not re-executed:
 
@@ -602,7 +615,7 @@ inspectable and records `status="blocked"` plus the limit event in
 `diagnostics`.
 
 For stuck executions, `limits.max_seconds` is a hard deadline for the whole
-AgentExecution. In Goal Pursuit / task-strategy runs, AgentTaskLoop owns that
+AgentExecution. In Goal Pursuit / task-strategy runs, AgentTask owns that
 wall-clock budget and returns a task `timed_out` result with task metadata; other
 routes surface the hard deadline as `RuntimeStageStallError`, available from the
 root `agently.core` export or from `agently.core.application.AgentExecution`.
@@ -738,12 +751,16 @@ itself mean the broader business goal is complete.
 ## Skills Semantics
 
 `agent.use_skills(...)` and `agent.use_skills_packs(...)` register route
-candidates. They no longer mean "inject full Skill guidance into the ordinary
-model request" by default. Full Skill guidance belongs to a Skills route that
-actually plans or executes the Skill. If the route does not select Skills, the
-ordinary request receives only safe capability summaries.
+candidates. `mode="model_decision"` keeps them as candidates and does not
+inject full guidance into the ordinary model request by default. `mode="required"`
+means the Skill guidance must be applied: if the execution uses the ordinary
+`model_request` route with Actions, Agently injects the required SKILL.md
+guidance into that AgentExecution and records prompt-bound Skill evidence for
+AgentTask capability checks. A selected Skills route or `run_skills_task(...)`
+still runs the Skills Executor path.
 
-Use `agent.run_skills_task(...)` when a caller must force Skills execution.
+Use `agent.run_skills_task(...)` or an explicit route policy when a caller must
+force the standalone Skills Executor route.
 
 ## Process Stream
 

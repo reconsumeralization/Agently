@@ -127,7 +127,7 @@ ActionRuntime、ExecutionResource、Workspace/ContextBuilder/ContextPackage、Ru
 还不够：release reviewer 还必须运行 `examples/` 下对应的核心 example，确认真实效果
 仍然能通过推荐 public API 跑通。
 
-AgentExecution、AgentTaskLoop、Skills workflows 和业务示例可以作为 release use-case
+AgentExecution、AgentTask、Skills workflows 和业务示例可以作为 release use-case
 checks，但它们本身不是 Foundation checks。只有当 release 同时触及它们依赖的
 Foundation substrate，例如 ModelRequest result materialization、TriggerFlow lifecycle
 或 Dynamic Task DAG execution 时，才映射到这个 gate。

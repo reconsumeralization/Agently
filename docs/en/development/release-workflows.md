@@ -152,7 +152,7 @@ enough by themselves: the release reviewer must also run the corresponding core
 example under `examples/` and confirm the real effect still works through the
 recommended public API.
 
-AgentExecution, AgentTaskLoop, Skills workflows, and business examples can be
+AgentExecution, AgentTask, Skills workflows, and business examples can be
 release use-case checks, but they are not Foundation checks by themselves. Map
 them to this gate only when the release also touches a Foundation substrate they
 depend on, such as ModelRequest result materialization, TriggerFlow lifecycle,

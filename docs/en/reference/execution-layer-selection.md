@@ -133,7 +133,7 @@ await execution.async_record_workspace(
 ```
 
 In both shapes, the DAG result is evidence. It does not by itself mean a
-business goal is complete. Goal completion still belongs to AgentTaskLoop model
+business goal is complete. Goal completion still belongs to AgentTask model
 verification plus host guards when goal pursuit is active.
 
 ## Runtime Flow
