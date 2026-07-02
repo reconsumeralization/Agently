@@ -23,7 +23,8 @@ agent.set_settings(
 )
 
 ## Debug Toggle
-# Set to False by default, turn on debug mode will display model request processing streaming logs in console.
+# Set to False by default. debug=True displays request/result summary logs;
+# use debug="detail" when token-level streaming logs are needed.
 agent.set_settings("debug", True)
 
 agent_model_requester_settings = agent.settings.get("plugins.ModelRequester.OpenAICompatible", {})

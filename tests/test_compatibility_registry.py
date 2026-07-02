@@ -67,10 +67,13 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.8"
-    assert in_development["release_train"] == "2026-06-4.1.3.8-dev"
-    assert "framework-level bug fixes and structural cleanup" in in_development["notes"]
-    assert "business-specific special-case fixes" in in_development["notes"]
+    assert in_development["target_version"] == "4.1.3.9"
+    assert in_development["release_train"] == "2026-07-4.1.3.9-dev"
+    assert "4.1.3.9 work" in in_development["notes"]
+    assert "framework-level observability architecture review and bug fixes" in in_development["notes"]
+    assert "Session conversation behavior and memory systems" in in_development["notes"]
+    assert "Human-in-the-loop capabilities" in in_development["notes"]
+    assert "long-task intermediate artifacts plus task execution memory" in in_development["notes"]
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",
@@ -151,6 +154,9 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "without .output()" in artifact_stream_contract
     assert "<$retry>...</$retry> is a consumer-side replay boundary" in artifact_stream_contract
     assert "targeted_readbacks" in artifact_stream_contract
+    blocks_task_loop_contract = in_development["companions"]["blocks"]["agent_task_loop_contract"]
+    assert 'AgentExecutionStreamData path="$delta"' in blocks_task_loop_contract
+    assert 'get_async_generator(type="all") remains the raw audit stream' in blocks_task_loop_contract
     execution_contract = in_development["request_input"]["agent_execution_request_scope"]
     assert "AgentExecution" in execution_contract["surface"]
     assert "AgentExecutionResult" in execution_contract["surface"]
@@ -186,6 +192,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentTask does not impose model-request, iteration, TaskBoard tick, or Action round quotas" in task_loop_contract["contract"]
     assert "no-progress and idle timeouts remain liveness guards" in task_loop_contract["contract"]
     assert "TaskDAG is no longer an AgentTask bounded-step strategy" in task_loop_contract["contract"]
+    assert 'AgentExecutionStreamData path="$delta"' in task_loop_contract["contract"]
+    assert 'get_async_generator(type="all") remains the raw audit stream' in task_loop_contract["contract"]
     assert "compatibility/convenience facade over DAG" in task_loop_contract["contract"]
     assert "Agent.use_dynamic_task(...) and AgentExecution.use_dynamic_task(...) fail fast" in task_loop_contract["contract"]
     assert "Agently.create_dynamic_task(...)" in task_loop_contract["contract"]

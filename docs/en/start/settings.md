@@ -123,7 +123,10 @@ A typical layout for a project that uses files is in [Project Framework](project
 Agently.set_settings("debug", True)
 ```
 
-Prints the streaming model request log to the console. Useful for verifying that prompt slots, output schema, and retries are doing what you expect.
+Prints concise model request and result logs to the console. For AgentTask runs,
+`"simple"` also prints process event summaries such as phases, progress, and
+snapshots without token-level deltas. Use `debug="detail"` when you need the
+full observation stream, including model delta output.
 
 Runtime logs can also be enabled per family:
 
@@ -134,7 +137,7 @@ Agently.set_settings("runtime.show_trigger_flow_logs", True)
 Agently.set_settings("runtime.show_runtime_logs", "detail")
 ```
 
-Each switch accepts `False` / `"off"`, `True` / `"simple"`, or `"detail"`. `"simple"` prints summaries and warning/error/critical events; `"detail"` prints the full observation event stream for that family. Action loop events render as `ActionLoop`; concrete `action.*` events render with the action name and `action_type`. `runtime.show_tool_logs` remains accepted for existing code and enables the same Action Runtime log family when `runtime.show_action_logs` is not set. Start events render as `Started`, normal completion renders as `Completed`, and only failure events or explicit failure payloads render as `Failed`.
+Each switch accepts `False` / `"off"`, `True` / `"simple"`, or `"detail"`. `"simple"` prints request/result summaries, AgentTask process summaries, and warning/error/critical events; `"detail"` prints the full observation event stream for that family, including model delta output. Action loop events render as `ActionLoop`; concrete `action.*` events render with the action name and `action_type`. `runtime.show_tool_logs` remains accepted for existing code and enables the same Action Runtime log family when `runtime.show_action_logs` is not set. Start events render as `Started`, normal completion renders as `Completed`, and only failure events or explicit failure payloads render as `Failed`.
 
 Production deployments that intentionally keep legacy compatibility calls can silence deprecation warnings globally:
 

@@ -228,7 +228,8 @@ AgentExecution 会把进展记录在 `async_get_meta()["diagnostics"]`：
 - `diagnostics["stalls"]` 记录 idle 无进展卡死。
 
 调试线上或本地应用时，可以临时挂 Event Center hook，或用
-`.set_settings("debug", True)` / `.set_settings("debug", "detail")` 打开控制台明细。
+`.set_settings("debug", True)` 打开请求/结果与过程摘要，用
+`.set_settings("debug", "detail")` 打开完整 observation 与模型 delta 输出。
 问题定位后，应从代码中移除临时 debug hook 和 debug settings。
 
 ## 兼容约束
